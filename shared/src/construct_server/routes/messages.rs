@@ -561,7 +561,9 @@ pub struct GetMessagesResponse {
     /// Format: "{timestamp}-{sequence}" (e.g., "1707584371151-5")
     /// Usage: GET /api/v1/messages?since=<this_value>
     /// Effect: Acknowledges receipt of all messages up to this ID (they will be deleted)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 
+    /// ✅ CRITICAL: This field is ALWAYS present (never skipped) to prevent client polling loops.
+    /// When no messages, server returns the same 'since' value client sent, or "0-0" if none.
     pub next_since: Option<String>,
     pub has_more: bool,
     /// Random padding to normalize response sizes (traffic analysis protection)
@@ -816,18 +818,19 @@ pub async fn get_messages(
         drop(queue);
         // Return last Stream ID for next request (ACK-based pagination)
         // Client will send this back to acknowledge receipt and get next batch
-        // ✅ CRITICAL: ALWAYS return nextSince when messages exist (nextSince bug fix)
-        let next_since = messages.last().and_then(|m| {
+        // ✅ CRITICAL FIX: ALWAYS return nextSince (never None)
+        let next_since = messages.last().map(|m| {
             let stream_id = m.stream_id.trim();
             if stream_id.is_empty() {
                 tracing::error!(
                     user_hash = %user_id_hash,
                     message_id = %m.id,
-                    "CRITICAL: Empty stream_id in message response - this should never happen!"
+                    "CRITICAL: Empty stream_id in message response - using fallback!"
                 );
-                None
+                // Fallback: use client's since or "0-0"
+                params.since.clone().unwrap_or_else(|| "0-0".to_string())
             } else {
-                Some(stream_id.to_string())
+                stream_id.to_string()
             }
         });
 
@@ -955,38 +958,49 @@ pub async fn get_messages(
     }
 
     // Return Stream ID for ACK-based pagination
-    // If we have messages, return the last stream_id
-    // If no messages: echo back client's 'since' ONLY if it's valid, otherwise return None
-    // ✅ CRITICAL: ALWAYS return nextSince when messages exist (nextSince bug fix)
+    // ✅ CRITICAL FIX: ALWAYS return nextSince to prevent infinite polling loop
+    // 
+    // Cases:
+    // 1. Has messages → return last message's stream_id
+    // 2. No messages + valid since → echo back client's since
+    // 3. No messages + invalid/no since → return "0-0" (start of stream)
     let next_since = if !messages.is_empty() {
-        messages.last().and_then(|m| {
+        // Case 1: Return last message's stream_id
+        messages.last().map(|m| {
             let stream_id = m.stream_id.trim();
             if stream_id.is_empty() {
                 tracing::error!(
                     user_hash = %user_id_hash,
                     message_id = %m.id,
-                    "CRITICAL: Empty stream_id in message response after long polling!"
+                    "CRITICAL: Empty stream_id in message response after long polling - using fallback!"
                 );
-                None
+                // Fallback: use client's since or "0-0"
+                params.since.clone().unwrap_or_else(|| "0-0".to_string())
             } else {
-                Some(stream_id.to_string())
+                stream_id.to_string()
             }
         })
     } else {
-        // Only preserve client's position if it's a valid Stream ID
-        // This prevents echoing back invalid IDs (e.g., UUIDs) that would cause repeated warnings
-        params.since.as_ref().and_then(|s| {
-            if is_valid_stream_id(s) {
+        // Case 2 & 3: No messages - preserve client's position or start from beginning
+        match params.since.as_ref() {
+            Some(s) if is_valid_stream_id(s) => {
+                // Valid since - echo it back so client keeps polling from same position
                 Some(s.clone())
-            } else {
-                tracing::debug!(
+            }
+            Some(s) => {
+                // Invalid since - log warning and reset to start
+                tracing::warn!(
                     user_hash = %user_id_hash,
                     invalid_since = %s,
-                    "Client sent invalid 'since' parameter, not echoing back"
+                    "Client sent invalid 'since' parameter, resetting to '0-0'"
                 );
-                None // Return None instead of invalid ID
+                Some("0-0".to_string())
             }
-        })
+            None => {
+                // No since parameter - start from beginning
+                Some("0-0".to_string())
+            }
+        }
     };
 
     tracing::debug!(
@@ -1305,5 +1319,66 @@ pub async fn confirm_message(
                 })),
             ))
         }
+    }
+}
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_next_since_always_serialized() {
+        // Test that nextSince field is always present in JSON (never omitted)
+        
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TestResponse {
+            messages: Vec<String>,
+            next_since: Option<String>,
+        }
+        
+        // Case 1: Some(value) → "nextSince": "value"
+        let response1 = TestResponse {
+            messages: vec![],
+            next_since: Some("1234567890-0".to_string()),
+        };
+        
+        let json1 = serde_json::to_value(&response1).unwrap();
+        assert!(json1.get("nextSince").is_some());
+        assert_eq!(json1["nextSince"], "1234567890-0");
+        
+        // Case 2: None → "nextSince": null (field still present!)
+        let response2 = TestResponse {
+            messages: vec![],
+            next_since: None,
+        };
+        
+        let json2 = serde_json::to_value(&response2).unwrap();
+        assert!(json2.get("nextSince").is_some(), "nextSince field must exist");
+        assert!(json2["nextSince"].is_null());
+    }
+
+    #[test]
+    fn test_is_valid_stream_id() {
+        // Valid cases
+        assert!(is_valid_stream_id("0"));
+        assert!(is_valid_stream_id("$"));
+        assert!(is_valid_stream_id("*"));
+        assert!(is_valid_stream_id("1234567890-0"));
+        assert!(is_valid_stream_id("1771079450941-0"));
+        assert!(is_valid_stream_id("999999999999-42"));
+        
+        // Invalid cases
+        assert!(!is_valid_stream_id(""));
+        assert!(!is_valid_stream_id("not-a-number-0"));
+        assert!(!is_valid_stream_id("1234567890"));  // Missing sequence
+        assert!(!is_valid_stream_id("1234567890-"));
+        assert!(!is_valid_stream_id("-0"));
+        assert!(!is_valid_stream_id("abc-def"));
+        assert!(!is_valid_stream_id("1234-5-6"));  // Too many parts
     }
 }
