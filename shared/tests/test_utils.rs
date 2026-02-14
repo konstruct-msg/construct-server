@@ -762,3 +762,86 @@ pub async fn register_user_passwordless(
 
     (auth_response.user_id, auth_response.access_token)
 }
+
+// ============================================================================
+// Protocol Compliance Test Helpers
+// ============================================================================
+
+/// Simple test user structure for protocol compliance tests
+pub struct TestUser {
+    pub user_id: String,
+    pub access_token: String,
+}
+
+/// Register a test user with default settings
+/// Returns TestUser with user_id and access_token
+pub async fn register_test_user(ctx: &TestApp, username: &str) -> TestUser {
+    let client = reqwest::Client::new();
+    let (user_id, access_token) = register_user_passwordless(
+        &client,
+        &ctx.auth_address,
+        Some(username),
+    ).await;
+    
+    TestUser {
+        user_id,
+        access_token,
+    }
+}
+
+/// Send a test message from sender to recipient
+/// Returns the response JSON
+pub async fn send_test_message(
+    ctx: &TestApp,
+    sender: &TestUser,
+    recipient_id: &str,
+    content: &str,
+) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    
+    // Create a dummy encrypted message
+    // In real tests, this would use actual E2EE
+    use base64::{Engine as _, engine::general_purpose};
+    let request_body = serde_json::json!({
+        "recipientId": recipient_id,
+        "ciphertext": general_purpose::STANDARD.encode(content.as_bytes()),
+        "header": {
+            "ratchetPublicKey": general_purpose::STANDARD.encode(&[0u8; 32]),
+            "previousChainLength": 0,
+            "messageNumber": 0,
+        },
+        "suiteId": 1,
+        "timestamp": chrono::Utc::now().timestamp(),
+    });
+    
+    let response = client
+        .post(&format!("http://{}/api/v1/messages", ctx.messaging_address))
+        .header("Authorization", format!("Bearer {}", sender.access_token))
+        .json(&request_body)
+        .send()
+        .await
+        .expect("Failed to send message");
+    
+    response.json().await.expect("Failed to parse send response")
+}
+
+/// Get all messages for a user
+/// Returns array of message JSONs
+pub async fn get_all_messages(ctx: &TestApp, user: &TestUser) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    
+    let response = client
+        .get(&format!("http://{}/api/v1/messages", ctx.messaging_address))
+        .header("Authorization", format!("Bearer {}", user.access_token))
+        .query(&[("limit", "100")])
+        .send()
+        .await
+        .expect("Failed to get messages");
+    
+    let body: serde_json::Value = response.json().await.expect("Failed to parse messages response");
+    
+    body["messages"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .clone()
+}
