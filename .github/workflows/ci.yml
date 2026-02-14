@@ -102,7 +102,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/construct_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: test-secret-key-for-ci-must-be-at-least-32-chars-long
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000001
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
       CSRF_SECRET: test-csrf-secret-for-ci-32chars!
       LOG_HASH_SALT: test-log-hash-salt-for-ci-not-secret-just-for-tests
       ENVIRONMENT: development
@@ -126,6 +126,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup test environment
+        run: cp .env.test.example .env.test
 
       - name: Generate test keys
         run: ./scripts/generate_test_keys.sh
