@@ -554,15 +554,15 @@ pub struct MessageResponse {
 /// Response structure for GET /api/v1/messages
 /// Includes optional padding field for traffic analysis protection
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")] // ✅ Use camelCase for all fields (nextSince, hasMore)
+#[serde(rename_all = "camelCase")] // Use camelCase for all fields (nextSince, hasMore)
 pub struct GetMessagesResponse {
     pub messages: Vec<MessageResponse>,
     /// Stream ID to use in next request for ACK-based pagination
     /// Format: "{timestamp}-{sequence}" (e.g., "1707584371151-5")
     /// Usage: GET /api/v1/messages?since=<this_value>
     /// Effect: Acknowledges receipt of all messages up to this ID (they will be deleted)
-    /// 
-    /// ✅ CRITICAL: This field is ALWAYS present (never skipped) to prevent client polling loops.
+    ///
+    /// CRITICAL: This field is ALWAYS present (never skipped) to prevent client polling loops.
     /// When no messages, server returns the same 'since' value client sent, or "0-0" if none.
     pub next_since: Option<String>,
     pub has_more: bool,
@@ -810,6 +810,14 @@ pub async fn get_messages(
         }
     };
 
+    // ✅ CRITICAL: Sort messages by message_number to ensure correct Double Ratchet order
+    // Redis Streams return messages in arrival order (stream_id), but Signal Protocol
+    // requires processing in messageNumber order (0, 1, 2...) for session initialization
+    //
+    // Bug: Without sorting, message #8 might arrive before message #0, causing
+    // InvalidCiphertext errors when client tries to initialize session with wrong message
+    messages.sort_by_key(|m| m.message_number);
+
     // No client-side filtering needed - Redis XREAD already filters by stream ID
     // We get exactly the messages we need
 
@@ -818,7 +826,7 @@ pub async fn get_messages(
         drop(queue);
         // Return last Stream ID for next request (ACK-based pagination)
         // Client will send this back to acknowledge receipt and get next batch
-        // ✅ CRITICAL FIX: ALWAYS return nextSince (never None)
+        // CRITICAL FIX: ALWAYS return nextSince (never None)
         let next_since = Some(messages.last().map_or_else(
             || params.since.clone().unwrap_or_else(|| "0-0".to_string()),
             |m| {
@@ -834,7 +842,7 @@ pub async fn get_messages(
                 } else {
                     stream_id.to_string()
                 }
-            }
+            },
         ));
 
         tracing::debug!(
@@ -919,15 +927,15 @@ pub async fn get_messages(
                     MessageResponse {
                         id: envelope.message_id.clone(),
                         stream_id: stream_id.clone(), // Internal use, skip in serialization
-                        // ✅ SPEC: Use "from"/"to" as per specification
+                        // SPEC: Use "from"/"to" as per specification
                         from: envelope.sender_id,
                         to: envelope.recipient_id,
                         // Phase 4.5: Include message type
                         message_type: message_type_str,
-                        // ✅ SPEC: Include Double Ratchet fields
+                        // SPEC: Include Double Ratchet fields
                         ephemeral_public_key: envelope.ephemeral_public_key,
                         message_number: envelope.message_number,
-                        // ✅ SPEC: Use "content" field name
+                        // SPEC: Use "content" field name
                         content: envelope.encrypted_payload,
                         timestamp: envelope.timestamp as u64,
                         suite_id: envelope.suite_id,
@@ -960,9 +968,23 @@ pub async fn get_messages(
         messages = new_messages;
     }
 
+    // CRITICAL: Sort messages by message_number for Double Ratchet protocol
+    // This ensures message #0 (session init) is always processed first
+    // Bug fix: Prevents InvalidCiphertext when messages arrive out of order
+    if !messages.is_empty() {
+        messages.sort_by_key(|m| m.message_number);
+        tracing::debug!(
+            user_hash = %user_id_hash,
+            count = messages.len(),
+            first_msg_num = messages.first().unwrap().message_number,
+            last_msg_num = messages.last().unwrap().message_number,
+            "Messages sorted by message_number for Double Ratchet order"
+        );
+    }
+
     // Return Stream ID for ACK-based pagination
-    // ✅ CRITICAL FIX: ALWAYS return nextSince to prevent infinite polling loop
-    // 
+    // ALWAYS return nextSince to prevent infinite polling loop
+    //
     // Cases:
     // 1. Has messages → return last message's stream_id
     // 2. No messages + valid since → echo back client's since
@@ -1022,10 +1044,6 @@ pub async fn get_messages(
         Json(GetMessagesResponse::new_padded(messages, next_since, false)),
     ))
 }
-
-// ============================================================================
-// Phase 4.5: END_SESSION Control Messages
-// ============================================================================
 
 /// POST /api/v1/control
 /// Sends a control message (e.g., END_SESSION) to notify recipient
@@ -1234,10 +1252,6 @@ pub async fn send_control_message(
     ))
 }
 
-// ============================================================================
-// Week R2: 2-Phase Commit - Message Confirmation Endpoint
-// ============================================================================
-
 #[derive(Debug, Deserialize)]
 pub struct ConfirmMessageRequest {
     /// Temporary ID from Phase 1 (send_message response)
@@ -1339,32 +1353,35 @@ mod tests {
     #[test]
     fn test_next_since_always_serialized() {
         // Test that nextSince field is always present in JSON (never omitted)
-        
+
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
         struct TestResponse {
             messages: Vec<String>,
             next_since: Option<String>,
         }
-        
+
         // Case 1: Some(value) → "nextSince": "value"
         let response1 = TestResponse {
             messages: vec![],
             next_since: Some("1234567890-0".to_string()),
         };
-        
+
         let json1 = serde_json::to_value(&response1).unwrap();
         assert!(json1.get("nextSince").is_some());
         assert_eq!(json1["nextSince"], "1234567890-0");
-        
+
         // Case 2: None → "nextSince": null (field still present!)
         let response2 = TestResponse {
             messages: vec![],
             next_since: None,
         };
-        
+
         let json2 = serde_json::to_value(&response2).unwrap();
-        assert!(json2.get("nextSince").is_some(), "nextSince field must exist");
+        assert!(
+            json2.get("nextSince").is_some(),
+            "nextSince field must exist"
+        );
         assert!(json2["nextSince"].is_null());
     }
 
@@ -1377,14 +1394,14 @@ mod tests {
         assert!(is_valid_stream_id("1234567890-0"));
         assert!(is_valid_stream_id("1771079450941-0"));
         assert!(is_valid_stream_id("999999999999-42"));
-        
+
         // Invalid cases
         assert!(!is_valid_stream_id(""));
         assert!(!is_valid_stream_id("not-a-number-0"));
-        assert!(!is_valid_stream_id("1234567890"));  // Missing sequence
+        assert!(!is_valid_stream_id("1234567890")); // Missing sequence
         assert!(!is_valid_stream_id("1234567890-"));
         assert!(!is_valid_stream_id("-0"));
         assert!(!is_valid_stream_id("abc-def"));
-        assert!(!is_valid_stream_id("1234-5-6"));  // Too many parts
+        assert!(!is_valid_stream_id("1234-5-6")); // Too many parts
     }
 }
