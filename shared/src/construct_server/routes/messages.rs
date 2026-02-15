@@ -819,20 +819,23 @@ pub async fn get_messages(
         // Return last Stream ID for next request (ACK-based pagination)
         // Client will send this back to acknowledge receipt and get next batch
         // ✅ CRITICAL FIX: ALWAYS return nextSince (never None)
-        let next_since = messages.last().map(|m| {
-            let stream_id = m.stream_id.trim();
-            if stream_id.is_empty() {
-                tracing::error!(
-                    user_hash = %user_id_hash,
-                    message_id = %m.id,
-                    "CRITICAL: Empty stream_id in message response - using fallback!"
-                );
-                // Fallback: use client's since or "0-0"
-                params.since.clone().unwrap_or_else(|| "0-0".to_string())
-            } else {
-                stream_id.to_string()
+        let next_since = Some(messages.last().map_or_else(
+            || params.since.clone().unwrap_or_else(|| "0-0".to_string()),
+            |m| {
+                let stream_id = m.stream_id.trim();
+                if stream_id.is_empty() {
+                    tracing::error!(
+                        user_hash = %user_id_hash,
+                        message_id = %m.id,
+                        "CRITICAL: Empty stream_id in message response - using fallback!"
+                    );
+                    // Fallback: use client's since or "0-0"
+                    params.since.clone().unwrap_or_else(|| "0-0".to_string())
+                } else {
+                    stream_id.to_string()
+                }
             }
-        });
+        ));
 
         tracing::debug!(
             user_hash = %user_id_hash,
@@ -966,20 +969,23 @@ pub async fn get_messages(
     // 3. No messages + invalid/no since → return "0-0" (start of stream)
     let next_since = if !messages.is_empty() {
         // Case 1: Return last message's stream_id
-        messages.last().map(|m| {
-            let stream_id = m.stream_id.trim();
-            if stream_id.is_empty() {
-                tracing::error!(
-                    user_hash = %user_id_hash,
-                    message_id = %m.id,
-                    "CRITICAL: Empty stream_id in message response after long polling - using fallback!"
-                );
-                // Fallback: use client's since or "0-0"
-                params.since.clone().unwrap_or_else(|| "0-0".to_string())
-            } else {
-                stream_id.to_string()
+        Some(messages.last().map_or_else(
+            || params.since.clone().unwrap_or_else(|| "0-0".to_string()),
+            |m| {
+                let stream_id = m.stream_id.trim();
+                if stream_id.is_empty() {
+                    tracing::error!(
+                        user_hash = %user_id_hash,
+                        message_id = %m.id,
+                        "CRITICAL: Empty stream_id in message response after long polling - using fallback!"
+                    );
+                    // Fallback: use client's since or "0-0"
+                    params.since.clone().unwrap_or_else(|| "0-0".to_string())
+                } else {
+                    stream_id.to_string()
+                }
             }
-        })
+        ))
     } else {
         // Case 2 & 3: No messages - preserve client's position or start from beginning
         match params.since.as_ref() {
