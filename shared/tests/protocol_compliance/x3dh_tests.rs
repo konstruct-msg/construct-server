@@ -24,7 +24,7 @@ async fn test_x3dh_key_bundle_contains_all_required_fields() {
     // Get key bundle
     let client = reqwest::Client::new();
     let response = client
-        .get(&format!("http://{}/api/v1/keys/{}", ctx.messaging_address, user.user_id))
+        .get(format!("http://{}/api/v1/keys/{}", ctx.messaging_address, user.user_id))
         .header("Authorization", format!("Bearer {}", user.access_token))
         .send()
         .await

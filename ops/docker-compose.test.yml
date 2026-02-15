@@ -17,8 +17,6 @@
 #
 # ============================================================================
 
-version: '3.8'
-
 services:
   # ==========================================================================
   # PostgreSQL - Database
@@ -31,7 +29,7 @@ services:
       POSTGRES_PASSWORD: construct_test_password
       POSTGRES_DB: construct_test
     ports:
-      - "5433:5432"  # Different port to avoid conflict with dev database
+      - "5433:5432" # Different port to avoid conflict with dev database
     volumes:
       - postgres_test_data:/var/lib/postgresql/data
       - ../shared/migrations:/docker-entrypoint-initdb.d:ro
@@ -50,7 +48,7 @@ services:
     image: redis:7-alpine
     container_name: construct-test-redis
     ports:
-      - "6380:6379"  # Different port to avoid conflict with dev Redis
+      - "6380:6379" # Different port to avoid conflict with dev Redis
     command: redis-server --appendonly yes
     volumes:
       - redis_test_data:/data
@@ -79,8 +77,8 @@ services:
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
     ports:
-      - "9093:9092"  # Kafka API (different port to avoid conflict)
-      - "8082:8081"  # Admin API
+      - "9093:9092" # Kafka API (different port to avoid conflict)
+      - "8082:8081" # Admin API
     volumes:
       - redpanda_test_data:/var/lib/redpanda/data
     healthcheck:
@@ -112,8 +110,7 @@ services:
   delivery-worker:
     build:
       context: ..
-      dockerfile: Dockerfile
-      target: runtime
+      dockerfile: ops/Dockerfile
     container_name: construct-test-delivery-worker
     command: ["delivery-worker"]
     environment:

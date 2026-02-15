@@ -31,7 +31,7 @@ async fn test_next_since_is_always_stream_id_format() {
     // Get messages
     let client = reqwest::Client::new();
     let response = client
-        .get(&format!("http://{}/api/v1/messages", ctx.messaging_address))
+        .get(format!("http://{}/api/v1/messages", ctx.messaging_address))
         .header("Authorization", format!("Bearer {}", bob.access_token))
         .send()
         .await

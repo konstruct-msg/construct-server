@@ -143,7 +143,7 @@ async fn test_multiple_message_retrieval_preserves_order() {
     // First request: Get messages (should return first batch)
     let client = reqwest::Client::new();
     let response1 = client
-        .get(&format!("http://{}/api/v1/messages", ctx.messaging_address))
+        .get(format!("http://{}/api/v1/messages", ctx.messaging_address))
         .header("Authorization", format!("Bearer {}", bob.access_token))
         .query(&[("limit", "5")])
         .send()
@@ -166,7 +166,7 @@ async fn test_multiple_message_retrieval_preserves_order() {
     // Second request: Use nextSince to get remaining messages
     if let Some(since) = next_since {
         let response2 = client
-            .get(&format!("http://{}/api/v1/messages", ctx.messaging_address))
+            .get(format!("http://{}/api/v1/messages", ctx.messaging_address))
             .header("Authorization", format!("Bearer {}", bob.access_token))
             .query(&[("since", since), ("limit", "5")])
             .send()

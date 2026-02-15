@@ -31,6 +31,10 @@ help:
 	@echo "  make dev-rebuild     Rebuild and restart services"
 	@echo "  make build           Build all binaries (release)"
 	@echo "  make test            Run all tests"
+	@echo "  make test-env-up     Start test infrastructure (Postgres + Redis + Redpanda)"
+	@echo "  make test-env-down   Stop test infrastructure"
+	@echo "  make test-env-logs   View test infrastructure logs"
+	@echo "  make test-integration Run integration tests (requires test-env-up)"
 	@echo "  make check           Run clippy + fmt check"
 	@echo "  make fmt             Format code"
 	@echo ""
@@ -93,6 +97,7 @@ APP_WORKER = construct-delivery-worker
 COMPOSE = docker-compose -f ops/docker-compose.yml
 COMPOSE_KAFKA = docker-compose -f ops/docker-compose.kafka.yml
 COMPOSE_DEV = docker-compose -f ops/docker-compose.dev.yml
+COMPOSE_TEST = docker-compose -f ops/docker-compose.test.yml
 
 # Colors for output
 COLOR_RESET = \033[0m
@@ -201,6 +206,52 @@ test:
 	@cargo test --all-targets -- --test-threads=1 || (EXIT_CODE=$$?; ./scripts/cleanup_test_keys.sh; exit $$EXIT_CODE)
 	@./scripts/cleanup_test_keys.sh
 	@echo "$(COLOR_SUCCESS)✅ Tests passed$(COLOR_RESET)"
+
+# ============================================================================
+# Test Infrastructure (Docker Compose)
+# ============================================================================
+
+.PHONY: test-env-up test-env-down test-env-logs test-integration test-e2e
+
+test-env-up:
+	@echo "$(COLOR_INFO)🐳 Starting test infrastructure (Postgres + Redis + Redpanda)...$(COLOR_RESET)"
+	@$(COMPOSE_TEST) up -d
+	@echo "$(COLOR_INFO)⏳ Waiting for services to be healthy...$(COLOR_RESET)"
+	@sleep 5
+	@$(COMPOSE_TEST) ps
+	@echo "$(COLOR_SUCCESS)✅ Test infrastructure ready$(COLOR_RESET)"
+	@echo ""
+	@echo "$(COLOR_INFO)📋 Connection details:$(COLOR_RESET)"
+	@echo "  PostgreSQL: postgresql://construct_test:construct_test_password@localhost:5433/construct_test"
+	@echo "  Redis:      redis://localhost:6380"
+	@echo "  Redpanda:   localhost:9093 (Kafka protocol)"
+	@echo ""
+	@echo "$(COLOR_INFO)💡 Run tests with: make test-integration$(COLOR_RESET)"
+
+test-env-down:
+	@echo "$(COLOR_INFO)🛑 Stopping test infrastructure...$(COLOR_RESET)"
+	@$(COMPOSE_TEST) down -v
+	@echo "$(COLOR_SUCCESS)✅ Test infrastructure stopped$(COLOR_RESET)"
+
+test-env-logs:
+	@echo "$(COLOR_INFO)📜 Test infrastructure logs:$(COLOR_RESET)"
+	@$(COMPOSE_TEST) logs -f
+
+test-integration:
+	@echo "$(COLOR_INFO)🧪 Running integration tests (with Redpanda)...$(COLOR_RESET)"
+	@echo "$(COLOR_INFO)⚠️  Make sure test environment is running: make test-env-up$(COLOR_RESET)"
+	@./scripts/generate_test_keys.sh
+	@cargo test --test protocol_compliance_test -- --nocapture || (EXIT_CODE=$$?; ./scripts/cleanup_test_keys.sh; exit $$EXIT_CODE)
+	@cargo test --test e2e_crypto_test -- --nocapture || (EXIT_CODE=$$?; ./scripts/cleanup_test_keys.sh; exit $$EXIT_CODE)
+	@./scripts/cleanup_test_keys.sh
+	@echo "$(COLOR_SUCCESS)✅ Integration tests passed$(COLOR_RESET)"
+
+test-e2e:
+	@echo "$(COLOR_INFO)🧪 Running E2E cryptographic tests...$(COLOR_RESET)"
+	@./scripts/generate_test_keys.sh
+	@cargo test --test e2e_crypto_test -- --nocapture || (EXIT_CODE=$$?; ./scripts/cleanup_test_keys.sh; exit $$EXIT_CODE)
+	@./scripts/cleanup_test_keys.sh
+	@echo "$(COLOR_SUCCESS)✅ E2E crypto tests passed$(COLOR_RESET)"
 
 check:
 	@echo "$(COLOR_INFO)🔍 Running code checks...$(COLOR_RESET)"
