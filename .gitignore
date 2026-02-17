@@ -45,6 +45,7 @@ prkeys/
 .docs-cache
 # Proto files are in shared/proto/, root proto/ is copy for build.rs
 proto/
+!shared/proto/
 
 # Documentation moved to Obsidian vault (~/Documents/Konstruct/)
 docs/

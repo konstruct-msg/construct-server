@@ -23,7 +23,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.6.7"
+version = "0.7.0"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/maximeliseyev/construct-server"
@@ -46,7 +46,7 @@ async-trait = "0.1"
 # Database
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
-    "tls-rustls-ring-native-roots", 
+    "tls-rustls-ring-native-roots",
     "postgres",
     "macros",
     "chrono",

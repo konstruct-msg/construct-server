@@ -868,3 +868,61 @@ See `make help` for all available commands.
 **Last Updated:** 2026-02-15  
 **Maintainer:** Construct Team  
 **License:** Proprietary
+
+---
+
+## Future: Protocol Buffers Migration
+
+**Status:** Planned for March 2026  
+**Detailed Plan:** See `/Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Refactoring/PROTOBUF_MIGRATION_PLAN.md`
+
+### Why Migrating to Protobuf?
+
+1. **Current Issue:** Double serialization (JSON → MessagePack) is wasteful
+2. **PQC Readiness:** ML-KEM-768 keys are 1184 bytes, need efficient encoding
+3. **WebSocket Native:** Protobuf is designed for binary streaming protocols
+4. **Signal Standard:** Official Signal Protocol uses Protobuf format
+
+### Expected Benefits
+
+| Metric | Current (JSON) | After (Protobuf) | Improvement |
+|--------|----------------|------------------|-------------|
+| Message size | ~200 bytes | ~100 bytes | -50% |
+| CPU overhead | Double parsing | Single decode | -30% |
+| Battery impact | Baseline | Better | +10% |
+| Traffic (100K users) | ~94 GB/day | ~47 GB/day | -50% |
+
+### Timeline
+
+**Phase 1 (Week 1):** Protocol definitions (.proto files)  
+**Phase 2 (Week 2):** Server implementation (WebSocket + Protobuf)  
+**Phase 3 (Week 3):** Client implementation (Swift Protobuf)  
+**Phase 4 (Week 4):** Gradual rollout with A/B testing  
+
+**Backwards Compatibility:** REST API will remain JSON-based for legacy clients.
+
+### Example Protobuf Schema
+
+```protobuf
+// construct.proto
+syntax = "proto3";
+
+message EncryptedMessage {
+  string recipient_id = 1;
+  enum SuiteId {
+    CLASSIC_X25519 = 1;
+    PQ_HYBRID_KYBER = 2;
+  }
+  SuiteId suite_id = 2;
+  bytes ephemeral_public_key = 3;    // 32 bytes (classic) or 1216 bytes (PQC)
+  uint32 message_number = 4;
+  uint32 previous_chain_length = 5;
+  bytes ciphertext = 6;
+}
+```
+
+**Size comparison:**
+- JSON: `{"recipientId":"uuid","suiteId":2,"ephemeralPublicKey":"base64..."}`
+- Protobuf: Binary encoding, ~40% smaller with PQC keys
+
+---
