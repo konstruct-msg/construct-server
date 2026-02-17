@@ -28,7 +28,7 @@ pub mod handlers {
 pub mod health;
 pub mod kafka;
 pub mod key_management;
-pub mod message_gateway;
+// pub mod message_gateway; // TODO PROTO-1: Replace with new gRPC MessagingService
 pub mod messaging_service;
 pub mod metrics;
 pub mod models; // Invite objects and other data models
