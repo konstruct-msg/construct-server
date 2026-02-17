@@ -20,12 +20,18 @@ use axum::{
 use std::sync::Arc;
 
 use crate::messaging_service::MessagingServiceContext;
+use crate::messaging_service::core as messaging_core;
 use crate::routes::extractors::TrustedUser;
 use crate::routes::messages;
 use crate::utils::log_safe_id;
 use construct_crypto::EncryptedMessage;
 use construct_error::AppError;
 use construct_types::message::EndSessionData;
+use uuid::Uuid;
+
+fn app_state(context: &Arc<MessagingServiceContext>) -> State<Arc<crate::context::AppContext>> {
+    State(Arc::new(context.to_app_context()))
+}
 
 /// Wrapper for send_message handler (POST /api/v1/messages)
 pub async fn send_message(
@@ -34,14 +40,12 @@ pub async fn send_message(
     headers: HeaderMap,
     Json(message): Json<EncryptedMessage>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-
     // Store recipient_id before message is consumed
     let recipient_id = message.recipient_id.clone();
 
     // Send message (existing handler)
-    let result = messages::send_message(
-        State(app_context),
+    let result = messaging_core::send_message(
+        app_state(&context),
         TrustedUser(user_id),
         headers,
         Json(message),
@@ -71,8 +75,7 @@ pub async fn get_messages(
     TrustedUser(user_id): TrustedUser,
     query: Query<messages::GetMessagesParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    messages::get_messages(State(app_context), TrustedUser(user_id), query).await
+    messaging_core::get_messages(app_state(&context), TrustedUser(user_id), query).await
 }
 
 // ============================================================================
@@ -189,12 +192,23 @@ pub async fn send_control_message(
     headers: HeaderMap,
     Json(data): Json<EndSessionData>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    messages::send_control_message(
-        State(app_context),
+    messaging_core::send_control_message(
+        app_state(&context),
         TrustedUser(user_id),
         headers,
         Json(data),
     )
     .await
+}
+
+/// Wrapper for confirm_message handler (POST /api/v1/messages/confirm)
+pub async fn confirm_message(
+    State(context): State<Arc<MessagingServiceContext>>,
+    TrustedUser(user_id): TrustedUser,
+    Json(data): Json<messages::ConfirmMessageRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = Uuid::parse_str(&user_id.to_string())
+        .map_err(|_| AppError::Validation("Invalid authenticated user ID".to_string()))?;
+    let result = messaging_core::confirm_pending_message(app_state(&context).0, user_id, &data.temp_id).await?;
+    Ok((axum::http::StatusCode::OK, Json(result)))
 }

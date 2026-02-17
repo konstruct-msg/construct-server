@@ -1,75 +1,30 @@
-// ============================================================================
-// Messages Routes (Double Ratchet Protocol)
-// ============================================================================
-//
-// Endpoints:
-// - POST /api/v1/messages - Send an E2E-encrypted message
-// - GET /api/v1/messages - Get messages (long polling)
-//
-// See docs/PROTOCOL_SPECIFICATION.md for protocol details.
-// ============================================================================
+use std::sync::Arc;
 
-use axum::http::HeaderMap;
 use axum::{
     Json,
     extract::{Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::sync::Arc;
+use serde_json::{Value, json};
 use uuid::Uuid;
-
-// ============================================================================
-// Response Padding for Traffic Analysis Protection
-// ============================================================================
-//
-// All GET /messages responses are padded to fixed bucket sizes to prevent
-// traffic analysis attacks that could reveal message count or content size.
-//
-// Buckets: 4KB, 16KB, 64KB, 256KB
-// ============================================================================
-
-/// Response size buckets in bytes (after JSON serialization)
-const RESPONSE_BUCKETS: [usize; 4] = [
-    4 * 1024,   // 4 KB - empty or few small messages
-    16 * 1024,  // 16 KB - typical response
-    64 * 1024,  // 64 KB - many messages
-    256 * 1024, // 256 KB - maximum batch
-];
-
-/// Overhead for the _pad field in JSON: `,"_pad":"..."` = ~12 bytes + base64 content
-const PAD_FIELD_OVERHEAD: usize = 12;
 
 use crate::context::AppContext;
 use crate::kafka::types::KafkaMessageEnvelope;
-use crate::messaging_service::core as messaging_core;
 use crate::rate_limit::{RateLimitAction, is_user_in_warmup};
 use crate::routes::extractors::TrustedUser;
+use crate::routes::messages::{GetMessagesParams, GetMessagesResponse, MessageResponse};
 use crate::utils::{extract_client_ip, log_safe_id};
 use construct_crypto::{EncryptedMessage, ServerCryptoValidator};
 use construct_error::AppError;
 use construct_types::message::{ChatMessage, EndSessionData};
 
-/// POST /api/v1/messages
 /// Sends an E2E-encrypted message using Double Ratchet protocol
-#[allow(unreachable_code)]
 pub async fn send_message(
     State(app_context): State<Arc<AppContext>>,
     TrustedUser(sender_id): TrustedUser,
     headers: HeaderMap,
     Json(message): Json<EncryptedMessage>,
-) -> Result<impl IntoResponse, AppError> {
-    return messaging_core::send_message(
-        State(app_context),
-        TrustedUser(sender_id),
-        headers,
-        Json(message),
-    )
-    .await;
-
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let sender_id_str = sender_id.to_string();
 
     // SECURITY: Check rate limiting BEFORE processing (DoS protection)
@@ -488,11 +443,7 @@ pub async fn send_message(
     ))
 }
 
-// ============================================================================
-// Phase 2.5: REST API for Message Retrieval (Long Polling)
-// ============================================================================
 
-/// Validate Redis Stream ID format: {timestamp}-{sequence}
 /// Examples: "0", "1707584371151-0", "1707584371151-42"
 fn is_valid_stream_id(id: &str) -> bool {
     // Special IDs
@@ -510,143 +461,12 @@ fn is_valid_stream_id(id: &str) -> bool {
     parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok()
 }
 
-/// Query parameters for GET /api/v1/messages
-#[derive(Debug, Deserialize)]
-pub struct GetMessagesParams {
-    /// Last Stream ID received - used for ACK-based pagination (optional)
-    /// Format: "{timestamp}-{sequence}" (e.g., "1707584371151-5")
-    /// On first request: omit this parameter
-    /// On subsequent requests: use `nextSince` from previous response
-    pub since: Option<String>,
-    /// Timeout for long polling in seconds (default: 30, max: 60)
-    pub timeout: Option<u64>,
-    /// Maximum number of messages to return (default: 50, max: 100)
-    pub limit: Option<u32>,
-}
 
-/// Message response structure for GET /api/v1/messages
-/// ✅ FIXED: Aligned with API specification (specification.md)
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")] // ✅ Use camelCase for all fields
-pub struct MessageResponse {
-    pub id: String, // Message UUID (unique identifier, NOT used for pagination)
-    #[serde(skip_serializing)]
-    pub stream_id: String, // Redis Stream ID (used for ACK-based pagination via nextSince)
-
-    // ✅ SPEC: Use "from" and "to" as per specification.md (not sender_id/recipient_id)
-    pub from: String,
-    pub to: String,
-
-    // Phase 4.5: Message type (Regular or EndSession)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_type: Option<String>, // "DIRECT_MESSAGE" | "CONTROL_MESSAGE"
-
-    // ✅ SPEC: Required fields for Double Ratchet protocol
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ephemeral_public_key: Option<String>, // Base64<Bytes>
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_number: Option<u32>,
-
-    // ✅ SPEC: "content" field contains encrypted data (Base64<nonce || ciphertext_with_tag>)
-    pub content: String,
-
-    pub suite_id: u16, // ✅ Changed from u8 to u16 per spec, serialized as "suiteId"
-
-    pub timestamp: u64, // ✅ Changed from i64 to u64 per spec
-
-    // Legacy/internal fields (not in spec, skip if None)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delivery_status: Option<String>,
-}
-
-/// Response structure for GET /api/v1/messages
-/// Includes optional padding field for traffic analysis protection
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")] // Use camelCase for all fields (nextSince, hasMore)
-pub struct GetMessagesResponse {
-    pub messages: Vec<MessageResponse>,
-    /// Stream ID to use in next request for ACK-based pagination
-    /// Format: "{timestamp}-{sequence}" (e.g., "1707584371151-5")
-    /// Usage: GET /api/v1/messages?since=<this_value>
-    /// Effect: Acknowledges receipt of all messages up to this ID (they will be deleted)
-    ///
-    /// CRITICAL: This field is ALWAYS present (never skipped) to prevent client polling loops.
-    /// When no messages, server returns the same 'since' value client sent, or "0-0" if none.
-    pub next_since: Option<String>,
-    pub has_more: bool,
-    /// Random padding to normalize response sizes (traffic analysis protection)
-    /// Clients should ignore this field
-    #[serde(rename = "_pad", skip_serializing_if = "Option::is_none")]
-    pub padding: Option<String>,
-}
-
-impl GetMessagesResponse {
-    /// Create a new response with automatic padding to the next bucket size
-    pub fn new_padded(
-        messages: Vec<MessageResponse>,
-        next_since: Option<String>,
-        has_more: bool,
-    ) -> Self {
-        let mut response = Self {
-            messages,
-            next_since,
-            has_more,
-            padding: None,
-        };
-
-        // Calculate current size without padding
-        let current_size = serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0);
-
-        // Find target bucket
-        let target_bucket = RESPONSE_BUCKETS
-            .iter()
-            .find(|&&b| b >= current_size)
-            .copied()
-            .unwrap_or(RESPONSE_BUCKETS[RESPONSE_BUCKETS.len() - 1]);
-
-        // Calculate padding needed
-        // Account for the overhead of adding the _pad field itself
-        if target_bucket > current_size + PAD_FIELD_OVERHEAD {
-            let padding_bytes_needed = target_bucket - current_size - PAD_FIELD_OVERHEAD;
-            // Base64 encoding: 3 bytes -> 4 chars, so we need ~75% of target bytes
-            let raw_bytes_needed = (padding_bytes_needed * 3) / 4;
-
-            if raw_bytes_needed > 0 {
-                let random_bytes: Vec<u8> = (0..raw_bytes_needed)
-                    .map(|_| rand::random::<u8>())
-                    .collect();
-                response.padding = Some(BASE64.encode(&random_bytes));
-            }
-        }
-
-        response
-    }
-}
-
-/// GET /api/v1/messages?since=<id>&timeout=30&limit=50
-///
-/// Long polling endpoint for retrieving messages.
-///
-/// Behavior:
-/// 1. If there are new messages - returns them immediately
-/// 2. If no new messages - waits up to `timeout` seconds (long polling)
-/// 3. Returns messages when they arrive or empty array on timeout
-///
-/// Security:
-/// - Requires JWT authentication (verified by Gateway, identity via X-User-Id header)
-/// - Returns only messages for the authenticated user
-/// - Rate limiting: configurable via MAX_LONG_POLL_REQUESTS_PER_WINDOW (default: 100/60s)
-#[allow(unreachable_code)]
 pub async fn get_messages(
     State(app_context): State<Arc<AppContext>>,
     TrustedUser(user_id): TrustedUser,
     Query(params): Query<GetMessagesParams>,
-) -> Result<impl IntoResponse, AppError> {
-    return messaging_core::get_messages(State(app_context), TrustedUser(user_id), Query(params))
-        .await;
-
+) -> Result<(StatusCode, Json<GetMessagesResponse>), AppError> {
     let user_id_str = user_id.to_string();
     let user_id_hash = log_safe_id(&user_id_str, &app_context.config.logging.hash_salt);
 
@@ -1059,26 +879,14 @@ pub async fn get_messages(
     ))
 }
 
-/// POST /api/v1/control
-/// Sends a control message (e.g., END_SESSION) to notify recipient
-#[allow(unreachable_code)]
 pub async fn send_control_message(
     State(app_context): State<Arc<AppContext>>,
     TrustedUser(sender_id): TrustedUser,
     headers: HeaderMap,
     Json(data): Json<EndSessionData>,
-) -> Result<impl IntoResponse, AppError> {
-    return messaging_core::send_control_message(
-        State(app_context),
-        TrustedUser(sender_id),
-        headers,
-        Json(data),
-    )
-    .await;
-
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let sender_id_str = sender_id.to_string();
 
-    // SECURITY: Check rate limiting BEFORE processing (DoS protection)
     {
         let mut queue = app_context.queue.lock().await;
         if let Ok(Some(reason)) = queue.is_user_blocked(&sender_id_str).await {
@@ -1094,10 +902,8 @@ pub async fn send_control_message(
             )));
         }
 
-        // Check combined rate limit (user_id + IP) for authenticated operations
         let client_ip = extract_client_ip(&headers, None);
 
-        // Use combined rate limiting if enabled
         if app_context.config.security.combined_rate_limiting_enabled {
             match queue
                 .increment_combined_rate_limit(&sender_id_str, &client_ip, 3600)
@@ -1129,7 +935,6 @@ pub async fn send_control_message(
             }
         }
 
-        // Also check user_id-only rate limit
         match queue.increment_message_count(&sender_id_str).await {
             Ok(count) => {
                 let max_messages = app_context.config.security.max_messages_per_hour;
@@ -1154,18 +959,15 @@ pub async fn send_control_message(
         drop(queue);
     }
 
-    // Parse recipient_id
     let recipient_id = Uuid::parse_str(&data.recipient_id)
         .map_err(|_| AppError::Validation("Invalid recipient ID format".to_string()))?;
 
-    // Security check: prevent sending to self
     if sender_id == recipient_id {
         return Err(AppError::Validation(
             "Cannot send control message to self".to_string(),
         ));
     }
 
-    // Check if recipient exists in database
     {
         let user_exists: Option<bool> =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE user_id = $1)")
@@ -1182,13 +984,10 @@ pub async fn send_control_message(
         }
     }
 
-    // Create END_SESSION ChatMessage
     let chat_message =
         ChatMessage::new_end_session(sender_id_str.clone(), data.recipient_id.clone());
-
     let message_id = chat_message.id.clone();
 
-    // Validate the control message
     if !chat_message.is_valid() {
         tracing::error!(
             sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
@@ -1199,13 +998,10 @@ pub async fn send_control_message(
         ));
     }
 
-    // Convert to Kafka envelope (will automatically map to ControlMessage type)
     let envelope = KafkaMessageEnvelope::from(chat_message);
-
-    // Write to Kafka (Phase 5: source of truth) or directly to Redis (test mode)
     let salt = &app_context.config.logging.hash_salt;
+
     if let Some(kafka_producer) = &app_context.kafka_producer {
-        // Production path: send to Kafka, delivery worker will write to Redis
         if kafka_producer.is_enabled() {
             if let Err(e) = kafka_producer.send_message(&envelope).await {
                 tracing::error!(
@@ -1218,7 +1014,6 @@ pub async fn send_control_message(
                 return Err(AppError::Kafka(e.to_string()));
             }
         } else {
-            // Test mode: Kafka disabled, write directly to Redis
             tracing::info!(
                 sender_hash = %log_safe_id(&sender_id_str, salt),
                 recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
@@ -1264,7 +1059,6 @@ pub async fn send_control_message(
         "END_SESSION control message sent successfully"
     );
 
-    // Return success with proper status and camelCase naming
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -1275,161 +1069,55 @@ pub async fn send_control_message(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ConfirmMessageRequest {
-    /// Temporary ID from Phase 1 (send_message response)
-    #[serde(rename = "tempId")]
-    pub temp_id: String,
-}
-
-/// POST /api/v1/messages/confirm - Phase 2 of 2-phase commit
-///
-/// Client calls this after successfully receiving message_id from send_message.
-/// If network failed and client never received the response, they retry send_message
-/// with the same temp_id (idempotent).
-///
-/// This endpoint is fire-and-forget - even if confirmation fails, the auto-cleanup
-/// worker will confirm pending messages after 5 minutes.
-#[allow(unreachable_code)]
-pub async fn confirm_message(
-    State(app_context): State<Arc<AppContext>>,
-    TrustedUser(sender_id): TrustedUser,
-    Json(data): Json<ConfirmMessageRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let result =
-        messaging_core::confirm_pending_message(app_context, sender_id, &data.temp_id).await?;
-    return Ok((StatusCode::OK, Json(result)));
-
+pub async fn confirm_pending_message(
+    app_context: Arc<AppContext>,
+    sender_id: Uuid,
+    temp_id: &str,
+) -> Result<Value, AppError> {
     let sender_id_str = sender_id.to_string();
 
-    // Check if 2-phase commit is enabled
     let Some(pending_storage) = &app_context.pending_message_storage else {
-        // 2-phase commit disabled, return success (backward compatibility)
-        return Ok((
-            StatusCode::OK,
-            Json(json!({
-                "status": "confirmed",
-                "message": "2-phase commit not enabled"
-            })),
-        ));
+        return Ok(json!({
+            "status": "confirmed",
+            "message": "2-phase commit not enabled"
+        }));
     };
 
-    // Confirm the pending message (Phase 2)
-    match pending_storage.confirm_pending(&data.temp_id).await {
+    match pending_storage.confirm_pending(temp_id).await {
         Ok(true) => {
             tracing::debug!(
-                temp_id = %data.temp_id,
+                temp_id = %temp_id,
                 sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
                 "Message confirmed (Phase 2)"
             );
-
-            Ok((
-                StatusCode::OK,
-                Json(json!({
-                    "status": "confirmed",
-                    "tempId": data.temp_id
-                })),
-            ))
+            Ok(json!({
+                "status": "confirmed",
+                "tempId": temp_id
+            }))
         }
         Ok(false) => {
-            // temp_id not found (already confirmed or expired)
             tracing::warn!(
-                temp_id = %data.temp_id,
+                temp_id = %temp_id,
                 sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
                 "Attempted to confirm non-existent pending message"
             );
-
-            // Return success anyway (fire-and-forget, idempotent)
-            Ok((
-                StatusCode::OK,
-                Json(json!({
-                    "status": "confirmed",
-                    "tempId": data.temp_id,
-                    "message": "Already confirmed or expired"
-                })),
-            ))
+            Ok(json!({
+                "status": "confirmed",
+                "tempId": temp_id,
+                "message": "Already confirmed or expired"
+            }))
         }
         Err(e) => {
             tracing::error!(
                 error = %e,
-                temp_id = %data.temp_id,
+                temp_id = %temp_id,
                 "Failed to confirm pending message"
             );
-
-            // Return success anyway (fire-and-forget)
-            // Auto-cleanup worker will confirm after 5 minutes
-            Ok((
-                StatusCode::OK,
-                Json(json!({
-                    "status": "confirmed",
-                    "tempId": data.temp_id,
-                    "message": "Confirmation queued"
-                })),
-            ))
+            Ok(json!({
+                "status": "confirmed",
+                "tempId": temp_id,
+                "message": "Confirmation queued"
+            }))
         }
-    }
-}
-
-// ============================================================================
-// Unit Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_next_since_always_serialized() {
-        // Test that nextSince field is always present in JSON (never omitted)
-
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct TestResponse {
-            messages: Vec<String>,
-            next_since: Option<String>,
-        }
-
-        // Case 1: Some(value) → "nextSince": "value"
-        let response1 = TestResponse {
-            messages: vec![],
-            next_since: Some("1234567890-0".to_string()),
-        };
-
-        let json1 = serde_json::to_value(&response1).unwrap();
-        assert!(json1.get("nextSince").is_some());
-        assert_eq!(json1["nextSince"], "1234567890-0");
-
-        // Case 2: None → "nextSince": null (field still present!)
-        let response2 = TestResponse {
-            messages: vec![],
-            next_since: None,
-        };
-
-        let json2 = serde_json::to_value(&response2).unwrap();
-        assert!(
-            json2.get("nextSince").is_some(),
-            "nextSince field must exist"
-        );
-        assert!(json2["nextSince"].is_null());
-    }
-
-    #[test]
-    fn test_is_valid_stream_id() {
-        // Valid cases
-        assert!(is_valid_stream_id("0"));
-        assert!(is_valid_stream_id("$"));
-        assert!(is_valid_stream_id("*"));
-        assert!(is_valid_stream_id("1234567890-0"));
-        assert!(is_valid_stream_id("1771079450941-0"));
-        assert!(is_valid_stream_id("999999999999-42"));
-
-        // Invalid cases
-        assert!(!is_valid_stream_id(""));
-        assert!(!is_valid_stream_id("not-a-number-0"));
-        assert!(!is_valid_stream_id("1234567890")); // Missing sequence
-        assert!(!is_valid_stream_id("1234567890-"));
-        assert!(!is_valid_stream_id("-0"));
-        assert!(!is_valid_stream_id("abc-def"));
-        assert!(!is_valid_stream_id("1234-5-6")); // Too many parts
     }
 }

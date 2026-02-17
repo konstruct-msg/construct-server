@@ -4,7 +4,7 @@
 //
 // Endpoints:
 // - GET /api/v1/account - Get account information
-// - PUT /api/v1/account - Update account (username, password)
+// - PUT /api/v1/account - Update account (username)
 // - GET /api/v1/users/username/availability - Check username availability
 //
 // Note: Account deletion moved to account_deletion.rs (device-signed flow)
@@ -24,6 +24,7 @@ use std::sync::Arc;
 use crate::context::AppContext;
 use crate::db;
 use crate::routes::extractors::TrustedUser;
+use crate::user_service::core;
 use crate::utils::{extract_client_ip, log_safe_id};
 use construct_error::AppError;
 
@@ -54,40 +55,14 @@ pub async fn get_account(
     State(app_context): State<Arc<AppContext>>,
     user: TrustedUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let user_id = user.0;
-
-    // Fetch user from database (using get_user_by_id for passwordless auth)
-    let user_record = db::get_user_by_id(&app_context.db_pool, &user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-                "Failed to fetch user from database"
-            );
-            AppError::Unknown(e)
-        })?;
-
-    let user_record = user_record.ok_or_else(|| {
-        tracing::warn!(
-            user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-            "User not found in database"
-        );
-        // SECURITY: Don't reveal whether user exists - use generic error
-        AppError::Auth("Session is invalid or expired".to_string())
-    })?;
-
-    tracing::debug!(
-        user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-        "Account information retrieved"
-    );
+    let info = core::get_account_info(app_context, user.0).await?;
 
     Ok((
         StatusCode::OK,
         Json(AccountInfo {
-            user_id: user_record.id.to_string(),
-            username: user_record.username,
-            created_at: None, // TODO: Add created_at to User struct if needed
+            user_id: info.user_id,
+            username: info.username,
+            created_at: info.created_at,
         }),
     ))
 }
@@ -99,21 +74,14 @@ pub struct UpdateAccountRequest {
     /// New username (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// New password (optional, requires old_password)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_password: Option<String>,
-    /// Old password (required if updating password)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub old_password: Option<String>,
 }
 
 /// PUT /api/v1/account
-/// Update account information (username, password)
+/// Update account information (username)
 ///
 /// Security:
 /// - Requires authentication (via Gateway X-User-Id header)
 /// - Requires CSRF protection (via middleware)
-/// - Password update requires old password verification
 /// - Username changes should be rate-limited
 ///
 /// Note: Uses TrustedUser extractor (Trust Boundary pattern).
@@ -124,60 +92,14 @@ pub async fn update_account(
     _headers: HeaderMap, // Reserved for future request signing
     Json(request): Json<UpdateAccountRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let user_id = user.0;
-
-    // Fetch current user (passwordless)
-    let _user_record = db::get_user_by_id(&app_context.db_pool, &user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to fetch user");
-            AppError::Unknown(e)
-        })?
-        .ok_or_else(
-            || // SECURITY: Don't reveal whether user exists - use generic error
-        AppError::Auth("Session is invalid or expired".to_string()),
-        )?;
-
-    // Update username if provided
-    if let Some(new_username) = &request.username {
-        if new_username.is_empty() {
-            return Err(AppError::Validation("Username cannot be empty".to_string()));
-        }
-
-        // Check if username is already taken
-        if let Ok(Some(existing_user)) =
-            db::get_user_by_username(&app_context.db_pool, new_username).await
-            && existing_user.id != user_id
-        {
-            return Err(AppError::Validation(
-                "Username is already taken".to_string(),
-            ));
-        }
-
-        // Update username (TODO: Add update_username function to db.rs)
-        // For now, we'll skip username updates until the function is added
-        tracing::warn!(
-            user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-            "Username update not yet implemented"
-        );
-        return Err(AppError::Validation(
-            "Username update is not yet implemented".to_string(),
-        ));
-    }
-
-    // Password updates are not supported in passwordless architecture
-    if request.new_password.is_some() || request.old_password.is_some() {
-        return Err(AppError::Validation(
-            "Password updates are not supported in passwordless authentication".to_string(),
-        ));
-    }
-
-    // If no updates were requested
-    if request.username.is_none() {
-        return Err(AppError::Validation(
-            "No update fields provided".to_string(),
-        ));
-    }
+    core::update_account(
+        app_context,
+        user.0,
+        core::UpdateAccountInput {
+            username: request.username,
+        },
+    )
+    .await?;
 
     Ok((
         StatusCode::OK,

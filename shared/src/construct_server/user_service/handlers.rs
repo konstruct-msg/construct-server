@@ -12,9 +12,11 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 
 use crate::routes::account;
@@ -22,18 +24,46 @@ use crate::routes::account_deletion;
 use crate::routes::devices;
 use crate::routes::extractors::TrustedUser;
 use crate::routes::invites;
-use crate::routes::keys;
+use crate::routes::keys::UpdateVerifyingKeyRequest;
 use crate::user_service::UserServiceContext;
+use crate::user_service::core as user_core;
 use construct_error::AppError;
+
+fn app_state(context: &Arc<UserServiceContext>) -> State<Arc<crate::context::AppContext>> {
+    State(Arc::new(context.to_app_context()))
+}
 
 /// Wrapper for get_account handler
 /// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInfoResponse {
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
 pub async fn get_account(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
-    account::get_account(State(app_context), user).await
+    let info = user_core::get_account_info(app_context, user.0).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(AccountInfoResponse {
+            user_id: info.user_id,
+            username: info.username,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAccountRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// Wrapper for update_account handler
@@ -41,11 +71,27 @@ pub async fn get_account(
 pub async fn update_account(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
-    headers: HeaderMap,
-    Json(request): Json<account::UpdateAccountRequest>,
+    _headers: HeaderMap,
+    Json(request): Json<UpdateAccountRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
-    account::update_account(State(app_context), user, headers, Json(request)).await
+
+    user_core::update_account(
+        app_context,
+        user.0,
+        user_core::UpdateAccountInput {
+            username: request.username,
+        },
+    )
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "message": "Account updated successfully"
+        })),
+    ))
 }
 
 // Note: Legacy delete_account removed - use device-signed deletion instead
@@ -60,7 +106,7 @@ pub async fn get_public_key_bundle(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
-    keys::get_public_key_bundle(State(app_context), user, Path(id)).await
+    user_core::get_public_key_bundle(app_context, user.0, id).await
 }
 
 /// Wrapper for legacy get_keys handler (GET /keys/:user_id)
@@ -84,15 +130,34 @@ pub async fn upload_keys(
     Json(bundle): Json<construct_crypto::UploadableKeyBundle>,
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
-    keys::upload_keys(State(app_context), user, headers, Json(bundle)).await
+    user_core::upload_keys(app_context, user.0, headers, bundle).await
+}
+
+/// Wrapper for update_verifying_key handler (PATCH /api/v1/users/me/public-key)
+pub async fn update_verifying_key(
+    State(context): State<Arc<UserServiceContext>>,
+    user: TrustedUser,
+    headers: HeaderMap,
+    Json(request): Json<UpdateVerifyingKeyRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let app_context = Arc::new(context.to_app_context());
+    user_core::update_verifying_key(
+        app_context,
+        user.0,
+        headers,
+        user_core::UpdateVerifyingKeyInput {
+            verifying_key: request.verifying_key,
+            reason: request.reason,
+        },
+    )
+    .await
 }
 
 pub async fn get_device_profile(
     State(context): State<Arc<UserServiceContext>>,
     Path(device_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    devices::get_device_profile(State(app_context), Path(device_id)).await
+    devices::get_device_profile(app_state(&context), Path(device_id)).await
 }
 
 /// Wrapper for check_username_availability handler
@@ -103,8 +168,7 @@ pub async fn check_username_availability(
     headers: HeaderMap,
     Query(query): Query<account::UsernameAvailabilityQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    account::check_username_availability(State(app_context), headers, Query(query)).await
+    account::check_username_availability(app_state(&context), headers, Query(query)).await
 }
 
 /// Wrapper for generate_invite handler
@@ -115,8 +179,7 @@ pub async fn generate_invite(
     user: TrustedUser,
     Json(request): Json<invites::GenerateInviteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    invites::generate_invite(State(app_context), user, Json(request)).await
+    invites::generate_invite(app_state(&context), user, Json(request)).await
 }
 
 /// Wrapper for accept_invite handler
@@ -127,8 +190,7 @@ pub async fn accept_invite(
     user: TrustedUser,
     Json(request): Json<invites::AcceptInviteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    invites::accept_invite(State(app_context), user, Json(request)).await
+    invites::accept_invite(app_state(&context), user, Json(request)).await
 }
 
 // ============================================================================
@@ -142,8 +204,7 @@ pub async fn get_delete_challenge(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    account_deletion::get_delete_challenge(State(app_context), user).await
+    account_deletion::get_delete_challenge(app_state(&context), user).await
 }
 
 /// Wrapper for confirm_delete handler
@@ -154,6 +215,5 @@ pub async fn confirm_delete(
     user: TrustedUser,
     Json(request): Json<account_deletion::DeleteConfirmRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    account_deletion::confirm_delete(State(app_context), user, Json(request)).await
+    account_deletion::confirm_delete(app_state(&context), user, Json(request)).await
 }

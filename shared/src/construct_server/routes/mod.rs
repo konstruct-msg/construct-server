@@ -19,7 +19,6 @@
 
 pub mod account; // Made public for user-service
 pub mod account_deletion; // Device-signed account deletion (Phase 5.0.1)
-pub mod auth; // Made public for auth-service
 mod capabilities; // Phase 5: Crypto-agility capabilities endpoint
 pub mod csrf; // Made public for gateway middleware
 pub mod devices; // Device-based passwordless authentication
@@ -54,10 +53,7 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
         .route("/metrics", get(health::metrics))
         // CSRF token endpoint (GET - no CSRF needed)
         .route("/api/csrf-token", get(csrf::get_csrf_token))
-        // Authentication endpoints (legacy, kept for backward compatibility)
-        // NOTE: Device-based auth is in auth-service (POST /api/v1/auth/register-device)
-        .route("/auth/refresh", post(auth::refresh_token))
-        .route("/auth/logout", post(auth::logout))
+        // NOTE: Device-based auth and token management live in auth-service
         // Account management (CSRF protected, authenticated)
         .route("/api/v1/account", get(account::get_account))
         .route("/api/v1/account", put(account::update_account))
@@ -71,9 +67,6 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
             post(account_deletion::confirm_delete),
         )
         // Keys management (CSRF protected)
-        .route("/keys/upload", post(keys::upload_keys)) // Legacy
-        .route("/keys/:user_id", get(keys::get_keys)) // Legacy
-        // Phase 2.5.4: Migrated endpoints under /api/v1/
         .route("/api/v1/keys/upload", post(keys::upload_keys))
         .route(
             "/api/v1/users/:id/public-key",
@@ -98,8 +91,6 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
         .route("/api/v1/invites/generate", post(invites::generate_invite))
         .route("/api/v1/invites/accept", post(invites::accept_invite))
         // Messages (CSRF protected)
-        .route("/messages/send", post(messages::send_message)) // Legacy
-        // Phase 2.5: REST API for messages
         .route("/api/v1/messages", post(messages::send_message)) // Phase 2.5.4: Migrated
         .route("/api/v1/messages", get(messages::get_messages)) // Phase 2.5.1: Long polling
         .route("/api/v1/messages/confirm", post(messages::confirm_message)) // Week R2: 2-phase commit

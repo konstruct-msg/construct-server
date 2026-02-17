@@ -7,6 +7,7 @@
 // ============================================================================
 
 pub mod handlers;
+pub mod core;
 
 use crate::auth::AuthManager;
 use crate::db::DbPool;

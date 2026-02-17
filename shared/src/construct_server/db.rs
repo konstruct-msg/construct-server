@@ -48,68 +48,6 @@ pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbP
 }
 
 // ============================================================================
-// Legacy Password-Based Auth Functions (Deprecated)
-// ============================================================================
-
-pub async fn create_legacy_user(
-    pool: &DbPool,
-    username: &str,
-    password: &str,
-) -> Result<LegacyUser> {
-    let password_hash = hash(password, DEFAULT_COST)?;
-    let user = sqlx::query_as::<_, LegacyUser>(
-        r#"
-        INSERT INTO users (username, password_hash)
-        VALUES ($1, $2)
-        RETURNING id, username, password_hash           "#,
-    )
-    .bind(username)
-    .bind(password_hash)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(user)
-}
-
-pub async fn get_legacy_user_by_username(
-    pool: &DbPool,
-    username: &str,
-) -> Result<Option<LegacyUser>> {
-    let user = sqlx::query_as::<_, LegacyUser>(
-        r#"
-        -- CREATE INDEX idx_users_username ON users(username);
-        SELECT id, username, password_hash
-        FROM users
-        WHERE username = $1
-        "#,
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user)
-}
-
-pub async fn get_legacy_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<LegacyUser>> {
-    let user = sqlx::query_as::<_, LegacyUser>(
-        r#"
-        SELECT id, username, password_hash
-        FROM users
-        WHERE id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user)
-}
-
-pub async fn verify_password(user: &LegacyUser, password: &str) -> Result<bool> {
-    Ok(bcrypt::verify(password, &user.password_hash)?)
-}
-
-// ============================================================================
 // Passwordless Device-Based Auth Functions (New)
 // ============================================================================
 
@@ -145,6 +83,30 @@ pub async fn get_user_by_username(pool: &DbPool, username: &str) -> Result<Optio
     Ok(user)
 }
 
+/// Set or clear username for a passwordless user account.
+/// `username = Some(value)` sets username, `None` clears it.
+pub async fn update_user_username(
+    pool: &DbPool,
+    user_id: &Uuid,
+    username: Option<&str>,
+) -> Result<User> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET username = $1
+        WHERE id = $2
+        RETURNING id, username, recovery_public_key, last_recovery_at, primary_device_id
+        "#,
+    )
+    .bind(username)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to update username")?;
+
+    Ok(user)
+}
+
 /// Create a new user (passwordless, device-based)
 ///
 /// # Arguments
@@ -173,15 +135,6 @@ pub async fn create_user_passwordless(
     .context("Failed to create passwordless user")?;
 
     Ok(user)
-}
-
-// ============================================================================
-// Backwards Compatibility Aliases (for legacy code)
-// ============================================================================
-
-/// Alias for create_legacy_user (backwards compatibility)
-pub async fn create_user(pool: &DbPool, username: &str, password: &str) -> Result<LegacyUser> {
-    create_legacy_user(pool, username, password).await
 }
 
 /// Delete user account and all associated data

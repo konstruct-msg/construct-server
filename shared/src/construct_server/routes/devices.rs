@@ -154,7 +154,7 @@ pub struct UpdateProfileRequest {
 pub async fn register_device_v2(
     State(app_context): State<Arc<AppContext>>,
     Json(request): Json<RegisterDeviceRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     let client_ip = "127.0.0.1".to_string();
 
     tracing::info!(
@@ -452,7 +452,7 @@ pub struct AuthenticateDeviceRequest {
 pub async fn authenticate_device(
     State(app_context): State<Arc<AppContext>>,
     Json(request): Json<AuthenticateDeviceRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     // 1. Validate timestamp (±5 minutes window)
     let now = chrono::Utc::now().timestamp();
     let time_diff = (now - request.timestamp).abs();
