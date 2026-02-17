@@ -1,0 +1,268 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "core/crypto.proto";
+import "core/identity.proto";
+
+// AuthService - Authentication & session management
+service AuthService {
+  // GetPoWChallenge - Anti-spam challenge for device registration
+  rpc GetPowChallenge(GetPowChallengeRequest) returns (GetPowChallengeResponse);
+
+  // RegisterDevice - Passwordless device registration
+  rpc RegisterDevice(RegisterDeviceRequest) returns (AuthTokensResponse);
+
+  // AuthenticateDevice - Passwordless device authentication
+  rpc AuthenticateDevice(AuthenticateDeviceRequest) returns (AuthTokensResponse);
+
+  // RefreshToken - Refresh access token
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // VerifyToken - Validate access token
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // Logout - Revoke session tokens
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+}
+
+// DeviceService - Device management
+service DeviceService {
+  // ListDevices - List all devices for current user
+  rpc ListDevices(ListDevicesRequest) returns (stream DeviceInfo);
+
+  // RevokeDevice - Revoke device (logout remotely)
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  // UpdatePushToken - Update push notification token
+  rpc UpdatePushToken(UpdatePushTokenRequest) returns (UpdatePushTokenResponse);
+
+  // VerifyDevice - Verify device (2FA)
+  rpc VerifyDevice(VerifyDeviceRequest) returns (VerifyDeviceResponse);
+
+  // GetDeviceInfo - Get specific device details
+  rpc GetDeviceInfo(GetDeviceInfoRequest) returns (DeviceInfo);
+}
+
+// === AuthService Messages ===
+
+message GetPowChallengeRequest {}
+
+message GetPowChallengeResponse {
+  string challenge = 1;
+  uint32 difficulty = 2;
+  int64 expires_at = 3;
+}
+
+message DevicePublicKeys {
+  string verifying_key = 1;
+  string identity_public = 2;
+  string signed_prekey_public = 3;
+  string signed_prekey_signature = 4;
+  string suite_id = 5;
+}
+
+message PowSolution {
+  string challenge = 1;
+  uint64 nonce = 2;
+  string hash = 3;
+}
+
+message RegisterDeviceRequest {
+  optional string username = 1;
+  string device_id = 2;
+  DevicePublicKeys public_keys = 3;
+  PowSolution pow_solution = 4;
+}
+
+message AuthenticateDeviceRequest {
+  string device_id = 1;
+  int64 timestamp = 2;
+  string signature = 3;
+}
+
+message AuthTokensResponse {
+  string user_id = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+  int64 expires_at = 4;
+}
+
+// RefreshTokenRequest - Refresh access token
+message RefreshTokenRequest {
+  // Refresh token
+  string refresh_token = 1;
+
+  // Device ID
+  string device_id = 2;
+}
+
+// RefreshTokenResponse - New access token
+message RefreshTokenResponse {
+  // New access token
+  string access_token = 1;
+
+  // New refresh token (optional, may rotate)
+  optional string refresh_token = 2;
+
+  // Token expiration
+  int64 expires_at = 3;
+}
+
+// VerifyTokenRequest - Validate token
+message VerifyTokenRequest {
+  // Access token to verify
+  string access_token = 1;
+}
+
+// VerifyTokenResponse - Token validation result
+message VerifyTokenResponse {
+  // Valid?
+  bool valid = 1;
+
+  // User ID (if valid)
+  optional string user_id = 2;
+
+  // Device ID (if valid)
+  optional string device_id = 3;
+
+  // Expiration timestamp
+  optional int64 expires_at = 4;
+}
+
+message LogoutRequest {
+  string access_token = 1;
+  bool all_devices = 2;
+}
+
+message LogoutResponse {
+  bool success = 1;
+}
+
+// === DeviceService Messages ===
+
+// ListDevicesRequest - List user's devices
+message ListDevicesRequest {
+  // Optional: filter by platform
+  optional shared.proto.core.v1.DevicePlatform platform = 1;
+}
+
+// DeviceInfo - Device information
+message DeviceInfo {
+  // Device ID
+  shared.proto.core.v1.DeviceId device = 1;
+
+  // Device name (user-set)
+  string device_name = 2;
+
+  // Platform
+  shared.proto.core.v1.DevicePlatform platform = 3;
+
+  // Last seen timestamp
+  int64 last_seen = 4;
+
+  // Created timestamp
+  int64 created_at = 5;
+
+  // Push provider (if registered)
+  optional PushProvider push_provider = 6;
+
+  // Is this the current device?
+  bool is_current = 7;
+
+  // Device capabilities
+  uint32 capabilities = 8;
+
+  // Reserved for future features
+  reserved 9 to 15;
+}
+
+// RevokeDeviceRequest - Revoke device
+message RevokeDeviceRequest {
+  // Device ID to revoke
+  string device_id = 1;
+}
+
+// RevokeDeviceResponse - Revoke confirmation
+message RevokeDeviceResponse {
+  // Success
+  bool success = 1;
+
+  // Revoked device info
+  DeviceInfo revoked_device = 2;
+}
+
+// UpdatePushTokenRequest - Update push token
+message UpdatePushTokenRequest {
+  // Device ID
+  string device_id = 1;
+
+  // Push token (from APNS/FCM/HMS)
+  string push_token = 2;
+
+  // Push provider
+  PushProvider provider = 3;
+
+  // Environment (production/sandbox)
+  PushEnvironment environment = 4;
+}
+
+// UpdatePushTokenResponse - Update confirmation
+message UpdatePushTokenResponse {
+  // Success
+  bool success = 1;
+}
+
+// VerifyDeviceRequest - Verify device (2FA)
+message VerifyDeviceRequest {
+  // Device ID to verify
+  string device_id = 1;
+
+  // Verification code (SMS, email, etc.)
+  string verification_code = 2;
+}
+
+// VerifyDeviceResponse - Verification result
+message VerifyDeviceResponse {
+  // Verified?
+  bool verified = 1;
+}
+
+// GetDeviceInfoRequest - Get specific device info
+message GetDeviceInfoRequest {
+  // Device ID
+  string device_id = 1;
+}
+
+// PushProvider - Push notification provider
+enum PushProvider {
+  // Unspecified provider (must be 0)
+  PUSH_PROVIDER_UNSPECIFIED = 0;
+
+  // Apple Push Notification Service (iOS, macOS)
+  PUSH_PROVIDER_APNS = 1;
+
+  // Firebase Cloud Messaging (Android)
+  PUSH_PROVIDER_FCM = 2;
+
+  // Huawei Mobile Services (Huawei Android)
+  PUSH_PROVIDER_HMS = 3;
+
+  // Web Push (PWA)
+  PUSH_PROVIDER_WEBPUSH = 4;
+
+  // Reserved for future providers
+  reserved 5 to 15;
+}
+
+// PushEnvironment - Push environment
+enum PushEnvironment {
+  // Unspecified environment (must be 0)
+  PUSH_ENV_UNSPECIFIED = 0;
+
+  // Production
+  PUSH_ENV_PRODUCTION = 1;
+
+  // Sandbox (APNS development)
+  PUSH_ENV_SANDBOX = 2;
+}

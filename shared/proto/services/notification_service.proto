@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// NotificationService - отвечает за отправку "слепых" уведомлений.
+service NotificationService {
+  // Отправляет обобщенное, сохраняющее приватность уведомление,
+  // чтобы сообщить о новой активности, не раскрывая содержания.
+  rpc SendBlindNotification(SendBlindNotificationRequest) returns (SendBlindNotificationResponse);
+}
+
+// Запрос на отправку "слепого" уведомления
+message SendBlindNotificationRequest {
+  // ID пользователя-получателя.
+  string user_id = 1;
+
+  // Опционально: новое количество для бейджа на иконке приложения.
+  // Показывает число непрочитанных событий, но не их содержание.
+  optional int32 badge_count = 2;
+
+  // Опционально: Тип активности (например, "new_message", "new_call").
+  // Клиент может использовать это для отображения обобщенного текста,
+  // например "Новое сообщение" или "Входящий вызов", не раскрывая деталей.
+  optional string activity_type = 3;
+}
+
+// Ответ после постановки уведомления в очередь
+message SendBlindNotificationResponse {
+  // true, если уведомление было успешно поставлено в очередь.
+  bool success = 1;
+}
