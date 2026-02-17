@@ -82,11 +82,15 @@ fn x3dh_receiver(
 /// Signal uses HKDF(SS, info="WhisperMessageKeys")
 /// Simplified: HMAC-SHA256(SS, "construct-message-key")
 fn derive_message_key(shared_secret: &[u8; 32]) -> [u8; 32] {
-    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(shared_secret).expect("HMAC can take any key size");
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(shared_secret)
+        .expect("HMAC can take any key size");
     mac.update(b"construct-message-key-v1");
     let result = mac.finalize();
     let bytes = result.into_bytes();
-    let array: [u8; 32] = bytes.as_slice().try_into().expect("HMAC-SHA256 produces 32 bytes");
+    let array: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .expect("HMAC-SHA256 produces 32 bytes");
     array
 }
 
@@ -252,7 +256,7 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
     println!(
         "   Shared secret: {}",
         hex::encode(&alice_shared_secret[..8])
-);
+    );
 
     // Alice encrypts message
     let plaintext = "Hello Bob! This is a real encrypted message.";
@@ -263,7 +267,7 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
     println!(
         "   Ciphertext length: {} bytes (includes 16-byte auth tag)",
         ciphertext.len()
-);
+    );
 
     // === SEND MESSAGE TO SERVER ===
 

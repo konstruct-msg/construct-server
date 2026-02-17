@@ -2,7 +2,6 @@
 //!
 //! КРИТИЧЕСКИЙ тест: Проверяем что nextSince ВСЕГДА присутствует в JSON response
 
-
 /// Проверяем что JSON response ВСЕГДА содержит nextSince
 #[test]
 fn test_json_response_schema() {
@@ -11,21 +10,27 @@ fn test_json_response_schema() {
         "messages": [],
         "nextSince": "1234-0"
     });
-    
-    assert!(json_with_value.get("nextSince").is_some(), 
-        "nextSince field must exist in JSON");
-    assert!(json_with_value["nextSince"].is_string(),
-        "nextSince must be a string");
-    
+
+    assert!(
+        json_with_value.get("nextSince").is_some(),
+        "nextSince field must exist in JSON"
+    );
+    assert!(
+        json_with_value["nextSince"].is_string(),
+        "nextSince must be a string"
+    );
+
     // Test 2: nextSince как null (всё ещё присутствует!)
     let json_with_null = serde_json::json!({
         "messages": [],
         "nextSince": null
     });
-    
-    assert!(json_with_null.get("nextSince").is_some(),
-        "nextSince field must exist even if null");
-    
+
+    assert!(
+        json_with_null.get("nextSince").is_some(),
+        "nextSince field must exist even if null"
+    );
+
     // Test 3: Проверяем сериализацию наших структур
     #[derive(serde::Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -33,28 +38,32 @@ fn test_json_response_schema() {
         messages: Vec<String>,
         next_since: Option<String>,
     }
-    
+
     // Case A: Some(value)
     let response_some = GetMessagesResponse {
         messages: vec![],
         next_since: Some("1234-0".to_string()),
     };
-    
+
     let json_some = serde_json::to_value(&response_some).unwrap();
     assert!(json_some.get("nextSince").is_some());
     assert_eq!(json_some["nextSince"], "1234-0");
-    
+
     // Case B: None (должен сериализоваться как null)
     let response_none = GetMessagesResponse {
         messages: vec![],
         next_since: None,
     };
-    
+
     let json_none = serde_json::to_value(&response_none).unwrap();
-    assert!(json_none.get("nextSince").is_some(), 
-        "❌ BUG: nextSince field missing when None! This causes infinite loop!");
-    assert!(json_none["nextSince"].is_null(), 
-        "nextSince should be null, not omitted");
+    assert!(
+        json_none.get("nextSince").is_some(),
+        "❌ BUG: nextSince field missing when None! This causes infinite loop!"
+    );
+    assert!(
+        json_none["nextSince"].is_null(),
+        "nextSince should be null, not omitted"
+    );
 }
 
 /// Проверяем что serde(skip_serializing_if) ЛОМАЕТ контракт
@@ -67,18 +76,20 @@ fn test_skip_serializing_if_breaks_contract() {
         #[serde(skip_serializing_if = "Option::is_none")]
         next_since: Option<String>,
     }
-    
+
     let response = BadResponse {
         messages: vec![],
         next_since: None,
     };
-    
+
     let json = serde_json::to_value(&response).unwrap();
-    
+
     // ❌ BAD: nextSince field ПОЛНОСТЬЮ отсутствует
-    assert!(json.get("nextSince").is_none(), 
-        "This proves skip_serializing_if is dangerous!");
-    
+    assert!(
+        json.get("nextSince").is_none(),
+        "This proves skip_serializing_if is dangerous!"
+    );
+
     // Это ломает клиентов:
     // Swift: nextSince становится nil → infinite loop
     // TypeScript: nextSince becomes undefined → crash
@@ -94,15 +105,15 @@ fn test_stream_id_validation() {
         if id == "0-0" {
             return true;
         }
-        
+
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 2 {
             return false;
         }
-        
+
         parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok()
     }
-    
+
     // Valid cases
     assert!(is_valid_stream_id("0"));
     assert!(is_valid_stream_id("$"));
@@ -110,13 +121,13 @@ fn test_stream_id_validation() {
     assert!(is_valid_stream_id("0-0"));
     assert!(is_valid_stream_id("1234567890-0"));
     assert!(is_valid_stream_id("1771079450941-0"));
-    
+
     // Invalid cases
     assert!(!is_valid_stream_id(""));
     assert!(!is_valid_stream_id("invalid"));
     assert!(!is_valid_stream_id("not-a-number-0"));
-    assert!(!is_valid_stream_id("1234"));  // Missing sequence
-    assert!(!is_valid_stream_id("-0"));    // Missing timestamp
+    assert!(!is_valid_stream_id("1234")); // Missing sequence
+    assert!(!is_valid_stream_id("-0")); // Missing timestamp
     assert!(!is_valid_stream_id("abc-def"));
 }
 
@@ -128,26 +139,28 @@ fn test_client_loop_simulation() {
     #[serde(rename_all = "camelCase")]
     struct MessagesResponse {
         messages: Vec<serde_json::Value>,
-        next_since: String,  // REQUIRED, not Option<String>!
+        next_since: String, // REQUIRED, not Option<String>!
     }
-    
+
     // Server response (empty, no new messages)
     let server_json = serde_json::json!({
         "messages": [],
         "nextSince": "1234-0"
     });
-    
+
     // Client parse
-    let response: MessagesResponse = serde_json::from_value(server_json)
-        .expect("Client should be able to parse response");
-    
+    let response: MessagesResponse =
+        serde_json::from_value(server_json).expect("Client should be able to parse response");
+
     assert_eq!(response.messages.len(), 0);
     assert_eq!(response.next_since, "1234-0");
-    
+
     // Client would use this for next request
     let next_request_since = response.next_since;
-    assert!(!next_request_since.is_empty(), 
-        "Client should have valid nextSince for next iteration");
+    assert!(
+        !next_request_since.is_empty(),
+        "Client should have valid nextSince for next iteration"
+    );
 }
 
 /// Проверяем обработку ошибки когда nextSince отсутствует
@@ -157,25 +170,27 @@ fn test_client_handles_missing_next_since() {
     #[serde(rename_all = "camelCase")]
     struct MessagesResponse {
         _messages: Vec<serde_json::Value>,
-        next_since: Option<String>,  // Client защищается с Option
+        next_since: Option<String>, // Client защищается с Option
     }
-    
+
     // Bad server response (missing nextSince)
     let bad_json = serde_json::json!({
         "messages": []
     });
-    
+
     let response: MessagesResponse = serde_json::from_value(bad_json).unwrap();
-    
+
     // Client должен обнаружить нарушение контракта
-    assert!(response.next_since.is_none(), 
-        "This test demonstrates what happens when server violates contract");
-    
+    assert!(
+        response.next_since.is_none(),
+        "This test demonstrates what happens when server violates contract"
+    );
+
     // В реальном коде клиент должен:
     // if response.next_since.is_none() {
     //     throw Error("Server violated contract: nextSince missing!");
     // }
-    
+
     println!("⚠️ This demonstrates the bug that was fixed!");
     println!("Without nextSince field, client enters infinite loop");
 }
@@ -189,30 +204,34 @@ fn test_next_since_monotonic_property() {
         ("1000-0", true),
         ("1000-1", true),
         ("2000-0", true),
-        ("1500-0", false),  // ❌ BACKWARDS! Invalid
+        ("1500-0", false), // ❌ BACKWARDS! Invalid
     ];
-    
+
     let mut previous: Option<(u64, u64)> = None;
-    
+
     for (next_since, should_be_valid) in responses {
         if next_since == "0-0" {
             previous = Some((0, 0));
             continue;
         }
-        
+
         let parts: Vec<&str> = next_since.split('-').collect();
         let timestamp = parts[0].parse::<u64>().unwrap();
         let sequence = parts[1].parse::<u64>().unwrap();
-        
+
         if let Some((prev_ts, prev_seq)) = previous {
             let is_forward = timestamp > prev_ts || (timestamp == prev_ts && sequence > prev_seq);
-            assert_eq!(is_forward, should_be_valid, 
-                "nextSince {} should be {} (previous: {}-{})", 
-                next_since, 
+            assert_eq!(
+                is_forward,
+                should_be_valid,
+                "nextSince {} should be {} (previous: {}-{})",
+                next_since,
                 if should_be_valid { "valid" } else { "invalid" },
-                prev_ts, prev_seq);
+                prev_ts,
+                prev_seq
+            );
         }
-        
+
         previous = Some((timestamp, sequence));
     }
 }
@@ -226,5 +245,7 @@ fn test_contract_documentation() {
     println!("4. nextSince MUST be monotonic (never backwards)");
     println!("5. When no messages: echo 'since' or return '0-0'");
     println!();
-    println!("📖 See: /Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Documentation/NEXT_SINCE_CONTRACT.md");
+    println!(
+        "📖 See: /Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Documentation/NEXT_SINCE_CONTRACT.md"
+    );
 }

@@ -27,7 +27,7 @@ use construct_server_shared::{
     messaging_service::{MessagingServiceContext, handlers as messaging_handlers},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
-    routes::{health, keys},
+    routes::health,
     user_service::{UserServiceContext, handlers as user_handlers},
 };
 use ed25519_dalek::{Signer, SigningKey};
@@ -61,6 +61,15 @@ pub struct SingleServiceApp {
 
 /// Create test config from .env.test
 async fn create_test_config(db_name: &str) -> Config {
+    // CRITICAL: Remove Kafka SASL credentials BEFORE loading any .env file
+    // dotenvy::dotenv() in Config::from_env() won't override existing env vars
+    // SAFETY: Tests run single-threaded (--test-threads=1) so this is safe
+    unsafe {
+        std::env::remove_var("KAFKA_SASL_MECHANISM");
+        std::env::remove_var("KAFKA_SASL_USERNAME");
+        std::env::remove_var("KAFKA_SASL_PASSWORD");
+    }
+
     // Load .env.test with override - this replaces any existing env vars
     // Try multiple paths since tests may run from different directories
     let _ = dotenvy::from_filename_override(".env.test")
@@ -125,21 +134,52 @@ fn try_read_key_file(paths: &[&str]) -> Result<String, std::io::Error> {
 
 /// Create test database
 async fn setup_test_database(db_name: &str) -> PgPool {
-    // Use DATABASE_URL from env or fallback to local dev credentials
-    let base_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://construct:construct_dev_password@localhost:5432/postgres".to_string()
+    // Load .env.test so DATABASE_URL is available before DB bootstrap
+    let _ = dotenvy::from_filename_override(".env.test")
+        .or_else(|_| dotenvy::from_filename_override("../.env.test"))
+        .or_else(|_| dotenvy::from_filename_override("../../.env.test"));
+
+    // Try DATABASE_URL first, then common local test defaults
+    let mut candidates = vec![];
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        candidates.push(url);
+    }
+    candidates.push("postgres://construct_test:construct_test_password@localhost:5433/postgres".to_string());
+    candidates.push("postgres://postgres:postgres@localhost:5432/postgres".to_string());
+    candidates.push("postgres://construct:construct_dev_password@localhost:5432/postgres".to_string());
+
+    let mut connection = None;
+    let mut base_url = None;
+    let mut last_err = None;
+    for candidate in candidates {
+        let candidate_postgres = if let Some(pos) = candidate.rfind('/') {
+            format!("{}/postgres", &candidate[..pos])
+        } else {
+            candidate.clone()
+        };
+        // Prefer IPv4 loopback; some local setups listen only on IPv4 and reject ::1
+        let candidate_postgres = candidate_postgres.replace("@localhost:", "@127.0.0.1:");
+        match PgConnection::connect(&candidate_postgres).await {
+            Ok(conn) => {
+                connection = Some(conn);
+                base_url = Some(candidate_postgres);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut connection = connection.unwrap_or_else(|| {
+        panic!(
+            "Failed to connect to Postgres with all known test URLs: {:?}",
+            last_err
+        )
     });
+    let base_url = base_url.expect("Base DB URL should be set when Postgres connection succeeds");
 
-    // Extract base connection info (without database name)
-    let base_url_without_db = if let Some(pos) = base_url.rfind('/') {
-        format!("{}/postgres", &base_url[..pos])
-    } else {
-        base_url.clone()
-    };
-
-    let mut connection = PgConnection::connect(&base_url_without_db)
-        .await
-        .expect("Failed to connect to Postgres");
+    // Keep config/database creation on the same working URL for this test process
+    unsafe {
+        std::env::set_var("DATABASE_URL", &base_url);
+    }
 
     // Drop if exists and create fresh
     let _ = connection
@@ -240,9 +280,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         )
         .route("/api/v1/auth/refresh", post(auth_handlers::refresh_token))
         .route("/api/v1/auth/logout", post(auth_handlers::logout))
-        // Legacy endpoints (for backward compatibility with tests)
-        .route("/auth/refresh", post(auth_handlers::refresh_token))
-        .route("/auth/logout", post(auth_handlers::logout))
         .with_state(context);
 
     tokio::spawn(async move {
@@ -292,12 +329,7 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         )
         .route(
             "/api/v1/users/me/public-key",
-            patch(
-                |State(ctx): State<Arc<UserServiceContext>>, user, headers, body| async move {
-                    let app_ctx = Arc::new(ctx.to_app_context());
-                    keys::update_verifying_key(State(app_ctx), user, headers, body).await
-                },
-            ),
+            patch(user_handlers::update_verifying_key),
         )
         .with_state(context);
 
@@ -354,6 +386,10 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> S
         .route("/health/live", get(health::liveness_check))
         .route("/api/v1/messages", post(messaging_handlers::send_message))
         .route("/api/v1/messages", get(messaging_handlers::get_messages))
+        .route(
+            "/api/v1/messages/confirm",
+            post(messaging_handlers::confirm_message),
+        )
         .with_state(context);
 
     tokio::spawn(async move {

@@ -6,8 +6,8 @@
 // - GET /api/v1/auth/challenge - Get PoW challenge
 // - POST /api/v1/auth/register-device - Register new device
 // - POST /api/v1/auth/device - Authenticate existing device
-// - POST /auth/refresh - Refresh access token
-// - POST /auth/logout - Logout device
+// - POST /api/v1/auth/refresh - Refresh access token
+// - POST /api/v1/auth/logout - Logout device
 //
 // ============================================================================
 
@@ -711,7 +711,7 @@ async fn test_authenticate_device_expired_timestamp() {
 }
 
 // ============================================================================
-// POST /auth/refresh Tests
+// POST /api/v1/auth/refresh Tests
 // ============================================================================
 
 #[tokio::test]
@@ -799,7 +799,7 @@ async fn test_refresh_token_success() {
     });
 
     let refresh_response = client
-        .post(&format!("http://{}/auth/refresh", app.auth_address))
+        .post(&format!("http://{}/api/v1/auth/refresh", app.auth_address))
         .json(&refresh_request)
         .send()
         .await
@@ -829,7 +829,7 @@ async fn test_refresh_token_invalid() {
     });
 
     let response = client
-        .post(&format!("http://{}/auth/refresh", app.auth_address))
+        .post(&format!("http://{}/api/v1/auth/refresh", app.auth_address))
         .json(&refresh_request)
         .send()
         .await
@@ -839,7 +839,7 @@ async fn test_refresh_token_invalid() {
 }
 
 // ============================================================================
-// POST /auth/logout Tests
+// POST /api/v1/auth/logout Tests
 // ============================================================================
 
 #[tokio::test]
@@ -860,7 +860,7 @@ async fn test_logout_success() {
     });
 
     let response = client
-        .post(&format!("http://{}/auth/logout", app.auth_address))
+        .post(&format!("http://{}/api/v1/auth/logout", app.auth_address))
         .header("Authorization", format!("Bearer {}", access_token))
         .json(&logout_request)
         .send()
@@ -888,7 +888,7 @@ async fn test_logout_requires_auth() {
     });
 
     let response = client
-        .post(&format!("http://{}/auth/logout", app.auth_address))
+        .post(&format!("http://{}/api/v1/auth/logout", app.auth_address))
         // No Authorization header
         .json(&logout_request)
         .send()
