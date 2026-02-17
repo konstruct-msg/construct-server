@@ -33,10 +33,172 @@ use serde_json::json;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tonic::{Request, Response, Status};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use construct_server_shared::shared::proto::services::v1::{
+    self as proto,
+    auth_service_server::{AuthService, AuthServiceServer},
+};
+
+#[derive(Clone)]
+struct AuthGrpcService {
+    context: Arc<AuthServiceContext>,
+}
+
+#[tonic::async_trait]
+impl AuthService for AuthGrpcService {
+    async fn get_pow_challenge(
+        &self,
+        _request: Request<proto::GetPowChallengeRequest>,
+    ) -> Result<Response<proto::GetPowChallengeResponse>, Status>
+    {
+        let app_context = Arc::new(self.context.to_app_context());
+        let axum::Json(challenge) = construct_server_shared::auth_service::core::get_pow_challenge(app_context)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::GetPowChallengeResponse {
+            challenge: challenge.challenge,
+            difficulty: challenge.difficulty,
+            expires_at: challenge.expires_at,
+        }))
+    }
+
+    async fn register_device(
+        &self,
+        request: Request<proto::RegisterDeviceRequest>,
+    ) -> Result<Response<proto::AuthTokensResponse>, Status>
+    {
+        let req = request.into_inner();
+        let public_keys = req
+            .public_keys
+            .ok_or_else(|| Status::invalid_argument("public_keys is required"))?;
+        let pow_solution = req
+            .pow_solution
+            .ok_or_else(|| Status::invalid_argument("pow_solution is required"))?;
+        let app_context = Arc::new(self.context.to_app_context());
+        let (_status, axum::Json(response)) = construct_server_shared::auth_service::core::register_device(
+            app_context,
+            construct_server_shared::auth_service::core::RegisterDeviceInput {
+                username: req.username,
+                device_id: req.device_id,
+                public_keys: construct_server_shared::auth_service::core::DevicePublicKeysInput {
+                    verifying_key: public_keys.verifying_key,
+                    identity_public: public_keys.identity_public,
+                    signed_prekey_public: public_keys.signed_prekey_public,
+                    signed_prekey_signature: public_keys.signed_prekey_signature,
+                    suite_id: public_keys.suite_id,
+                },
+                pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
+                    challenge: pow_solution.challenge,
+                    nonce: pow_solution.nonce,
+                    hash: pow_solution.hash,
+                },
+            },
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::AuthTokensResponse {
+            user_id: response.user_id,
+            access_token: response.access_token,
+            refresh_token: response.refresh_token,
+            expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+        }))
+    }
+
+    async fn refresh_token(
+        &self,
+        request: Request<proto::RefreshTokenRequest>,
+    ) -> Result<Response<proto::RefreshTokenResponse>, Status> {
+        let app_context = Arc::new(self.context.to_app_context());
+        let response = construct_server_shared::auth_service::core::refresh_tokens_proto(
+            app_context,
+            request.into_inner(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn verify_token(
+        &self,
+        request: Request<proto::VerifyTokenRequest>,
+    ) -> Result<Response<proto::VerifyTokenResponse>, Status>
+    {
+        let token = request.into_inner().access_token;
+        match self.context.auth_manager.verify_token(&token) {
+            Ok(claims) => Ok(Response::new(proto::VerifyTokenResponse {
+                valid: true,
+                user_id: Some(claims.sub),
+                device_id: None,
+                expires_at: Some(claims.exp),
+            })),
+            Err(_) => Ok(Response::new(proto::VerifyTokenResponse {
+                valid: false,
+                user_id: None,
+                device_id: None,
+                expires_at: None,
+            })),
+        }
+    }
+
+    async fn authenticate_device(
+        &self,
+        request: Request<proto::AuthenticateDeviceRequest>,
+    ) -> Result<Response<proto::AuthTokensResponse>, Status>
+    {
+        let req = request.into_inner();
+        let app_context = Arc::new(self.context.to_app_context());
+        let (_status, axum::Json(response)) =
+            construct_server_shared::auth_service::core::authenticate_device(
+                app_context,
+                construct_server_shared::auth_service::core::AuthenticateDeviceInput {
+                    device_id: req.device_id,
+                    timestamp: req.timestamp,
+                    signature: req.signature,
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::AuthTokensResponse {
+            user_id: response.user_id,
+            access_token: response.access_token,
+            refresh_token: response.refresh_token,
+            expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+        }))
+    }
+
+    async fn logout(
+        &self,
+        request: Request<proto::LogoutRequest>,
+    ) -> Result<Response<proto::LogoutResponse>, Status>
+    {
+        let req = request.into_inner();
+        if req.access_token.is_empty() {
+            return Err(Status::invalid_argument("access_token is required"));
+        }
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&req.access_token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let app_context = Arc::new(self.context.to_app_context());
+        construct_server_shared::auth_service::core::logout_user(app_context, user_id, req.all_devices)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::LogoutResponse { success: true }))
+    }
+}
 
 /// GET /.well-known/jwks.json
 /// Returns JSON Web Key Set (JWKS) for RS256 public key
@@ -191,6 +353,27 @@ async fn main() -> Result<()> {
     // Import auth service handlers
     use construct_server_shared::auth_service::handlers;
 
+    // Start gRPC AuthService (hard-cut target transport)
+    let grpc_context = context.clone();
+    let grpc_bind_address =
+        env::var("AUTH_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
+    let grpc_addr = grpc_bind_address
+        .parse()
+        .context("Invalid AUTH_GRPC_BIND_ADDRESS")?;
+    tokio::spawn(async move {
+        let service = AuthGrpcService {
+            context: grpc_context,
+        };
+        if let Err(e) = tonic::transport::Server::builder()
+            .add_service(AuthServiceServer::new(service))
+            .serve(grpc_addr)
+            .await
+        {
+            tracing::error!(error = %e, "Auth gRPC server failed");
+        }
+    });
+    info!("Auth gRPC listening on {}", grpc_bind_address);
+
     // Create router
     let app = Router::new()
         // Health check
@@ -210,9 +393,6 @@ async fn main() -> Result<()> {
         // Token management endpoints
         .route("/api/v1/auth/refresh", post(handlers::refresh_token))
         .route("/api/v1/auth/logout", post(handlers::logout))
-        // Legacy endpoints (for backward compatibility)
-        .route("/auth/refresh", post(handlers::refresh_token))
-        .route("/auth/logout", post(handlers::logout))
         // Apply middleware
         .layer(
             ServiceBuilder::new()

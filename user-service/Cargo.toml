@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
+construct-db = { path = "../crates/construct-db" }
 construct-server-shared = { path = "../shared" }
 
 # Workspace deps
@@ -31,3 +32,4 @@ base64 = {workspace = true}
 hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
+tonic = "0.14.2"

@@ -31,6 +31,7 @@ base64 = {workspace = true}
 hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
+tonic = "0.14.2"
 
 # Auth specific
 rand = "0.8"
