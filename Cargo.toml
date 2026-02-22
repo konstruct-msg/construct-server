@@ -12,6 +12,8 @@ members = [
     "media-service",
     "delivery-worker",
     "key-service",
+    "mls-service",
+    "sentinel-service",
     # New modular crates (Phase 4)
     "crates/construct-types",
     "crates/construct-error",
