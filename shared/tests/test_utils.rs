@@ -70,11 +70,11 @@ async fn create_test_config(db_name: &str) -> Config {
         std::env::remove_var("KAFKA_SASL_PASSWORD");
     }
 
-    // Load .env.test with override - this replaces any existing env vars
+    // Load .env.test as defaults — CI env vars take precedence (not overridden)
     // Try multiple paths since tests may run from different directories
-    let _ = dotenvy::from_filename_override(".env.test")
-        .or_else(|_| dotenvy::from_filename_override("../.env.test"))
-        .or_else(|_| dotenvy::from_filename_override("../../.env.test"));
+    let _ = dotenvy::from_filename(".env.test")
+        .or_else(|_| dotenvy::from_filename("../.env.test"))
+        .or_else(|_| dotenvy::from_filename("../../.env.test"));
 
     // Read JWT keys directly from files - try multiple paths for workspace compatibility
     let private_key = try_read_key_file(&[
@@ -134,10 +134,10 @@ fn try_read_key_file(paths: &[&str]) -> Result<String, std::io::Error> {
 
 /// Create test database
 async fn setup_test_database(db_name: &str) -> PgPool {
-    // Load .env.test so DATABASE_URL is available before DB bootstrap
-    let _ = dotenvy::from_filename_override(".env.test")
-        .or_else(|_| dotenvy::from_filename_override("../.env.test"))
-        .or_else(|_| dotenvy::from_filename_override("../../.env.test"));
+    // Load .env.test as defaults — CI env vars take precedence (not overridden)
+    let _ = dotenvy::from_filename(".env.test")
+        .or_else(|_| dotenvy::from_filename("../.env.test"))
+        .or_else(|_| dotenvy::from_filename("../../.env.test"));
 
     // Try DATABASE_URL first, then common local test defaults
     let mut candidates = vec![];
