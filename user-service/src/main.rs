@@ -23,6 +23,10 @@ use construct_db as db_agility;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
+use construct_server_shared::shared::proto::services::v1::{
+    self as proto,
+    user_service_server::{UserService, UserServiceServer},
+};
 use construct_server_shared::user_service::UserServiceContext;
 use serde_json::json;
 use std::env;
@@ -33,10 +37,6 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use construct_server_shared::shared::proto::services::v1::{
-    self as proto,
-    user_service_server::{UserService, UserServiceServer},
-};
 
 #[derive(Clone)]
 struct UserGrpcService {
@@ -93,9 +93,7 @@ impl UserService for UserGrpcService {
 
         if let Some(ref username) = normalized_username {
             if username.len() < 3 || username.len() > 20 {
-                return Err(Status::invalid_argument(
-                    "username must be 3-20 characters",
-                ));
+                return Err(Status::invalid_argument("username must be 3-20 characters"));
             }
             if !username
                 .chars()
@@ -140,60 +138,13 @@ impl UserService for UserGrpcService {
         }))
     }
 
-    async fn search_users(
-        &self,
-        _request: Request<proto::SearchUsersRequest>,
-    ) -> Result<Response<proto::SearchUsersResponse>, Status> {
-        Err(Status::unimplemented("search_users is not implemented yet"))
-    }
-
-    async fn get_contacts(
-        &self,
-        _request: Request<proto::GetContactsRequest>,
-    ) -> Result<Response<proto::GetContactsResponse>, Status> {
-        Err(Status::unimplemented("get_contacts is not implemented yet"))
-    }
-
-    async fn add_contact(
-        &self,
-        _request: Request<proto::AddContactRequest>,
-    ) -> Result<Response<proto::AddContactResponse>, Status> {
-        Err(Status::unimplemented("add_contact is not implemented yet"))
-    }
-
-    async fn remove_contact(
-        &self,
-        _request: Request<proto::RemoveContactRequest>,
-    ) -> Result<Response<proto::RemoveContactResponse>, Status> {
-        Err(Status::unimplemented("remove_contact is not implemented yet"))
-    }
-
-    async fn block_user(
-        &self,
-        _request: Request<proto::BlockUserRequest>,
-    ) -> Result<Response<proto::BlockUserResponse>, Status> {
-        Err(Status::unimplemented("block_user is not implemented yet"))
-    }
-
-    async fn unblock_user(
-        &self,
-        _request: Request<proto::UnblockUserRequest>,
-    ) -> Result<Response<proto::UnblockUserResponse>, Status> {
-        Err(Status::unimplemented("unblock_user is not implemented yet"))
-    }
-
-    async fn get_blocked_users(
-        &self,
-        _request: Request<proto::GetBlockedUsersRequest>,
-    ) -> Result<Response<proto::GetBlockedUsersResponse>, Status> {
-        Err(Status::unimplemented("get_blocked_users is not implemented yet"))
-    }
-
     async fn update_profile_picture(
         &self,
         _request: Request<proto::UpdateProfilePictureRequest>,
     ) -> Result<Response<proto::UpdateProfilePictureResponse>, Status> {
-        Err(Status::unimplemented("update_profile_picture is not implemented yet"))
+        Err(Status::unimplemented(
+            "update_profile_picture is not implemented yet",
+        ))
     }
 
     async fn get_user_capabilities(
@@ -226,6 +177,120 @@ impl UserService for UserGrpcService {
             supports_pq,
             device_capabilities: vec![],
         }))
+    }
+
+    async fn block_user(
+        &self,
+        request: Request<proto::BlockUserRequest>,
+    ) -> Result<Response<proto::BlockUserResponse>, Status> {
+        let req = request.into_inner();
+        let blocker_user_id = uuid::Uuid::parse_str(&req.blocker_user_id)
+            .map_err(|_| Status::invalid_argument("invalid blocker_user_id"))?;
+        let blocked_user_id = uuid::Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+
+        if blocker_user_id == blocked_user_id {
+            return Err(Status::invalid_argument("cannot block self"));
+        }
+
+        if construct_server_shared::db::get_user_by_id(&self.context.db_pool, &blocked_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .is_none()
+        {
+            return Err(Status::not_found("user not found"));
+        }
+
+        let blocked_at = construct_server_shared::db::block_user(
+            &self.context.db_pool,
+            &blocker_user_id,
+            &blocked_user_id,
+            req.reason.as_deref(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::BlockUserResponse {
+            success: true,
+            blocked_at: blocked_at.timestamp_millis(),
+        }))
+    }
+
+    async fn unblock_user(
+        &self,
+        request: Request<proto::UnblockUserRequest>,
+    ) -> Result<Response<proto::UnblockUserResponse>, Status> {
+        let req = request.into_inner();
+        let blocker_user_id = uuid::Uuid::parse_str(&req.blocker_user_id)
+            .map_err(|_| Status::invalid_argument("invalid blocker_user_id"))?;
+        let blocked_user_id = uuid::Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+
+        let success = construct_server_shared::db::unblock_user(
+            &self.context.db_pool,
+            &blocker_user_id,
+            &blocked_user_id,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::UnblockUserResponse { success }))
+    }
+
+    async fn get_blocked_users(
+        &self,
+        request: Request<proto::GetBlockedUsersRequest>,
+    ) -> Result<Response<proto::GetBlockedUsersResponse>, Status> {
+        let req = request.into_inner();
+        let user_id = uuid::Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+
+        let blocked_users =
+            construct_server_shared::db::get_blocked_users(&self.context.db_pool, &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        let total_count = blocked_users.len() as u32;
+        let blocked_users = blocked_users
+            .into_iter()
+            .map(|u| proto::BlockedUser {
+                user_id: u.user_id.to_string(),
+                username: u.username.unwrap_or_default(),
+                blocked_at: u.blocked_at.timestamp_millis(),
+                reason: u.reason,
+            })
+            .collect();
+
+        Ok(Response::new(proto::GetBlockedUsersResponse {
+            blocked_users,
+            total_count,
+            next_cursor: None,
+            has_more: false,
+        }))
+    }
+
+    async fn delete_account(
+        &self,
+        _request: Request<proto::DeleteAccountRequest>,
+    ) -> Result<Response<proto::DeleteAccountResponse>, Status> {
+        // TODO: Implement account deletion (GDPR right to be forgotten)
+        // - Verify confirmation token
+        // - Mark account as deleted (soft delete)
+        // - Schedule data cleanup job
+        // - Revoke all sessions/tokens
+        Err(Status::unimplemented("DeleteAccount not implemented yet"))
+    }
+
+    async fn export_user_data(
+        &self,
+        _request: Request<proto::ExportUserDataRequest>,
+    ) -> Result<Response<proto::ExportUserDataResponse>, Status> {
+        // TODO: Implement data export (GDPR data portability)
+        // - Collect user profile, devices, keys
+        // - Optionally include message metadata (if stored)
+        // - Format as JSON/CSV based on request
+        // - Return download URL or inline data
+        Err(Status::unimplemented("ExportUserData not implemented yet"))
     }
 }
 

@@ -32,10 +32,142 @@ use construct_server_shared::queue::MessageQueue;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tonic::{Request, Response, Status, metadata::MetadataMap, transport::Server};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
+
+// Import generated proto types
+use construct_server_shared::shared::proto::services::v1 as proto;
+use proto::notification_service_server::{NotificationService, NotificationServiceServer};
+
+mod core;
+
+/// Extract user_id from gRPC metadata (set by auth interceptor)
+fn extract_user_id(metadata: &MetadataMap) -> Result<Uuid, Status> {
+    let user_id_str = metadata
+        .get("x-user-id")
+        .ok_or_else(|| Status::unauthenticated("Missing x-user-id metadata"))?
+        .to_str()
+        .map_err(|_| Status::unauthenticated("Invalid x-user-id format"))?;
+
+    Uuid::parse_str(user_id_str).map_err(|_| Status::unauthenticated("Invalid x-user-id UUID"))
+}
+
+/// gRPC implementation of NotificationService
+struct NotificationGrpcService {
+    context: Arc<NotificationServiceContext>,
+}
+
+#[tonic::async_trait]
+impl NotificationService for NotificationGrpcService {
+    async fn send_blind_notification(
+        &self,
+        request: Request<proto::SendBlindNotificationRequest>,
+    ) -> Result<Response<proto::SendBlindNotificationResponse>, Status> {
+        let _metadata = request.metadata();
+
+        // Note: SendBlindNotification typically called by internal services, not clients
+        // For now, we'll require auth but allow it to be called without x-user-id
+        // by using the user_id from the request payload
+        let req = request.into_inner();
+
+        let user_id = Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+
+        let input = core::SendBlindNotificationInput {
+            user_id,
+            badge_count: req.badge_count,
+            activity_type: req.activity_type,
+        };
+
+        let output = core::send_blind_notification(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to send notification: {}", e)))?;
+
+        Ok(Response::new(proto::SendBlindNotificationResponse {
+            success: output.success,
+        }))
+    }
+
+    async fn register_device_token(
+        &self,
+        request: Request<proto::RegisterDeviceTokenRequest>,
+    ) -> Result<Response<proto::RegisterDeviceTokenResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = core::RegisterDeviceTokenInput {
+            user_id,
+            device_token: req.device_token,
+            device_name: req.device_name,
+            notification_filter: req.notification_filter,
+        };
+
+        let output = core::register_device_token(&self.context, input)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to register device token");
+                Status::internal(format!("Failed to register device token: {}", e))
+            })?;
+
+        Ok(Response::new(proto::RegisterDeviceTokenResponse {
+            success: output.success,
+            token_id: output.token_id,
+        }))
+    }
+
+    async fn unregister_device_token(
+        &self,
+        request: Request<proto::UnregisterDeviceTokenRequest>,
+    ) -> Result<Response<proto::UnregisterDeviceTokenResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = core::UnregisterDeviceTokenInput {
+            user_id,
+            device_token: req.device_token,
+        };
+
+        let output = core::unregister_device_token(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to unregister device token: {}", e)))?;
+
+        Ok(Response::new(proto::UnregisterDeviceTokenResponse {
+            success: output.success,
+        }))
+    }
+
+    async fn update_notification_preferences(
+        &self,
+        request: Request<proto::UpdateNotificationPreferencesRequest>,
+    ) -> Result<Response<proto::UpdateNotificationPreferencesResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = core::UpdateNotificationPreferencesInput {
+            user_id,
+            device_token: req.device_token,
+            notification_filter: req.notification_filter,
+            enabled: req.enabled,
+        };
+
+        let output = core::update_notification_preferences(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to update preferences: {}", e)))?;
+
+        Ok(Response::new(
+            proto::UpdateNotificationPreferencesResponse {
+                success: output.success,
+            },
+        ))
+    }
+}
 
 /// Health check endpoint
 async fn health_check() -> impl IntoResponse {
@@ -176,18 +308,51 @@ async fn main() -> Result<()> {
                 .layer(TraceLayer::new_for_http())
                 .into_inner(),
         )
-        .with_state(context);
+        .with_state(context.clone());
 
-    // Start server
-    info!("Notification Service listening on {}", config.bind_address);
+    // Prepare gRPC server
+    let grpc_bind_address = std::env::var("NOTIFICATION_GRPC_BIND_ADDRESS")
+        .unwrap_or_else(|_| "[::]:50054".to_string());
+    let grpc_addr = grpc_bind_address
+        .parse()
+        .context("Failed to parse NOTIFICATION_GRPC_BIND_ADDRESS")?;
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
-        .await
-        .context("Failed to bind to address")?;
+    let grpc_service = NotificationGrpcService {
+        context: context.clone(),
+    };
 
-    axum::serve(listener, app)
-        .await
-        .context("Failed to start server")?;
+    info!("Starting Notification Service...");
+    info!("REST API listening on {}", config.bind_address);
+    info!("gRPC API listening on {}", grpc_bind_address);
+
+    // Start both servers concurrently
+    let rest_server = async move {
+        let listener = tokio::net::TcpListener::bind(&config.bind_address)
+            .await
+            .context("Failed to bind REST server")?;
+
+        axum::serve(listener, app)
+            .await
+            .context("Failed to start REST server")
+    };
+
+    let grpc_server = async move {
+        Server::builder()
+            .add_service(NotificationServiceServer::new(grpc_service))
+            .serve(grpc_addr)
+            .await
+            .context("Failed to start gRPC server")
+    };
+
+    // Run both servers, exit if either fails
+    tokio::select! {
+        result = rest_server => {
+            result?;
+        }
+        result = grpc_server => {
+            result?;
+        }
+    }
 
     Ok(())
 }

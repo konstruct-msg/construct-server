@@ -21,6 +21,7 @@
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -54,12 +55,12 @@ impl AuthService for AuthGrpcService {
     async fn get_pow_challenge(
         &self,
         _request: Request<proto::GetPowChallengeRequest>,
-    ) -> Result<Response<proto::GetPowChallengeResponse>, Status>
-    {
+    ) -> Result<Response<proto::GetPowChallengeResponse>, Status> {
         let app_context = Arc::new(self.context.to_app_context());
-        let axum::Json(challenge) = construct_server_shared::auth_service::core::get_pow_challenge(app_context)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let axum::Json(challenge) =
+            construct_server_shared::auth_service::core::get_pow_challenge(app_context)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::GetPowChallengeResponse {
             challenge: challenge.challenge,
             difficulty: challenge.difficulty,
@@ -70,8 +71,7 @@ impl AuthService for AuthGrpcService {
     async fn register_device(
         &self,
         request: Request<proto::RegisterDeviceRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status>
-    {
+    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
         let req = request.into_inner();
         let public_keys = req
             .public_keys
@@ -80,27 +80,29 @@ impl AuthService for AuthGrpcService {
             .pow_solution
             .ok_or_else(|| Status::invalid_argument("pow_solution is required"))?;
         let app_context = Arc::new(self.context.to_app_context());
-        let (_status, axum::Json(response)) = construct_server_shared::auth_service::core::register_device(
-            app_context,
-            construct_server_shared::auth_service::core::RegisterDeviceInput {
-                username: req.username,
-                device_id: req.device_id,
-                public_keys: construct_server_shared::auth_service::core::DevicePublicKeysInput {
-                    verifying_key: public_keys.verifying_key,
-                    identity_public: public_keys.identity_public,
-                    signed_prekey_public: public_keys.signed_prekey_public,
-                    signed_prekey_signature: public_keys.signed_prekey_signature,
-                    suite_id: public_keys.suite_id,
+        let (_status, axum::Json(response)) =
+            construct_server_shared::auth_service::core::register_device(
+                app_context,
+                construct_server_shared::auth_service::core::RegisterDeviceInput {
+                    username: req.username,
+                    device_id: req.device_id,
+                    public_keys:
+                        construct_server_shared::auth_service::core::DevicePublicKeysInput {
+                            verifying_key: public_keys.verifying_key,
+                            identity_public: public_keys.identity_public,
+                            signed_prekey_public: public_keys.signed_prekey_public,
+                            signed_prekey_signature: public_keys.signed_prekey_signature,
+                            suite_id: public_keys.suite_id,
+                        },
+                    pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
+                        challenge: pow_solution.challenge,
+                        nonce: pow_solution.nonce,
+                        hash: pow_solution.hash,
+                    },
                 },
-                pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
-                    challenge: pow_solution.challenge,
-                    nonce: pow_solution.nonce,
-                    hash: pow_solution.hash,
-                },
-            },
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::AuthTokensResponse {
             user_id: response.user_id,
@@ -128,8 +130,7 @@ impl AuthService for AuthGrpcService {
     async fn verify_token(
         &self,
         request: Request<proto::VerifyTokenRequest>,
-    ) -> Result<Response<proto::VerifyTokenResponse>, Status>
-    {
+    ) -> Result<Response<proto::VerifyTokenResponse>, Status> {
         let token = request.into_inner().access_token;
         match self.context.auth_manager.verify_token(&token) {
             Ok(claims) => Ok(Response::new(proto::VerifyTokenResponse {
@@ -150,8 +151,7 @@ impl AuthService for AuthGrpcService {
     async fn authenticate_device(
         &self,
         request: Request<proto::AuthenticateDeviceRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status>
-    {
+    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
         let req = request.into_inner();
         let app_context = Arc::new(self.context.to_app_context());
         let (_status, axum::Json(response)) =
@@ -177,8 +177,7 @@ impl AuthService for AuthGrpcService {
     async fn logout(
         &self,
         request: Request<proto::LogoutRequest>,
-    ) -> Result<Response<proto::LogoutResponse>, Status>
-    {
+    ) -> Result<Response<proto::LogoutResponse>, Status> {
         let req = request.into_inner();
         if req.access_token.is_empty() {
             return Err(Status::invalid_argument("access_token is required"));
@@ -192,9 +191,13 @@ impl AuthService for AuthGrpcService {
             .map_err(|_| Status::internal("invalid user id in token"))?;
 
         let app_context = Arc::new(self.context.to_app_context());
-        construct_server_shared::auth_service::core::logout_user(app_context, user_id, req.all_devices)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        construct_server_shared::auth_service::core::logout_user(
+            app_context,
+            user_id,
+            req.all_devices,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::LogoutResponse { success: true }))
     }
@@ -254,6 +257,19 @@ async fn get_public_key() -> impl IntoResponse {
 /// Health check endpoint
 async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
+}
+
+/// Service discovery endpoint (wrapper)
+async fn well_known_construct_server(
+    State(context): State<Arc<AuthServiceContext>>,
+) -> impl IntoResponse {
+    use construct_server_shared::routes::federation;
+
+    // Convert AuthServiceContext to AppContext
+    let app_context = Arc::new(context.to_app_context());
+
+    // Call the actual handler
+    federation::well_known_construct_server(axum::extract::State(app_context)).await
 }
 
 #[tokio::main]
@@ -380,6 +396,11 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
+        // Service discovery (Hybrid Discovery Protocol v1.0)
+        .route(
+            "/.well-known/construct-server",
+            get(well_known_construct_server),
+        )
         // Public key endpoint (no auth required)
         .route("/.well-known/jwks.json", get(get_jwks))
         .route("/public-key", get(get_public_key))

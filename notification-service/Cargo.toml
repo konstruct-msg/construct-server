@@ -32,5 +32,9 @@ hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
 
+# gRPC dependencies
+tonic = "0.14.2"
+prost = "0.14.0"
+
 # Notification specific
 apns-h2 = "0.11.0-alpha.1"
