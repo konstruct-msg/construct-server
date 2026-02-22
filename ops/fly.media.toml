@@ -3,77 +3,98 @@
 # ============================================================================
 #
 # Privacy-focused media storage service with:
-# - No IP logging
-# - No user tracking
-# - Auto-deletion after TTL
+# - gRPC streaming for uploads/downloads
+# - No IP logging, no user tracking
+# - Auto-deletion after TTL (15 days)
 # - E2E encrypted blob storage only
 #
-# Deploy: flyctl deploy --config ops/fly.media.toml --app construct-media-service
+# Deploy: flyctl deploy --config ops/fly.media.toml --app construct-media-staging
 #
 # ============================================================================
 
-app = "construct-media-service"
+app = "construct-media-staging"
 primary_region = "ams"
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "ops/Dockerfile.media"
 
-# Command to run (override default CMD)
+# Command to run (single binary)
 [processes]
   app = "media-service"
 
 [env]
-  RUST_LOG = "info"
-  MEDIA_BIND_ADDRESS = "0.0.0.0:8080"
+  RUST_LOG = "info,media_service=debug"
+  # REST health check port
+  MEDIA_BIND_ADDRESS = "0.0.0.0:8082"
+  # gRPC service port
+  MEDIA_GRPC_BIND_ADDRESS = "[::]:50056"
+  # Storage configuration
   MEDIA_STORAGE_DIR = "/data/media"
-  MEDIA_MAX_FILE_SIZE = "104857600"  # 100MB
-  MEDIA_FILE_TTL_SECONDS = "604800"  # 7 days
+  MEDIA_MAX_FILE_SIZE = "524288000"  # 500MB for videos
+  MEDIA_FILE_TTL_SECONDS = "1296000"  # 15 days
 
-# Persistent storage for media files
+# Persistent storage for media files (auto-expands)
 [mounts]
-  source = "media_data"
+  source = "media_storage"
   destination = "/data"
-  initial_size = "10"  # 10GB, auto-expands
+  initial_size = "10"  # 10GB initial
 
+# HTTP service for REST health checks
 [http_service]
-  internal_port = 8080
+  internal_port = 8082
   force_https = true
-  auto_stop_machines = false  # Keep running for uploads
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]  # Link to the app process
+  processes = ["app"]
   
   [http_service.concurrency]
     type = "requests"
-    hard_limit = 100
-    soft_limit = 80
+    hard_limit = 200
+    soft_limit = 150
 
-  # Health check
   [[http_service.checks]]
     interval = "30s"
     timeout = "5s"
-    grace_period = "10s"
+    grace_period = "15s"
     method = "GET"
     path = "/health"
 
+# gRPC service (separate from HTTP)
+[[services]]
+  protocol = "tcp"
+  internal_port = 50056
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls"]
+
+  [[services.ports]]
+    port = 50056
+    handlers = []
+
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+
+# VM sizing for media handling (5GB RAM for large file processing)
 [[vm]]
-  memory = "512mb"
+  memory = "4gb"
   cpu_kind = "shared"
-  cpus = 1
+  cpus = 2
 
 # ============================================================================
-# Secrets (set via flyctl secrets set):
+# Secrets (set via flyctl secrets set --app construct-media-staging):
 # ============================================================================
 #
 # Required:
-#   MEDIA_HMAC_SECRET - Shared secret with construct-server for token validation
-#                       Must be at least 32 characters
-#                       Generate: openssl rand -hex 32
+#   DATABASE_URL - PostgreSQL connection string
+#   MEDIA_HMAC_SECRET - Token signing secret (64 hex chars)
 #
-# Optional:
-#   MEDIA_ADMIN_TOKEN - Token for admin operations (delete)
-#
-# Example:
-#   flyctl secrets set MEDIA_HMAC_SECRET=$(openssl rand -hex 32) --app construct-media-service
+# Generate secrets:
+#   flyctl secrets set MEDIA_HMAC_SECRET=$(openssl rand -hex 32) --app construct-media-staging
+#   flyctl secrets set DATABASE_URL="postgres://..." --app construct-media-staging
 #
 # ============================================================================

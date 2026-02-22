@@ -3,6 +3,7 @@
 //! Validates that server returns messages sorted by messageNumber,
 //! not by arrival order (stream_id), to ensure proper Double Ratchet
 //! session initialization.
+#![allow(clippy::needless_borrows_for_generic_args)]
 //!
 //! Critical Bug: Without sorting, message #8 might arrive before #0,
 //! causing InvalidCiphertext when client tries to initialize session.

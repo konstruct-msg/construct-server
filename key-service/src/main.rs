@@ -19,12 +19,7 @@
 mod core;
 
 use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-};
+use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde_json::json;
 use std::env;
 use std::net::SocketAddr;
@@ -50,13 +45,12 @@ struct KeyServiceContext {
 
 impl KeyServiceContext {
     async fn new() -> Result<Self> {
-        let database_url = env::var("DATABASE_URL")
-            .context("DATABASE_URL must be set")?;
-        
+        let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+
         let db = sqlx::PgPool::connect(&database_url)
             .await
             .context("Failed to connect to database")?;
-        
+
         Ok(Self { db })
     }
 }
@@ -72,7 +66,6 @@ struct KeyGrpcService {
 
 #[tonic::async_trait]
 impl KeyService for KeyGrpcService {
-    
     // =========================================================================
     // Pre-Key Bundle Operations
     // =========================================================================
@@ -82,19 +75,16 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundleRequest>,
     ) -> Result<Response<proto::GetPreKeyBundleResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
-        
-        let bundle = core::get_prekey_bundle(
-            &self.context.db,
-            &req.user_id,
-            req.device_id.as_deref(),
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-        
+
+        let bundle =
+            core::get_prekey_bundle(&self.context.db, &req.user_id, req.device_id.as_deref())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
         match bundle {
             Some(b) => Ok(Response::new(proto::GetPreKeyBundleResponse {
                 bundle: Some(proto::PreKeyBundle {
@@ -124,27 +114,28 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::UploadPreKeysRequest>,
     ) -> Result<Response<proto::UploadPreKeysResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
         if req.pre_keys.is_empty() {
             return Err(Status::invalid_argument("pre_keys cannot be empty"));
         }
-        
+
         // Convert proto prekeys to core types
-        let prekeys: Vec<core::OneTimePreKey> = req.pre_keys
+        let prekeys: Vec<core::OneTimePreKey> = req
+            .pre_keys
             .into_iter()
             .map(|k| core::OneTimePreKey {
                 key_id: k.key_id,
                 public_key: k.public_key,
             })
             .collect();
-        
+
         let count = core::upload_prekeys(&self.context.db, &req.device_id, &prekeys)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         // Handle optional signed prekey update
         if let Some(spk) = req.signed_pre_key {
             let signed_key = core::SignedPreKey {
@@ -156,7 +147,7 @@ impl KeyService for KeyGrpcService {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
         }
-        
+
         Ok(Response::new(proto::UploadPreKeysResponse {
             success: true,
             pre_key_count: count,
@@ -169,15 +160,15 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyCountRequest>,
     ) -> Result<Response<proto::GetPreKeyCountResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        
+
         let (count, last_upload) = core::get_prekey_count(&self.context.db, &req.device_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         Ok(Response::new(proto::GetPreKeyCountResponse {
             count,
             recommended_minimum: 20,
@@ -194,18 +185,21 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::RotateSignedPreKeyRequest>,
     ) -> Result<Response<proto::RotateSignedPreKeyResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        
-        let new_key = req.new_signed_pre_key
+
+        let new_key = req
+            .new_signed_pre_key
             .ok_or_else(|| Status::invalid_argument("new_signed_pre_key is required"))?;
-        
+
         if new_key.public_key.is_empty() || new_key.signature.is_empty() {
-            return Err(Status::invalid_argument("public_key and signature are required"));
+            return Err(Status::invalid_argument(
+                "public_key and signature are required",
+            ));
         }
-        
+
         let reason = match req.reason {
             1 => "scheduled",
             2 => "security",
@@ -213,22 +207,18 @@ impl KeyService for KeyGrpcService {
             4 => "reinstall",
             _ => "unspecified",
         };
-        
+
         let signed_key = core::SignedPreKey {
             key_id: new_key.key_id,
             public_key: new_key.public_key,
             signature: new_key.signature,
         };
-        
-        let old_valid_until = core::rotate_signed_prekey(
-            &self.context.db,
-            &req.device_id,
-            &signed_key,
-            reason,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-        
+
+        let old_valid_until =
+            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, reason)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
         Ok(Response::new(proto::RotateSignedPreKeyResponse {
             success: true,
             new_key_id: signed_key.key_id,
@@ -242,15 +232,15 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetSignedPreKeyAgeRequest>,
     ) -> Result<Response<proto::GetSignedPreKeyAgeResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        
+
         let result = core::get_signed_prekey_age(&self.context.db, &req.device_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        
+
         match result {
             Some((uploaded_at, should_rotate)) => {
                 let age = chrono::Utc::now() - uploaded_at;
@@ -275,19 +265,16 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetIdentityKeyRequest>,
     ) -> Result<Response<proto::GetIdentityKeyResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
-        
-        let result = core::get_identity_key(
-            &self.context.db,
-            &req.user_id,
-            req.device_id.as_deref(),
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-        
+
+        let result =
+            core::get_identity_key(&self.context.db, &req.user_id, req.device_id.as_deref())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
         match result {
             Some((identity_key, first_seen)) => {
                 // Calculate fingerprint (first 32 chars of hex)
@@ -300,7 +287,7 @@ impl KeyService for KeyGrpcService {
                     .collect::<Vec<_>>()
                     .join(" ")
                     .to_uppercase();
-                
+
                 Ok(Response::new(proto::GetIdentityKeyResponse {
                     identity_key,
                     fingerprint,
@@ -318,25 +305,29 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::VerifySafetyNumberRequest>,
     ) -> Result<Response<proto::VerifySafetyNumberResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.our_user_id.is_empty() || req.their_user_id.is_empty() {
-            return Err(Status::invalid_argument("our_user_id and their_user_id are required"));
+            return Err(Status::invalid_argument(
+                "our_user_id and their_user_id are required",
+            ));
         }
         if req.expected_safety_number.is_empty() {
-            return Err(Status::invalid_argument("expected_safety_number is required"));
+            return Err(Status::invalid_argument(
+                "expected_safety_number is required",
+            ));
         }
-        
+
         // Get both identity keys
         let our_key = core::get_identity_key(&self.context.db, &req.our_user_id, None)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Our user not found"))?;
-        
+
         let their_key = core::get_identity_key(&self.context.db, &req.their_user_id, None)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Their user not found"))?;
-        
+
         // Calculate safety number
         let actual = core::calculate_safety_number(
             &our_key.0,
@@ -344,9 +335,9 @@ impl KeyService for KeyGrpcService {
             &req.our_user_id,
             &req.their_user_id,
         );
-        
+
         let matches = actual.replace(" ", "") == req.expected_safety_number.replace(" ", "");
-        
+
         Ok(Response::new(proto::VerifySafetyNumberResponse {
             matches,
             actual_safety_number: actual,
@@ -363,25 +354,22 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundlesRequest>,
     ) -> Result<Response<proto::GetPreKeyBundlesResponse>, Status> {
         let req = request.into_inner();
-        
+
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
-        
+
         let device_ids = if req.device_ids.is_empty() {
             None
         } else {
             Some(req.device_ids.as_slice())
         };
-        
-        let (bundles, unavailable) = core::get_prekey_bundles(
-            &self.context.db,
-            &req.user_id,
-            device_ids,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-        
+
+        let (bundles, unavailable) =
+            core::get_prekey_bundles(&self.context.db, &req.user_id, device_ids)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
         let proto_bundles = bundles
             .into_iter()
             .map(|b| proto::DevicePreKeyBundle {
@@ -400,7 +388,7 @@ impl KeyService for KeyGrpcService {
                 platform: 0, // Unknown
             })
             .collect();
-        
+
         Ok(Response::new(proto::GetPreKeyBundlesResponse {
             bundles: proto_bundles,
             unavailable_devices: unavailable,
@@ -420,13 +408,14 @@ async fn health_check() -> impl IntoResponse {
     }))
 }
 
-async fn readiness_check(
-    ctx: axum::extract::State<Arc<KeyServiceContext>>
-) -> impl IntoResponse {
+async fn readiness_check(ctx: axum::extract::State<Arc<KeyServiceContext>>) -> impl IntoResponse {
     // Check database connection
     match sqlx::query("SELECT 1").fetch_one(&ctx.db).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "status": "not ready", "reason": "database unavailable" }))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not ready", "reason": "database unavailable" })),
+        ),
     }
 }
 
@@ -446,7 +435,7 @@ async fn main() -> Result<()> {
 
     // Initialize context
     let context = Arc::new(KeyServiceContext::new().await?);
-    
+
     // Create gRPC service
     let grpc_service = KeyGrpcService {
         context: context.clone(),
@@ -478,10 +467,7 @@ async fn main() -> Result<()> {
 
     info!("HTTP health server listening on {}", http_addr);
 
-    let http_server = axum::serve(
-        tokio::net::TcpListener::bind(http_addr).await?,
-        http_app
-    );
+    let http_server = axum::serve(tokio::net::TcpListener::bind(http_addr).await?, http_app);
 
     // Run both servers
     tokio::select! {

@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ pub struct RecoveryStatus {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RecoveryResult {
     pub user_id: Uuid,
     pub devices_revoked: u32,
@@ -67,40 +68,42 @@ pub async fn set_recovery_key(
 
     // 3. Parse the Ed25519 public key
     let verifying_key = VerifyingKey::from_bytes(
-        recovery_public_key.try_into().map_err(|_| anyhow::anyhow!("Invalid key bytes"))?
-    ).map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
+        recovery_public_key
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid key bytes"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
 
     // 4. Verify setup signature
     // Message: "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}"
     let message = format!("CONSTRUCT_RECOVERY_SETUP:{}:{}", user_id, timestamp);
-    let sig_bytes: [u8; 64] = setup_signature.try_into()
+    let sig_bytes: [u8; 64] = setup_signature
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
     let signature = Signature::from_bytes(&sig_bytes);
 
-    verifying_key.verify(message.as_bytes(), &signature)
+    verifying_key
+        .verify(message.as_bytes(), &signature)
         .map_err(|_| anyhow::anyhow!("Invalid setup signature"))?;
 
     // 5. Check if recovery key already set
-    let existing: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT recovery_public_key FROM users WHERE id = $1"
-    )
-    .bind(user_id)
-    .fetch_optional(db)
-    .await?
-    .flatten();
+    let existing: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT recovery_public_key FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?
+            .flatten();
 
     if existing.is_some() {
         anyhow::bail!("Recovery key already set and cannot be changed");
     }
 
     // 6. Store recovery key (DB trigger enforces immutability)
-    sqlx::query(
-        "UPDATE users SET recovery_public_key = $1 WHERE id = $2"
-    )
-    .bind(recovery_public_key)
-    .bind(user_id)
-    .execute(db)
-    .await?;
+    sqlx::query("UPDATE users SET recovery_public_key = $1 WHERE id = $2")
+        .bind(recovery_public_key)
+        .bind(user_id)
+        .execute(db)
+        .await?;
 
     // 7. Store encrypted backup if provided
     if let Some(backup) = encrypted_backup {
@@ -120,16 +123,13 @@ pub async fn set_recovery_key(
 // ============================================================================
 
 /// Check recovery setup status for authenticated user
-pub async fn get_recovery_status(
-    db: &PgPool,
-    user_id: Uuid,
-) -> Result<RecoveryStatus> {
+pub async fn get_recovery_status(db: &PgPool, user_id: Uuid) -> Result<RecoveryStatus> {
     let row = sqlx::query_as::<_, RecoveryStatusRow>(
         r#"
         SELECT recovery_public_key, created_at, last_recovery_at
         FROM users
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -167,7 +167,7 @@ pub async fn verify_recovery_signature(
         SELECT id, recovery_public_key, last_recovery_at
         FROM users
         WHERE id::text = $1 OR username = $1
-        "#
+        "#,
     )
     .bind(identifier)
     .fetch_optional(db)
@@ -176,7 +176,8 @@ pub async fn verify_recovery_signature(
     let row = row.ok_or_else(|| anyhow::anyhow!("Account not found"))?;
 
     // 2. Check recovery is set up
-    let recovery_public_key = row.recovery_public_key
+    let recovery_public_key = row
+        .recovery_public_key
         .ok_or_else(|| anyhow::anyhow!("Recovery not set up for this account"))?;
 
     // 3. Check cooldown (7 days)
@@ -184,21 +185,28 @@ pub async fn verify_recovery_signature(
         let elapsed = Utc::now() - last_recovery;
         if elapsed.num_days() < 7 {
             let remaining = 7 * 24 * 3600 - elapsed.num_seconds();
-            anyhow::bail!("Recovery cooldown active. Try again in {} seconds", remaining);
+            anyhow::bail!(
+                "Recovery cooldown active. Try again in {} seconds",
+                remaining
+            );
         }
     }
 
     // 4. Verify signature
-    let key_bytes: [u8; 32] = recovery_public_key.as_slice().try_into()
+    let key_bytes: [u8; 32] = recovery_public_key
+        .as_slice()
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Stored recovery key has invalid length"))?;
     let verifying_key = VerifyingKey::from_bytes(&key_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid stored recovery key: {}", e))?;
 
-    let sig_bytes: [u8; 64] = recovery_signature.try_into()
+    let sig_bytes: [u8; 64] = recovery_signature
+        .try_into()
         .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
     let signature = Signature::from_bytes(&sig_bytes);
 
-    verifying_key.verify(challenge.as_bytes(), &signature)
+    verifying_key
+        .verify(challenge.as_bytes(), &signature)
         .map_err(|_| anyhow::anyhow!("Invalid recovery signature"))?;
 
     Ok(row.id)
@@ -206,12 +214,11 @@ pub async fn verify_recovery_signature(
 
 /// Revoke all devices for a user (during recovery)
 pub async fn revoke_all_devices(db: &PgPool, user_id: Uuid) -> Result<u32> {
-    let result = sqlx::query(
-        "UPDATE devices SET is_active = false WHERE user_id = $1 AND is_active = true"
-    )
-    .bind(user_id)
-    .execute(db)
-    .await?;
+    let result =
+        sqlx::query("UPDATE devices SET is_active = false WHERE user_id = $1 AND is_active = true")
+            .bind(user_id)
+            .execute(db)
+            .await?;
 
     Ok(result.rows_affected() as u32)
 }

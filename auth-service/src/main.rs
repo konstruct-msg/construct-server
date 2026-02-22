@@ -228,7 +228,9 @@ impl AuthService for AuthGrpcService {
         }
 
         // Verify auth token
-        let claims = self.context.auth_manager
+        let claims = self
+            .context
+            .auth_manager
             .verify_token(&token)
             .map_err(|_| Status::unauthenticated("invalid access token"))?;
         let user_id = uuid::Uuid::parse_str(&claims.sub)
@@ -269,7 +271,9 @@ impl AuthService for AuthGrpcService {
     ) -> Result<Response<proto::GetRecoveryStatusResponse>, Status> {
         // Must be authenticated
         let token = request_token(request.metadata())?;
-        let claims = self.context.auth_manager
+        let claims = self
+            .context
+            .auth_manager
             .verify_token(&token)
             .map_err(|_| Status::unauthenticated("invalid access token"))?;
         let user_id = uuid::Uuid::parse_str(&claims.sub)
@@ -305,9 +309,11 @@ impl AuthService for AuthGrpcService {
         if req.recovery_signature.is_empty() {
             return Err(Status::invalid_argument("recovery_signature is required"));
         }
-        let new_device = req.new_device
+        let new_device = req
+            .new_device
             .ok_or_else(|| Status::invalid_argument("new_device is required"))?;
-        let public_keys = new_device.public_keys
+        let public_keys = new_device
+            .public_keys
             .ok_or_else(|| Status::invalid_argument("new_device.public_keys is required"))?;
 
         let db = self.context.db_pool.as_ref();
