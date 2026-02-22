@@ -1,123 +1,62 @@
-# fly.toml app configuration file for Construct Server (WebSocket Gateway)
+# fly.toml - Fly.io STAGING deployment (multi-container)
 #
-# This is the main application server that handles:
-# - WebSocket connections for real-time messaging
-# - HTTP REST API for key management, authentication
-# - Database interactions (PostgreSQL)
-# - Kafka producer (dual-write mode, Phase 2-4)
+# Architecture: Envoy + all microservices in one VM
+# Purpose: Quick staging testing before production VPS deploy
+# Production: Digital Ocean VPS with docker-compose
 #
-# Deploy with: make deploy-server
-# Or: fly deploy --config ops/fly.toml --app construct-server
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# Deploy: fly deploy --config ops/fly.toml
 
-app = 'construct-server'
+app = 'construct-server-staging'
 primary_region = 'ams'
 
 [build]
-  # Dockerfile path is specified via --dockerfile flag in Makefile
+  dockerfile = "Dockerfile"
 
 [env]
-  # Rust logging (info level for production, exclude noisy sqlx DEBUG logs)
-  # Set to "info,construct_server=debug" for detailed debugging if needed
-  RUST_LOG = "info,sqlx=warn,construct_server=info"
+  RUST_LOG = "info,sqlx=warn"
+  INSTANCE_DOMAIN = "construct-server-staging.fly.dev"
   
-  # Database connection pool settings
+  # Database pool
   DB_MAX_CONNECTIONS = "10"
   DB_ACQUIRE_TIMEOUT_SECS = "30"
-  DB_IDLE_TIMEOUT_SECS = "600"
-
-  # Server configuration
-  PORT = "8080"
-  HEALTH_PORT = "8081"
-
-  # Message TTL
-  MESSAGE_TTL_DAYS = "7"
-  SESSION_TTL_DAYS = "30"
-  REFRESH_TOKEN_TTL_DAYS = "90"
-
+  
   # Rate limiting
   MAX_MESSAGES_PER_HOUR = "1000"
-  MAX_CONNECTIONS_PER_USER = "5"
+  
+  # Message TTL
+  MESSAGE_TTL_DAYS = "7"
 
-  # Delivery worker config
-  # OPTIMIZED: Increased polling interval from 10s to 30s to reduce Redis commands
-  # This reduces Redis command usage by ~66% while maintaining acceptable latency
-  DELIVERY_POLL_INTERVAL_MS = "30000"
-  # OPTIMIZED: Increased heartbeat from 90s to 180s (TTL is 270s, so this is safe)
-  # Reduces Redis heartbeat commands by 50%
-  HEARTBEAT_INTERVAL_SECS = "180"  # How often server updates its registration
-  SERVER_REGISTRY_TTL_SECS = "270"  # TTL for delivery_queue keys (must be > HEARTBEAT_INTERVAL_SECS)
-
-  # Redis prefixes
-  ONLINE_CHANNEL = "user_online_notifications:"
-  DELIVERY_QUEUE_PREFIX = "delivery_queue:"
-  OFFLINE_QUEUE_PREFIX = "offline:"
-
-[http_service]
+# Public HTTPS service (Envoy only)
+[[services]]
   internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
+  protocol = "tcp"
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
 
-  # Health check endpoint
-  [[http_service.checks]]
-    grace_period = "5s"
-    interval = "10s"
-    method = "GET"
-    path = "/health"
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+    alpn = ["h2", "http/1.1"] 
+  
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  # Health check via Envoy admin
+  [[services.tcp_checks]]
+    interval = "15s"
     timeout = "2s"
-    protocol = "http"
+    grace_period = "5s"
+    port = 9901
 
-[processes]
-  app = "construct-server"
-
-# VM configuration - WebSocket server needs more resources
+# VM configuration (all services in one VM)
 [[vm]]
-  memory = '1gb'
+  memory = '2gb'
+  cpu_kind = 'shared'
   cpus = 2
 
-# Deployment strategy - rolling updates to maintain availability
 [deploy]
   strategy = "rolling"
-  max_unavailable = 1
+  max_unavailable = 0
 
-# Auto-scaling based on WebSocket connections
-[autoscaling]
-  min_instances = 1
-  max_instances = 10
-
-  [[autoscaling.metrics]]
-    type = "concurrency"
-    target = 500  # Scale when >500 concurrent connections
-
-  [[autoscaling.metrics]]
-    type = "cpu"
-    target = 75
-
-# Secrets to set via: make secrets-server
-# Or: bash ops/setup-fly-secrets.sh
-# Required secrets:
-# - DATABASE_URL (Supabase PostgreSQL)
-# - REDIS_URL (Upstash Redis)
-# - JWT_SECRET
-# - JWT_ISSUER
-# - LOG_HASH_SALT
-# - KAFKA_ENABLED=true
-# - KAFKA_BROKERS (Confluent Cloud)
-# - KAFKA_TOPIC
-# - KAFKA_CONSUMER_GROUP
-# - KAFKA_SSL_ENABLED=true
-# - KAFKA_SASL_MECHANISM=PLAIN
-# - KAFKA_SASL_USERNAME
-# - KAFKA_SASL_PASSWORD
-# - KAFKA_PRODUCER_COMPRESSION=snappy
-# - KAFKA_PRODUCER_LINGER_MS=5
-# - KAFKA_PRODUCER_ACKS=all
-# - DELIVERY_ACK_MODE=kafka
-# - DELIVERY_SECRET_KEY
-# - INSTANCE_DOMAIN
-# - FEDERATION_BASE_DOMAIN
-# - APNS_DEVICE_TOKEN_ENCRYPTION_KEY

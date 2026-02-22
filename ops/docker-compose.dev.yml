@@ -1,275 +1,40 @@
-# ============================================================================
-# Construct Server - Local Development Environment
-# ============================================================================
-# 
-# This docker-compose file runs all microservices locally for development.
-# Each service is built from source and can be debugged/modified.
-#
-# Usage:
-#   make dev-services-up     # Start all services
-#   make dev-services-down   # Stop all services
-#   make dev-services-logs   # View logs
-#
-# Prerequisites:
-#   make dev                 # Start PostgreSQL + Redis + Kafka
-#   make db-migrate          # Apply database migrations
-#
-# ============================================================================
-
 version: '3.8'
 
+# Minimal local services for development
+# Just PostgreSQL + Redis for testing services locally without Docker
+# Run: docker-compose -f ops/docker-compose.dev.yml up -d
+
 services:
-  # ==========================================================================
-  # API Gateway - Entry point for all client requests
-  # ==========================================================================
-  api-gateway:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-api-gateway-local
-    command: ["gateway"]
-    ports:
-      - "8000:8080"      # HTTP API
-      - "8001:8081"      # Health check
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres-local
     environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      RUST_LOG: "debug,sqlx=warn"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-      CSRF_ENABLED: "true"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-  # ==========================================================================
-  # Auth Service - Authentication and JWT token management
-  # ==========================================================================
-  auth-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-auth-service-local
-    command: ["auth-service"]
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: construct_test
     ports:
-      - "8010:8080"      # HTTP API
-      - "8011:8081"      # Health check
-    environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      RUST_LOG: "debug,sqlx=warn"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-      CSRF_ENABLED: "false"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-  # ==========================================================================
-  # User Service - User profiles, keys, contacts
-  # ==========================================================================
-  user-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-user-service-local
-    command: ["user-service"]
-    ports:
-      - "8020:8080"      # HTTP API
-      - "8021:8081"      # Health check
-    environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      RUST_LOG: "debug,sqlx=warn"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-      CSRF_ENABLED: "false"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-  # ==========================================================================
-  # Messaging Service - Send/receive messages, END_SESSION, Capabilities API
-  # ==========================================================================
-  messaging-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-messaging-service-local
-    command: ["messaging-service"]
-    ports:
-      - "8030:8080"      # HTTP API
-      - "8031:8081"      # Health check
-    environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      KAFKA_ENABLED: "true"
-      KAFKA_BROKERS: "kafka:29092"
-      KAFKA_TOPIC: "construct-messages"
-      KAFKA_CONSUMER_GROUP: "delivery-workers"
-      KAFKA_SSL_ENABLED: "false"
-      RUST_LOG: "debug,sqlx=warn,rdkafka=info"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-      CSRF_ENABLED: "false"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-      - kafka
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-  # ==========================================================================
-  # Notification Service - APNs push notifications
-  # ==========================================================================
-  notification-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-notification-service-local
-    command: ["notification-service"]
-    ports:
-      - "8040:8080"      # HTTP API
-      - "8041:8081"      # Health check
-    environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      APNS_ENABLED: "false"
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: "00000000000000000000000000000000"
-      RUST_LOG: "debug,sqlx=warn"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-      CSRF_ENABLED: "false"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-  # ==========================================================================
-  # Media Service - Image/video upload and storage
-  # ==========================================================================
-  media-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-media-service-local
-    command: ["media-service"]
-    ports:
-      - "8050:8080"      # HTTP API
-      - "8051:8081"      # Health check
-    environment:
-      MEDIA_HMAC_SECRET: "local_dev_hmac_secret_not_for_production"
-      MEDIA_STORAGE_DIR: "/var/media"
-      MEDIA_MAX_FILE_SIZE: "104857600"  # 100MB
-      MEDIA_FILE_TTL_SECONDS: "604800"  # 7 days
-      RUST_LOG: "debug"
-      PORT: "8080"
-      HEALTH_PORT: "8081"
-    env_file:
-      - ../.env.local
+      - "5432:5432"
     volumes:
-      - media_data:/var/media
-    restart: unless-stopped
-    networks:
-      - construct-network
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # ==========================================================================
-  # Delivery Worker - Kafka consumer, processes message delivery
-  # ==========================================================================
-  delivery-worker:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: construct-delivery-worker-local
-    command: ["delivery-worker"]
-    environment:
-      DATABASE_URL: "postgresql://construct:construct_dev_password@postgres:5432/construct"
-      REDIS_URL: "redis://redis:6379"
-      JWT_ISSUER: "construct-server-local"
-      LOG_HASH_SALT: "local_dev_salt_not_for_production"
-      ONLINE_CHANNEL: "user:online"
-      DELIVERY_QUEUE_PREFIX: "messages"
-      OFFLINE_QUEUE_PREFIX: "offline"
-      KAFKA_ENABLED: "true"
-      KAFKA_BROKERS: "kafka:29092"
-      KAFKA_TOPIC: "construct-messages"
-      KAFKA_CONSUMER_GROUP: "delivery-workers"
-      KAFKA_SSL_ENABLED: "false"
-      RUST_LOG: "debug,sqlx=warn,rdkafka=info"
-      CSRF_ENABLED: "false"
-    env_file:
-      - ../.env.local
-    depends_on:
-      - postgres
-      - redis
-      - kafka
-    restart: unless-stopped
-    networks:
-      - construct-network
-
-# ==============================================================================
-# External Networks and Volumes
-# ==============================================================================
-
-networks:
-  construct-network:
-    name: construct-network
-    external: true
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis-local
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  media_data:
-    name: construct-media-local
+  postgres-data:
+  redis-data:

@@ -1,0 +1,68 @@
+#cloud-config
+
+# Update system packages
+package_update: true
+package_upgrade: true
+
+# Install required packages
+packages:
+  - docker.io
+  - docker-compose
+  - ufw
+  - curl
+  - wget
+  - git
+  - htop
+  - vim
+
+# Create admin user
+users:
+  - name: ${admin_username}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, docker]
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# Configure SSH
+ssh_pwauth: false
+disable_root: true
+
+# Configure firewall (basic setup)
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker ${admin_username}
+  - ufw allow ssh
+  - ufw allow 80
+  - ufw allow 443
+  - ufw --force enable
+  - mkdir -p /opt/construct-server
+  - chown ${admin_username}:${admin_username} /opt/construct-server
+
+# Write a simple deployment script
+write_files:
+  - path: /opt/deploy.sh
+    permissions: '0755'
+    owner: ${admin_username}
+    content: |
+      #!/bin/bash
+      set -e
+
+      echo "=== Construct Server Deployment Script ==="
+
+      cd /opt/construct-server
+
+      # Pull latest code (assuming git repo)
+      if [ -d ".git" ]; then
+        git pull origin main
+      fi
+
+      # Build and start services
+      docker-compose -f docker-compose.prod.yml down || true
+      docker-compose -f docker-compose.prod.yml build --no-cache
+      docker-compose -f docker-compose.prod.yml up -d
+
+      echo "=== Deployment completed ==="
+      echo "Check status with: docker-compose -f docker-compose.prod.yml ps"
+      echo "View logs with: docker-compose -f docker-compose.prod.yml logs -f"

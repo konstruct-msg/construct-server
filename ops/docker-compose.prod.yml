@@ -1,0 +1,201 @@
+# Docker Compose for Production VPS (Digital Ocean)
+# 
+# Architecture: Envoy Proxy + Separate Service Containers
+# 
+# Deploy:
+#   docker-compose -f ops/docker-compose.prod.yml up -d
+#
+# Services:
+#   - envoy: Public-facing proxy (443, 80)
+#   - auth-service: Authentication (internal:50051)
+#   - user-service: User management (internal:50052)
+#   - messaging-service: Real-time messaging (internal:50053)
+#   - notification-service: Push notifications (internal:50054)
+#   - postgres: Database
+#   - redis: Cache & message queue
+#   - (optional) kafka: Message broker
+
+version: '3.8'
+
+services:
+  # Envoy Proxy (public-facing)
+  envoy:
+    image: envoyproxy/envoy:v1.36-latest
+    container_name: construct-envoy
+    ports:
+      - "443:443"
+      - "80:80"
+      - "9901:9901"  # Admin interface
+    volumes:
+      - ./envoy.prod.yaml:/etc/envoy/envoy.yaml:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro  # Let's Encrypt certificates
+    networks:
+      - construct-network
+    restart: unless-stopped
+    depends_on:
+      - auth-service
+      - user-service
+      - messaging-service
+      - notification-service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9901/ready"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+
+  # Auth Service (gRPC)
+  auth-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-auth
+    command: /usr/local/bin/auth-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - INSTANCE_DOMAIN=${INSTANCE_DOMAIN}
+      - PORT=3000
+    ports:
+      - "50051:50051"  # gRPC
+      - "3000:3000"    # REST (.well-known)
+    networks:
+      - construct-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+
+  # User Service (gRPC)
+  user-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-user
+    command: /usr/local/bin/user-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+    ports:
+      - "50052:50052"
+    networks:
+      - construct-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  # Messaging Service (gRPC with bidirectional streaming)
+  messaging-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-messaging
+    command: /usr/local/bin/messaging-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - JWT_SECRET=${JWT_SECRET}
+      - MAX_MESSAGES_PER_HOUR=${MAX_MESSAGES_PER_HOUR:-1000}
+    ports:
+      - "50053:50053"
+    networks:
+      - construct-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  # Notification Service (gRPC)
+  notification-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-notification
+    command: /usr/local/bin/notification-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+    ports:
+      - "50054:50054"
+    networks:
+      - construct-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-construct}
+      - POSTGRES_USER=${POSTGRES_USER:-construct}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - construct-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-construct}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Message Queue
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - construct-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # (Optional) Kafka - uncomment if using message broker
+  # kafka:
+  #   image: confluentinc/cp-kafka:7.5.0
+  #   container_name: construct-kafka
+  #   environment:
+  #     KAFKA_NODE_ID: 1
+  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+  #     KAFKA_PROCESS_ROLES: broker,controller
+  #     KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+  #     KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+  #     KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+  #   volumes:
+  #     - kafka-data:/var/lib/kafka/data
+  #   networks:
+  #     - construct-network
+  #   restart: unless-stopped
+
+networks:
+  construct-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  # kafka-data:
