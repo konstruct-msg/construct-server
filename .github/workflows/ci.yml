@@ -128,44 +128,7 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup test environment
-        run: |
-          cat > .env.test <<'EOF'
-          DATABASE_URL=postgres://postgres:postgres@localhost:5432/construct_test
-          REDIS_URL=redis://localhost:6379
-          JWT_SECRET=test-secret-key-for-ci-must-be-at-least-32-chars-long
-          APNS_DEVICE_TOKEN_ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
-          CSRF_SECRET=test-csrf-secret-for-ci-32chars!
-          LOG_HASH_SALT=test-log-hash-salt-for-ci-not-secret-just-for-tests
-          ENVIRONMENT=development
-          DELIVERY_SECRET_KEY=a16cda790fc6c4eb031f1b552f2fb8839c3d0bbf999bc54d0de5bbaf6149dc21
-          MEDIA_HMAC_SECRET=925adaccd852f1e95bfdfba9f620f51951e41e25c4a3ccebf2d4adbea4a6c378
-          SERVER_SIGNING_KEY=g7P/rMDwefyMZ+axIHxYFLriZ3tNco9mmZd0HuC89nU=
-          APNS_ENABLED=false
-          KAFKA_ENABLED=false
-          KAFKA_BROKERS=localhost:9092
-          KAFKA_TOPIC=construct-messages-test
-          KAFKA_CONSUMER_GROUP=delivery-workers-test
-          KAFKA_SSL_ENABLED=false
-          FEDERATION_ENABLED=false
-          INSTANCE_DOMAIN=localhost
-          FEDERATION_BASE_DOMAIN=localhost
-          ENABLE_MESSAGE_GATEWAY=false
-          DEEP_LINK_BASE_URL=http://localhost:8080
-          DELIVERY_ACK_MODE=database
-          DELIVERY_ACK_ENABLE_BATCHING=false
-          DELIVERY_EXPIRY_DAYS=7
-          DELIVERY_CLEANUP_INTERVAL_SECS=3600
-          MESSAGE_TTL_DAYS=7
-          SESSION_TTL_DAYS=30
-          REFRESH_TOKEN_TTL_DAYS=90
-          MAX_MESSAGES_PER_HOUR=1000
-          MAX_KEY_ROTATIONS_PER_DAY=10
-          MAX_PASSWORD_CHANGES_PER_DAY=5
-          MAX_FAILED_LOGIN_ATTEMPTS=5
-          MAX_CONNECTIONS_PER_USER=5
-          LOG_MESSAGE_METADATA=true
-          LOG_USER_IDENTIFIERS=true
-          EOF
+        run: cp .env.test.example .env.test
 
       - name: Generate test keys
         run: ./scripts/generate_test_keys.sh
