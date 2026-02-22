@@ -144,9 +144,12 @@ async fn setup_test_database(db_name: &str) -> PgPool {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         candidates.push(url);
     }
-    candidates.push("postgres://construct_test:construct_test_password@localhost:5433/postgres".to_string());
+    candidates.push(
+        "postgres://construct_test:construct_test_password@localhost:5433/postgres".to_string(),
+    );
     candidates.push("postgres://postgres:postgres@localhost:5432/postgres".to_string());
-    candidates.push("postgres://construct:construct_dev_password@localhost:5432/postgres".to_string());
+    candidates
+        .push("postgres://construct:construct_dev_password@localhost:5432/postgres".to_string());
 
     let mut connection = None;
     let mut base_url = None;

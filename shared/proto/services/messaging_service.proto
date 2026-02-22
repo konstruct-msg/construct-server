@@ -19,24 +19,14 @@ service MessagingService {
   // Long-lived connection for real-time messaging
   rpc MessageStream(stream MessageStreamRequest) returns (stream MessageStreamResponse);
 
-  // === Unary RPCs (Query APIs) ===
-
-  // GetInbox - Fetch user's inbox with pagination
-  // Returns list of conversations with latest message
-  rpc GetInbox(GetInboxRequest) returns (shared.proto.core.v1.PageResponse);
-
-  // GetHistory - Fetch conversation history with pagination
-  // Returns messages in a specific conversation
-  rpc GetHistory(GetHistoryRequest) returns (shared.proto.core.v1.PageResponse);
+  // === Unary RPCs ===
 
   // SendMessage - Send single message (alternative to stream)
   // Use for one-off messages, prefer MessageStream for active sessions
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 
-  // DeleteMessage - Delete message (for self or everyone)
-  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
-
-  // EditMessage - Edit existing message
+  // EditMessage - Edit existing message (FUTURE - append-only revisions)
+  // Not implemented yet - reserved for future append-only edit chain
   rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
 
 }
@@ -191,42 +181,6 @@ enum ErrorCode {
   reserved 7 to 20;
 }
 
-// GetInboxRequest - Fetch user's inbox
-message GetInboxRequest {
-  // Pagination
-  shared.proto.core.v1.PageRequest page = 1;
-
-  // Filter by conversation type (optional)
-  optional shared.proto.core.v1.ConversationType filter_type = 2;
-
-  // Filter by unread status (optional)
-  optional bool unread_only = 3;
-
-  // Reserved for future filters
-  reserved 4 to 10;
-}
-
-// GetHistoryRequest - Fetch conversation history
-message GetHistoryRequest {
-  // Conversation ID (required)
-  string conversation_id = 1;
-
-  // Pagination
-  shared.proto.core.v1.PageRequest page = 2;
-
-  // Filter by content type (optional)
-  repeated shared.proto.core.v1.ContentType filter_types = 3;
-
-  // Search query (optional, E2EE requires client-side)
-  optional string search_query = 4;
-
-  // Time range filter (optional)
-  optional shared.proto.core.v1.TimeRange time_range = 5;
-
-  // Reserved for future filters
-  reserved 6 to 10;
-}
-
 // SendMessageRequest - Send single message (unary RPC)
 message SendMessageRequest {
   // Message envelope
@@ -257,30 +211,6 @@ message SendMessageResponse {
   optional MessageError error = 5;
 }
 
-
-// DeleteMessageRequest - Delete message
-message DeleteMessageRequest {
-  // Message ID to delete
-  string message_id = 1;
-
-  // Conversation ID
-  string conversation_id = 2;
-
-  // Delete for everyone or just self?
-  shared.proto.messaging.v1.DeleteScope scope = 3;
-
-  // Reserved for future features
-  reserved 4 to 10;
-}
-
-// DeleteMessageResponse - Delete confirmation
-message DeleteMessageResponse {
-  // Success
-  bool success = 1;
-
-  // Deleted timestamp
-  int64 deleted_at = 2;
-}
 
 // EditMessageRequest - Edit message
 message EditMessageRequest {

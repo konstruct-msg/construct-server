@@ -209,6 +209,8 @@ pub async fn confirm_message(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = Uuid::parse_str(&user_id.to_string())
         .map_err(|_| AppError::Validation("Invalid authenticated user ID".to_string()))?;
-    let result = messaging_core::confirm_pending_message(app_state(&context).0, user_id, &data.temp_id).await?;
+    let result =
+        messaging_core::confirm_pending_message(app_state(&context).0, user_id, &data.temp_id)
+            .await?;
     Ok((axum::http::StatusCode::OK, Json(result)))
 }

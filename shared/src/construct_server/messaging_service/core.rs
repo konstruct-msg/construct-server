@@ -443,7 +443,6 @@ pub async fn send_message(
     ))
 }
 
-
 /// Examples: "0", "1707584371151-0", "1707584371151-42"
 fn is_valid_stream_id(id: &str) -> bool {
     // Special IDs
@@ -460,7 +459,6 @@ fn is_valid_stream_id(id: &str) -> bool {
     // Both parts must be valid numbers
     parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok()
 }
-
 
 pub async fn get_messages(
     State(app_context): State<Arc<AppContext>>,

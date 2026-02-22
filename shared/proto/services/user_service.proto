@@ -13,32 +13,26 @@ service UserService {
   // UpdateUserProfile - Update own profile
   rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UserProfile);
 
-  // SearchUsers - Search for users by username/name
-  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
-
-  // GetContacts - Get user's contact list
-  rpc GetContacts(GetContactsRequest) returns (GetContactsResponse);
-
-  // AddContact - Add user to contacts
-  rpc AddContact(AddContactRequest) returns (AddContactResponse);
-
-  // RemoveContact - Remove user from contacts
-  rpc RemoveContact(RemoveContactRequest) returns (RemoveContactResponse);
-
-  // BlockUser - Block user (prevent messages)
-  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
-
-  // UnblockUser - Unblock user
-  rpc UnblockUser(UnblockUserRequest) returns (UnblockUserResponse);
-
-  // GetBlockedUsers - List blocked users
-  rpc GetBlockedUsers(GetBlockedUsersRequest) returns (GetBlockedUsersResponse);
-
   // UpdateProfilePicture - Upload profile picture
   rpc UpdateProfilePicture(UpdateProfilePictureRequest) returns (UpdateProfilePictureResponse);
 
   // GetUserCapabilities - Get user's device capabilities
   rpc GetUserCapabilities(GetUserCapabilitiesRequest) returns (GetUserCapabilitiesResponse);
+
+  // BlockUser - Block another user for this account
+  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
+
+  // UnblockUser - Remove user from blocklist
+  rpc UnblockUser(UnblockUserRequest) returns (UnblockUserResponse);
+
+  // GetBlockedUsers - List blocked users
+  rpc GetBlockedUsers(GetBlockedUsersRequest) returns (GetBlockedUsersResponse);
+  
+  // DeleteAccount - Delete user account (GDPR right to be forgotten)
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
+  
+  // ExportUserData - Export user data (GDPR data portability)
+  rpc ExportUserData(ExportUserDataRequest) returns (ExportUserDataResponse);
 }
 
 // UserProfile - User profile information
@@ -146,115 +140,16 @@ message UpdateUserProfileRequest {
   reserved 3 to 10;
 }
 
-// SearchUsersRequest - Search users
-message SearchUsersRequest {
-  // Search query (username, display name)
-  string query = 1;
-
-  // Pagination
-  shared.proto.core.v1.PageRequest page = 2;
-
-  // Exact match only?
-  bool exact_match = 3;
-
-  // Reserved for future filters
-  reserved 4 to 10;
-}
-
-// SearchUsersResponse - Search results
-message SearchUsersResponse {
-  // Matching users
-  repeated UserProfile users = 1;
-
-  // Total matches
-  uint32 total_count = 2;
-
-  // Next cursor
-  optional shared.proto.core.v1.Cursor next_cursor = 3;
-
-  // Has more results?
-  bool has_more = 4;
-}
-
-// GetContactsRequest - Get contacts
-message GetContactsRequest {
-  // Pagination
-  shared.proto.core.v1.PageRequest page = 1;
-
-  // Filter by online status (optional)
-  optional bool online_only = 2;
-}
-
-// GetContactsResponse - Contacts list
-message GetContactsResponse {
-  // Contacts
-  repeated Contact contacts = 1;
-
-  // Total contacts
-  uint32 total_count = 2;
-
-  // Next cursor
-  optional shared.proto.core.v1.Cursor next_cursor = 3;
-
-  // Has more results?
-  bool has_more = 4;
-}
-
-// Contact - Contact entry
-message Contact {
-  // User profile
-  UserProfile profile = 1;
-
-  // Added timestamp
-  int64 added_at = 2;
-
-  // Custom nickname (optional)
-  optional string nickname = 3;
-
-  // Is online?
-  bool online = 4;
-
-  // Last seen (if privacy allows)
-  optional int64 last_seen = 5;
-}
-
-// AddContactRequest - Add contact
-message AddContactRequest {
-  // User ID to add
-  string user_id = 1;
-
-  // Optional nickname
-  optional string nickname = 2;
-}
-
-// AddContactResponse - Add confirmation
-message AddContactResponse {
-  // Success
-  bool success = 1;
-
-  // Contact info
-  Contact contact = 2;
-}
-
-// RemoveContactRequest - Remove contact
-message RemoveContactRequest {
-  // User ID to remove
-  string user_id = 1;
-}
-
-// RemoveContactResponse - Remove confirmation
-message RemoveContactResponse {
-  // Success
-  bool success = 1;
-}
-
 // BlockUserRequest - Block user
 message BlockUserRequest {
+  // Current user performing block action
+  string blocker_user_id = 1;
+
   // User ID to block
-  string user_id = 1;
+  string user_id = 2;
 
   // Reason (optional)
-  optional string reason = 2;
+  optional string reason = 3;
 }
 
 // BlockUserResponse - Block confirmation
@@ -268,8 +163,11 @@ message BlockUserResponse {
 
 // UnblockUserRequest - Unblock user
 message UnblockUserRequest {
+  // Current user performing unblock action
+  string blocker_user_id = 1;
+
   // User ID to unblock
-  string user_id = 1;
+  string user_id = 2;
 }
 
 // UnblockUserResponse - Unblock confirmation
@@ -280,8 +178,11 @@ message UnblockUserResponse {
 
 // GetBlockedUsersRequest - List blocked users
 message GetBlockedUsersRequest {
+  // Current user whose blocklist is requested
+  string user_id = 1;
+
   // Pagination
-  shared.proto.core.v1.PageRequest page = 1;
+  shared.proto.core.v1.PageRequest page = 2;
 }
 
 // GetBlockedUsersResponse - Blocked users list
@@ -372,4 +273,55 @@ message DeviceCapability {
 
   // Capabilities (bitmask)
   uint32 capabilities = 3;
+}
+
+
+// ============================================================================
+// DeleteAccount Messages
+// ============================================================================
+
+// Request to delete user account
+message DeleteAccountRequest {
+  // Confirmation token (e.g. "DELETE" or user-entered code)
+  string confirmation = 1;
+  
+  // Optional: reason for deletion (for analytics, not stored)
+  optional string reason = 2;
+}
+
+// Response after account deletion
+message DeleteAccountResponse {
+  // true if account was successfully deleted
+  bool success = 1;
+  
+  // Message for UI
+  string message = 2;
+  
+  // Scheduled deletion timestamp (for grace period)
+  optional int64 scheduled_deletion_at = 3;
+}
+
+// ============================================================================
+// ExportUserData Messages
+// ============================================================================
+
+// Request to export user data
+message ExportUserDataRequest {
+  // Format for export (json, csv, etc.)
+  optional string format = 1;
+  
+  // Include message history (if stored)
+  optional bool include_messages = 2;
+}
+
+// Response with exported data
+message ExportUserDataResponse {
+  // Export data (JSON encoded user profile, devices, etc.)
+  string data = 1;
+  
+  // Export format
+  string format = 2;
+  
+  // Export timestamp
+  int64 exported_at = 3;
 }

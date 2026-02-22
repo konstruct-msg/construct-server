@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use axum::Json;
 use crate::context::AppContext;
 use crate::routes::devices;
 use crate::shared::proto::services::v1 as proto_services;
 use crate::utils::log_safe_id;
+use axum::Json;
 use construct_error::AppError;
 use serde::Serialize;
 use uuid::Uuid;
@@ -173,7 +173,13 @@ pub async fn get_pow_challenge(
 pub async fn register_device(
     app_context: Arc<AppContext>,
     input: RegisterDeviceInput,
-) -> Result<(axum::http::StatusCode, Json<devices::RegisterDeviceResponse>), AppError> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<devices::RegisterDeviceResponse>,
+    ),
+    AppError,
+> {
     devices::register_device_v2(
         axum::extract::State(app_context),
         Json(devices::RegisterDeviceRequest {
@@ -199,7 +205,13 @@ pub async fn register_device(
 pub async fn authenticate_device(
     app_context: Arc<AppContext>,
     input: AuthenticateDeviceInput,
-) -> Result<(axum::http::StatusCode, Json<devices::RegisterDeviceResponse>), AppError> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        Json<devices::RegisterDeviceResponse>,
+    ),
+    AppError,
+> {
     devices::authenticate_device(
         axum::extract::State(app_context),
         Json(devices::AuthenticateDeviceRequest {

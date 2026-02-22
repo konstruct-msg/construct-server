@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use axum::{
-    Json,
-    http::{HeaderMap, StatusCode},
-};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use construct_crypto::{BundleData, ServerCryptoValidator, UploadableKeyBundle};
 use crate::context::AppContext;
 use crate::db;
 use crate::routes::keys::{KeyBundleResponse, PublicKeyResponse};
 use crate::routes::request_signing::{
     compute_body_hash, extract_request_signature, verify_request_signature,
 };
-use crate::{audit::AuditLogger, utils::extract_client_ip};
 use crate::utils::log_safe_id;
+use crate::{audit::AuditLogger, utils::extract_client_ip};
+use axum::{
+    Json,
+    http::{HeaderMap, StatusCode},
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use construct_crypto::{BundleData, ServerCryptoValidator, UploadableKeyBundle};
 use construct_error::AppError;
 use serde_json::{Value, json};
 use std::net::IpAddr;
@@ -118,7 +118,9 @@ pub async fn update_account(
                 db::get_user_by_username(&app_context.db_pool, username).await
                 && existing_user.id != user_id
             {
-                return Err(AppError::Validation("Username is already taken".to_string()));
+                return Err(AppError::Validation(
+                    "Username is already taken".to_string(),
+                ));
             }
         }
 
@@ -259,7 +261,9 @@ pub async fn upload_keys(
         Ok(data) => data,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse bundle_data");
-            return Err(AppError::Validation("Invalid bundle_data format".to_string()));
+            return Err(AppError::Validation(
+                "Invalid bundle_data format".to_string(),
+            ));
         }
     };
 
@@ -514,7 +518,10 @@ pub async fn upload_keys(
     store_result.map_err(AppError::Unknown)?;
 
     let mut queue = app_context.queue.lock().await;
-    if let Err(e) = queue.invalidate_key_bundle_cache(&user_id.to_string()).await {
+    if let Err(e) = queue
+        .invalidate_key_bundle_cache(&user_id.to_string())
+        .await
+    {
         tracing::warn!(error = %e, "Failed to invalidate key bundle cache");
     }
     drop(queue);
@@ -564,8 +571,12 @@ pub async fn update_verifying_key(
         return Err(AppError::NotFound("No device found for user".to_string()));
     };
 
-    match db::update_device_verifying_key(&app_context.db_pool, &device.device_id, &verifying_key_bytes)
-        .await
+    match db::update_device_verifying_key(
+        &app_context.db_pool,
+        &device.device_id,
+        &verifying_key_bytes,
+    )
+    .await
     {
         Ok(_) => {
             let username_hash = db::get_user_by_id(&app_context.db_pool, &user_id)

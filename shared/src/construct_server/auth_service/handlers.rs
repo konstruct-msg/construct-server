@@ -13,14 +13,14 @@
 //
 // ============================================================================
 
-use axum::{Json, extract::State, response::IntoResponse};
 use axum::http::StatusCode;
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::auth_service::core;
 use crate::auth_service::AuthServiceContext;
+use crate::auth_service::core;
 use crate::routes::extractors::TrustedUser;
 use crate::shared::proto::services::v1 as proto_services;
 use construct_error::AppError;

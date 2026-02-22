@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use bcrypt::{DEFAULT_COST, hash};
 use chrono::{DateTime, Utc};
 use construct_crypto::{BundleData, UploadableKeyBundle};
 use sqlx::postgres::PgPoolOptions;
@@ -8,14 +7,6 @@ use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 
 pub type DbPool = Pool<Postgres>;
-
-// Legacy User struct (for password-based auth, deprecated)
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct LegacyUser {
-    pub id: Uuid,
-    pub username: String,
-    pub password_hash: String,
-}
 
 // New minimal User struct (passwordless, device-based)
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -25,6 +16,14 @@ pub struct User {
     pub recovery_public_key: Option<Vec<u8>>,
     pub last_recovery_at: Option<DateTime<Utc>>,
     pub primary_device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BlockedUser {
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub blocked_at: DateTime<Utc>,
+    pub reason: Option<String>,
 }
 
 use construct_config::DbConfig;
@@ -153,23 +152,74 @@ pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Updates user password (requires valid old password)
-pub async fn update_user_password(pool: &DbPool, user_id: &Uuid, new_password: &str) -> Result<()> {
-    let new_password_hash = hash(new_password, DEFAULT_COST)?;
-
-    sqlx::query(
+/// Add or update a user in caller's blocklist.
+pub async fn block_user(
+    pool: &DbPool,
+    blocker_user_id: &Uuid,
+    blocked_user_id: &Uuid,
+    reason: Option<&str>,
+) -> Result<DateTime<Utc>> {
+    let blocked_at = sqlx::query_scalar::<_, DateTime<Utc>>(
         r#"
-        UPDATE users
-        SET password_hash = $1
-        WHERE id = $2
+        INSERT INTO user_blocks (blocker_user_id, blocked_user_id, reason)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (blocker_user_id, blocked_user_id)
+        DO UPDATE SET reason = EXCLUDED.reason, blocked_at = NOW()
+        RETURNING blocked_at
         "#,
     )
-    .bind(new_password_hash)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+    .bind(blocker_user_id)
+    .bind(blocked_user_id)
+    .bind(reason)
+    .fetch_one(pool)
+    .await
+    .context("Failed to block user")?;
 
-    Ok(())
+    Ok(blocked_at)
+}
+
+/// Remove a user from caller's blocklist.
+pub async fn unblock_user(
+    pool: &DbPool,
+    blocker_user_id: &Uuid,
+    blocked_user_id: &Uuid,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM user_blocks
+        WHERE blocker_user_id = $1 AND blocked_user_id = $2
+        "#,
+    )
+    .bind(blocker_user_id)
+    .bind(blocked_user_id)
+    .execute(pool)
+    .await
+    .context("Failed to unblock user")?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// List blocked users for caller.
+pub async fn get_blocked_users(pool: &DbPool, blocker_user_id: &Uuid) -> Result<Vec<BlockedUser>> {
+    let rows = sqlx::query_as::<_, BlockedUser>(
+        r#"
+        SELECT
+            ub.blocked_user_id AS user_id,
+            u.username,
+            ub.blocked_at,
+            ub.reason
+        FROM user_blocks ub
+        JOIN users u ON u.id = ub.blocked_user_id
+        WHERE ub.blocker_user_id = $1
+        ORDER BY ub.blocked_at DESC
+        "#,
+    )
+    .bind(blocker_user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to get blocked users")?;
+
+    Ok(rows)
 }
 
 // ============================================================================

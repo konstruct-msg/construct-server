@@ -23,7 +23,7 @@ mod capabilities; // Phase 5: Crypto-agility capabilities endpoint
 pub mod csrf; // Made public for gateway middleware
 pub mod devices; // Device-based passwordless authentication
 pub mod extractors; // Made public for auth-service, user-service, messaging-service, and notification-service
-mod federation;
+pub mod federation; // Made public for service discovery
 pub mod health; // Made public for tests
 pub mod invites; // Phase 5: Dynamic invite tokens (one-time QR codes) - Made public for user-service
 pub mod keys; // Made public for user-service
@@ -96,6 +96,10 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
         .route("/api/v1/messages/confirm", post(messages::confirm_message)) // Week R2: 2-phase commit
         .route("/api/v1/control", post(messages::send_control_message)) // Phase 4.5: END_SESSION
         // Federation (no CSRF - uses server signatures)
+        .route(
+            "/.well-known/construct-server",
+            get(federation::well_known_construct_server),
+        )
         .route(
             "/.well-known/konstruct",
             get(federation::well_known_konstruct),
