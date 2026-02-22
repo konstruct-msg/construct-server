@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// MediaService - управление загрузкой и скачиванием encrypted media файлов
+// (аватары, вложения) с privacy-preserving design
+service MediaService {
+  // Генерация одноразового токена для загрузки медиа
+  rpc GenerateUploadToken(GenerateUploadTokenRequest) returns (GenerateUploadTokenResponse);
+  
+  // Загрузка encrypted медиа файла (streaming)
+  rpc UploadMedia(stream UploadMediaRequest) returns (UploadMediaResponse);
+  
+  // Скачивание encrypted медиа файла (streaming, публичный доступ)
+  rpc DownloadMedia(DownloadMediaRequest) returns (stream DownloadMediaResponse);
+  
+  // Удаление медиа файла (internal, требует admin token)
+  rpc DeleteMedia(DeleteMediaRequest) returns (DeleteMediaResponse);
+  
+  // Получение метаданных медиа без скачивания
+  rpc GetMediaMetadata(GetMediaMetadataRequest) returns (GetMediaMetadataResponse);
+}
+
+// ============================================================================
+// GenerateUploadToken Messages
+// ============================================================================
+
+// Запрос на генерацию upload token
+message GenerateUploadTokenRequest {
+  // Опционально: ожидаемый размер файла для валидации
+  optional int64 expected_size = 1;
+  
+  // Опционально: тип контента (для метаданных, не используется в валидации)
+  optional string content_type = 2;
+}
+
+// Ответ с upload token
+message GenerateUploadTokenResponse {
+  // Одноразовый upload токен (JWT)
+  string upload_token = 1;
+  
+  // URL для загрузки (media-service endpoint)
+  string upload_url = 2;
+  
+  // Максимальный размер файла в байтах
+  int64 max_file_size = 3;
+  
+  // Истечение токена (ISO 8601 timestamp)
+  string expires_at = 4;
+}
+
+// ============================================================================
+// UploadMedia Messages
+// ============================================================================
+
+// Запрос на загрузку медиа (streaming chunks)
+message UploadMediaRequest {
+  // Одноразовый upload токен (только в первом chunk)
+  optional string upload_token = 1;
+  
+  // Чанк данных (encrypted blob)
+  bytes chunk = 2;
+  
+  // Номер чанка (для ordering)
+  int32 chunk_number = 3;
+  
+  // Последний ли это чанк
+  bool is_last = 4;
+  
+  // Общий размер файла (в первом chunk)
+  optional int64 total_size = 5;
+  
+  // SHA-256 хеш всего файла (в последнем chunk для верификации)
+  optional string file_hash = 6;
+}
+
+// Ответ после успешной загрузки
+message UploadMediaResponse {
+  // Уникальный media_id для скачивания
+  string media_id = 1;
+  
+  // Публичный URL для скачивания
+  string download_url = 2;
+  
+  // Размер файла в байтах
+  int64 file_size = 3;
+  
+  // SHA-256 хеш файла
+  string file_hash = 4;
+  
+  // Истечение файла (auto-delete после TTL)
+  string expires_at = 5;
+}
+
+// ============================================================================
+// DownloadMedia Messages
+// ============================================================================
+
+// Запрос на скачивание медиа
+message DownloadMediaRequest {
+  // Уникальный media_id
+  string media_id = 1;
+  
+  // Опционально: Range request (byte offset start)
+  optional int64 range_start = 2;
+  
+  // Опционально: Range request (byte offset end)
+  optional int64 range_end = 3;
+}
+
+// Ответ со stream чанков
+message DownloadMediaResponse {
+  // Чанк данных (encrypted blob)
+  bytes chunk = 1;
+  
+  // Номер чанка
+  int32 chunk_number = 2;
+  
+  // Последний ли это чанк
+  bool is_last = 3;
+  
+  // Общий размер файла (в первом chunk)
+  optional int64 total_size = 4;
+  
+  // Content-Type (в первом chunk, если доступен)
+  optional string content_type = 5;
+}
+
+// ============================================================================
+// DeleteMedia Messages
+// ============================================================================
+
+// Запрос на удаление медиа
+message DeleteMediaRequest {
+  // Уникальный media_id
+  string media_id = 1;
+  
+  // Admin token для авторизации (internal endpoint)
+  string admin_token = 2;
+}
+
+// Ответ на удаление
+message DeleteMediaResponse {
+  // true если файл был удалён
+  bool success = 1;
+  
+  // Сообщение (например "File deleted" или "File not found")
+  string message = 2;
+}
+
+// ============================================================================
+// GetMediaMetadata Messages
+// ============================================================================
+
+// Запрос метаданных медиа
+message GetMediaMetadataRequest {
+  // Уникальный media_id
+  string media_id = 1;
+}
+
+// Ответ с метаданными
+message GetMediaMetadataResponse {
+  // Media ID
+  string media_id = 1;
+  
+  // Размер файла в байтах
+  int64 file_size = 2;
+  
+  // SHA-256 хеш файла
+  string file_hash = 3;
+  
+  // Content-Type (если доступен)
+  optional string content_type = 4;
+  
+  // Дата создания (ISO 8601)
+  string created_at = 5;
+  
+  // Дата истечения (ISO 8601)
+  string expires_at = 6;
+  
+  // Существует ли файл на диске
+  bool exists = 7;
+}

@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// NotificationService - отвечает за управление push-уведомлениями
+// и отправку "слепых" уведомлений (privacy-preserving notifications).
+service NotificationService {
+  // Отправляет обобщенное, сохраняющее приватность уведомление,
+  // чтобы сообщить о новой активности, не раскрывая содержания.
+  rpc SendBlindNotification(SendBlindNotificationRequest) returns (SendBlindNotificationResponse);
+  
+  // Регистрация device token для push-уведомлений (APNs/FCM)
+  rpc RegisterDeviceToken(RegisterDeviceTokenRequest) returns (RegisterDeviceTokenResponse);
+  
+  // Удаление device token (при выходе с устройства)
+  rpc UnregisterDeviceToken(UnregisterDeviceTokenRequest) returns (UnregisterDeviceTokenResponse);
+  
+  // Обновление настроек уведомлений для устройства
+  rpc UpdateNotificationPreferences(UpdateNotificationPreferencesRequest) returns (UpdateNotificationPreferencesResponse);
+}
+
+// ============================================================================
+// SendBlindNotification Messages
+// ============================================================================
+
+// Запрос на отправку "слепого" уведомления
+message SendBlindNotificationRequest {
+  // ID пользователя-получателя.
+  string user_id = 1;
+
+  // Опционально: новое количество для бейджа на иконке приложения.
+  // Показывает число непрочитанных событий, но не их содержание.
+  optional int32 badge_count = 2;
+
+  // Опционально: Тип активности (например, "new_message", "new_call").
+  // Клиент может использовать это для отображения обобщенного текста,
+  // например "Новое сообщение" или "Входящий вызов", не раскрывая деталей.
+  optional string activity_type = 3;
+}
+
+// Ответ после постановки уведомления в очередь
+message SendBlindNotificationResponse {
+  // true, если уведомление было успешно поставлено в очередь.
+  bool success = 1;
+}
+
+// ============================================================================
+// Device Token Registration Messages
+// ============================================================================
+
+// Запрос на регистрацию device token
+message RegisterDeviceTokenRequest {
+  // Device token (APNs для iOS, FCM для Android)
+  string device_token = 1;
+  
+  // Опционально: имя устройства (для отображения в настройках)
+  optional string device_name = 2;
+  
+  // Фильтр уведомлений
+  NotificationFilter notification_filter = 3;
+}
+
+// Ответ на регистрацию device token
+message RegisterDeviceTokenResponse {
+  // true, если токен успешно зарегистрирован
+  bool success = 1;
+  
+  // ID зарегистрированного токена (для последующего управления)
+  optional string token_id = 2;
+}
+
+// ============================================================================
+// Device Token Unregistration Messages
+// ============================================================================
+
+// Запрос на удаление device token
+message UnregisterDeviceTokenRequest {
+  // Device token для удаления
+  string device_token = 1;
+}
+
+// Ответ на удаление device token
+message UnregisterDeviceTokenResponse {
+  // true, если токен успешно удалён
+  bool success = 1;
+}
+
+// ============================================================================
+// Notification Preferences Messages
+// ============================================================================
+
+// Запрос на обновление настроек уведомлений
+message UpdateNotificationPreferencesRequest {
+  // Device token для которого обновляются настройки
+  string device_token = 1;
+  
+  // Фильтр уведомлений
+  NotificationFilter notification_filter = 2;
+  
+  // Включены ли уведомления для этого устройства
+  bool enabled = 3;
+}
+
+// Ответ на обновление настроек
+message UpdateNotificationPreferencesResponse {
+  // true, если настройки успешно обновлены
+  bool success = 1;
+}
+
+// ============================================================================
+// Common Enums and Types
+// ============================================================================
+
+// Фильтр уведомлений - определяет какие события вызывают видимое уведомление
+enum NotificationFilter {
+  // Не указан (по умолчанию silent)
+  NOTIFICATION_FILTER_UNSPECIFIED = 0;
+  
+  // Только "слепые" уведомления (без текста, только бейдж)
+  NOTIFICATION_FILTER_SILENT = 1;
+  
+  // Все уведомления видимые
+  NOTIFICATION_FILTER_VISIBLE_ALL = 2;
+  
+  // Только direct messages
+  NOTIFICATION_FILTER_VISIBLE_DM = 3;
+  
+  // Только упоминания (@mention)
+  NOTIFICATION_FILTER_VISIBLE_MENTIONS = 4;
+  
+  // Только от контактов
+  NOTIFICATION_FILTER_VISIBLE_CONTACTS = 5;
+}

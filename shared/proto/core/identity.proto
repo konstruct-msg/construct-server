@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package shared.proto.core.v1;
+
+// UserId - Unique identifier for a user in the Construct network
+// Federation-ready: supports @user:domain format
+message UserId {
+  // Local user ID (UUID v4 or custom format)
+  // Example: "550e8400-e29b-41d4-a716-446655440000"
+  string user_id = 1;
+
+  // Domain for federation (optional for local users)
+  // Example: "construct.app", "company.com"
+  // If empty, user is local to this server
+  optional string domain = 2;
+
+  // Display name (cached for UI)
+  // May be stale, should be refreshed from UserService
+  optional string display_name = 3;
+
+  // Reserved for future federation features
+  reserved 4 to 15;
+}
+
+// DeviceId - Unique identifier for a user's device
+// One user can have multiple devices (phone, desktop, tablet, web)
+message DeviceId {
+  // User ID this device belongs to
+  UserId user = 1;
+
+  // Device-specific ID (UUID v4)
+  // Unique per user device
+  string device_id = 2;
+
+  // Device platform
+  DevicePlatform platform = 3;
+
+  // Device name (user-assigned)
+  // Example: "Alice's iPhone", "Work Laptop"
+  optional string device_name = 4;
+
+  // Registration timestamp (device creation)
+  int64 registered_at = 5;
+
+  // Last activity timestamp
+  // Updated on every message send/receive
+  int64 last_seen = 6;
+
+  // Device capabilities (bitmask)
+  // Indicates support for: WebRTC, MLS, PQ crypto, etc.
+  uint32 capabilities = 16;
+
+  // Reserved for future features
+  reserved 17 to 50;
+}
+
+// DevicePlatform - Platform enumeration
+enum DevicePlatform {
+  // Unspecified platform (must be 0)
+  DEVICE_PLATFORM_UNSPECIFIED = 0;
+
+  // iOS (iPhone, iPad)
+  DEVICE_PLATFORM_IOS = 1;
+
+  // Android (phone, tablet)
+  DEVICE_PLATFORM_ANDROID = 2;
+
+  // Desktop (macOS, Windows, Linux)
+  DEVICE_PLATFORM_DESKTOP = 3;
+
+  // Web browser (PWA)
+  DEVICE_PLATFORM_WEB = 4;
+
+  // Server-side bot/integration
+  DEVICE_PLATFORM_BOT = 5;
+
+  // Reserved for future platforms
+  reserved 6 to 15;
+}
+
+// DeviceCapabilities - Bitflags for device features
+// Used in DeviceId.capabilities field as bitmask
+// Note: These are bitflag values, not sequential enum values
+// Actual usage: capabilities = DEVICE_CAP_WEBRTC | DEVICE_CAP_MLS
+enum DeviceCapabilities {
+  // Unspecified capability (must be 0)
+  DEVICE_CAPABILITIES_UNSPECIFIED = 0;
+
+  // Supports WebRTC calls (voice/video) - bit 0
+  DEVICE_CAPABILITIES_WEBRTC = 1; // 1 << 0
+
+  // Supports MLS group messaging - bit 1
+  DEVICE_CAPABILITIES_MLS = 2; // 1 << 1
+
+  // Supports Post-Quantum cryptography - bit 2
+  DEVICE_CAPABILITIES_PQ_CRYPTO = 4; // 1 << 2
+
+  // Supports sealed sender (metadata hiding) - bit 3
+  DEVICE_CAPABILITIES_SEALED_SENDER = 8; // 1 << 3
+
+  // Supports push notifications - bit 4
+  DEVICE_CAPABILITIES_PUSH = 16; // 1 << 4
+
+  // Supports background sync - bit 5
+  DEVICE_CAPABILITIES_BACKGROUND_SYNC = 32; // 1 << 5
+}

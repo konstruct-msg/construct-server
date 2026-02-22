@@ -1,0 +1,53 @@
+[package]
+name = "construct-error"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization for error responses
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# HTTP framework (for IntoResponse trait)
+axum = { workspace = true }
+hyper = "1.6"
+http-body-util = "0.1"
+bytes = "1.9"
+
+# External error types that we convert from
+# Make these optional to reduce dependencies for libraries
+sqlx = { workspace = true, optional = true }
+redis = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+rdkafka = { version = "0.37", optional = true }
+reqwest = { workspace = true, optional = true }
+rmp-serde = { version = "1.3", optional = true }
+
+[features]
+# Full feature set (for services)
+default = ["full"]
+
+# All error conversions enabled
+full = ["database", "redis", "kafka", "jwt", "http", "serialization"]
+
+# Individual feature flags
+database = ["dep:sqlx"]
+redis = ["dep:redis"]
+kafka = ["dep:rdkafka"]
+jwt = ["dep:jsonwebtoken"]
+http = ["dep:reqwest"]
+serialization = ["dep:rmp-serde", "dep:uuid"]
+
+[dev-dependencies]
+# For testing
+tokio = { workspace = true }

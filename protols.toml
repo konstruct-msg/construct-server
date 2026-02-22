@@ -1,0 +1,6 @@
+# protols language server configuration
+# https://github.com/coder3101/protols
+
+[workspace]
+# Include paths for proto imports resolution
+includes = ["shared/proto"]

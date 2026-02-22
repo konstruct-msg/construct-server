@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package shared.proto.core.v1;
+
+import "core/envelope.proto";
+
+// Cursor - Opaque pagination cursor
+// Server-generated, client should not parse or modify
+// Combines multiple ordering strategies for robustness
+message Cursor {
+  // Server-assigned message number (primary ordering)
+  // Sequential per user inbox, guaranteed unique
+  uint64 message_number = 1;
+
+  // Timestamp (fallback for ordering when message_number unavailable)
+  // Unix timestamp in milliseconds
+  int64 timestamp = 2;
+
+  // Backend-specific cursor (optional)
+  // Allows backend to use native pagination (Redis Stream ID, Kafka offset)
+  // Format examples:
+  // - Redis Stream: "redis:1676473917894-0"
+  // - Kafka: "kafka:messages-0-12345"
+  // - PostgreSQL: "pg:cursor:base64encodeddata"
+  // Client must treat this as opaque blob
+  optional string backend_cursor = 3;
+
+  // Reserved for future cursor metadata
+  reserved 4 to 10;
+}
+
+// PageRequest - Generic page request
+// Used across all paginated APIs (inbox, history, contacts, etc.)
+message PageRequest {
+  // Page size (number of items to return)
+  // Default: 50, Max: 100
+  // Server may return fewer items if end is reached
+  uint32 page_size = 1;
+
+  // Cursor for pagination (optional)
+  // If omitted, returns first page (newest items)
+  // Client receives cursor in PageResponse and uses it for next request
+  optional Cursor cursor = 2;
+
+  // Direction (newer or older relative to cursor)
+  Direction direction = 3;
+
+  // Reserved for future pagination options
+  reserved 4 to 10;
+}
+
+// Direction - Pagination direction
+enum Direction {
+  // Unspecified direction (must be 0)
+  // Server defaults to DIRECTION_OLDER
+  DIRECTION_UNSPECIFIED = 0;
+
+  // Fetch items newer than cursor (more recent)
+  // Use case: "Load more recent messages"
+  // Ordering: ascending by timestamp
+  DIRECTION_NEWER = 1;
+
+  // Fetch items older than cursor (less recent)
+  // Use case: "Load older messages" (scroll up)
+  // Ordering: descending by timestamp
+  DIRECTION_OLDER = 2;
+}
+
+// PageResponse - Generic page response
+// Contains items and pagination metadata
+message PageResponse {
+  // Items in this page (messages, users, etc.)
+  // Type depends on API:
+  // - GetInbox: repeated Envelope
+  // - GetHistory: repeated Envelope
+  // - ListContacts: repeated UserProfile
+  repeated Envelope items = 1;
+
+  // Next cursor (for fetching older items)
+  // If null, no more older items available
+  optional Cursor next_cursor = 2;
+
+  // Previous cursor (for fetching newer items)
+  // If null, no more newer items available
+  optional Cursor prev_cursor = 3;
+
+  // Has more items in requested direction?
+  // true = more pages available
+  // false = end of list reached
+  bool has_more = 4;
+
+  // Approximate total remaining items (expensive, may be omitted)
+  // Server may skip this calculation for performance
+  // Client should not rely on this for pagination logic
+  optional uint32 total_remaining = 5;
+
+  // Reserved for future pagination metadata
+  reserved 6 to 10;
+}
+
+// HistoryRequest - Request conversation history with pagination
+// Specialized request for message history with filters
+message HistoryRequest {
+  // Conversation ID (required)
+  // Format: "direct:{user1}:{user2}" or "group:{group_id}"
+  string conversation_id = 1;
+
+  // Pagination parameters
+  PageRequest page = 2;
+
+  // Filter by content type (optional)
+  // If empty, returns all message types
+  repeated ContentType filter_types = 3;
+
+  // Search query (optional)
+  // Full-text search within conversation
+  // Note: E2EE messages require client-side decryption first
+  optional string search_query = 4;
+
+  // Filter by time range (optional)
+  optional TimeRange time_range = 5;
+
+  // Reserved for future filters
+  reserved 6 to 10;
+}
+
+// TimeRange - Time range filter for history queries
+message TimeRange {
+  // Start timestamp (inclusive)
+  // Unix timestamp in milliseconds
+  optional int64 start_timestamp = 1;
+
+  // End timestamp (exclusive)
+  optional int64 end_timestamp = 2;
+}
+
+// InboxRequest - Request user's inbox with pagination
+message InboxRequest {
+  // User ID (extracted from auth token, not sent by client)
+  // Included here for server-side processing
+
+  // Pagination parameters
+  PageRequest page = 1;
+
+  // Filter by conversation type (optional)
+  optional ConversationType filter_type = 2;
+
+  // Filter by unread status (optional)
+  optional bool unread_only = 3;
+
+  // Reserved for future filters
+  reserved 4 to 10;
+}
+
+// ConversationType - Type of conversation
+enum ConversationType {
+  // Unscpecified type (must be 0)
+  CONVERSATION_TYPE_UNSPECIFIED = 0;
+
+  // Direct 1-to-1 conversation
+  CONVERSATION_TYPE_DIRECT = 1;
+
+  // Group conversation
+  CONVERSATION_TYPE_GROUP = 2;
+
+  // Broadcast channel (one-to-many)
+  CONVERSATION_TYPE_BROADCAST = 3;
+
+  // Reserved for future types
+  reserved 4 to 15;
+}

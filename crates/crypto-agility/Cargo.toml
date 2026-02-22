@@ -1,0 +1,16 @@
+[package]
+name = "crypto-agility"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.21"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }

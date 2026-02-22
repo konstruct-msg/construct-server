@@ -1,0 +1,305 @@
+syntax = "proto3";
+
+package shared.proto.messaging.v1;
+
+// E2EE Messages - Signal Protocol implementation
+// Based on libsignal-protocol specification
+// Supports X3DH key agreement and Double Ratchet algorithm
+
+// SignalMessage - Double Ratchet message (after session established)
+message SignalMessage {
+  // Protocol version (currently 3)
+  uint32 version = 1;
+
+  // Sender's ratchet public key (X25519, 32 bytes)
+  // Used for DH ratchet step
+  bytes ratchet_key = 2;
+
+  // Message counter (increments per message in chain)
+  uint32 counter = 3;
+
+  // Previous chain length (for out-of-order message handling)
+  uint32 previous_counter = 4;
+
+  // Encrypted message body (AEAD ciphertext)
+  // ChaCha20-Poly1305 or AES-256-GCM
+  bytes ciphertext = 5;
+
+  // MAC (message authentication code)
+  // HMAC-SHA256 of (version || ratchet_key || counter || ciphertext)
+  bytes mac = 6;
+
+  // Reserved for future Signal Protocol extensions
+  reserved 7 to 15;
+}
+
+// PreKeySignalMessage - Initial message (X3DH handshake)
+// Sent when no session exists between sender and recipient
+message PreKeySignalMessage {
+  // Protocol version (currently 3)
+  uint32 version = 1;
+
+  // Registration ID (sender's device registration)
+  uint32 registration_id = 2;
+
+  // Pre-key ID (which one-time pre-key was used)
+  // Optional: may be null if signed pre-key only
+  optional uint32 pre_key_id = 3;
+
+  // Signed pre-key ID (which signed pre-key was used)
+  uint32 signed_pre_key_id = 4;
+
+  // Base key (sender's ephemeral public key, X25519)
+  bytes base_key = 5;
+
+  // Identity key (sender's long-term public key)
+  bytes identity_key = 6;
+
+  // Embedded Signal message (first message in new session)
+  SignalMessage message = 7;
+
+  // Reserved for future X3DH extensions
+  reserved 8 to 15;
+}
+
+// SenderKeyMessage - Group message (Sender Key protocol)
+// Used for efficient group messaging before MLS adoption
+// Note: Will be deprecated in favor of MLS
+message SenderKeyMessage {
+  // Protocol version (currently 3)
+  uint32 version = 1;
+
+  // Distribution ID (identifies sender key distribution)
+  bytes distribution_id = 2;
+
+  // Chain ID (ratchet chain identifier)
+  uint32 chain_id = 3;
+
+  // Iteration (message counter within chain)
+  uint32 iteration = 4;
+
+  // Encrypted message body
+  bytes ciphertext = 5;
+
+  // MAC (HMAC-SHA256)
+  bytes mac = 6;
+
+  // Reserved for future extensions
+  reserved 7 to 15;
+}
+
+// SenderKeyDistributionMessage - Distribute sender key to group
+// Sent when new member joins or sender key rotates
+message SenderKeyDistributionMessage {
+  // Distribution ID (unique per sender per group)
+  bytes distribution_id = 1;
+
+  // Chain ID (starts at 0, increments on rotation)
+  uint32 chain_id = 2;
+
+  // Iteration (starts at 0, increments per message)
+  uint32 iteration = 3;
+
+  // Chain key (seed for message key derivation)
+  bytes chain_key = 4;
+
+  // Signing key (Ed25519 public key for signature verification)
+  bytes signing_key = 5;
+
+  // Reserved for future extensions
+  reserved 6 to 15;
+}
+
+// SessionResetMessage - Reset E2EE session
+// Sent when session corruption detected or security incident
+message SessionResetMessage {
+  // Reason for reset
+  SessionResetReason reason = 1;
+
+  // Timestamp of reset request
+  int64 reset_timestamp = 2;
+
+  // Optional: new pre-key bundle (if initiating new session immediately)
+  optional bytes new_pre_key_bundle = 3;
+
+  // Reserved for future extensions
+  reserved 4 to 10;
+}
+
+// SessionResetReason - Why session was reset
+enum SessionResetReason {
+  // Unscpecified reason (must be 0)
+  SESSION_RESET_REASON_UNSPECIFIED = 0;
+
+  // Session corruption detected (MAC verification failed)
+  SESSION_RESET_REASON_CORRUPTION = 1;
+
+  // Security incident (keys compromised)
+  SESSION_RESET_REASON_SECURITY = 2;
+
+  // User-initiated reset (manual action)
+  SESSION_RESET_REASON_USER = 3;
+
+  // Device changed (new device, old session invalid)
+  SESSION_RESET_REASON_DEVICE_CHANGED = 4;
+
+  // Reserved for future reasons
+  reserved 5 to 15;
+}
+
+// IdentityKeyChangeNotification - Alert when contact's identity key changes
+// Security feature: prevents MITM attacks
+message IdentityKeyChangeNotification {
+  // User whose identity key changed
+  string user_id = 1;
+
+  // Device whose identity key changed
+  string device_id = 2;
+
+  // Old identity key (for comparison)
+  bytes old_identity_key = 3;
+
+  // New identity key (requires user verification)
+  bytes new_identity_key = 4;
+
+  // Change timestamp
+  int64 changed_at = 5;
+
+  // Reason for change (if known)
+  optional string change_reason = 6;
+
+  // Reserved for future features
+  reserved 7 to 10;
+}
+
+// SafetyNumberChangeEvent - Safety number verification change
+// Displayed to users for manual verification
+message SafetyNumberChangeEvent {
+  // Conversation ID affected
+  string conversation_id = 1;
+
+  // User ID whose safety number changed
+  string user_id = 2;
+
+  // Old safety number (60-digit fingerprint)
+  string old_safety_number = 3;
+
+  // New safety number (60-digit fingerprint)
+  string new_safety_number = 4;
+
+  // Change timestamp
+  int64 changed_at = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// DecryptionErrorMessage - Failed to decrypt message
+// Sent back to sender to request re-send or session reset
+message DecryptionErrorMessage {
+  // Failed message ID
+  string message_id = 1;
+
+  // Error type
+  DecryptionErrorType error_type = 2;
+
+  // Error description (for debugging)
+  string error_message = 3;
+
+  // Timestamp when error occurred
+  int64 error_timestamp = 4;
+
+  // Ratchet state snapshot (for debugging)
+  optional RatchetState ratchet_state = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// DecryptionErrorType - Type of decryption failure
+enum DecryptionErrorType {
+  // Unscpecified error (must be 0)
+  DECRYPTION_ERROR_TYPE_UNSPECIFIED = 0;
+
+  // MAC verification failed (message tampered)
+  DECRYPTION_ERROR_TYPE_MAC_FAILED = 1;
+
+  // Message too old (exceeded max skip count)
+  DECRYPTION_ERROR_TYPE_TOO_OLD = 2;
+
+  // Duplicate message (counter reused)
+  DECRYPTION_ERROR_TYPE_DUPLICATE = 3;
+
+  // No session found (need PreKeySignalMessage)
+  DECRYPTION_ERROR_TYPE_NO_SESSION = 4;
+
+  // Invalid message format
+  DECRYPTION_ERROR_TYPE_INVALID_FORMAT = 5;
+
+  // Reserved for future errors
+  reserved 6 to 15;
+}
+
+// RatchetState - Snapshot of Double Ratchet state (for debugging)
+message RatchetState {
+  // Sending chain counter
+  uint32 send_counter = 1;
+
+  // Receiving chain counter
+  uint32 recv_counter = 2;
+
+  // Previous sending chain counter
+  uint32 prev_send_counter = 3;
+
+  // Root key present? (boolean, don't expose actual key)
+  bool has_root_key = 4;
+
+  // Chain key present? (boolean, don't expose actual key)
+  bool has_chain_key = 5;
+
+  // Reserved for future state fields
+  reserved 6 to 10;
+}
+
+// PrekeyBundleRequest - Request pre-key bundle for new session
+// Sent to server to fetch recipient's keys
+message PrekeyBundleRequest {
+  // Recipient user ID
+  string user_id = 1;
+
+  // Recipient device ID (optional, fetch for all devices if omitted)
+  optional string device_id = 2;
+
+  // Preferred crypto suite (optional)
+  optional string crypto_suite = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
+}
+
+// PrekeyBundleResponse - Server response with pre-key bundle
+message PrekeyBundleResponse {
+  // Recipient's registration ID
+  uint32 registration_id = 1;
+
+  // Identity key (long-term)
+  bytes identity_key = 2;
+
+  // Signed pre-key
+  bytes signed_pre_key = 3;
+
+  // Signed pre-key signature
+  bytes signed_pre_key_signature = 4;
+
+  // Signed pre-key ID
+  uint32 signed_pre_key_id = 5;
+
+  // One-time pre-key (optional, single-use)
+  optional bytes one_time_pre_key = 6;
+
+  // One-time pre-key ID (if provided)
+  optional uint32 one_time_pre_key_id = 7;
+
+  // Reserved for future features
+  reserved 8 to 15;
+}

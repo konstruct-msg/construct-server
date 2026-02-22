@@ -1,0 +1,364 @@
+syntax = "proto3";
+
+package shared.proto.signaling.v1;
+
+// WebRTC Signaling Messages
+// Used for establishing peer-to-peer voice/video calls
+// Signaling is E2EE encrypted, media is DTLS-SRTP
+
+// WebRTCSignal - Top-level WebRTC signaling message
+message WebRTCSignal {
+  // Call ID (unique per call session)
+  string call_id = 1;
+
+  // Signal type (determines which field is populated)
+  oneof signal {
+    // Call offer (SDP offer from caller)
+    CallOffer offer = 2;
+
+    // Call answer (SDP answer from callee)
+    CallAnswer answer = 3;
+
+    // ICE candidate (network path for P2P connection)
+    IceCandidate ice_candidate = 4;
+
+    // ICE candidates (batch multiple candidates)
+    IceCandidateBatch ice_candidates = 5;
+
+    // Call hangup (end call)
+    CallHangup hangup = 6;
+
+    // Call busy (recipient busy)
+    CallBusy busy = 7;
+
+    // Ringing indication
+    CallRinging ringing = 8;
+
+    // Media update (add/remove video, screen share)
+    MediaUpdate media_update = 9;
+  }
+
+  // Sender device ID
+  string sender_device_id = 10;
+
+  // Timestamp
+  int64 timestamp = 11;
+
+  // Reserved for future signaling types
+  reserved 12 to 20;
+}
+
+// CallOffer - WebRTC SDP offer
+message CallOffer {
+  // SDP (Session Description Protocol)
+  // Contains: media types, codecs, encryption keys
+  string sdp = 1;
+
+  // Call type
+  CallType call_type = 2;
+
+  // Caller's device ID
+  string caller_device_id = 3;
+
+  // Caller's user ID
+  string caller_user_id = 4;
+
+  // Offer timestamp
+  int64 offered_at = 5;
+
+  // ICE username fragment (for STUN/TURN)
+  optional string ice_ufrag = 6;
+
+  // ICE password (for STUN/TURN)
+  optional string ice_pwd = 7;
+
+  // Reserved for future features
+  reserved 8 to 15;
+}
+
+// CallAnswer - WebRTC SDP answer
+message CallAnswer {
+  // SDP answer (response to offer)
+  string sdp = 1;
+
+  // Answerer's device ID
+  string answerer_device_id = 2;
+
+  // Answerer's user ID
+  string answerer_user_id = 3;
+
+  // Answer timestamp
+  int64 answered_at = 4;
+
+  // ICE username fragment
+  optional string ice_ufrag = 5;
+
+  // ICE password
+  optional string ice_pwd = 6;
+
+  // Reserved for future features
+  reserved 7 to 15;
+}
+
+// IceCandidate - ICE candidate for P2P connection
+// Represents a potential network path (IP:port + protocol)
+message IceCandidate {
+  // SDP media line index (which m= line this applies to)
+  uint32 sdp_m_line_index = 1;
+
+  // SDP MID (media stream identification)
+  string sdp_mid = 2;
+
+  // Candidate SDP string
+  // Example: "candidate:1 1 UDP 2130706431 192.168.1.5 54321 typ host"
+  string candidate = 3;
+
+  // Username fragment (authentication)
+  optional string username_fragment = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// IceCandidateBatch - Multiple ICE candidates (optimization)
+message IceCandidateBatch {
+  // Batch of ICE candidates
+  repeated IceCandidate candidates = 1;
+
+  // Batch timestamp
+  int64 timestamp = 2;
+}
+
+// CallHangup - End call
+message CallHangup {
+  // Hangup reason
+  HangupReason reason = 1;
+
+  // Hangup device ID
+  string device_id = 2;
+
+  // Hangup timestamp
+  int64 hangup_at = 3;
+
+  // Optional message (e.g., "Poor connection")
+  optional string message = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// HangupReason - Why call ended
+enum HangupReason {
+  // Unspecified reason (must be 0)
+  HANGUP_REASON_UNSPECIFIED = 0;
+
+  // Normal hangup (user ended call)
+  HANGUP_REASON_NORMAL = 1;
+
+  // Busy (recipient busy)
+  HANGUP_REASON_BUSY = 2;
+
+  // Declined (recipient rejected)
+  HANGUP_REASON_DECLINED = 3;
+
+  // Timeout (no answer)
+  HANGUP_REASON_TIMEOUT = 4;
+
+  // Connection failed (network error)
+  HANGUP_REASON_CONNECTION_FAILED = 5;
+
+  // Accepted elsewhere (multi-device)
+  HANGUP_REASON_ACCEPTED_ELSEWHERE = 6;
+
+  // Reserved for future reasons
+  reserved 7 to 15;
+}
+
+// CallBusy - Recipient is busy
+message CallBusy {
+  // Busy device ID
+  string device_id = 1;
+
+  // Busy timestamp
+  int64 busy_at = 2;
+}
+
+// CallRinging - Call is ringing on recipient device
+message CallRinging {
+  // Ringing device ID
+  string device_id = 1;
+
+  // Ringing timestamp
+  int64 ringing_at = 2;
+}
+
+// MediaUpdate - Update media streams during call
+message MediaUpdate {
+  // Update type
+  MediaUpdateType update_type = 1;
+
+  // Media type affected
+  MediaType media_type = 2;
+
+  // Enabled or disabled?
+  bool enabled = 3;
+
+  // Updated SDP (if re-negotiation needed)
+  optional string sdp = 4;
+
+  // Timestamp
+  int64 updated_at = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// MediaUpdateType - Type of media update
+enum MediaUpdateType {
+  // Unspecified update (must be 0)
+  MEDIA_UPDATE_TYPE_UNSPECIFIED = 0;
+
+  // Add media stream
+  MEDIA_UPDATE_TYPE_ADD = 1;
+
+  // Remove media stream
+  MEDIA_UPDATE_TYPE_REMOVE = 2;
+
+  // Mute/unmute
+  MEDIA_UPDATE_TYPE_MUTE = 3;
+
+  // Reserved for future types
+  reserved 4 to 15;
+}
+
+// MediaType - Type of media stream
+enum MediaType {
+  // Unspecified media (must be 0)
+  MEDIA_TYPE_UNSPECIFIED = 0;
+
+  // Audio stream
+  MEDIA_TYPE_AUDIO = 1;
+
+  // Video stream (camera)
+  MEDIA_TYPE_VIDEO = 2;
+
+  // Screen share
+  MEDIA_TYPE_SCREEN = 3;
+
+  // Data channel (non-media)
+  MEDIA_TYPE_DATA = 4;
+
+  // Reserved for future types
+  reserved 5 to 15;
+}
+
+// CallType - Type of call
+enum CallType {
+  // Unspecified call type (must be 0)
+  CALL_TYPE_UNSPECIFIED = 0;
+
+  // Audio-only call
+  CALL_TYPE_AUDIO = 1;
+
+  // Video call
+  CALL_TYPE_VIDEO = 2;
+
+  // Screen share
+  CALL_TYPE_SCREEN = 3;
+
+  // Group call (multi-party)
+  CALL_TYPE_GROUP = 4;
+
+  // Reserved for future types
+  reserved 5 to 15;
+}
+
+// CallState - Current state of a call
+message CallState {
+  // Call ID
+  string call_id = 1;
+
+  // Current state
+  CallStatus status = 2;
+
+  // Participants
+  repeated CallParticipant participants = 3;
+
+  // Call start time (when answered)
+  optional int64 started_at = 4;
+
+  // Call end time (when hung up)
+  optional int64 ended_at = 5;
+
+  // Duration in seconds
+  optional uint32 duration_seconds = 6;
+
+  // Reserved for future features
+  reserved 7 to 15;
+}
+
+// CallStatus - Call state
+enum CallStatus {
+  // Unspecified status (must be 0)
+  CALL_STATUS_UNSPECIFIED = 0;
+
+  // Call initiated (offer sent)
+  CALL_STATUS_INITIATED = 1;
+
+  // Ringing (recipient alerted)
+  CALL_STATUS_RINGING = 2;
+
+  // Active (call in progress)
+  CALL_STATUS_ACTIVE = 3;
+
+  // Ended (call finished)
+  CALL_STATUS_ENDED = 4;
+
+  // Reserved for future statuses
+  reserved 5 to 15;
+}
+
+// CallParticipant - Participant in a call
+message CallParticipant {
+  // User ID
+  string user_id = 1;
+
+  // Device ID
+  string device_id = 2;
+
+  // Joined timestamp
+  int64 joined_at = 3;
+
+  // Left timestamp (if applicable)
+  optional int64 left_at = 4;
+
+  // Audio enabled?
+  bool audio_enabled = 5;
+
+  // Video enabled?
+  bool video_enabled = 6;
+
+  // Screen sharing?
+  bool screen_sharing = 7;
+
+  // Reserved for future features
+  reserved 8 to 15;
+}
+
+// TurnCredentials - TURN server credentials (for NAT traversal)
+message TurnCredentials {
+  // TURN server URLs
+  repeated string urls = 1;
+
+  // Username
+  string username = 2;
+
+  // Password/credential
+  string credential = 3;
+
+  // Credential expiration
+  int64 expires_at = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}

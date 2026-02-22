@@ -1,0 +1,158 @@
+# ============================================================================
+# Construct Server - Test Environment
+# ============================================================================
+#
+# Docker Compose configuration for running integration tests.
+# Includes PostgreSQL, Redis, and Redpanda (Kafka-compatible).
+#
+# Usage:
+#   docker compose -f ops/docker-compose.test.yml up -d
+#   cargo test
+#   docker compose -f ops/docker-compose.test.yml down
+#
+# Or use Makefile:
+#   make test-env-up
+#   make test
+#   make test-env-down
+#
+# ============================================================================
+
+services:
+  # ==========================================================================
+  # PostgreSQL - Database
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-test-db
+    environment:
+      POSTGRES_USER: construct_test
+      POSTGRES_PASSWORD: construct_test_password
+      POSTGRES_DB: construct_test
+    ports:
+      - "5433:5432" # Different port to avoid conflict with dev database
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+      - ../shared/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - construct-test-network
+
+  # ==========================================================================
+  # Redis - Cache and Pub/Sub
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: construct-test-redis
+    ports:
+      - "6380:6379" # Different port to avoid conflict with dev Redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - construct-test-network
+
+  # ==========================================================================
+  # Redpanda - Kafka-compatible Message Broker
+  # ==========================================================================
+  redpanda:
+    image: redpandadata/redpanda:v24.1.1
+    container_name: construct-test-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9093:9092" # Kafka API (different port to avoid conflict)
+      - "8082:8081" # Admin API
+    volumes:
+      - redpanda_test_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - construct-test-network
+
+  # ==========================================================================
+  # Redpanda Console (Optional - for debugging)
+  # ==========================================================================
+  # redpanda-console:
+  #   image: redpandadata/console:latest
+  #   container_name: construct-test-console
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     KAFKA_BROKERS: redpanda:9092
+  #   depends_on:
+  #     - redpanda
+  #   networks:
+  #     - construct-test-network
+
+  # ==========================================================================
+  # Delivery Worker - Message delivery (for E2E tests)
+  # ==========================================================================
+  delivery-worker:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-test-delivery-worker
+    command: ["delivery-worker"]
+    environment:
+      DATABASE_URL: "postgresql://construct_test:construct_test_password@postgres:5432/construct_test"
+      REDIS_URL: "redis://redis:6379"
+      JWT_ISSUER: "construct-server-test"
+      LOG_HASH_SALT: "test_salt_not_for_production_12345678"
+      ONLINE_CHANNEL: "user:online"
+      DELIVERY_QUEUE_PREFIX: "messages"
+      OFFLINE_QUEUE_PREFIX: "offline"
+      KAFKA_ENABLED: "true"
+      KAFKA_BROKERS: "redpanda:9092"
+      KAFKA_TOPIC: "construct-messages"
+      KAFKA_CONSUMER_GROUP: "delivery-workers-test"
+      KAFKA_SSL_ENABLED: "false"
+      RUST_LOG: "info,sqlx=warn,rdkafka=warn"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - construct-test-network
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  postgres_test_data:
+    name: construct_test_postgres_data
+  redis_test_data:
+    name: construct_test_redis_data
+  redpanda_test_data:
+    name: construct_test_redpanda_data
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  construct-test-network:
+    name: construct-test-network
+    driver: bridge

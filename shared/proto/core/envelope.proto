@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package shared.proto.core.v1;
+
+import "core/identity.proto";
+
+// Envelope - Universal message container
+// Wraps all message types (text, media, E2EE, MLS, WebRTC signaling)
+// Server only sees this outer envelope, content is encrypted
+message Envelope {
+  // === Core Identity (fields 1-5, common, 1-byte encoding) ===
+
+  // Sender identity
+  UserId sender = 1;
+  DeviceId sender_device = 2;
+
+  // Recipient identity
+  UserId recipient = 3;
+  optional DeviceId recipient_device = 4;
+
+  // Content type (determines payload interpretation)
+  ContentType content_type = 5;
+
+  // === Message Identification (fields 6-10) ===
+
+  // Message ID (for 1-to-1 direct messages)
+  // For group messages, use group_message_id instead
+  // This is a oneof to avoid ambiguity
+  oneof message_id_type {
+    // Direct message ID (UUID v4)
+    // Example: "550e8400-e29b-41d4-a716-446655440000"
+    string message_id = 6;
+
+    // Group message ID (MLS composite)
+    // Example: "abc123:5:2:42" (group_id:epoch:sender:generation)
+    GroupMessageId group_message_id = 21; // MOVED TO FIELD 21 (2-byte)
+  }
+
+  // Server timestamp (rounded to 5-second buckets for privacy)
+  // Prevents server from learning precise message timing
+  // For precise timestamps, see encrypted_metadata
+  int64 timestamp = 7;
+
+  // TTL (time-to-live) in seconds
+  // Server deletes message after TTL expires (0 = no expiration)
+  uint32 ttl = 8;
+
+  // Priority (for delivery ordering)
+  MessagePriority priority = 9;
+
+  // === Encrypted Payload (field 10) ===
+
+  // Encrypted message content
+  // Encryption depends on content_type:
+  // - E2EE_SIGNAL: Signal Protocol encrypted
+  // - E2EE_MLS: MLS encrypted
+  // - WEBRTC_SIGNAL: May be plaintext (SDP/ICE)
+  bytes encrypted_payload = 10;
+
+  // === Routing & Metadata (fields 11-15) ===
+
+  // Conversation ID (1-to-1 or group)
+  // Format: "direct:{user1}:{user2}" or "group:{group_id}"
+  string conversation_id = 11;
+
+  // Server-assigned metadata (added by server, read-only for clients)
+  ServerMetadata server_metadata = 12;
+
+  // Client-provided metadata (optional)
+  optional ClientMetadata client_metadata = 13;
+
+  // Forwarding chain (for sealed sender)
+  // Each hop appends its server ID
+  repeated string forwarding_path = 14;
+
+  // Reserved for future common fields
+  reserved 15;
+
+  // === Advanced Features (fields 16-50, rare, 2-byte encoding) ===
+
+  // Ephemeral message (disappears after reading)
+  optional uint32 ephemeral_seconds = 16;
+
+  // Reply to message ID (for threading)
+  optional string reply_to_message_id = 17;
+
+  // Edit of message ID (for message editing)
+  optional string edits_message_id = 18;
+
+  // Reactions (emoji reactions to this message)
+  repeated Reaction reactions = 19;
+
+  // Mentions (user IDs mentioned in message)
+  repeated string mentions = 20;
+
+  // Group message ID moved to field 21 (in oneof above)
+
+  // Reserved for future features
+  reserved 22 to 50;
+
+  // === Reserved for Extensions (fields 51-100) ===
+
+  // Federation routing (future)
+  reserved 51 to 60;
+
+  // Sealed sender metadata (future)
+  reserved 61 to 70;
+
+  // Compliance & audit (future)
+  reserved 71 to 80;
+
+  // Custom extensions (enterprise)
+  reserved 81 to 100;
+}
+
+// ContentType - Type of message content
+enum ContentType {
+  // Unscpecified content type (must be 0)
+  CONTENT_TYPE_UNSPECITIED = 0;
+
+  // === E2EE Messages ===
+
+  // Signal Protocol E2EE message (1-to-1)
+  CONTENT_TYPE_E2EE_SIGNAL = 1;
+
+  // MLS E2EE message (group)
+  CONTENT_TYPE_E2EE_MLS = 2;
+
+  // === Signaling ===
+
+  // WebRTC signaling (SDP, ICE candidates)
+  CONTENT_TYPE_WEBRTC_SIGNAL = 10;
+
+  // Presence updates (typing, online, receipts)
+  CONTENT_TYPE_PRESENCE = 11;
+
+  // === Control Messages ===
+
+  // Key exchange initiation (X3DH handshake)
+  CONTENT_TYPE_KEY_EXCHANGE = 20;
+
+  // Session reset request
+  CONTENT_TYPE_SESSION_RESET = 21;
+
+  // Reserved for future types
+  reserved 3 to 9, 12 to 19, 22 to 100;
+}
+
+// MessagePriority - Delivery priority
+enum MessagePriority {
+  // Normal priority (default)
+  MESSAGE_PRIORITY_NORMAL = 0;
+
+  // High priority (typing indicators, receipts)
+  MESSAGE_PRIORITY_HIGH = 1;
+
+  // Critical priority (calls, security alerts)
+  MESSAGE_PRIORITY_CRITICAL = 2;
+
+  // Low priority (bulk messages, analytics)
+  MESSAGE_PRIORITY_LOW = 3;
+}
+
+// ServerMetadata - Server-assigned metadata
+// Read-only for clients, set by server during routing
+message ServerMetadata {
+  // Server-assigned message number (sequential per user inbox)
+  // Used for pagination and ordering
+  uint64 message_number = 1;
+
+  // Server receive timestamp (audit trail)
+  // Precise timestamp when server received message
+  int64 server_timestamp = 2;
+
+  // Delivery attempts (for debugging)
+  // Incremented on each delivery retry
+  uint32 delivery_attempts = 3;
+
+  // Server ID that processed this message (for debugging)
+  optional string processing_server_id = 4;
+
+  // Encrypted metadata (for premium privacy users)
+  // Contains: precise_timestamp, delivery_hops, processing_time_ms
+  // Encrypted with recipient's metadata key (derived from Signal session)
+  // See EncryptedMetadataContent for decrypted structure
+  optional bytes encrypted_metadata = 5;
+
+  // Reserved for future server metadata
+  reserved 6 to 10;
+}
+
+// EncryptedMetadataContent - Decrypted content of encrypted_metadata
+// This is NOT transmitted in proto, but documented for client implementation
+message EncryptedMetadataContent {
+  // Actual (non-rounded) timestamp
+  // Precise timestamp before 5-second rounding
+  int64 precise_timestamp = 1;
+
+  // Delivery path (for debugging)
+  // List of server hops: ["server-1", "server-2", "gateway"]
+  repeated string delivery_hops = 2;
+
+  // Server processing time in milliseconds
+  // Useful for performance monitoring
+  uint32 processing_time_ms = 3;
+
+  // Reserved for future encrypted metadata
+  reserved 4 to 10;
+}
+
+// ClientMetadata - Optional client-provided metadata
+message ClientMetadata {
+  // Client-generated timestamp (may differ from server_timestamp)
+  int64 client_timestamp = 1;
+
+  // Client version (for debugging)
+  // Example: "construct-ios/1.2.3"
+  optional string client_version = 2;
+
+  // Correlation ID (for request tracing)
+  optional string correlation_id = 3;
+
+  // Reserved for future client metadata
+  reserved 4 to 10;
+}
+
+// GroupMessageId - Composite message ID for MLS groups
+// Prevents message ID conflicts in multi-sender groups
+message GroupMessageId {
+  // Group ID (unique group identifier)
+  bytes group_id = 1;
+
+  // MLS epoch (increments on group membership changes)
+  uint64 epoch = 2;
+
+  // Sender index in group roster (0-based)
+  // Deterministic ordering within epoch
+  uint32 sender_index = 3;
+
+  // Generation number (sequential per sender in epoch)
+  // Sender's message counter within current epoch
+  uint64 generation = 4;
+
+  // Composite ID string (for logging/debugging)
+  // Format: "group_id:epoch:sender:generation"
+  // Example: "abc123:5:2:42"
+  // This is computed, not transmitted
+}
+
+// Reaction - Emoji reaction to a message
+message Reaction {
+  // Reactor's user ID
+  string user_id = 1;
+
+  // Emoji unicode (UTF-8)
+  // Example: "👍", "❤️", "😂"
+  string emoji = 2;
+
+  // Reaction timestamp
+  int64 timestamp = 3;
+}

@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # API GATEWAY (Load Balancer + Reverse Proxy)
+  # ============================================================================
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile
+      target: gateway
+    container_name: construct-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - MICROSERVICES_ENABLED=true
+      - AUTH_SERVICE_URL=http://core.internal:8001
+      - USER_SERVICE_URL=http://core.internal:8002
+      - NOTIFICATION_SERVICE_URL=http://core.internal:8003
+      - MESSAGING_SERVICE_URL=http://message.internal:8004
+      - MEDIA_SERVICE_URL=${MEDIA_SERVICE_URL}
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - JWT_SECRET=${JWT_SECRET}
+      - LOG_LEVEL=info
+    volumes:
+      - ./certs:/etc/ssl/certs:ro
+    depends_on:
+      - caddy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Caddy for SSL termination and load balancing
+  caddy:
+    image: caddy:2-alpine
+    container_name: construct-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

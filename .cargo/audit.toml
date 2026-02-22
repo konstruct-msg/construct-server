@@ -1,0 +1,23 @@
+# Security audit configuration
+# See: https://rustsec.org/
+
+[advisories]
+# Vulnerabilities to ignore (with justification)
+ignore = [
+    # RUSTSEC-2023-0071: rsa 0.9.9 - Marvin Attack timing sidechannel
+    # Status: No fix available
+    # Risk: LOW - pulled in by sqlx-mysql, we use PostgreSQL only
+    # Action: Monitor for updates monthly
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2024-0436: paste - proc-macro denial of service
+    # Status: No fix available (crate unmaintained)
+    # Risk: LOW - build-time only, doesn't affect runtime security
+    # Impact: Potential infinite loop during compilation
+    # Mitigation: We use specific version pinned by dependencies
+    # Action: Monitor for maintained alternative or upstream fix
+    "RUSTSEC-2024-0436",
+]
+
+# Don't fail on unmaintained crates (just warn)
+informational_warnings = ["unmaintained"]

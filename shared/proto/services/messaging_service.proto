@@ -1,0 +1,351 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "core/crypto.proto";
+import "core/envelope.proto";
+import "core/identity.proto";
+import "core/pagination.proto";
+import "messaging/content.proto";
+import "signaling/presence.proto";
+
+// MessagingService - Core messaging gRPC service
+// Handles sending, receiving, and querying messages
+service MessagingService {
+  // === Bidirectional Streaming (Primary API) ===
+
+  // MessageStream - Bidirectional message stream
+  // Client sends messages, server pushes incoming messages
+  // Long-lived connection for real-time messaging
+  rpc MessageStream(stream MessageStreamRequest) returns (stream MessageStreamResponse);
+
+  // === Unary RPCs ===
+
+  // SendMessage - Send single message (alternative to stream)
+  // Use for one-off messages, prefer MessageStream for active sessions
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // EditMessage - Edit existing message (FUTURE - append-only revisions)
+  // Not implemented yet - reserved for future append-only edit chain
+  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
+
+  // =========================================================================
+  // Reactions (Future Implementation)
+  // =========================================================================
+
+  // AddReaction - Add emoji reaction to message
+  // Encrypted: reaction is E2EE, server only sees message_id
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+
+  // RemoveReaction - Remove reaction from message
+  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
+
+}
+
+// MessageStreamRequest - Client -> Server in bidirectional stream
+message MessageStreamRequest {
+  // Request type (determines which field is populated)
+  oneof request {
+    // Send message
+    shared.proto.core.v1.Envelope send = 1;
+
+    // Send receipt
+    shared.proto.signaling.v1.DeliveryReceipt receipt = 2;
+
+    // Typing indicator
+    shared.proto.signaling.v1.TypingIndicator typing = 3;
+
+    // Subscribe to conversations (request push for these)
+    SubscribeRequest subscribe = 4;
+
+    // Unsubscribe from conversations
+    UnsubscribeRequest unsubscribe = 5;
+
+    // Heartbeat/keepalive
+    Heartbeat heartbeat = 6;
+  }
+
+  // Request ID (for correlation)
+  string request_id = 10;
+
+  // Reserved for future request types
+  reserved 7 to 9, 11 to 20;
+}
+
+// MessageStreamResponse - Server -> Client in bidirectional stream
+message MessageStreamResponse {
+  // Response type (determines which field is populated)
+  oneof response {
+    // Incoming message
+    shared.proto.core.v1.Envelope message = 1;
+
+    // Incoming receipt
+    shared.proto.signaling.v1.DeliveryReceipt receipt = 2;
+
+    // Typing indicator from other user
+    shared.proto.signaling.v1.TypingIndicator typing = 3;
+
+    // Message sent acknowledgment
+    MessageAck ack = 4;
+
+    // Message send failed
+    MessageError error = 5;
+
+    // Presence update (user online/offline)
+    shared.proto.signaling.v1.PresenceUpdate presence = 6;
+
+    // Heartbeat response
+    HeartbeatAck heartbeat_ack = 7;
+  }
+
+  // Response ID (correlates to request_id)
+  optional string response_id = 10;
+
+  // Reserved for future response types
+  reserved 8 to 9, 11 to 20;
+}
+
+// SubscribeRequest - Subscribe to conversation updates
+message SubscribeRequest {
+  // Conversation IDs to subscribe to
+  repeated string conversation_ids = 1;
+
+  // Subscribe to presence updates for these users?
+  bool include_presence = 2;
+}
+
+// UnsubscribeRequest - Unsubscribe from conversation updates
+message UnsubscribeRequest {
+  // Conversation IDs to unsubscribe from
+  repeated string conversation_ids = 1;
+}
+
+// Heartbeat - Keepalive ping
+message Heartbeat {
+  // Timestamp
+  int64 timestamp = 1;
+}
+
+// HeartbeatAck - Keepalive pong
+message HeartbeatAck {
+  // Echo timestamp
+  int64 timestamp = 1;
+
+  // Server timestamp
+  int64 server_timestamp = 2;
+}
+
+// MessageAck - Message successfully sent
+message MessageAck {
+  // Original message ID
+  string message_id = 1;
+
+  // Server-assigned message number
+  uint64 message_number = 2;
+
+  // Server timestamp
+  int64 server_timestamp = 3;
+
+  // Delivered to how many recipients/devices?
+  uint32 delivery_count = 4;
+}
+
+// MessageError - Message send failed
+message MessageError {
+  // Original message ID
+  string message_id = 1;
+
+  // Error code
+  ErrorCode error_code = 2;
+
+  // Error message (human-readable)
+  string error_message = 3;
+
+  // Retry allowed?
+  bool retryable = 4;
+}
+
+// ErrorCode - Message error codes
+enum ErrorCode {
+  // Unspecified error (must be 0)
+  ERROR_CODE_UNSPECIFIED = 0;
+
+  // Recipient not found
+  ERROR_CODE_RECIPIENT_NOT_FOUND = 1;
+
+  // Recipient blocked sender
+  ERROR_CODE_BLOCKED = 2;
+
+  // Rate limit exceeded
+  ERROR_CODE_RATE_LIMIT = 3;
+
+  // Message too large
+  ERROR_CODE_TOO_LARGE = 4;
+
+  // Invalid encryption (E2EE failed)
+  ERROR_CODE_ENCRYPTION_FAILED = 5;
+
+  // Recipient offline (no push token)
+  ERROR_CODE_OFFLINE = 6;
+
+  // Reserved for future errors
+  reserved 7 to 20;
+}
+
+// SendMessageRequest - Send single message (unary RPC)
+message SendMessageRequest {
+  // Message envelope
+  shared.proto.core.v1.Envelope message = 1;
+
+  // Idempotency key (prevent duplicate sends)
+  optional string idempotency_key = 2;
+
+  // Reserved for future features
+  reserved 3 to 10;
+}
+
+// SendMessageResponse - Send message response
+message SendMessageResponse {
+  // Message ID (echo back)
+  string message_id = 1;
+
+  // Server-assigned message number
+  uint64 message_number = 2;
+
+  // Server timestamp
+  int64 server_timestamp = 3;
+
+  // Success
+  bool success = 4;
+
+  // Error (if failed)
+  optional MessageError error = 5;
+}
+
+
+// EditMessageRequest - Edit message
+message EditMessageRequest {
+  // Message ID to edit
+  string message_id = 1;
+
+  // Conversation ID
+  string conversation_id = 2;
+
+  // New content (encrypted)
+  bytes new_encrypted_content = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
+}
+
+// EditMessageResponse - Edit confirmation
+message EditMessageResponse {
+  // Success
+  bool success = 1;
+
+  // Edited timestamp
+  int64 edited_at = 2;
+
+  // Edit count
+  uint32 edit_count = 3;
+}
+
+// ============================================================================
+// Reaction Messages
+// ============================================================================
+
+// AddReactionRequest - Add reaction to message
+message AddReactionRequest {
+  // Message ID to react to
+  string message_id = 1;
+
+  // Conversation ID (for routing)
+  string conversation_id = 2;
+
+  // Encrypted reaction (E2EE blob)
+  // Contains: emoji, timestamp, sender info
+  // Encrypted with conversation key
+  bytes encrypted_reaction = 3;
+
+  // Reaction ID (client-generated UUID for deduplication)
+  string reaction_id = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// AddReactionResponse - Reaction added confirmation
+message AddReactionResponse {
+  // Success
+  bool success = 1;
+
+  // Server timestamp
+  int64 reacted_at = 2;
+
+  // Reaction ID (echo back)
+  string reaction_id = 3;
+
+  // Error if failed
+  optional MessageError error = 4;
+}
+
+// RemoveReactionRequest - Remove reaction from message
+message RemoveReactionRequest {
+  // Message ID
+  string message_id = 1;
+
+  // Conversation ID
+  string conversation_id = 2;
+
+  // Reaction ID to remove
+  string reaction_id = 3;
+
+  // Reserved for future options
+  reserved 4 to 10;
+}
+
+// RemoveReactionResponse - Reaction removed confirmation
+message RemoveReactionResponse {
+  // Success
+  bool success = 1;
+
+  // Removal timestamp
+  int64 removed_at = 2;
+}
+
+// ReactionEvent - Reaction notification (via MessageStream)
+// Sent to other participants when someone reacts
+message ReactionEvent {
+  // Reaction added or removed?
+  ReactionEventType event_type = 1;
+
+  // Message ID that was reacted to
+  string message_id = 2;
+
+  // Conversation ID
+  string conversation_id = 3;
+
+  // Encrypted reaction (for ADD events)
+  optional bytes encrypted_reaction = 4;
+
+  // Reaction ID
+  string reaction_id = 5;
+
+  // Event timestamp
+  int64 timestamp = 6;
+
+  // Sender device ID (for multi-device sync)
+  string sender_device_id = 7;
+}
+
+// ReactionEventType - Type of reaction event
+enum ReactionEventType {
+  // Unspecified (must be 0)
+  REACTION_EVENT_TYPE_UNSPECIFIED = 0;
+
+  // Reaction added
+  REACTION_EVENT_TYPE_ADDED = 1;
+
+  // Reaction removed
+  REACTION_EVENT_TYPE_REMOVED = 2;
+}

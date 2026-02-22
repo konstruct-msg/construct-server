@@ -1,0 +1,450 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "core/crypto.proto";
+import "core/identity.proto";
+
+// AuthService - Authentication & session management
+service AuthService {
+  // GetPoWChallenge - Anti-spam challenge for device registration
+  rpc GetPowChallenge(GetPowChallengeRequest) returns (GetPowChallengeResponse);
+
+  // RegisterDevice - Passwordless device registration
+  rpc RegisterDevice(RegisterDeviceRequest) returns (AuthTokensResponse);
+
+  // AuthenticateDevice - Passwordless device authentication
+  rpc AuthenticateDevice(AuthenticateDeviceRequest) returns (AuthTokensResponse);
+
+  // RefreshToken - Refresh access token
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+
+  // VerifyToken - Validate access token
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // Logout - Revoke session tokens
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // =========================================================================
+  // Account Recovery (Seed Phrase)
+  // =========================================================================
+
+  // SetRecoveryKey - Set recovery public key (derived from seed phrase)
+  // Called once during initial setup, cannot be changed later
+  // Recovery key = Ed25519 public key derived from BIP39 seed
+  rpc SetRecoveryKey(SetRecoveryKeyRequest) returns (SetRecoveryKeyResponse);
+
+  // GetRecoveryStatus - Check if recovery is set up for account
+  // Called on app startup to show recovery setup prompt if needed
+  rpc GetRecoveryStatus(GetRecoveryStatusRequest) returns (GetRecoveryStatusResponse);
+
+  // RecoverAccount - Recover account using seed phrase
+  // Proves ownership by signing challenge with recovery key
+  // Creates new device, revokes all existing sessions
+  rpc RecoverAccount(RecoverAccountRequest) returns (RecoverAccountResponse);
+}
+
+// DeviceService - Device management
+service DeviceService {
+  // ListDevices - List all devices for current user
+  rpc ListDevices(ListDevicesRequest) returns (stream DeviceInfo);
+
+  // RevokeDevice - Revoke device (logout remotely)
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  // UpdatePushToken - Update push notification token
+  rpc UpdatePushToken(UpdatePushTokenRequest) returns (UpdatePushTokenResponse);
+
+  // VerifyDevice - Verify device (2FA)
+  rpc VerifyDevice(VerifyDeviceRequest) returns (VerifyDeviceResponse);
+
+  // GetDeviceInfo - Get specific device details
+  rpc GetDeviceInfo(GetDeviceInfoRequest) returns (DeviceInfo);
+}
+
+// === AuthService Messages ===
+
+message GetPowChallengeRequest {}
+
+message GetPowChallengeResponse {
+  string challenge = 1;
+  uint32 difficulty = 2;
+  int64 expires_at = 3;
+}
+
+message DevicePublicKeys {
+  string verifying_key = 1;
+  string identity_public = 2;
+  string signed_prekey_public = 3;
+  string signed_prekey_signature = 4;
+  string suite_id = 5;
+}
+
+message PowSolution {
+  string challenge = 1;
+  uint64 nonce = 2;
+  string hash = 3;
+}
+
+message RegisterDeviceRequest {
+  optional string username = 1;
+  string device_id = 2;
+  DevicePublicKeys public_keys = 3;
+  PowSolution pow_solution = 4;
+}
+
+message AuthenticateDeviceRequest {
+  string device_id = 1;
+  int64 timestamp = 2;
+  string signature = 3;
+}
+
+message AuthTokensResponse {
+  string user_id = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+  int64 expires_at = 4;
+}
+
+// RefreshTokenRequest - Refresh access token
+message RefreshTokenRequest {
+  // Refresh token
+  string refresh_token = 1;
+
+  // Device ID
+  string device_id = 2;
+}
+
+// RefreshTokenResponse - New access token
+message RefreshTokenResponse {
+  // New access token
+  string access_token = 1;
+
+  // New refresh token (optional, may rotate)
+  optional string refresh_token = 2;
+
+  // Token expiration
+  int64 expires_at = 3;
+}
+
+// VerifyTokenRequest - Validate token
+message VerifyTokenRequest {
+  // Access token to verify
+  string access_token = 1;
+}
+
+// VerifyTokenResponse - Token validation result
+message VerifyTokenResponse {
+  // Valid?
+  bool valid = 1;
+
+  // User ID (if valid)
+  optional string user_id = 2;
+
+  // Device ID (if valid)
+  optional string device_id = 3;
+
+  // Expiration timestamp
+  optional int64 expires_at = 4;
+}
+
+message LogoutRequest {
+  string access_token = 1;
+  bool all_devices = 2;
+}
+
+message LogoutResponse {
+  bool success = 1;
+}
+
+// === DeviceService Messages ===
+
+// ListDevicesRequest - List user's devices
+message ListDevicesRequest {
+  // Optional: filter by platform
+  optional shared.proto.core.v1.DevicePlatform platform = 1;
+}
+
+// DeviceInfo - Device information
+message DeviceInfo {
+  // Device ID
+  shared.proto.core.v1.DeviceId device = 1;
+
+  // Device name (user-set)
+  string device_name = 2;
+
+  // Platform
+  shared.proto.core.v1.DevicePlatform platform = 3;
+
+  // Last seen timestamp
+  int64 last_seen = 4;
+
+  // Created timestamp
+  int64 created_at = 5;
+
+  // Push provider (if registered)
+  optional PushProvider push_provider = 6;
+
+  // Is this the current device?
+  bool is_current = 7;
+
+  // Device capabilities
+  uint32 capabilities = 8;
+
+  // Reserved for future features
+  reserved 9 to 15;
+}
+
+// RevokeDeviceRequest - Revoke device
+message RevokeDeviceRequest {
+  // Device ID to revoke
+  string device_id = 1;
+}
+
+// RevokeDeviceResponse - Revoke confirmation
+message RevokeDeviceResponse {
+  // Success
+  bool success = 1;
+
+  // Revoked device info
+  DeviceInfo revoked_device = 2;
+}
+
+// UpdatePushTokenRequest - Update push token
+message UpdatePushTokenRequest {
+  // Device ID
+  string device_id = 1;
+
+  // Push token (from APNS/FCM/HMS)
+  string push_token = 2;
+
+  // Push provider
+  PushProvider provider = 3;
+
+  // Environment (production/sandbox)
+  PushEnvironment environment = 4;
+}
+
+// UpdatePushTokenResponse - Update confirmation
+message UpdatePushTokenResponse {
+  // Success
+  bool success = 1;
+}
+
+// VerifyDeviceRequest - Verify device (2FA)
+message VerifyDeviceRequest {
+  // Device ID to verify
+  string device_id = 1;
+
+  // Verification code (SMS, email, etc.)
+  string verification_code = 2;
+}
+
+// VerifyDeviceResponse - Verification result
+message VerifyDeviceResponse {
+  // Verified?
+  bool verified = 1;
+}
+
+// GetDeviceInfoRequest - Get specific device info
+message GetDeviceInfoRequest {
+  // Device ID
+  string device_id = 1;
+}
+
+// PushProvider - Push notification provider
+enum PushProvider {
+  // Unspecified provider (must be 0)
+  PUSH_PROVIDER_UNSPECIFIED = 0;
+
+  // Apple Push Notification Service (iOS, macOS)
+  PUSH_PROVIDER_APNS = 1;
+
+  // Firebase Cloud Messaging (Android)
+  PUSH_PROVIDER_FCM = 2;
+
+  // Huawei Mobile Services (Huawei Android)
+  PUSH_PROVIDER_HMS = 3;
+
+  // Web Push (PWA)
+  PUSH_PROVIDER_WEBPUSH = 4;
+
+  // Reserved for future providers
+  reserved 5 to 15;
+}
+
+// PushEnvironment - Push environment
+enum PushEnvironment {
+  // Unspecified environment (must be 0)
+  PUSH_ENV_UNSPECIFIED = 0;
+
+  // Production
+  PUSH_ENV_PRODUCTION = 1;
+
+  // Sandbox (APNS development)
+  PUSH_ENV_SANDBOX = 2;
+}
+
+// ============================================================================
+// Account Recovery Messages
+// ============================================================================
+
+// SetRecoveryKeyRequest - Set up account recovery
+message SetRecoveryKeyRequest {
+  // Recovery public key (Ed25519, 32 bytes)
+  // Derived from BIP39 seed phrase on client
+  // Path: m/44'/0'/0'/0/0 or custom derivation
+  bytes recovery_public_key = 1;
+
+  // Signature proving possession of private key
+  // Signs: "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}"
+  bytes setup_signature = 2;
+
+  // Timestamp used in signature
+  int64 timestamp = 3;
+
+  // Optional: encrypted backup of key material
+  // Encrypted with key derived from seed, stored server-side
+  optional bytes encrypted_backup = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// SetRecoveryKeyResponse - Recovery setup confirmation
+message SetRecoveryKeyResponse {
+  // Success
+  bool success = 1;
+
+  // Recovery key fingerprint (for display)
+  string fingerprint = 2;
+
+  // Setup timestamp
+  int64 setup_at = 3;
+
+  // Error if failed
+  optional string error = 4;
+}
+
+// GetRecoveryStatusRequest - Check recovery status
+message GetRecoveryStatusRequest {
+  // User ID (from current auth token)
+  // Empty = check for authenticated user
+}
+
+// GetRecoveryStatusResponse - Recovery status
+message GetRecoveryStatusResponse {
+  // Is recovery set up?
+  bool is_setup = 1;
+
+  // Recovery key fingerprint (if set up)
+  optional string fingerprint = 2;
+
+  // When recovery was set up
+  optional int64 setup_at = 3;
+
+  // When recovery was last used (for security alert)
+  optional int64 last_used_at = 4;
+
+  // Has encrypted backup?
+  bool has_backup = 5;
+}
+
+// RecoverAccountRequest - Recover account with seed phrase
+message RecoverAccountRequest {
+  // Username or user ID to recover
+  string identifier = 1;
+
+  // Recovery challenge (obtained from GetRecoveryChallenge or embedded)
+  string challenge = 2;
+
+  // Signature over challenge using recovery private key
+  bytes recovery_signature = 3;
+
+  // New device registration (recovery creates new device)
+  NewDeviceForRecovery new_device = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// NewDeviceForRecovery - New device info during recovery
+message NewDeviceForRecovery {
+  // New device ID
+  string device_id = 1;
+
+  // Device public keys (same as RegisterDevice)
+  DevicePublicKeys public_keys = 2;
+
+  // Device name (e.g., "iPhone 15 Pro")
+  string device_name = 3;
+
+  // Platform
+  shared.proto.core.v1.DevicePlatform platform = 4;
+}
+
+// RecoverAccountResponse - Recovery result
+message RecoverAccountResponse {
+  // Success
+  bool success = 1;
+
+  // User ID (confirmed)
+  string user_id = 2;
+
+  // New auth tokens for recovered device
+  AuthTokensResponse tokens = 3;
+
+  // Number of devices revoked
+  uint32 devices_revoked = 4;
+
+  // Recovery timestamp
+  int64 recovered_at = 5;
+
+  // Warning messages (e.g., "All existing sessions terminated")
+  repeated string warnings = 6;
+
+  // Error if failed
+  optional RecoveryError error = 7;
+}
+
+// RecoveryError - Recovery failure reasons
+message RecoveryError {
+  // Error code
+  RecoveryErrorCode code = 1;
+
+  // Human-readable message
+  string message = 2;
+
+  // Retry allowed?
+  bool retryable = 3;
+
+  // Cooldown seconds (if rate limited)
+  optional int64 cooldown_seconds = 4;
+}
+
+// RecoveryErrorCode - Recovery error codes
+enum RecoveryErrorCode {
+  // Unspecified error (must be 0)
+  RECOVERY_ERROR_CODE_UNSPECIFIED = 0;
+
+  // Account not found
+  RECOVERY_ERROR_CODE_ACCOUNT_NOT_FOUND = 1;
+
+  // Recovery not set up for this account
+  RECOVERY_ERROR_CODE_NOT_SETUP = 2;
+
+  // Invalid signature (wrong seed phrase)
+  RECOVERY_ERROR_CODE_INVALID_SIGNATURE = 3;
+
+  // Challenge expired
+  RECOVERY_ERROR_CODE_CHALLENGE_EXPIRED = 4;
+
+  // Too many attempts (rate limited)
+  RECOVERY_ERROR_CODE_RATE_LIMITED = 5;
+
+  // Account locked (security hold)
+  RECOVERY_ERROR_CODE_ACCOUNT_LOCKED = 6;
+
+  // Reserved for future errors
+  reserved 7 to 15;
+}

@@ -1,0 +1,13 @@
+[package]
+name = "construct-metrics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Prometheus metrics for Construct server"
+
+[dependencies]
+anyhow = { workspace = true }
+once_cell = { workspace = true }
+prometheus = { workspace = true }

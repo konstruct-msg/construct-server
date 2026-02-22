@@ -1,0 +1,95 @@
+# ============================================================================
+# Fly.io Staging Deployment (Envoy + Multi-container)
+# ============================================================================
+
+.PHONY: staging-create staging-db staging-secrets staging-deploy staging-test staging-setup
+
+# Create app (one-time)
+staging-create:
+	@echo "🚀 Creating Fly.io staging app..."
+	@fly apps create construct-server-staging --org personal 2>/dev/null || echo "✓ App already exists"
+	@echo "✅ App: construct-server-staging"
+
+# Database setup instructions
+staging-db:
+	@echo "🗄️  Database Setup Options:"
+	@echo ""
+	@echo "Option 1: Fly Postgres (recommended, ~\$$5/mo)"
+	@echo "  fly postgres create --name construct-db-staging --region ams"
+	@echo "  fly postgres attach --app construct-server-staging construct-db-staging"
+	@echo ""
+	@echo "Option 2: Fly Redis (~\$$5/mo)"
+	@echo "  fly redis create --name construct-redis-staging --region ams"
+	@echo ""
+	@echo "Option 3: External (Upstash Redis, Neon Postgres)"
+	@echo "  Set DATABASE_URL and REDIS_URL manually via secrets"
+
+# Set secrets
+staging-secrets:
+	@if [ -z "$$DATABASE_URL" ]; then \
+		echo "❌ DATABASE_URL not set. Export it first:"; \
+		echo "   export DATABASE_URL=postgresql://user:pass@host:5432/db"; \
+		exit 1; \
+	fi
+	@if [ -z "$$REDIS_URL" ]; then \
+		echo "❌ REDIS_URL not set. Export it first:"; \
+		echo "   export REDIS_URL=redis://host:6379"; \
+		exit 1; \
+	fi
+	@JWT_SECRET=$${JWT_SECRET:-$$(openssl rand -base64 32)}; \
+	fly secrets set \
+		DATABASE_URL="$$DATABASE_URL" \
+		REDIS_URL="$$REDIS_URL" \
+		JWT_SECRET="$$JWT_SECRET" \
+		--app construct-server-staging
+	@echo "✅ Secrets configured"
+
+# Deploy to staging
+staging-deploy:
+	@echo "🚀 Deploying to Fly.io staging..."
+	@echo ""
+	@echo "Architecture: Envoy Proxy + 4 gRPC services"
+	@echo "  - Envoy (443) → path routing"
+	@echo "  - auth-service (50051)"
+	@echo "  - user-service (50052)"
+	@echo "  - messaging-service (50053)"
+	@echo "  - notification-service (50054)"
+	@echo ""
+	@cargo check --release --workspace --bins || (echo "❌ Build check failed!" && exit 1)
+	@echo "✓ Build check passed"
+	@fly deploy --config ops/fly.toml --app construct-server-staging --remote-only
+	@echo ""
+	@echo "✅ Deployed! Test with: make staging-test"
+
+# Test staging
+staging-test:
+	@echo "🧪 Testing staging deployment..."
+	@echo ""
+	@echo "1. Health check (.well-known):"
+	@curl -s https://construct-server-staging.fly.dev/.well-known/construct-server | jq . 2>/dev/null || echo "Failed"
+	@echo ""
+	@echo "2. gRPC services (requires grpcurl):"
+	@command -v grpcurl >/dev/null 2>&1 && \
+		grpcurl construct-server-staging.fly.dev:443 list || \
+		echo "⚠️  Install grpcurl: brew install grpcurl"
+	@echo ""
+	@echo "3. Fly status:"
+	@fly status --app construct-server-staging
+
+# Complete setup
+staging-setup:
+	@echo "🚀 Complete Staging Setup"
+	@echo ""
+	@echo "Step 1: Create app"
+	@$(MAKE) staging-create
+	@echo ""
+	@echo "Step 2: Setup databases"
+	@$(MAKE) staging-db
+	@echo ""
+	@echo "Step 3: Configure secrets"
+	@echo "  export DATABASE_URL=postgresql://..."
+	@echo "  export REDIS_URL=redis://..."
+	@echo "  make staging-secrets"
+	@echo ""
+	@echo "Step 4: Deploy"
+	@echo "  make staging-deploy"

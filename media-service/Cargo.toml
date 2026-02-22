@@ -1,0 +1,40 @@
+[package]
+name = "media-service"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "media-service"
+path = "src/main.rs"
+
+[dependencies]
+# Local crates
+construct-config = { path = "../crates/construct-config" }
+construct-server-shared = { path = "../shared" }
+
+# Workspace deps
+tokio = {workspace = true}
+anyhow = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
+dotenvy = {workspace = true}
+uuid = {workspace = true}
+chrono = {workspace = true}
+axum = {workspace = true}
+tower = {workspace = true}
+tower-http = {workspace = true}
+base64 = {workspace = true}
+hex = {workspace = true}
+sqlx = {workspace = true}
+
+# gRPC
+tonic = "0.14.2"
+tokio-stream = "0.1"
+
+# Media specific
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.6"
+rand = "0.8"

@@ -1,0 +1,254 @@
+syntax = "proto3";
+
+package shared.proto.signaling.v1;
+
+// Presence & Receipt Messages
+// Includes: delivery/read receipts, typing indicators, online status
+
+// PresenceUpdate - User online/offline status
+message PresenceUpdate {
+  // User ID
+  string user_id = 1;
+
+  // Online status
+  PresenceStatus status = 2;
+
+  // Status timestamp
+  int64 timestamp = 3;
+
+  // Last seen timestamp (if offline)
+  optional int64 last_seen = 4;
+
+  // Custom status message (optional)
+  optional string status_message = 5;
+
+  // Device ID (which device is online)
+  optional string device_id = 6;
+
+  // Reserved for future features
+  reserved 7 to 15;
+}
+
+// PresenceStatus - User availability
+enum PresenceStatus {
+  // Unknown status (must be 0)
+  PRESENCE_STATUS_UNSPECIFIED = 0;
+
+  // Online (active)
+  PRESENCE_STATUS_ONLINE = 1;
+
+  // Away (idle, no activity for 5+ minutes)
+  PRESENCE_STATUS_AWAY = 2;
+
+  // Busy (do not disturb)
+  PRESENCE_STATUS_BUSY = 3;
+
+  // Offline
+  PRESENCE_STATUS_OFFLINE = 4;
+
+  // Reserved for future statuses
+  reserved 5 to 15;
+}
+
+// TypingIndicator - User is typing
+message TypingIndicator {
+  // Conversation ID
+  string conversation_id = 1;
+
+  // User ID who is typing
+  string user_id = 2;
+
+  // Typing state
+  TypingState state = 3;
+
+  // Timestamp
+  int64 timestamp = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// TypingState - Typing activity
+enum TypingState {
+  // Unspecified state (must be 0)
+  TYPING_STATE_UNSPECIFIED = 0;
+
+  // Started typing
+  TYPING_STATE_STARTED = 1;
+
+  // Stopped typing
+  TYPING_STATE_STOPPED = 2;
+}
+
+// DeliveryReceipt - Message delivery/read receipt
+// Supports both 1-to-1 (DirectReceipt) and group (GroupReceipt)
+message DeliveryReceipt {
+  // Receipt type (determines which field is populated)
+  oneof receipt_type {
+    // Direct 1-to-1 receipt
+    DirectReceipt direct = 1;
+
+    // Group receipt (MLS)
+    GroupReceipt group = 2;
+  }
+
+  // Reserved for future receipt types
+  reserved 3 to 10;
+}
+
+// DirectReceipt - Receipt for 1-to-1 messages
+message DirectReceipt {
+  // Message IDs acknowledged (batch multiple receipts)
+  repeated string message_ids = 1;
+
+  // Receipt status (delivered, read, failed)
+  ReceiptStatus status = 2;
+
+  // Receipt timestamp
+  int64 timestamp = 3;
+
+  // Sender device ID (who sent this receipt)
+  string sender_device_id = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// GroupReceipt - Receipt for group messages
+message GroupReceipt {
+  // Group ID
+  bytes group_id = 1;
+
+  // MLS epoch (for message ordering)
+  uint64 epoch = 2;
+
+  // Message IDs (composite format: "group_id:epoch:sender:generation")
+  // Example: ["abc123:5:2:42", "abc123:5:2:43"]
+  repeated string message_ids = 3;
+
+  // Receipt status
+  ReceiptStatus status = 4;
+
+  // Who sent this receipt (sender_index in group)
+  uint32 sender_index = 5;
+
+  // Receipt timestamp
+  int64 timestamp = 6;
+
+  // Reserved for future features
+  reserved 7 to 10;
+}
+
+// ReceiptStatus - Receipt status
+enum ReceiptStatus {
+  // Unspecified status (must be 0)
+  RECEIPT_STATUS_UNSPECIFIED = 0;
+
+  // Message delivered to device
+  RECEIPT_STATUS_DELIVERED = 1;
+
+  // Message read by user
+  RECEIPT_STATUS_READ = 2;
+
+  // Message failed to deliver
+  RECEIPT_STATUS_FAILED = 3;
+
+  // Message played (for voice messages)
+  RECEIPT_STATUS_PLAYED = 4;
+
+  // Reserved for future statuses
+  reserved 5 to 15;
+}
+
+// ReadCursor - Marks last read message in conversation
+message ReadCursor {
+  // Conversation ID
+  string conversation_id = 1;
+
+  // Last read message ID
+  string last_read_message_id = 2;
+
+  // Last read timestamp
+  int64 last_read_timestamp = 3;
+
+  // User ID (who read)
+  string user_id = 4;
+
+  // Device ID
+  string device_id = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// PresenceSubscription - Subscribe to user's presence
+message PresenceSubscription {
+  // User IDs to subscribe to
+  repeated string user_ids = 1;
+
+  // Subscribe or unsubscribe?
+  bool subscribe = 2;
+
+  // Reserved for future features
+  reserved 3 to 10;
+}
+
+// PresenceBatch - Batch presence updates
+message PresenceBatch {
+  // Presence updates
+  repeated PresenceUpdate updates = 1;
+
+  // Batch timestamp
+  int64 timestamp = 2;
+}
+
+// TypingUsers - Active typists in a conversation
+message TypingUsers {
+  // Conversation ID
+  string conversation_id = 1;
+
+  // User IDs currently typing
+  repeated string user_ids = 2;
+
+  // Timestamp
+  int64 timestamp = 3;
+}
+
+// ActivityIndicator - Generic user activity
+message ActivityIndicator {
+  // User ID
+  string user_id = 1;
+
+  // Activity type
+  ActivityType activity = 2;
+
+  // Conversation ID (if applicable)
+  optional string conversation_id = 3;
+
+  // Timestamp
+  int64 timestamp = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// ActivityType - Type of user activity
+enum ActivityType {
+  // Unspecified activity (must be 0)
+  ACTIVITY_TYPE_UNSPECIFIED = 0;
+
+  // Typing
+  ACTIVITY_TYPE_TYPING = 1;
+
+  // Recording voice message
+  ACTIVITY_TYPE_RECORDING = 2;
+
+  // Uploading file
+  ACTIVITY_TYPE_UPLOADING = 3;
+
+  // Playing voice message
+  ACTIVITY_TYPE_PLAYING = 4;
+
+  // Reserved for future types
+  reserved 5 to 15;
+}

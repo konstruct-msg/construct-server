@@ -1,0 +1,91 @@
+[package]
+name = "construct-server-shared"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# New modular crates (Phase 4 + Phase 5)
+construct-types = { path = "../crates/construct-types" }
+construct-error = { path = "../crates/construct-error", features = ["full"] }
+construct-crypto = { path = "../crates/construct-crypto", features = ["full"] }
+construct-config = { path = "../crates/construct-config" }
+construct-redis = { path = "../crates/construct-redis" }
+construct-db = { path = "../crates/construct-db" }
+construct-metrics = { path = "../crates/construct-metrics" }
+crypto-agility = { path = "../crates/crypto-agility" }
+
+tokio = {workspace = true}
+anyhow = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
+dotenvy = {workspace = true}
+uuid = {workspace = true}
+chrono = {workspace = true}
+thiserror = {workspace = true}
+async-trait = {workspace = true}
+sqlx = {workspace = true}
+redis = {workspace = true}
+axum = {workspace = true}
+tower = {workspace = true}
+tower-http = {workspace = true}
+reqwest = {workspace = true}
+jsonwebtoken = {workspace = true}
+bcrypt = {workspace = true}
+base64 = {workspace = true}
+hex = {workspace = true}
+zeroize = {workspace = true}
+prometheus = {workspace = true}
+
+# Additional shared deps
+bytes = "1.8"
+futures-util = "0.3"
+futures-core = "0.3"
+once_cell = "1.21.3"
+
+# Crypto and security
+argon2 = "0.5"  # PoW with Argon2id
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
+# HTTP and gRPC
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+tonic = "0.14.4"
+tonic-prost = "0.14.4"  # Required for generated gRPC code
+prost = "0.14.3"
+bb8 = "0.9.1"
+bb8-tonic = "0.4.0"
+
+# Message formats
+serde_bytes = "0.11"
+rmp-serde = "1.3"
+
+# Kafka
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
+
+# APNs
+apns-h2 = "0.11.0-alpha.1"
+
+# Federation and TLS
+native-tls = "0.2.14"
+tokio-native-tls = "0.3.1"
+
+[features]
+default = []
+integration-tests = []
+
+[dev-dependencies]
+serial_test = "3.2"
+
+[build-dependencies]
+tonic-build = "0.14.4"
+prost-build = "0.14.3"
+tonic-prost-build = "0.14.4"

@@ -1,0 +1,50 @@
+# Caddyfile for federation test instance
+#
+# Caddy automatically provisions TLS certificates via Let's Encrypt
+# Make sure DNS A record points to this server's IP
+
+{$INSTANCE_DOMAIN} {
+    # WebSocket and HTTP API
+    handle /ws* {
+        reverse_proxy construct-server:8080
+    }
+    
+    # Federation endpoints
+    handle /.well-known/construct {
+        reverse_proxy construct-server:8080
+    }
+    
+    handle /federation/* {
+        reverse_proxy message-gateway:8080
+    }
+    
+    # Health check
+    handle /health {
+        reverse_proxy construct-server:8080
+    }
+    
+    # All other HTTP API
+    handle {
+        reverse_proxy construct-server:8080
+    }
+    
+    # Enable WebSocket upgrade
+    header {
+        # Security headers
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+    
+    # Logging
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# Health check endpoint (no TLS, internal only)
+:8081 {
+    respond /health "OK" 200
+}

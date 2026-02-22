@@ -1,0 +1,10 @@
+rpk:
+  kafka_api:
+    brokers:
+      - d5ohc4qn5b4at65p6360.any.eu-central-1.mpx.prd.cloud.redpanda.com:9092
+    tls:
+      enabled: true
+    sasl:
+      mechanism: SCRAM-SHA-256
+      user: CONSTRUCT_MESSENGER_BROKER
+      password: jDOE(-tOSFSktSLW)ll+k5nfUE1lEC

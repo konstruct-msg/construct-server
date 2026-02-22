@@ -1,0 +1,281 @@
+# ============================================================================
+# Local Development - Full Stack
+# ============================================================================
+#
+# Runs all Construct microservices + infrastructure in Docker for local testing.
+#
+# Usage:
+#   # Infrastructure only (postgres + redis):
+#   docker compose -f ops/docker-compose.dev.yml up -d
+#
+#   # Full stack (services + infrastructure):
+#   docker compose -f ops/docker-compose.local.yml up --build
+#
+#   # Specific services only:
+#   docker compose -f ops/docker-compose.local.yml up auth-service key-service
+#
+#   # Run migrations only:
+#   docker compose -f ops/docker-compose.local.yml run --rm migrate
+#
+# Ports exposed on host:
+#   8080  - Envoy proxy (gRPC gateway, main entry point)
+#   50051 - auth-service (direct gRPC)
+#   50052 - user-service (direct gRPC)
+#   50053 - messaging-service (direct gRPC)
+#   50055 - invite-service (direct gRPC)
+#   50057 - key-service (direct gRPC)
+#   5432  - postgres (if docker-compose.dev.yml not running)
+#   6379  - redis (if docker-compose.dev.yml not running)
+#
+# JWT keys: mount prkeys/ directory (see prkeys/jwt_private_key.pem)
+# ============================================================================
+
+name: construct-local
+
+services:
+
+  # ==========================================================================
+  # Infrastructure
+  # ==========================================================================
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: construct_test
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ==========================================================================
+  # Migration runner (runs once, then exits)
+  # ==========================================================================
+
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../shared/migrations:/migrations:ro
+    environment:
+      PGPASSWORD: password
+    entrypoint: |
+      sh -c '
+        echo "Running migrations..."
+        for f in /migrations/*.sql; do
+          echo "  Applying: $$(basename $$f)"
+          psql -h postgres -U postgres -d construct_test -f "$$f" -q 2>&1 | grep -v "^$$" || true
+        done
+        echo "Migrations complete."
+      '
+    restart: "no"
+
+  # ==========================================================================
+  # Build image (shared by all services)
+  # ==========================================================================
+
+  # All service containers use the same build context.
+  # Each service overrides `command` to run its specific binary.
+
+  auth-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-auth
+    command: /usr/local/bin/auth-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "50051:50051"
+      - "8051:8051"   # health HTTP
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/construct_test
+      REDIS_URL: redis://redis:6379
+      AUTH_GRPC_BIND_ADDRESS: "[::]:50051"
+      PORT: "8051"
+      SERVER_HOSTNAME: localhost
+      ONLINE_CHANNEL: "construct:online"
+      JWT_PRIVATE_KEY: /app/prkeys/jwt_private_key.pem
+      JWT_PUBLIC_KEY: /app/prkeys/jwt_public_key.pem
+      JWT_ISSUER: construct-local
+      DELIVERY_ACK_MODE: disabled
+      POW_DIFFICULTY: "2"
+      RUST_LOG: "info,auth_service=debug"
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8051/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  user-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-user
+    command: /usr/local/bin/user-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "50052:50052"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/construct_test
+      REDIS_URL: redis://redis:6379
+      USER_GRPC_BIND_ADDRESS: "[::]:50052"
+      PORT: "8052"
+      SERVER_HOSTNAME: localhost
+      ONLINE_CHANNEL: "construct:online"
+      JWT_PUBLIC_KEY: /app/prkeys/jwt_public_key.pem
+      JWT_ISSUER: construct-local
+      DELIVERY_ACK_MODE: disabled
+      RUST_LOG: "info,user_service=debug"
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    restart: unless-stopped
+
+  messaging-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-messaging
+    command: /usr/local/bin/messaging-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "50053:50053"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/construct_test
+      REDIS_URL: redis://redis:6379
+      MESSAGING_GRPC_BIND_ADDRESS: "[::]:50053"
+      PORT: "8053"
+      SERVER_HOSTNAME: localhost
+      ONLINE_CHANNEL: "construct:online"
+      JWT_PUBLIC_KEY: /app/prkeys/jwt_public_key.pem
+      JWT_ISSUER: construct-local
+      DELIVERY_ACK_MODE: disabled
+      DELIVERY_SECRET_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      RUST_LOG: "info,messaging_service=debug"
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    restart: unless-stopped
+
+  invite-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-invite
+    command: /usr/local/bin/invite-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "50055:50055"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/construct_test
+      REDIS_URL: redis://redis:6379
+      INVITE_GRPC_BIND_ADDRESS: "[::]:50055"
+      PORT: "8055"
+      SERVER_HOSTNAME: localhost
+      ONLINE_CHANNEL: "construct:online"
+      JWT_PUBLIC_KEY: /app/prkeys/jwt_public_key.pem
+      JWT_ISSUER: construct-local
+      DELIVERY_ACK_MODE: disabled
+      RUST_LOG: "info,invite_service=debug"
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    restart: unless-stopped
+
+  key-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: construct-key
+    command: /usr/local/bin/key-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "50057:50057"
+      - "8057:8057"   # health HTTP
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/construct_test
+      KEY_GRPC_BIND_ADDRESS: "[::]:50057"
+      KEY_HTTP_BIND_ADDRESS: "[::]:8057"
+      RUST_LOG: "info,key_service=debug"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8057/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ==========================================================================
+  # Envoy proxy (gRPC gateway, routes to all services)
+  # ==========================================================================
+
+  envoy:
+    image: envoyproxy/envoy:v1.37.0
+    container_name: construct-envoy
+    command: -c /etc/envoy/envoy.yaml --log-level warn
+    depends_on:
+      - auth-service
+      - user-service
+      - messaging-service
+      - key-service
+    ports:
+      - "8080:8080"   # gRPC gateway (main entry point for clients)
+      - "9901:9901"   # Envoy admin
+    volumes:
+      - ./envoy.local.yaml:/etc/envoy/envoy.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

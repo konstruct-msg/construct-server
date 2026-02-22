@@ -1,38 +1,49 @@
-[package]
-name = "construct-server"
-version = "0.4.3"
+[workspace]
+resolver = "2"
+
+members = [
+    "shared",
+    "auth-service",
+    "messaging-service",
+    "user-service",
+    "notification-service",
+    "invite-service",
+    "gateway",
+    "media-service",
+    "delivery-worker",
+    "key-service",
+    # New modular crates (Phase 4)
+    "crates/construct-types",
+    "crates/construct-error",
+    "crates/construct-crypto",
+    "crates/construct-db",
+    "crates/construct-redis",
+    "crates/construct-config",
+    # Phase 5 - Crypto-Agility
+    "crates/crypto-agility", "crates/construct-metrics",
+]
+
+# Единая версия для всех пакетов
+[workspace.package]
+version = "0.7.1"
 edition = "2024"
+authors = ["Construct Team"]
+repository = "https://github.com/maximeliseyev/construct-server"
+license = "MIT"
 
-[lib]
-name = "construct_server"
-path = "src/lib.rs"
-
-[[bin]]
-name = "construct-server"
-path = "src/main.rs"
-
-[[bin]]
-name = "delivery-worker"
-path = "src/bin/delivery_worker.rs"
-
-[[bin]]
-name = "message-gateway"
-path = "src/bin/message_gateway.rs"
-
-[dependencies]
-# Async runtime
+[workspace.dependencies]
+# Common dependencies for all services
 tokio = { version = "1.40", features = ["full"] }
-tokio-tungstenite = "0.24"
-futures-util = "0.3"
-
-# HTTP server для health checks и metrics
-hyper = { version = "1.5", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
-http-body-util = "0.1"
-bytes = "1.8"
-
-# HTTP client (federation)
-reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+async-trait = "0.1"
 
 # Database
 sqlx = { version = "0.8", features = [
@@ -45,75 +56,24 @@ sqlx = { version = "0.8", features = [
     "migrate",
 ] }
 
-# Redis (updated for TLS support)
+# Redis
 redis = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-native-tls-comp"] }
-tokio-native-tls = "0.3.1"
-native-tls = "0.2.14"
 
-# Kafka (message broker for reliable delivery)
-rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
+# HTTP
+axum = { version = "0.7", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+reqwest = { version = "0.12", features = ["json"] }
 
-# gRPC (message-gateway communication)
-tonic = "0.12"
-prost = "0.13"
-
-# APNs (Apple Push Notification service)
-a2 = "0.10"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_bytes = "0.11"  # For efficient binary serialization in MessagePack
-rmp-serde = "1.3"  # MessagePack для WebSocket
-
-# Cryptography
-chacha20poly1305 = "0.10"
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-rand = "0.8"
-sha2 = "0.10"
-hkdf = "0.12"
-zeroize = "1.8"
-subtle = "2.6"
-hex = "0.4"
-
-# Authentication & Security
-bcrypt = "0.16"
+# Auth
 jsonwebtoken = "9.3"
+bcrypt = "0.16"
 base64 = "0.22"
 
-# Configuration & Environment
-dotenvy = "0.15"
-anyhow = "1.0"
+# Crypto
+hex = "0.4"
+zeroize = "1.8"
 
-# Logging & Monitoring
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Metrics (Prometheus)
-once_cell = "1.21.3"
-prometheus = { version = "0.13", features = ["process"] }
-
-# UUID
-uuid = { version = "1.11", features = ["v4", "serde"] }
-
-# Date & Time
-chrono = { version = "0.4", features = ["serde"] }
-
-[build-dependencies]
-tonic-build = "0.12"
-
-[dev-dependencies]
-anyhow = "1.0"
-url = "2.5"
-serial_test = "3.1.1"
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = true
-
-[profile.dev]
-opt-level = 0
-debug = true
+# Metrics
+prometheus = { version = "0.14", features = ["process"] }
+once_cell = "1.21"

@@ -1,0 +1,42 @@
+[package]
+name = "invite-service"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "invite-service"
+path = "src/main.rs"
+
+[dependencies]
+construct-config = { path = "../crates/construct-config" }
+construct-server-shared = { path = "../shared" }
+crypto-agility = { path = "../crates/crypto-agility" }
+
+# Workspace deps
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+prometheus = { workspace = true }
+tonic = "0.14.2"
+
+# Crypto for invite signatures
+rand = "0.8"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }

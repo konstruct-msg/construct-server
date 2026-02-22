@@ -1,0 +1,19 @@
+---
+- name: Setup all servers
+  hosts: all
+  become: yes
+  roles:
+    - common
+    - docker
+
+- name: Setup gateway
+  hosts: gateways
+  become: yes
+  roles:
+    - nginx
+
+- name: Setup monitoring
+  hosts: monitoring
+  become: yes
+  roles:
+    - monitoring
