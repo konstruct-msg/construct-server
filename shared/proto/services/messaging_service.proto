@@ -29,6 +29,17 @@ service MessagingService {
   // Not implemented yet - reserved for future append-only edit chain
   rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
 
+  // =========================================================================
+  // Reactions (Future Implementation)
+  // =========================================================================
+
+  // AddReaction - Add emoji reaction to message
+  // Encrypted: reaction is E2EE, server only sees message_id
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+
+  // RemoveReaction - Remove reaction from message
+  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
+
 }
 
 // MessageStreamRequest - Client -> Server in bidirectional stream
@@ -239,4 +250,102 @@ message EditMessageResponse {
   uint32 edit_count = 3;
 }
 
+// ============================================================================
+// Reaction Messages
+// ============================================================================
 
+// AddReactionRequest - Add reaction to message
+message AddReactionRequest {
+  // Message ID to react to
+  string message_id = 1;
+
+  // Conversation ID (for routing)
+  string conversation_id = 2;
+
+  // Encrypted reaction (E2EE blob)
+  // Contains: emoji, timestamp, sender info
+  // Encrypted with conversation key
+  bytes encrypted_reaction = 3;
+
+  // Reaction ID (client-generated UUID for deduplication)
+  string reaction_id = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// AddReactionResponse - Reaction added confirmation
+message AddReactionResponse {
+  // Success
+  bool success = 1;
+
+  // Server timestamp
+  int64 reacted_at = 2;
+
+  // Reaction ID (echo back)
+  string reaction_id = 3;
+
+  // Error if failed
+  optional MessageError error = 4;
+}
+
+// RemoveReactionRequest - Remove reaction from message
+message RemoveReactionRequest {
+  // Message ID
+  string message_id = 1;
+
+  // Conversation ID
+  string conversation_id = 2;
+
+  // Reaction ID to remove
+  string reaction_id = 3;
+
+  // Reserved for future options
+  reserved 4 to 10;
+}
+
+// RemoveReactionResponse - Reaction removed confirmation
+message RemoveReactionResponse {
+  // Success
+  bool success = 1;
+
+  // Removal timestamp
+  int64 removed_at = 2;
+}
+
+// ReactionEvent - Reaction notification (via MessageStream)
+// Sent to other participants when someone reacts
+message ReactionEvent {
+  // Reaction added or removed?
+  ReactionEventType event_type = 1;
+
+  // Message ID that was reacted to
+  string message_id = 2;
+
+  // Conversation ID
+  string conversation_id = 3;
+
+  // Encrypted reaction (for ADD events)
+  optional bytes encrypted_reaction = 4;
+
+  // Reaction ID
+  string reaction_id = 5;
+
+  // Event timestamp
+  int64 timestamp = 6;
+
+  // Sender device ID (for multi-device sync)
+  string sender_device_id = 7;
+}
+
+// ReactionEventType - Type of reaction event
+enum ReactionEventType {
+  // Unspecified (must be 0)
+  REACTION_EVENT_TYPE_UNSPECIFIED = 0;
+
+  // Reaction added
+  REACTION_EVENT_TYPE_ADDED = 1;
+
+  // Reaction removed
+  REACTION_EVENT_TYPE_REMOVED = 2;
+}

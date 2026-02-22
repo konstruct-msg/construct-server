@@ -11,6 +11,7 @@ members = [
     "gateway",
     "media-service",
     "delivery-worker",
+    "key-service",
     # New modular crates (Phase 4)
     "crates/construct-types",
     "crates/construct-error",
@@ -24,7 +25,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/maximeliseyev/construct-server"
