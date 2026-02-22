@@ -17,6 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/services/notification_service.proto",
         "proto/services/invite_service.proto",
         "proto/services/media_service.proto",
+        "proto/services/key_service.proto",
+        "proto/services/mls_service.proto",
     ];
 
     tonic_prost_build::configure()

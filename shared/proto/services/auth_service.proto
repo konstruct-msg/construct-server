@@ -24,6 +24,24 @@ service AuthService {
 
   // Logout - Revoke session tokens
   rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // =========================================================================
+  // Account Recovery (Seed Phrase)
+  // =========================================================================
+
+  // SetRecoveryKey - Set recovery public key (derived from seed phrase)
+  // Called once during initial setup, cannot be changed later
+  // Recovery key = Ed25519 public key derived from BIP39 seed
+  rpc SetRecoveryKey(SetRecoveryKeyRequest) returns (SetRecoveryKeyResponse);
+
+  // GetRecoveryStatus - Check if recovery is set up for account
+  // Called on app startup to show recovery setup prompt if needed
+  rpc GetRecoveryStatus(GetRecoveryStatusRequest) returns (GetRecoveryStatusResponse);
+
+  // RecoverAccount - Recover account using seed phrase
+  // Proves ownership by signing challenge with recovery key
+  // Creates new device, revokes all existing sessions
+  rpc RecoverAccount(RecoverAccountRequest) returns (RecoverAccountResponse);
 }
 
 // DeviceService - Device management
@@ -265,4 +283,168 @@ enum PushEnvironment {
 
   // Sandbox (APNS development)
   PUSH_ENV_SANDBOX = 2;
+}
+
+// ============================================================================
+// Account Recovery Messages
+// ============================================================================
+
+// SetRecoveryKeyRequest - Set up account recovery
+message SetRecoveryKeyRequest {
+  // Recovery public key (Ed25519, 32 bytes)
+  // Derived from BIP39 seed phrase on client
+  // Path: m/44'/0'/0'/0/0 or custom derivation
+  bytes recovery_public_key = 1;
+
+  // Signature proving possession of private key
+  // Signs: "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}"
+  bytes setup_signature = 2;
+
+  // Timestamp used in signature
+  int64 timestamp = 3;
+
+  // Optional: encrypted backup of key material
+  // Encrypted with key derived from seed, stored server-side
+  optional bytes encrypted_backup = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// SetRecoveryKeyResponse - Recovery setup confirmation
+message SetRecoveryKeyResponse {
+  // Success
+  bool success = 1;
+
+  // Recovery key fingerprint (for display)
+  string fingerprint = 2;
+
+  // Setup timestamp
+  int64 setup_at = 3;
+
+  // Error if failed
+  optional string error = 4;
+}
+
+// GetRecoveryStatusRequest - Check recovery status
+message GetRecoveryStatusRequest {
+  // User ID (from current auth token)
+  // Empty = check for authenticated user
+}
+
+// GetRecoveryStatusResponse - Recovery status
+message GetRecoveryStatusResponse {
+  // Is recovery set up?
+  bool is_setup = 1;
+
+  // Recovery key fingerprint (if set up)
+  optional string fingerprint = 2;
+
+  // When recovery was set up
+  optional int64 setup_at = 3;
+
+  // When recovery was last used (for security alert)
+  optional int64 last_used_at = 4;
+
+  // Has encrypted backup?
+  bool has_backup = 5;
+}
+
+// RecoverAccountRequest - Recover account with seed phrase
+message RecoverAccountRequest {
+  // Username or user ID to recover
+  string identifier = 1;
+
+  // Recovery challenge (obtained from GetRecoveryChallenge or embedded)
+  string challenge = 2;
+
+  // Signature over challenge using recovery private key
+  bytes recovery_signature = 3;
+
+  // New device registration (recovery creates new device)
+  NewDeviceForRecovery new_device = 4;
+
+  // Reserved for future options
+  reserved 5 to 10;
+}
+
+// NewDeviceForRecovery - New device info during recovery
+message NewDeviceForRecovery {
+  // New device ID
+  string device_id = 1;
+
+  // Device public keys (same as RegisterDevice)
+  DevicePublicKeys public_keys = 2;
+
+  // Device name (e.g., "iPhone 15 Pro")
+  string device_name = 3;
+
+  // Platform
+  shared.proto.core.v1.DevicePlatform platform = 4;
+}
+
+// RecoverAccountResponse - Recovery result
+message RecoverAccountResponse {
+  // Success
+  bool success = 1;
+
+  // User ID (confirmed)
+  string user_id = 2;
+
+  // New auth tokens for recovered device
+  AuthTokensResponse tokens = 3;
+
+  // Number of devices revoked
+  uint32 devices_revoked = 4;
+
+  // Recovery timestamp
+  int64 recovered_at = 5;
+
+  // Warning messages (e.g., "All existing sessions terminated")
+  repeated string warnings = 6;
+
+  // Error if failed
+  optional RecoveryError error = 7;
+}
+
+// RecoveryError - Recovery failure reasons
+message RecoveryError {
+  // Error code
+  RecoveryErrorCode code = 1;
+
+  // Human-readable message
+  string message = 2;
+
+  // Retry allowed?
+  bool retryable = 3;
+
+  // Cooldown seconds (if rate limited)
+  optional int64 cooldown_seconds = 4;
+}
+
+// RecoveryErrorCode - Recovery error codes
+enum RecoveryErrorCode {
+  // Unspecified error (must be 0)
+  RECOVERY_ERROR_CODE_UNSPECIFIED = 0;
+
+  // Account not found
+  RECOVERY_ERROR_CODE_ACCOUNT_NOT_FOUND = 1;
+
+  // Recovery not set up for this account
+  RECOVERY_ERROR_CODE_NOT_SETUP = 2;
+
+  // Invalid signature (wrong seed phrase)
+  RECOVERY_ERROR_CODE_INVALID_SIGNATURE = 3;
+
+  // Challenge expired
+  RECOVERY_ERROR_CODE_CHALLENGE_EXPIRED = 4;
+
+  // Too many attempts (rate limited)
+  RECOVERY_ERROR_CODE_RATE_LIMITED = 5;
+
+  // Account locked (security hold)
+  RECOVERY_ERROR_CODE_ACCOUNT_LOCKED = 6;
+
+  // Reserved for future errors
+  reserved 7 to 15;
 }

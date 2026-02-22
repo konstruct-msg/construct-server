@@ -9,7 +9,7 @@
 // - JWT token management (access tokens, refresh tokens)
 // - Token refresh
 // - Logout (token invalidation)
-// - Password management (future)
+// - Account recovery via seed phrase
 //
 // Architecture:
 // - Stateless (JWT tokens)
@@ -17,6 +17,8 @@
 // - No sticky sessions required
 //
 // ============================================================================
+
+mod recovery;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -201,6 +203,254 @@ impl AuthService for AuthGrpcService {
 
         Ok(Response::new(proto::LogoutResponse { success: true }))
     }
+
+    // =========================================================================
+    // Account Recovery RPCs
+    // =========================================================================
+
+    async fn set_recovery_key(
+        &self,
+        request: Request<proto::SetRecoveryKeyRequest>,
+    ) -> Result<Response<proto::SetRecoveryKeyResponse>, Status> {
+        // Extract token before consuming request
+        let token = request_token(request.metadata())?;
+        let req = request.into_inner();
+
+        // Validate inputs
+        if req.recovery_public_key.is_empty() {
+            return Err(Status::invalid_argument("recovery_public_key is required"));
+        }
+        if req.setup_signature.is_empty() {
+            return Err(Status::invalid_argument("setup_signature is required"));
+        }
+        if req.timestamp == 0 {
+            return Err(Status::invalid_argument("timestamp is required"));
+        }
+
+        // Verify auth token
+        let claims = self.context.auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let db = self.context.db_pool.as_ref();
+        let fingerprint = recovery::set_recovery_key(
+            db,
+            user_id,
+            &req.recovery_public_key,
+            &req.setup_signature,
+            req.timestamp,
+            req.encrypted_backup.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("already set") {
+                Status::already_exists(msg)
+            } else if msg.contains("expired") || msg.contains("Invalid") {
+                Status::invalid_argument(msg)
+            } else {
+                Status::internal(msg)
+            }
+        })?;
+
+        Ok(Response::new(proto::SetRecoveryKeyResponse {
+            success: true,
+            fingerprint,
+            setup_at: chrono::Utc::now().timestamp(),
+            error: None,
+        }))
+    }
+
+    async fn get_recovery_status(
+        &self,
+        request: Request<proto::GetRecoveryStatusRequest>,
+    ) -> Result<Response<proto::GetRecoveryStatusResponse>, Status> {
+        // Must be authenticated
+        let token = request_token(request.metadata())?;
+        let claims = self.context.auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let db = self.context.db_pool.as_ref();
+        let status = recovery::get_recovery_status(db, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::GetRecoveryStatusResponse {
+            is_setup: status.is_setup,
+            fingerprint: status.fingerprint,
+            setup_at: status.setup_at.map(|t| t.timestamp()),
+            last_used_at: status.last_used_at.map(|t| t.timestamp()),
+            has_backup: status.has_backup,
+        }))
+    }
+
+    async fn recover_account(
+        &self,
+        request: Request<proto::RecoverAccountRequest>,
+    ) -> Result<Response<proto::RecoverAccountResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate required fields
+        if req.identifier.is_empty() {
+            return Err(Status::invalid_argument("identifier is required"));
+        }
+        if req.challenge.is_empty() {
+            return Err(Status::invalid_argument("challenge is required"));
+        }
+        if req.recovery_signature.is_empty() {
+            return Err(Status::invalid_argument("recovery_signature is required"));
+        }
+        let new_device = req.new_device
+            .ok_or_else(|| Status::invalid_argument("new_device is required"))?;
+        let public_keys = new_device.public_keys
+            .ok_or_else(|| Status::invalid_argument("new_device.public_keys is required"))?;
+
+        let db = self.context.db_pool.as_ref();
+
+        // 1. Verify recovery signature and get user_id
+        let user_id = recovery::verify_recovery_signature(
+            db,
+            &req.identifier,
+            &req.challenge,
+            &req.recovery_signature,
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Status::not_found(msg)
+            } else if msg.contains("not set up") {
+                Status::failed_precondition(msg)
+            } else if msg.contains("cooldown") {
+                Status::resource_exhausted(msg)
+            } else if msg.contains("Invalid") {
+                Status::permission_denied(msg)
+            } else {
+                Status::internal(msg)
+            }
+        })?;
+
+        // 2. Revoke all existing devices
+        let devices_revoked = recovery::revoke_all_devices(db, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // 3. Revoke all tokens
+        let app_context = Arc::new(self.context.to_app_context());
+        construct_server_shared::auth_service::core::logout_user(
+            app_context.clone(),
+            user_id,
+            true,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        // 4. Register new device directly (bypass PoW for recovery flow)
+        let hostname = env::var("SERVER_HOSTNAME").unwrap_or_else(|_| "construct.cc".to_string());
+
+        let verifying_key = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &public_keys.verifying_key,
+        )
+        .unwrap_or(public_keys.verifying_key.as_bytes().to_vec());
+
+        let identity_public = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &public_keys.identity_public,
+        )
+        .unwrap_or(public_keys.identity_public.as_bytes().to_vec());
+
+        let signed_prekey_public = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &public_keys.signed_prekey_public,
+        )
+        .unwrap_or(public_keys.signed_prekey_public.as_bytes().to_vec());
+
+        let signed_prekey_signature = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &public_keys.signed_prekey_signature,
+        )
+        .unwrap_or(public_keys.signed_prekey_signature.as_bytes().to_vec());
+
+        construct_server_shared::db::create_device(
+            self.context.db_pool.as_ref(),
+            construct_server_shared::db::CreateDeviceData {
+                device_id: new_device.device_id,
+                server_hostname: hostname,
+                verifying_key,
+                identity_public,
+                signed_prekey_public,
+                signed_prekey_signature,
+                crypto_suites: format!(r#"["{}"]"#, public_keys.suite_id),
+            },
+            Some(user_id),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        // 5. Generate tokens for new device
+        let (access_token, _, exp_timestamp) = app_context
+            .auth_manager
+            .create_token(&user_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let (refresh_token, refresh_jti, _) = app_context
+            .auth_manager
+            .create_refresh_token(&user_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Store refresh token
+        {
+            let mut queue = app_context.queue.lock().await;
+            let ttl = app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
+            if let Err(e) = queue
+                .store_refresh_token(&refresh_jti, &user_id.to_string(), ttl)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to store refresh token during recovery");
+            }
+        }
+
+        // 6. Update last_recovery_at
+        recovery::mark_recovery_used(db, user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let now = chrono::Utc::now().timestamp();
+        Ok(Response::new(proto::RecoverAccountResponse {
+            success: true,
+            user_id: user_id.to_string(),
+            tokens: Some(proto::AuthTokensResponse {
+                user_id: user_id.to_string(),
+                access_token,
+                refresh_token,
+                expires_at: exp_timestamp,
+            }),
+            devices_revoked,
+            recovered_at: now,
+            warnings: vec!["All existing sessions have been terminated".to_string()],
+            error: None,
+        }))
+    }
+}
+
+/// Extract Bearer token from gRPC metadata
+fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Status> {
+    let auth = metadata
+        .get("authorization")
+        .or_else(|| metadata.get("Authorization"))
+        .ok_or_else(|| Status::unauthenticated("missing authorization header"))?
+        .to_str()
+        .map_err(|_| Status::unauthenticated("invalid authorization header"))?;
+
+    auth.strip_prefix("Bearer ")
+        .map(|s| s.to_string())
+        .ok_or_else(|| Status::unauthenticated("authorization must be Bearer token"))
 }
 
 /// GET /.well-known/jwks.json
