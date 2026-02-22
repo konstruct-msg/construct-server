@@ -1,0 +1,184 @@
+syntax = "proto3";
+
+package sentinel;
+
+import "google/protobuf/timestamp.proto";
+
+// SentinelService — privacy-first multi-layer protection against spam and bot attacks.
+//
+// Design principles:
+//   - Server is BLIND to message content (E2E encrypted). All analysis is metadata-only.
+//   - Signals: timing patterns, unique recipient counts, ciphertext hash repetition,
+//     pre-key download anomalies, account age, spam reports from users.
+//   - No content keywords, no URL scanning, no message reading.
+//   - Device-based (not user-based) to handle account-switching attacks.
+//
+// Layers:
+//   1. IP Guard            — exponential backoff on registration (kills bulk account creation)
+//   2. Device Trust Levels — graduated limits based on account age + behavior
+//   3. Ciphertext Hash     — identical payload sent to N recipients = mass spam detection
+//   4. Pre-key anomaly     — abnormal pre-key downloads before spam campaigns
+//   5. User reports        — SpamReport with category, no message content
+//   6. ML on metadata      — future: ONNX model trained on metadata features only
+//
+// Port: 50059
+
+service SentinelService {
+  // User reports a device as spam. No message content is sent — server is blind.
+  rpc ReportSpam(SpamReportRequest) returns (SpamReportResponse);
+
+  // Server-enforced block: server will not deliver messages from blocked device.
+  rpc BlockDevice(BlockDeviceRequest) returns (BlockDeviceResponse);
+
+  // Remove a server-enforced block.
+  rpc UnblockDevice(UnblockDeviceRequest) returns (UnblockDeviceResponse);
+
+  // List devices the caller has blocked.
+  rpc GetBlockedDevices(GetBlockedDevicesRequest) returns (GetBlockedDevicesResponse);
+
+  // Get caller's current trust level, active restrictions, and remaining rate limits.
+  // Auth token provides identity — no parameters needed.
+  rpc GetTrustStatus(TrustStatusRequest) returns (TrustStatusResponse);
+
+  // Check if caller is permitted to send a message to a specific target device.
+  // Call BEFORE encrypting and sending to avoid wasted work on denied sends.
+  rpc CheckSendPermission(CheckSendPermissionRequest) returns (CheckSendPermissionResponse);
+
+  // Appeal an automatic restriction (rate limit, flag, or ban).
+  // Stub — full review workflow to be implemented later.
+  rpc AppealRestriction(AppealRequest) returns (AppealResponse);
+
+  // Aggregate protection statistics — admin/internal use only.
+  // Returns no individual user data; aggregate counts only.
+  rpc GetProtectionStats(ProtectionStatsRequest) returns (ProtectionStatsResponse);
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum TrustLevel {
+  TRUST_LEVEL_UNSPECIFIED = 0;
+  TRUST_NEW       = 1; // 0–48 h after registration: strict limits
+  TRUST_WARMING   = 2; // 48 h–7 d: moderate limits
+  TRUST_TRUSTED   = 3; // 7 d+: normal limits
+  TRUST_VERIFIED  = 4; // reserved: elevated trust via future verification mechanism
+  TRUST_FLAGGED   = 5; // suspicious patterns detected: minimal limits + under review
+  TRUST_BANNED    = 6; // device banned: no sends permitted
+}
+
+enum SpamCategory {
+  SPAM_CATEGORY_UNSPECIFIED = 0;
+  SPAM_UNWANTED       = 1; // unsolicited contact
+  SPAM_HARASSMENT     = 2; // repeated / threatening messages
+  SPAM_SCAM           = 3; // fraud / phishing attempt
+  SPAM_BOT_SUSPECTED  = 4; // automated / non-human behavior
+  SPAM_IMPERSONATION  = 5; // pretending to be someone else
+}
+
+enum RestrictionType {
+  RESTRICTION_UNSPECIFIED = 0;
+  RESTRICTION_RATE_LIMITED = 1; // temporary rate limit exceeded
+  RESTRICTION_FLAGGED      = 2; // flagged for review
+  RESTRICTION_BANNED       = 3; // permanent or long-term ban
+}
+
+// ─── ReportSpam ───────────────────────────────────────────────────────────────
+
+message SpamReportRequest {
+  string reported_device_id = 1; // device being reported
+  SpamCategory category     = 2; // report category — NO message content
+  // Deliberately no message_id or content: server is blind to message content.
+}
+
+message SpamReportResponse {
+  bool   accepted  = 1; // report accepted for processing
+  string report_id = 2; // opaque reference for follow-up
+}
+
+// ─── BlockDevice ─────────────────────────────────────────────────────────────
+
+message BlockDeviceRequest {
+  string device_id = 1; // device to block
+}
+
+message BlockDeviceResponse {
+  bool success = 1;
+}
+
+message UnblockDeviceRequest {
+  string device_id = 1;
+}
+
+message UnblockDeviceResponse {
+  bool success = 1;
+}
+
+message GetBlockedDevicesRequest {
+  int32 page      = 1;
+  int32 page_size = 2;
+}
+
+message GetBlockedDevicesResponse {
+  repeated string device_ids = 1;
+  bool            has_more   = 2;
+}
+
+// ─── TrustStatus ─────────────────────────────────────────────────────────────
+
+message TrustStatusRequest {
+  // Caller identity comes from auth token — no explicit field needed.
+}
+
+message TrustStatusResponse {
+  TrustLevel trust_level = 1;
+
+  // Remaining quota in current window (–1 means unlimited).
+  int32 messages_remaining_hour       = 2;
+  int32 new_recipients_remaining_day  = 3;
+  int32 group_messages_remaining_day  = 4;
+
+  // Set if device is flagged or banned.
+  optional google.protobuf.Timestamp restriction_expires_at = 5;
+  optional string                    restriction_reason      = 6;
+}
+
+// ─── CheckSendPermission ─────────────────────────────────────────────────────
+
+message CheckSendPermissionRequest {
+  string target_device_id = 1; // device the caller wants to send to
+}
+
+message CheckSendPermissionResponse {
+  bool   allowed             = 1;
+  string denial_reason       = 2; // human-readable if allowed = false
+  int32  retry_after_seconds = 3; // > 0 if temporarily rate-limited
+}
+
+// ─── AppealRestriction ───────────────────────────────────────────────────────
+
+message AppealRequest {
+  RestrictionType restriction_type = 1;
+  string          context          = 2; // user's explanation; plain text, no message content
+}
+
+message AppealResponse {
+  bool   submitted = 1;
+  string appeal_id = 2;
+  // status: "pending_review" | "approved" | "rejected"
+  string status    = 3;
+}
+
+// ─── ProtectionStats (admin) ─────────────────────────────────────────────────
+
+message ProtectionStatsRequest {
+  // Admin-authenticated requests only. No filters needed for MVP.
+}
+
+message ProtectionStatsResponse {
+  // Aggregate counts — no individual user data.
+  int64 spam_reports_24h           = 1;
+  int64 devices_flagged_24h        = 2;
+  int64 devices_banned_7d          = 3;
+  int64 rate_limit_violations_24h  = 4;
+  int64 blocks_created_24h         = 5;
+  int64 appeals_pending            = 6;
+}

@@ -39,6 +39,8 @@ static_resources:
                           route: { cluster: key_service, timeout: 30s }
                         - match: { prefix: "/shared.proto.services.v1.MLSService" }
                           route: { cluster: mls_service, timeout: 0s }
+                        - match: { prefix: "/sentinel.SentinelService" }
+                          route: { cluster: sentinel_service, timeout: 30s }
                         - match: { prefix: "/health" }
                           direct_response: { status: 200, body: { inline_string: "ok" } }
                 http_filters:
@@ -146,3 +148,20 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: construct-mls, port_value: 50058 }
+
+    # SentinelService - :50059
+    - name: sentinel_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: sentinel_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: construct-sentinel, port_value: 50059 }
