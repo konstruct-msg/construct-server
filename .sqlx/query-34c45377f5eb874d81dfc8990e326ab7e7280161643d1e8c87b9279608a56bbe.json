@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE device_tokens\n        SET notification_filter = $1, enabled = $2\n        WHERE user_id = $3 AND device_token_hash = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Uuid",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34c45377f5eb874d81dfc8990e326ab7e7280161643d1e8c87b9279608a56bbe"
+}

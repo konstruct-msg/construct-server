@@ -16,9 +16,8 @@ venv/
 *.egg-info/
 .mypy_cache/
 
-# sqlx query cache
-.sqlx/*
-!.sqlx/query-cache.json
+# sqlx query cache - committed for SQLX_OFFLINE=true in CI
+# regenerate with: cargo sqlx prepare --workspace
 
 # Environment
 .env

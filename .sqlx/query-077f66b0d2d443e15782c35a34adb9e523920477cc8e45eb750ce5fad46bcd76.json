@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT device_token_encrypted, notification_filter, enabled\n        FROM device_tokens\n        WHERE user_id = $1 AND enabled = TRUE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "device_token_encrypted",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 1,
+        "name": "notification_filter",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "enabled",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "077f66b0d2d443e15782c35a34adb9e523920477cc8e45eb750ce5fad46bcd76"
+}

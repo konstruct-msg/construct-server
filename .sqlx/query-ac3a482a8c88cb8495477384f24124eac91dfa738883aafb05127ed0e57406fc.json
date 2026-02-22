@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM device_tokens\n        WHERE user_id = $1 AND device_token_hash = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac3a482a8c88cb8495477384f24124eac91dfa738883aafb05127ed0e57406fc"
+}
