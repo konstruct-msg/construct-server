@@ -11,18 +11,19 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libsasl2-dev \
     libsasl2-modules \
+    libcurl4-openssl-dev \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace files
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY shared ./shared
-COPY proto ./proto
 COPY auth-service ./auth-service
 COPY messaging-service ./messaging-service
 COPY user-service ./user-service
 COPY notification-service ./notification-service
+COPY invite-service ./invite-service
 COPY gateway ./gateway
 COPY media-service ./media-service
 COPY delivery-worker ./delivery-worker
@@ -35,8 +36,12 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
+# Copy Envoy from official image
+COPY --from=envoyproxy/envoy:v1.37.0 /usr/local/bin/envoy /usr/local/bin/envoy
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
+    supervisor \
     ca-certificates \
     libssl3 \
     libsasl2-2 \
@@ -53,7 +58,12 @@ COPY --from=builder --chmod=+x /app/target/release/auth-service /usr/local/bin/a
 COPY --from=builder --chmod=+x /app/target/release/user-service /usr/local/bin/user-service
 COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/bin/messaging-service
 COPY --from=builder --chmod=+x /app/target/release/notification-service /usr/local/bin/notification-service
+COPY --from=builder --chmod=+x /app/target/release/invite-service /usr/local/bin/invite-service
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
+
+# Copy Envoy configuration for Fly.io (no TLS, localhost routing)
+COPY ops/envoy.fly.yaml /app/envoy.yaml
+COPY ops/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Copy migrations for the main server
 COPY shared/migrations /app/migrations
@@ -66,4 +76,4 @@ EXPOSE 8080
 
 # Default command (can be overridden in docker-compose or fly.toml)
 # Each service (server, worker, gateway) uses its own process name from fly.toml
-CMD ["construct-server"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

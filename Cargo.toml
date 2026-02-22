@@ -7,6 +7,7 @@ members = [
     "messaging-service",
     "user-service",
     "notification-service",
+    "invite-service",
     "gateway",
     "media-service",
     "delivery-worker",

@@ -116,7 +116,7 @@ Client generates keys **on device** (never sent to server):
 - Device Key Pair - for authentication
 
 ```http
-POST /api/v1/auth/register
+POST /api/v1/auth/register-device
 Content-Type: application/json
 
 {
@@ -611,7 +611,7 @@ Find nonce such that:
 
 ### Authentication Endpoints
 
-#### POST /api/v1/auth/pow/challenge
+#### POST /api/v1/auth/challenge
 Get PoW challenge for registration.
 
 **Request:** `{}`
@@ -625,7 +625,7 @@ Get PoW challenge for registration.
 }
 ```
 
-#### POST /api/v1/auth/register
+#### POST /api/v1/auth/register-device
 Register new device.
 
 **Request:**
@@ -871,10 +871,10 @@ See `make help` for all available commands.
 
 ---
 
-## Future: Protocol Buffers Migration
+## Protocol Buffers / gRPC Migration
 
-**Status:** Planned for March 2026  
-**Detailed Plan:** See `/Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Refactoring/PROTOBUF_MIGRATION_PLAN.md`
+**Status:** In progress (hard-cut from legacy REST-first architecture)  
+**Detailed Plan:** See `/Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Refactoring/MASTER_PLAN.md`
 
 ### Why Migrating to Protobuf?
 
@@ -899,7 +899,7 @@ See `make help` for all available commands.
 **Phase 3 (Week 3):** Client implementation (Swift Protobuf)  
 **Phase 4 (Week 4):** Gradual rollout with A/B testing  
 
-**Backwards Compatibility:** REST API will remain JSON-based for legacy clients.
+**Backwards Compatibility:** No legacy REST compatibility guarantee; contracts are being narrowed to passwordless + invite/QR discovery model.
 
 ### Example Protobuf Schema
 

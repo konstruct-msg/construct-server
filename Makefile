@@ -640,3 +640,4 @@ version:
 	@echo "Features: END_SESSION protocol, modular crates, microservices"
 	@cargo --version
 	@rustc --version
+

@@ -56,3 +56,6 @@ TODO.md
 plan.md
 DEPLOY_*.md
 *.old
+
+# Local test environment
+.env.test
