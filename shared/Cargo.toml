@@ -61,6 +61,7 @@ http-body-util = "0.1"
 tonic = "0.14.4"
 tonic-prost = "0.14.4"  # Required for generated gRPC code
 prost = "0.14.3"
+prost-types = "0.14.3"  # Required for google.protobuf.Timestamp in sentinel_service.proto
 bb8 = "0.9.1"
 bb8-tonic = "0.4.0"
 
