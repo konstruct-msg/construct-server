@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT blocked_device_id FROM device_blocks\n             WHERE blocker_device_id = $1\n             ORDER BY created_at DESC\n             LIMIT $2 OFFSET $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "blocked_device_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "35f3ca515b971bc6c6eec1ab21763f0bd6277415d069a4ba3e7906ed607ba58e"
+}

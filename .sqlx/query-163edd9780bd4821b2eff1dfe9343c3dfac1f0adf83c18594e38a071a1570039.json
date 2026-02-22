@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO device_flags (device_id, is_flagged, flagged_at)\n             VALUES ($1, TRUE, NOW())\n             ON CONFLICT (device_id) DO UPDATE\n             SET is_flagged = TRUE, flagged_at = NOW(), updated_at = NOW()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "163edd9780bd4821b2eff1dfe9343c3dfac1f0adf83c18594e38a071a1570039"
+}

@@ -1,0 +1,30 @@
+[package]
+name = "mls-service"
+version = "0.1.0"
+edition = "2021"
+description = "MLS Group Messaging Service for Construct Messenger (RFC 9420)"
+license = "MIT"
+
+[dependencies]
+# Core runtime
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+# gRPC / Tonic
+tonic = "0.14"
+prost = "0.13"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Health check
+axum = "0.7"
+serde_json = "1"
+
+# Shared
+construct-server-shared = { path = "../shared" }
+
+[[bin]]
+name = "mls-service"
+path = "src/main.rs"
