@@ -1,0 +1,14 @@
+[package]
+name = "construct-server-messaging"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-server-shared = { path = "../shared" }
+construct-config = { path = "../crates/construct-config" }
+tokio = {workspace = true}
+tracing = {workspace = true}
+uuid = {workspace = true}
+axum = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}

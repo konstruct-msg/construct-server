@@ -1,0 +1,327 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "core/identity.proto";
+import "core/pagination.proto";
+
+// UserService - User profile & contact management
+service UserService {
+  // GetUserProfile - Fetch user profile
+  rpc GetUserProfile(GetUserProfileRequest) returns (UserProfile);
+
+  // UpdateUserProfile - Update own profile
+  rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UserProfile);
+
+  // UpdateProfilePicture - Upload profile picture
+  rpc UpdateProfilePicture(UpdateProfilePictureRequest) returns (UpdateProfilePictureResponse);
+
+  // GetUserCapabilities - Get user's device capabilities
+  rpc GetUserCapabilities(GetUserCapabilitiesRequest) returns (GetUserCapabilitiesResponse);
+
+  // BlockUser - Block another user for this account
+  rpc BlockUser(BlockUserRequest) returns (BlockUserResponse);
+
+  // UnblockUser - Remove user from blocklist
+  rpc UnblockUser(UnblockUserRequest) returns (UnblockUserResponse);
+
+  // GetBlockedUsers - List blocked users
+  rpc GetBlockedUsers(GetBlockedUsersRequest) returns (GetBlockedUsersResponse);
+  
+  // DeleteAccount - Delete user account (GDPR right to be forgotten)
+  rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
+  
+  // ExportUserData - Export user data (GDPR data portability)
+  rpc ExportUserData(ExportUserDataRequest) returns (ExportUserDataResponse);
+}
+
+// UserProfile - User profile information
+message UserProfile {
+  // User ID
+  string user_id = 1;
+
+  // Username (optional unique handle; null = private/no username)
+  optional string username = 2;
+
+  // Display name (not unique)
+  optional string display_name = 3;
+
+  // Bio/status
+  optional string bio = 4;
+
+  // Profile picture URL
+  optional string profile_picture_url = 5;
+
+  // Email (private, only visible to self)
+  optional string email = 6;
+
+  // Phone (private, only visible to self)
+  optional string phone = 7;
+
+  // Created timestamp
+  int64 created_at = 8;
+
+  // Last seen timestamp (privacy-controlled)
+  optional int64 last_seen = 9;
+
+  // Public key fingerprint (for verification)
+  optional string public_key_fingerprint = 10;
+
+  // Privacy settings
+  optional PrivacySettings privacy = 11;
+
+  // Verified badge (official accounts)
+  bool verified = 12;
+
+  // Reserved for future features
+  reserved 13 to 50;
+}
+
+// PrivacySettings - User privacy preferences
+message PrivacySettings {
+  // Who can see last seen?
+  PrivacyLevel last_seen_visibility = 1;
+
+  // Who can see profile picture?
+  PrivacyLevel profile_picture_visibility = 2;
+
+  // Who can see bio?
+  PrivacyLevel bio_visibility = 3;
+
+  // Who can message me?
+  PrivacyLevel message_visibility = 4;
+
+  // Who can call me?
+  PrivacyLevel call_visibility = 5;
+
+  // Read receipts enabled?
+  bool read_receipts_enabled = 6;
+
+  // Typing indicators enabled?
+  bool typing_indicators_enabled = 7;
+
+  // Reserved for future settings
+  reserved 8 to 15;
+}
+
+// PrivacyLevel - Privacy visibility level
+enum PrivacyLevel {
+  // Unknown level (must be 0)
+  PRIVACY_LEVEL_UNSPECFIED = 0;
+
+  // Everyone can see
+  PRIVACY_LEVEL_EVERYONE = 1;
+
+  // Only contacts can see
+  PRIVACY_LEVEL_CONTACTS = 2;
+
+  // Nobody can see (private)
+  PRIVACY_LEVEL_NOBODY = 3;
+
+  // Reserved for future levels
+  reserved 4 to 15;
+}
+
+// GetUserProfileRequest - Fetch user profile
+message GetUserProfileRequest {
+  // User ID to fetch
+  string user_id = 1;
+}
+
+// UpdateUserProfileRequest - Update profile
+message UpdateUserProfileRequest {
+  // User ID to update (current authenticated user)
+  string user_id = 1;
+
+  // Username update: Some("name") = set, Some("")/None handling by server
+  optional string username = 2;
+
+  // Reserved for future profile fields
+  reserved 3 to 10;
+}
+
+// BlockUserRequest - Block user
+message BlockUserRequest {
+  // Current user performing block action
+  string blocker_user_id = 1;
+
+  // User ID to block
+  string user_id = 2;
+
+  // Reason (optional)
+  optional string reason = 3;
+}
+
+// BlockUserResponse - Block confirmation
+message BlockUserResponse {
+  // Success
+  bool success = 1;
+
+  // Blocked timestamp
+  int64 blocked_at = 2;
+}
+
+// UnblockUserRequest - Unblock user
+message UnblockUserRequest {
+  // Current user performing unblock action
+  string blocker_user_id = 1;
+
+  // User ID to unblock
+  string user_id = 2;
+}
+
+// UnblockUserResponse - Unblock confirmation
+message UnblockUserResponse {
+  // Success
+  bool success = 1;
+}
+
+// GetBlockedUsersRequest - List blocked users
+message GetBlockedUsersRequest {
+  // Current user whose blocklist is requested
+  string user_id = 1;
+
+  // Pagination
+  shared.proto.core.v1.PageRequest page = 2;
+}
+
+// GetBlockedUsersResponse - Blocked users list
+message GetBlockedUsersResponse {
+  // Blocked users
+  repeated BlockedUser blocked_users = 1;
+
+  // Total blocked
+  uint32 total_count = 2;
+
+  // Next cursor
+  optional shared.proto.core.v1.Cursor next_cursor = 3;
+
+  // Has more results?
+  bool has_more = 4;
+}
+
+// BlockedUser - Blocked user entry
+message BlockedUser {
+  // User ID
+  string user_id = 1;
+
+  // Username
+  string username = 2;
+
+  // Blocked timestamp
+  int64 blocked_at = 3;
+
+  // Reason (if provided)
+  optional string reason = 4;
+}
+
+// UpdateProfilePictureRequest - Upload profile picture
+message UpdateProfilePictureRequest {
+  // Image data (JPEG/PNG, max 5MB)
+  bytes image_data = 1;
+
+  // MIME type
+  string mime_type = 2;
+}
+
+// UpdateProfilePictureResponse - Upload confirmation
+message UpdateProfilePictureResponse {
+  // Success
+  bool success = 1;
+
+  // New profile picture URL
+  string profile_picture_url = 2;
+}
+
+// GetUserCapabilitiesRequest - Get user capabilities
+message GetUserCapabilitiesRequest {
+  // User ID
+  string user_id = 1;
+}
+
+// GetUserCapabilitiesResponse - User capabilities
+message GetUserCapabilitiesResponse {
+  // User ID
+  string user_id = 1;
+
+  // Supported crypto suites (ordered by preference)
+  repeated string crypto_suites = 2;
+
+  // Supports WebRTC?
+  bool supports_webrtc = 3;
+
+  // Supports MLS?
+  bool supports_mls = 4;
+
+  // Supports Post-Quantum crypto?
+  bool supports_pq = 5;
+
+  // Device capabilities (bitmask per device)
+  repeated DeviceCapability device_capabilities = 6;
+
+  // Reserved for future capabilities
+  reserved 7 to 15;
+}
+
+// DeviceCapability - Capability per device
+message DeviceCapability {
+  // Device ID
+  string device_id = 1;
+
+  // Platform
+  shared.proto.core.v1.DevicePlatform platform = 2;
+
+  // Capabilities (bitmask)
+  uint32 capabilities = 3;
+}
+
+
+// ============================================================================
+// DeleteAccount Messages
+// ============================================================================
+
+// Request to delete user account
+message DeleteAccountRequest {
+  // Confirmation token (e.g. "DELETE" or user-entered code)
+  string confirmation = 1;
+  
+  // Optional: reason for deletion (for analytics, not stored)
+  optional string reason = 2;
+}
+
+// Response after account deletion
+message DeleteAccountResponse {
+  // true if account was successfully deleted
+  bool success = 1;
+  
+  // Message for UI
+  string message = 2;
+  
+  // Scheduled deletion timestamp (for grace period)
+  optional int64 scheduled_deletion_at = 3;
+}
+
+// ============================================================================
+// ExportUserData Messages
+// ============================================================================
+
+// Request to export user data
+message ExportUserDataRequest {
+  // Format for export (json, csv, etc.)
+  optional string format = 1;
+  
+  // Include message history (if stored)
+  optional bool include_messages = 2;
+}
+
+// Response with exported data
+message ExportUserDataResponse {
+  // Export data (JSON encoded user profile, devices, etc.)
+  string data = 1;
+  
+  // Export format
+  string format = 2;
+  
+  // Export timestamp
+  int64 exported_at = 3;
+}

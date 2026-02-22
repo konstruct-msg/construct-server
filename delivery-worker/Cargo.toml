@@ -1,0 +1,36 @@
+[package]
+name = "delivery-worker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-config = { path = "../crates/construct-config" }
+construct-server-shared = { path = "../shared" }
+
+# Workspace deps
+tokio = {workspace = true}
+anyhow = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+tracing = {workspace = true}
+tracing-subscriber = {workspace = true}
+dotenvy = {workspace = true}
+uuid = {workspace = true}
+chrono = {workspace = true}
+thiserror = {workspace = true}
+async-trait = {workspace = true}
+sqlx = {workspace = true}
+redis = {workspace = true}
+axum = {workspace = true}
+tower = {workspace = true}
+tower-http = {workspace = true}
+reqwest = {workspace = true}
+jsonwebtoken = {workspace = true}
+bcrypt = {workspace = true}
+base64 = {workspace = true}
+hex = {workspace = true}
+zeroize = {workspace = true}
+prometheus = {workspace = true}
+
+# Delivery worker specific
+futures-util = "0.3"

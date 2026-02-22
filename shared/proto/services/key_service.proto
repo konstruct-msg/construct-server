@@ -1,0 +1,381 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "core/crypto.proto";
+import "core/identity.proto";
+
+// ============================================================================
+// KeyService - E2EE Key Management
+// ============================================================================
+//
+// Manages cryptographic keys for end-to-end encryption:
+// - Pre-key bundles (X3DH key agreement)
+// - One-time pre-keys (forward secrecy)
+// - Signed pre-keys (rotation)
+//
+// Privacy: Server stores public keys only, never private keys.
+// All keys are device-specific (multi-device support).
+//
+// ============================================================================
+
+service KeyService {
+  // =========================================================================
+  // Pre-Key Bundle Operations
+  // =========================================================================
+
+  // GetPreKeyBundle - Fetch pre-key bundle to establish E2EE session
+  // Called when: Starting new conversation, recipient has no session
+  // Returns: Identity key + signed pre-key + one-time pre-key (if available)
+  rpc GetPreKeyBundle(GetPreKeyBundleRequest) returns (GetPreKeyBundleResponse);
+
+  // GetPreKeyBundles - Fetch bundles for multiple devices (batch)
+  // Called when: Multi-device recipient, need session with each device
+  rpc GetPreKeyBundles(GetPreKeyBundlesRequest) returns (GetPreKeyBundlesResponse);
+
+  // =========================================================================
+  // Pre-Key Upload Operations
+  // =========================================================================
+
+  // UploadPreKeys - Upload new one-time pre-keys
+  // Called when: Pre-key count is low, after registration, key refresh
+  // Recommended: Keep 100+ one-time pre-keys on server
+  rpc UploadPreKeys(UploadPreKeysRequest) returns (UploadPreKeysResponse);
+
+  // GetPreKeyCount - Check how many one-time pre-keys remain
+  // Called when: App startup, periodic check
+  // Client should upload more if count < 20
+  rpc GetPreKeyCount(GetPreKeyCountRequest) returns (GetPreKeyCountResponse);
+
+  // =========================================================================
+  // Signed Pre-Key Operations
+  // =========================================================================
+
+  // RotateSignedPreKey - Replace signed pre-key
+  // Called when: Monthly rotation, security incident, device compromise suspected
+  // Old signed pre-key kept for 48h to allow in-flight messages
+  rpc RotateSignedPreKey(RotateSignedPreKeyRequest) returns (RotateSignedPreKeyResponse);
+
+  // GetSignedPreKeyAge - Check when signed pre-key was last rotated
+  // Called when: App startup, decide if rotation needed
+  rpc GetSignedPreKeyAge(GetSignedPreKeyAgeRequest) returns (GetSignedPreKeyAgeResponse);
+
+  // =========================================================================
+  // Identity Key Operations
+  // =========================================================================
+
+  // GetIdentityKey - Fetch user's identity public key
+  // Called when: Verify safety number, check key change
+  rpc GetIdentityKey(GetIdentityKeyRequest) returns (GetIdentityKeyResponse);
+
+  // VerifySafetyNumber - Verify safety number matches
+  // Called when: User manually verifies contact (QR code scan)
+  rpc VerifySafetyNumber(VerifySafetyNumberRequest) returns (VerifySafetyNumberResponse);
+
+  // =========================================================================
+  // Key Transparency (Future)
+  // =========================================================================
+
+  // Reserved for key transparency / auditing features
+  // rpc GetKeyHistory - audit log of key changes
+  // rpc ReportKeyMismatch - report potential MITM
+}
+
+// ============================================================================
+// GetPreKeyBundle Messages
+// ============================================================================
+
+message GetPreKeyBundleRequest {
+  // Target user ID
+  string user_id = 1;
+
+  // Target device ID (optional - if omitted, returns for primary device)
+  optional string device_id = 2;
+
+  // Preferred crypto suite (optional)
+  // Values: "X25519_CHACHA20", "X25519_AES256", "KYBER_HYBRID"
+  optional string preferred_suite = 3;
+
+  // Reserved for future options
+  reserved 4 to 10;
+}
+
+message GetPreKeyBundleResponse {
+  // Pre-key bundle
+  PreKeyBundle bundle = 1;
+
+  // Bundle device ID
+  string device_id = 2;
+
+  // Was one-time pre-key included?
+  // If false, only signed pre-key available (less forward secrecy)
+  bool has_one_time_key = 3;
+
+  // Reserved for future fields
+  reserved 4 to 10;
+}
+
+// Pre-key bundle for X3DH key agreement
+message PreKeyBundle {
+  // Registration ID (for Signal protocol compatibility)
+  uint32 registration_id = 1;
+
+  // Identity key (long-term, Ed25519 -> X25519 or native X25519)
+  bytes identity_key = 2;
+
+  // Signed pre-key (rotated monthly)
+  bytes signed_pre_key = 3;
+
+  // Signed pre-key ID
+  uint32 signed_pre_key_id = 4;
+
+  // Signed pre-key signature (Ed25519 signature over signed_pre_key)
+  bytes signed_pre_key_signature = 5;
+
+  // One-time pre-key (single use, may be null if exhausted)
+  optional bytes one_time_pre_key = 6;
+
+  // One-time pre-key ID (if provided)
+  optional uint32 one_time_pre_key_id = 7;
+
+  // Crypto suite used
+  string crypto_suite = 8;
+
+  // Key generation timestamp (for staleness detection)
+  int64 generated_at = 9;
+
+  // Reserved for post-quantum keys
+  reserved 10 to 15;
+}
+
+// ============================================================================
+// GetPreKeyBundles (Batch) Messages
+// ============================================================================
+
+message GetPreKeyBundlesRequest {
+  // Target user ID
+  string user_id = 1;
+
+  // Specific device IDs (optional - if omitted, returns for all devices)
+  repeated string device_ids = 2;
+
+  // Preferred crypto suite
+  optional string preferred_suite = 3;
+}
+
+message GetPreKeyBundlesResponse {
+  // Bundles per device
+  repeated DevicePreKeyBundle bundles = 1;
+
+  // Devices that had no pre-keys available
+  repeated string unavailable_devices = 2;
+}
+
+message DevicePreKeyBundle {
+  // Device ID
+  string device_id = 1;
+
+  // Pre-key bundle
+  PreKeyBundle bundle = 2;
+
+  // Device platform (for UI hints)
+  shared.proto.core.v1.DevicePlatform platform = 3;
+}
+
+// ============================================================================
+// UploadPreKeys Messages
+// ============================================================================
+
+message UploadPreKeysRequest {
+  // Device ID uploading keys for
+  string device_id = 1;
+
+  // One-time pre-keys to upload
+  repeated OneTimePreKey pre_keys = 2;
+
+  // Optional: also update signed pre-key
+  optional SignedPreKeyUpload signed_pre_key = 3;
+
+  // Reserved for future options
+  reserved 4 to 10;
+}
+
+message OneTimePreKey {
+  // Key ID (client-generated, unique per device)
+  uint32 key_id = 1;
+
+  // Public key (X25519, 32 bytes)
+  bytes public_key = 2;
+}
+
+message SignedPreKeyUpload {
+  // Key ID
+  uint32 key_id = 1;
+
+  // Public key (X25519, 32 bytes)
+  bytes public_key = 2;
+
+  // Signature over public_key using identity key
+  bytes signature = 3;
+}
+
+message UploadPreKeysResponse {
+  // Success
+  bool success = 1;
+
+  // Number of pre-keys now on server
+  uint32 pre_key_count = 2;
+
+  // Server timestamp
+  int64 uploaded_at = 3;
+}
+
+// ============================================================================
+// GetPreKeyCount Messages
+// ============================================================================
+
+message GetPreKeyCountRequest {
+  // Device ID to check
+  string device_id = 1;
+}
+
+message GetPreKeyCountResponse {
+  // Number of one-time pre-keys remaining
+  uint32 count = 1;
+
+  // Recommended minimum (client should upload if below)
+  uint32 recommended_minimum = 2;
+
+  // Last upload timestamp
+  int64 last_upload_at = 3;
+}
+
+// ============================================================================
+// RotateSignedPreKey Messages
+// ============================================================================
+
+message RotateSignedPreKeyRequest {
+  // Device ID
+  string device_id = 1;
+
+  // New signed pre-key
+  SignedPreKeyUpload new_signed_pre_key = 2;
+
+  // Reason for rotation (for audit log)
+  SignedPreKeyRotationReason reason = 3;
+}
+
+enum SignedPreKeyRotationReason {
+  // Unspecified (must be 0)
+  SIGNED_PRE_KEY_ROTATION_REASON_UNSPECIFIED = 0;
+
+  // Scheduled rotation (monthly)
+  SIGNED_PRE_KEY_ROTATION_REASON_SCHEDULED = 1;
+
+  // Security incident suspected
+  SIGNED_PRE_KEY_ROTATION_REASON_SECURITY = 2;
+
+  // User-initiated
+  SIGNED_PRE_KEY_ROTATION_REASON_USER = 3;
+
+  // Device reinstall/restore
+  SIGNED_PRE_KEY_ROTATION_REASON_REINSTALL = 4;
+
+  // Reserved for future reasons
+  reserved 5 to 10;
+}
+
+message RotateSignedPreKeyResponse {
+  // Success
+  bool success = 1;
+
+  // New signed pre-key ID (echo back)
+  uint32 new_key_id = 2;
+
+  // Old key will be kept until (for in-flight messages)
+  int64 old_key_valid_until = 3;
+
+  // Rotation timestamp
+  int64 rotated_at = 4;
+}
+
+// ============================================================================
+// GetSignedPreKeyAge Messages
+// ============================================================================
+
+message GetSignedPreKeyAgeRequest {
+  // Device ID
+  string device_id = 1;
+}
+
+message GetSignedPreKeyAgeResponse {
+  // Current signed pre-key ID
+  uint32 key_id = 1;
+
+  // When it was uploaded
+  int64 uploaded_at = 2;
+
+  // Age in seconds
+  int64 age_seconds = 3;
+
+  // Should rotate? (age > 30 days)
+  bool should_rotate = 4;
+
+  // Recommended rotation interval (seconds)
+  int64 rotation_interval = 5;
+}
+
+// ============================================================================
+// GetIdentityKey Messages
+// ============================================================================
+
+message GetIdentityKeyRequest {
+  // User ID
+  string user_id = 1;
+
+  // Device ID (optional - if omitted, returns primary device's key)
+  optional string device_id = 2;
+}
+
+message GetIdentityKeyResponse {
+  // Identity public key
+  bytes identity_key = 1;
+
+  // Key fingerprint (for display, e.g., "AB12 CD34 ...")
+  string fingerprint = 2;
+
+  // When this key was first seen
+  int64 first_seen_at = 3;
+
+  // Has this key changed since last check?
+  bool key_changed = 4;
+
+  // Previous key fingerprint (if changed)
+  optional string previous_fingerprint = 5;
+}
+
+// ============================================================================
+// VerifySafetyNumber Messages
+// ============================================================================
+
+message VerifySafetyNumberRequest {
+  // Our user ID
+  string our_user_id = 1;
+
+  // Their user ID
+  string their_user_id = 2;
+
+  // Expected safety number (60 digits)
+  string expected_safety_number = 3;
+}
+
+message VerifySafetyNumberResponse {
+  // Does it match?
+  bool matches = 1;
+
+  // Actual safety number (for display if mismatch)
+  string actual_safety_number = 2;
+
+  // Verification timestamp
+  int64 verified_at = 3;
+}

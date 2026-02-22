@@ -1,0 +1,49 @@
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16
+    container_name: construct-db
+    environment:
+      POSTGRES_USER: construct
+      POSTGRES_PASSWORD: construct_dev_password
+      POSTGRES_DB: construct
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../shared/migrations:/docker-entrypoint-initdb.d/migrations:ro
+    restart: unless-stopped
+    networks:
+      - construct-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for message queues and pub/sub)
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - construct-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  construct-network:
+    name: construct-network
+    driver: bridge

@@ -1,0 +1,221 @@
+# docker-compose.federation-test.yml
+#
+# Self-hosted federation test instance
+# Deploy on a VPS (Hetzner, DigitalOcean, etc.) to test S2S federation
+#
+# Usage:
+#   1. Copy .env.federation-test.example to .env
+#   2. Fill in the required values
+#   3. docker compose -f docker-compose.federation-test.yml up -d
+#
+# This creates a complete Construct instance that can federate with
+# your production instance (eu.konstruct.cc)
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # Core Services
+  # ==========================================================================
+  
+  construct-server:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    command: ["construct-server"]
+    ports:
+      - "8080:8080"   # WebSocket + HTTP
+      - "8081:8081"   # Health check
+    environment:
+      # Instance identity
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      FEDERATION_BASE_DOMAIN: ${FEDERATION_BASE_DOMAIN:-konstruct.cc}
+      
+      # Database
+      DATABASE_URL: postgres://construct:${POSTGRES_PASSWORD}@postgres:5432/construct
+      REDIS_URL: redis://redis:6379
+      
+      # Kafka
+      KAFKA_ENABLED: "true"
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: construct-messages
+      KAFKA_CONSUMER_GROUP: cnstrct-dlvr-wrkrs
+      
+      # Security
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ISSUER: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      LOG_HASH_SALT: ${LOG_HASH_SALT}
+      
+      # Server signing key (for federation)
+      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
+      
+      # Logging
+      RUST_LOG: info,construct_server=debug
+      
+      # Prefixes
+      ONLINE_CHANNEL: "user_online_notifications:"
+      DELIVERY_QUEUE_PREFIX: "delivery_queue:"
+      OFFLINE_QUEUE_PREFIX: "offline:"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  message-gateway:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    command: ["message-gateway"]
+    ports:
+      - "8090:8080"   # gRPC
+    environment:
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      DATABASE_URL: postgres://construct:${POSTGRES_PASSWORD}@postgres:5432/construct
+      REDIS_URL: redis://redis:6379
+      KAFKA_ENABLED: "true"
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: construct-messages
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ISSUER: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      LOG_HASH_SALT: ${LOG_HASH_SALT}
+      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
+      RUST_LOG: info,construct_server=debug
+      ONLINE_CHANNEL: "user_online_notifications:"
+      DELIVERY_QUEUE_PREFIX: "delivery_queue:"
+      OFFLINE_QUEUE_PREFIX: "offline:"
+    depends_on:
+      - postgres
+      - redis
+      - redpanda
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  delivery-worker:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    command: ["delivery-worker"]
+    environment:
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      DATABASE_URL: postgres://construct:${POSTGRES_PASSWORD}@postgres:5432/construct
+      REDIS_URL: redis://redis:6379
+      KAFKA_ENABLED: "true"
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: construct-messages
+      KAFKA_CONSUMER_GROUP: cnstrct-dlvr-wrkrs
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ISSUER: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+      LOG_HASH_SALT: ${LOG_HASH_SALT}
+      RUST_LOG: info,construct_server=debug
+      ONLINE_CHANNEL: "user_online_notifications:"
+      DELIVERY_QUEUE_PREFIX: "delivery_queue:"
+      OFFLINE_QUEUE_PREFIX: "offline:"
+    depends_on:
+      - postgres
+      - redis
+      - redpanda
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  # ==========================================================================
+  # Data Stores
+  # ==========================================================================
+  
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: construct
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: construct
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  # Redpanda - Kafka-compatible, single-node friendly
+  redpanda:
+    image: redpandadata/redpanda:v24.1.1
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --set=redpanda.enable_idempotence=true
+      - --set=redpanda.auto_create_topics_enabled=true
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+  # ==========================================================================
+  # Reverse Proxy (TLS termination)
+  # ==========================================================================
+  
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.federation:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN:-test.konstruct.cc}
+    depends_on:
+      - construct-server
+      - message-gateway
+    restart: unless-stopped
+    networks:
+      - construct-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  redpanda_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  construct-network:
+    driver: bridge

@@ -1,0 +1,167 @@
+version: '3.8'
+
+# Local staging environment - tests full microservices stack with Envoy
+# Uses external managed services (Supabase, Upstash, Redpanda)
+# Run: docker-compose -f ops/docker-compose.staging.yml up --build
+
+# Load environment from parent .env.test file for local testing
+env_file:
+  - ../.env.test
+
+services:
+  # Envoy Proxy - entry point for all gRPC traffic
+  envoy:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-envoy
+    ports:
+      - "443:443"      # HTTPS (TLS terminated by Envoy)
+      - "9901:9901"    # Envoy admin interface
+    volumes:
+      - ../ops/envoy.yaml:/app/envoy.yaml:ro
+      - ../ops/certs:/etc/envoy/certs:ro
+    command: /usr/local/bin/envoy -c /app/envoy.yaml --log-level info
+    networks:
+      - construct-net
+    depends_on:
+      - auth-service
+      - user-service
+      - messaging-service
+      - notification-service
+    restart: unless-stopped
+
+  # Auth Service - authentication and JWT management
+  auth-service:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-auth
+    command: /usr/local/bin/auth-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - JWT_PRIVATE_KEY=${JWT_PRIVATE_KEY}
+      - CSRF_SECRET=${CSRF_SECRET}
+      - AUTH_GRPC_BIND_ADDRESS=0.0.0.0:50051
+    ports:
+      - "50051:50051"  # Exposed for direct testing
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+  # User Service - user management
+  user-service:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-user
+    command: /usr/local/bin/user-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - USER_GRPC_BIND_ADDRESS=0.0.0.0:50052
+    ports:
+      - "50052:50052"
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+  # Messaging Service - message routing
+  messaging-service:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-messaging
+    command: /usr/local/bin/messaging-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_SASL_USERNAME=${KAFKA_SASL_USERNAME}
+      - KAFKA_SASL_PASSWORD=${KAFKA_SASL_PASSWORD}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - MESSAGING_GRPC_BIND_ADDRESS=0.0.0.0:50053
+    ports:
+      - "50053:50053"
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+  # Notification Service - push notifications
+  notification-service:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-notification
+    command: /usr/local/bin/notification-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - APNS_KEY_PATH=/app/prkeys/AuthKey_TKYQ5KVW7P.p8
+      - APNS_KEY_ID=${APNS_KEY_ID}
+      - APNS_TEAM_ID=${APNS_TEAM_ID}
+      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID}
+      - APNS_ENVIRONMENT=development
+      - NOTIFICATION_GRPC_BIND_ADDRESS=0.0.0.0:50054
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    ports:
+      - "50054:50054"
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+  # Invite Service - invite management
+  invite-service:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-invite
+    command: /usr/local/bin/invite-service
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - INVITE_GRPC_BIND_ADDRESS=0.0.0.0:50055
+    ports:
+      - "50055:50055"
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+  # Delivery Worker - message delivery
+  delivery-worker:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    container_name: construct-worker
+    command: /usr/local/bin/delivery-worker
+    environment:
+      - RUST_LOG=info,sqlx=warn
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - KAFKA_BROKERS=${KAFKA_BROKERS}
+      - KAFKA_SASL_USERNAME=${KAFKA_SASL_USERNAME}
+      - KAFKA_SASL_PASSWORD=${KAFKA_SASL_PASSWORD}
+      - APNS_KEY_PATH=/app/prkeys/AuthKey_TKYQ5KVW7P.p8
+      - APNS_KEY_ID=${APNS_KEY_ID}
+      - APNS_TEAM_ID=${APNS_TEAM_ID}
+      - APNS_BUNDLE_ID=${APNS_BUNDLE_ID}
+      - APNS_ENVIRONMENT=development
+    volumes:
+      - ../prkeys:/app/prkeys:ro
+    networks:
+      - construct-net
+    restart: unless-stopped
+
+networks:
+  construct-net:
+    driver: bridge

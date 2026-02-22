@@ -1,5 +1,12 @@
 # Rust
 Cargo.lock
+.cargo/
+!.cargo/audit.toml
+target/
+
+rpk
+*.bin
+*.zip
 
 # Python
 test_*.py
@@ -7,26 +14,47 @@ test_*.py
 __pycache__/
 venv/
 *.egg-info/
+.mypy_cache/
 
-# Rust
-target/
-
-# sqlx query cache
-.sqlx/*
-!.sqlx/query-cache.json
+# sqlx query cache - committed for SQLX_OFFLINE=true in CI
+# regenerate with: cargo sqlx prepare --workspace
 
 # Environment
 .env
 .env.local
-*.p8
+.env.deploy
+.env.backup
+.env.test
 
 # APNs Keys
 *.p8
 
+# RSA/PEM Keys
+*.pem
+shared/tests/keys/
+prkeys/
+
 # IDE
 .vscode/
-.claude/
 .idea/
+.zed/
 *.swp
 *.swo
 .DS_Store
+.docs-cache
+# Proto files are in shared/proto/, root proto/ is copy for build.rs
+proto/
+!shared/proto/
+
+# Documentation moved to Obsidian vault (~/Documents/Konstruct/)
+docs/
+TODO.md
+*.md.backup
+
+# Session state (already in ~/.copilot/session-state/)
+plan.md
+DEPLOY_*.md
+*.old
+
+# Local test environment
+.env.test

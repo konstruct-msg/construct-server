@@ -1,0 +1,38 @@
+# Buf configuration for Construct protobuf schemas
+# https://buf.build/docs/configuration/v2/buf-yaml
+
+version: v2
+
+# Lint configuration
+lint:
+  use:
+    - STANDARD # Use standard lint rules
+  except:
+    # Temporarily disable until Phase 2 (microservices decomposition)
+    # Current structure: shared/proto/construct/core/ is too nested
+    # After Phase 2: Each service will have its own proto/ directory
+    - PACKAGE_DIRECTORY_MATCH
+
+  # Allow both enum value prefixes and no prefix
+  enum_zero_value_suffix: _UNSPECIFIED
+  rpc_allow_same_request_response: false
+  rpc_allow_google_protobuf_empty_requests: true
+  rpc_allow_google_protobuf_empty_responses: true
+  service_suffix: Service
+
+# Breaking change detection
+breaking:
+  use:
+    - FILE # Detect file-level breaking changes
+    - PACKAGE # Detect package-level breaking changes
+    - WIRE_JSON # Detect wire and JSON breaking changes
+
+  # Field numbers are FROZEN after first commit
+  # Never remove or renumber fields!
+
+# Dependencies (none for now, may add google/protobuf later)
+deps: []
+
+# Module configuration
+modules:
+  - path: .

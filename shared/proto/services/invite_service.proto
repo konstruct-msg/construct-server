@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// InviteService - управление пригласительными ссылками и QR-кодами
+// для безопасного добавления контактов (one-time use, short TTL)
+service InviteService {
+  // Генерация одноразового invite token для QR-кода или deep link
+  rpc GenerateInvite(GenerateInviteRequest) returns (GenerateInviteResponse);
+  
+  // Принятие и сжигание invite token (one-time use)
+  rpc AcceptInvite(AcceptInviteRequest) returns (AcceptInviteResponse);
+  
+  // Отзыв активного invite (до его использования)
+  rpc RevokeInvite(RevokeInviteRequest) returns (RevokeInviteResponse);
+  
+  // Получение списка активных invite'ов пользователя
+  rpc ListInvites(ListInvitesRequest) returns (ListInvitesResponse);
+}
+
+// ============================================================================
+// GenerateInvite Messages
+// ============================================================================
+
+// Запрос на генерацию invite token
+message GenerateInviteRequest {
+  // Device ID который создаёт invite (v2)
+  optional string device_id = 1;
+  
+  // TTL в секундах (по умолчанию 300 = 5 минут)
+  optional int64 ttl_seconds = 2;
+}
+
+// Ответ с данными для формирования invite token
+message GenerateInviteResponse {
+  // Уникальный jti (JWT ID) для one-time use tracking
+  string jti = 1;
+  
+  // Server FQDN (для federation)
+  string server = 2;
+  
+  // Unix timestamp истечения
+  int64 expires_at = 3;
+  
+  // User ID создателя invite
+  string user_id = 4;
+  
+  // Device ID создателя (v2, опционально для обратной совместимости с v1)
+  optional string device_id = 5;
+  
+  // TTL в секундах
+  int64 ttl_seconds = 6;
+}
+
+// ============================================================================
+// AcceptInvite Messages
+// ============================================================================
+
+// Запрос на принятие invite token
+message AcceptInviteRequest {
+  // Полный invite token (закодированный MessagePack/Base64 с QR-кода)
+  // Содержит: jti, uuid, device_id, server, ts, eph_pub, sig
+  InviteToken invite = 1;
+}
+
+// Структура invite token (MessagePack encoded)
+message InviteToken {
+  // Версия протокола (1 = legacy user_id only, 2 = device_id)
+  int32 v = 1;
+  
+  // JWT ID для one-time use tracking
+  string jti = 2;
+  
+  // User ID создателя
+  string uuid = 3;
+  
+  // Device ID создателя (v2 only)
+  optional string device_id = 4;
+  
+  // Server FQDN
+  string server = 5;
+  
+  // Unix timestamp создания
+  int64 ts = 6;
+  
+  // Ephemeral X25519 public key (32 bytes, base64)
+  string eph_pub = 7;
+  
+  // Ed25519 signature (64 bytes, base64)
+  string sig = 8;
+}
+
+// Ответ после успешного принятия invite
+message AcceptInviteResponse {
+  // User ID добавленного контакта
+  string user_id = 1;
+  
+  // Device ID (v2 only)
+  optional string device_id = 2;
+  
+  // Server где находится пользователь
+  string server = 3;
+  
+  // Сообщение для UI
+  string message = 4;
+}
+
+// ============================================================================
+// RevokeInvite Messages
+// ============================================================================
+
+// Запрос на отзыв invite token
+message RevokeInviteRequest {
+  // jti токена который нужно отозвать
+  string jti = 1;
+}
+
+// Ответ на отзыв invite
+message RevokeInviteResponse {
+  // true если токен был отозван
+  bool success = 1;
+  
+  // Сообщение (например "Invite revoked" или "Invite not found")
+  string message = 2;
+}
+
+// ============================================================================
+// ListInvites Messages
+// ============================================================================
+
+// Запрос на список активных invite'ов
+message ListInvitesRequest {
+  // Максимальное количество результатов
+  optional int32 limit = 1;
+  
+  // Включать ли истёкшие invite'ы
+  optional bool include_expired = 2;
+}
+
+// Ответ со списком invite'ов
+message ListInvitesResponse {
+  // Список активных invite'ов
+  repeated InviteInfo invites = 1;
+}
+
+// Информация об invite
+message InviteInfo {
+  // jti токена
+  string jti = 1;
+  
+  // User ID создателя
+  string user_id = 2;
+  
+  // Device ID создателя (v2 only)
+  optional string device_id = 3;
+  
+  // Unix timestamp создания
+  int64 created_at = 4;
+  
+  // Unix timestamp истечения
+  int64 expires_at = 5;
+  
+  // Использован ли токен
+  bool used = 6;
+  
+  // Кем использован (если used = true)
+  optional string used_by = 7;
+  
+  // Когда использован
+  optional int64 used_at = 8;
+}

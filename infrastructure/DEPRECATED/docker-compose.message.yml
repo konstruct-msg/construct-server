@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # INFRASTRUCTURE SERVICES
+  # ============================================================================
+
+  # Redis (Replica - Message queues, rate limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis-replica
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --slaveof core.internal 6379
+    volumes:
+      - redis_data:/data
+    networks:
+      - construct_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redpanda (Kafka-compatible message broker)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.3
+    container_name: construct-redpanda
+    ports:
+      - "127.0.0.1:9092:9092"  # Kafka protocol
+      - "127.0.0.1:9644:9644"  # Admin API
+    environment:
+      - REDPANDA_AUTO_CREATE_TOPICS_ENABLED=true
+      - REDPANDA_ENABLE_IDEMPOTENCE=true
+      - REDPANDA_ENABLE_TRANSACTIONS=true
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - construct_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ============================================================================
+  # MESSAGE MICROSERVICES
+  # ============================================================================
+
+  # Messaging Service
+  messaging-service:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile
+      target: messaging-service
+    container_name: construct-messaging-service
+    ports:
+      - "127.0.0.1:8004:8080"
+    environment:
+      - DATABASE_URL=postgresql://construct:${DB_PASSWORD}@core.internal:5432/construct
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - KAFKA_ENABLED=true
+      - KAFKA_BROKERS=redpanda:9092
+      - KAFKA_TOPIC=construct-messages
+      - JWT_SECRET=${JWT_SECRET}
+      - PORT=8080
+      - LOG_LEVEL=info
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - construct_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Delivery Worker
+  delivery-worker:
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile
+      target: delivery-worker
+    container_name: construct-delivery-worker
+    environment:
+      - DATABASE_URL=postgresql://construct:${DB_PASSWORD}@core.internal:5432/construct
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - KAFKA_ENABLED=true
+      - KAFKA_BROKERS=redpanda:9092
+      - KAFKA_TOPIC=construct-messages
+      - KAFKA_CONSUMER_GROUP=delivery-workers
+      - JWT_SECRET=${JWT_SECRET}
+      - LOG_LEVEL=info
+    depends_on:
+      redis:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      messaging-service:
+        condition: service_healthy
+    networks:
+      - construct_network
+    restart: unless-stopped
+    # No health check for worker - it's a background process
+
+volumes:
+  redis_data:
+  redpanda_data:
+
+networks:
+  construct_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package shared.proto.core.v1;
+
+// CryptoSuite - Cryptographic algorithm suite
+// Ordered by preference (strongest first)
+enum CryptoSuite {
+  // Unspecified suite (must be 0)
+  CRYPTO_SUITE_UNSPECIFIED = 0;
+
+  // === Post-Quantum Hybrid Suites (Future) ===
+
+  // Kyber1024 (NIST Level 5) + X25519 + AES-256-GCM + SHA3-512
+  // Key size: ~1.5KB, security: 256-bit quantum
+  CRYPTO_SUITE_HYBRID_KYBER1024_X25519 = 1;
+
+  // Kyber768 (NIST Level 3) + X25519 + AES-256-GCM + SHA3-256
+  // Key size: ~1.2KB, security: 192-bit quantum
+  CRYPTO_SUITE_HYBRID_KYBER768_X25519 = 2;
+
+  // === Classic Suites (Current) ===
+
+  // X25519 ECDH + ChaCha20-Poly1305 + SHA-256
+  // Signal Protocol default, widely supported
+  CRYPTO_SUITE_CLASSIC_X25519_CHACHA20 = 10;
+
+  // X25519 ECDH + AES-256-GCM + SHA-256
+  // Compatible with hardware AES acceleration
+  CRYPTO_SUITE_CLASSIC_X25519_AES256 = 11;
+
+  // Reserved for future suites
+  reserved 3 to 9, 12 to 100;
+}
+
+// KeyBundle - Cryptographic key package for E2EE handshake
+// Used in X3DH (Signal Protocol) and MLS key distribution
+message KeyBundle {
+  // User and device identity
+  string user_id = 1;
+  string device_id = 2;
+
+  // Crypto suite used for these keys
+  CryptoSuite crypto_suite = 3;
+
+  // Identity key (long-term, never rotates)
+  // Ed25519 public key (32 bytes) for classic suites
+  // Dilithium public key (~2.5KB) for PQ suites
+  bytes identity_key = 4;
+
+  // Signed pre-key (medium-term, rotates monthly)
+  // X25519 public key (32 bytes) for classic suites
+  // Kyber public key (~1.5KB) for PQ suites
+  bytes signed_pre_key = 5;
+
+  // Signature of signed_pre_key by identity_key
+  // Proves ownership and prevents MITM attacks
+  bytes signature = 6;
+
+  // One-time pre-keys (ephemeral, single-use)
+  // Client should replenish when count < 10
+  repeated bytes one_time_pre_keys = 7;
+
+  // Key generation timestamp
+  int64 created_at = 8;
+
+  // Signed pre-key expiration (Unix timestamp)
+  // Server rejects expired keys
+  int64 signed_pre_key_expires_at = 9;
+
+  // Key bundle version (for protocol upgrades)
+  uint32 version = 10;
+
+  // Reserved for future PQ hybrid keys
+  // May include: Kyber ciphertext, Dilithium signature, etc.
+  reserved 16 to 50;
+
+  // Reserved for federation metadata
+  reserved 51 to 100;
+}
+
+// CryptoNegotiation - Algorithm negotiation for E2EE session
+// Used in Noise Protocol prologue to ensure both parties agree
+message CryptoNegotiation {
+  // Client's supported suites (ordered by preference)
+  // Client sends strongest suite first
+  // Example: [KYBER1024_X25519, KYBER768_X25519, X25519_CHACHA20]
+  repeated CryptoSuite supported_suites = 1;
+
+  // Chosen suite after negotiation
+  // Server selects strongest intersection with recipient
+  CryptoSuite chosen_suite = 2;
+
+  // Prologue (authenticated commitment to chosen suite)
+  // Format: "construct-v1|CRYPTO_SUITE_X25519_CHACHA20"
+  // Included in Noise handshake to prevent downgrade attacks
+  bytes prologue = 3;
+
+  // Negotiation timestamp
+  int64 negotiated_at = 4;
+
+  // Reserved for future negotiation metadata
+  reserved 5 to 15;
+}
+
+// PreKeyRequest - Request for pre-keys from server
+// Client fetches recipient's keys before sending first message
+message PreKeyRequest {
+  // Recipient user ID
+  string user_id = 1;
+
+  // Recipient device ID (optional)
+  // If empty, server returns keys for all devices
+  optional string device_id = 2;
+
+  // Preferred crypto suite (optional)
+  // If recipient doesn't support it, server returns next best
+  optional CryptoSuite preferred_suite = 3;
+}
+
+// PreKeyResponse - Server response with recipient's keys
+message PreKeyResponse {
+  // Recipient's key bundle
+  KeyBundle key_bundle = 1;
+
+  // Registration ID (Signal Protocol)
+  // Used to detect key changes and prevent replay attacks
+  uint32 registration_id = 2;
+
+  // Remaining one-time pre-keys count
+  // Client should warn if < 10
+  uint32 remaining_one_time_keys = 3;
+}
+
+// KeyRotationEvent - Notification that device keys rotated
+// Sent to all active sessions when signed_pre_key changes
+message KeyRotationEvent {
+  // Device that rotated keys
+  string user_id = 1;
+  string device_id = 2;
+
+  // New key bundle
+  KeyBundle new_key_bundle = 3;
+
+  // Reason for rotation
+  KeyRotationReason reason = 4;
+
+  // Rotation timestamp
+  int64 rotated_at = 5;
+}
+
+// KeyRotationReason - Why keys were rotated
+enum KeyRotationReason {
+  // Unspecified reason (must be 0)
+  KEY_ROTATION_REASON_UNSPECIFIED = 0;
+
+  // Scheduled rotation (every 30 days)
+  KEY_ROTATION_REASON_SCHEDULED = 1;
+
+  // Security incident (forced by admin)
+  KEY_ROTATION_REASON_SECURITY = 2;
+
+  // Device compromised (user-initiated)
+  KEY_ROTATION_REASON_COMPROMISED = 3;
+
+  // One-time keys depleted
+  KEY_ROTATION_REASON_REPLENISH = 4;
+
+  // Reserved for future reasons
+  reserved 5 to 15;
+}

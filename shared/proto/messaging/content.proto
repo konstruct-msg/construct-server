@@ -1,0 +1,417 @@
+syntax = "proto3";
+
+package shared.proto.messaging.v1;
+
+// MessageContent - Decrypted message content
+// This is the plaintext content after E2EE decryption
+// Never transmitted in plaintext over network
+message MessageContent {
+  // Message type (determines which field is populated)
+  oneof content {
+    // Text message (UTF-8)
+    TextMessage text = 1;
+
+    // Media message (image, video, audio, file)
+    MediaMessage media = 2;
+
+    // Reaction to another message
+    ReactionMessage reaction = 3;
+
+    // Message edit (replace previous message)
+    EditMessage edit = 4;
+
+    // Message deletion (tombstone)
+    DeleteMessage delete = 5;
+
+    // Voice message (audio recorded in-app)
+    VoiceMessage voice = 6;
+
+    // Location share
+    LocationMessage location = 7;
+
+    // Contact card
+    ContactMessage contact = 8;
+
+    // Poll/Survey
+    PollMessage poll = 9;
+
+    // Future content types: 10-20
+  }
+
+  // Formatting metadata (applies to all types)
+  optional FormattingMetadata formatting = 21;
+
+  // Preview metadata (for link previews, unfurled URLs)
+  optional PreviewMetadata preview = 22;
+
+  // Reserved for future metadata
+  reserved 23 to 50;
+}
+
+// TextMessage - Plain text message
+message TextMessage {
+  // Message text (UTF-8, max 10,000 chars)
+  string text = 1;
+
+  // Mentioned user IDs (for @mentions)
+  repeated string mentions = 2;
+
+  // Quoted message (reply to another message)
+  optional QuotedMessage quoted = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
+}
+
+// MediaMessage - Image, video, audio, or file
+message MediaMessage {
+  // Media type
+  MediaType media_type = 1;
+
+  // File URL (encrypted storage URL)
+  // Points to E2EE encrypted blob on CDN
+  string file_url = 2;
+
+  // Encryption key (for decrypting file_url content)
+  // AES-256-GCM key (32 bytes)
+  bytes encryption_key = 3;
+
+  // HMAC-SHA256 of encrypted file (integrity check)
+  bytes file_hash = 4;
+
+  // File size in bytes
+  uint64 file_size = 5;
+
+  // MIME type (e.g., "image/jpeg", "video/mp4")
+  string mime_type = 6;
+
+  // Filename (original filename, sanitized)
+  optional string filename = 7;
+
+  // Thumbnail (small preview image)
+  // JPEG compressed, max 100KB
+  optional bytes thumbnail = 8;
+
+  // Media dimensions (for images/videos)
+  optional MediaDimensions dimensions = 9;
+
+  // Duration (for audio/video) in milliseconds
+  optional uint32 duration_ms = 10;
+
+  // Caption (optional text with media)
+  optional string caption = 11;
+
+  // Reserved for future media metadata
+  reserved 12 to 20;
+}
+
+// MediaType - Type of media attachment
+enum MediaType {
+  // Unspecified media type (must be 0)
+  MEDIA_TYPE_UNSPECIFIED = 0;
+
+  // Image (JPEG, PNG, WebP, HEIC)
+  MEDIA_TYPE_IMAGE = 1;
+
+  // Video (MP4, MOV, WebM)
+  MEDIA_TYPE_VIDEO = 2;
+
+  // Audio (MP3, AAC, Opus)
+  MEDIA_TYPE_AUDIO = 3;
+
+  // Generic file (PDF, ZIP, etc.)
+  MEDIA_TYPE_FILE = 4;
+
+  // Animated image (GIF, APNG)
+  MEDIA_TYPE_ANIMATED = 5;
+
+  // Sticker
+  MEDIA_TYPE_STICKER = 6;
+
+  // Reserved for future types
+  reserved 7 to 15;
+}
+
+// MediaDimensions - Image/video dimensions
+message MediaDimensions {
+  // Width in pixels
+  uint32 width = 1;
+
+  // Height in pixels
+  uint32 height = 2;
+}
+
+// VoiceMessage - Voice recording (special audio type)
+message VoiceMessage {
+  // Audio file URL (E2EE encrypted)
+  string file_url = 1;
+
+  // Encryption key (AES-256-GCM)
+  bytes encryption_key = 2;
+
+  // File hash (HMAC-SHA256)
+  bytes file_hash = 3;
+
+  // Duration in milliseconds
+  uint32 duration_ms = 4;
+
+  // Waveform data (for visualization)
+  // Array of amplitude samples (0-255)
+  repeated uint32 waveform = 5;
+
+  // Audio codec (Opus recommended)
+  string codec = 6;
+
+  // Reserved for future features
+  reserved 7 to 10;
+}
+
+// ReactionMessage - Emoji reaction to a message
+message ReactionMessage {
+  // Message ID being reacted to
+  string target_message_id = 1;
+
+  // Emoji unicode (UTF-8)
+  // Example: "👍", "❤️", "😂"
+  string emoji = 2;
+
+  // Action (add or remove reaction)
+  ReactionAction action = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
+}
+
+// ReactionAction - Add or remove reaction
+enum ReactionAction {
+  // Uncspecified action (must be 0)
+  REACTION_ACTION_UNSPECIFIED = 0;
+
+  // Add reaction
+  REACTION_ACTION_ADD = 1;
+
+  // Remove reaction
+  REACTION_ACTION_REMOVE = 2;
+}
+
+// EditMessage - Edit existing message
+message EditMessage {
+  // Message ID being edited
+  string target_message_id = 1;
+
+  // New content (replaces original)
+  oneof new_content {
+    TextMessage new_text = 2;
+    MediaMessage new_media = 3;
+  }
+
+  // Edit timestamp
+  int64 edited_at = 4;
+
+  // Edit count (increments with each edit)
+  uint32 edit_count = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// DeleteMessage - Delete/tombstone a message
+message DeleteMessage {
+  // Message ID being deleted
+  string target_message_id = 1;
+
+  // Delete for everyone or just self?
+  DeleteScope scope = 2;
+
+  // Deletion timestamp
+  int64 deleted_at = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
+}
+
+// DeleteScope - Who sees the deletion
+enum DeleteScope {
+  // Unscpecified scope (must be 0)
+  DELETE_SCOPE_UNSPECIFIED = 0;
+
+  // Delete for self only (other recipients still see it)
+  DELETE_SCOPE_FOR_SELF = 1;
+
+  // Delete for everyone (tombstone for all recipients)
+  DELETE_SCOPE_EVERYONE = 2;
+}
+
+// LocationMessage - Geographic location share
+message LocationMessage {
+  // Latitude (WGS84)
+  double latitude = 1;
+
+  // Longitude (WGS84)
+  double longitude = 2;
+
+  // Accuracy in meters (optional)
+  optional float accuracy = 3;
+
+  // Place name (optional, user-provided)
+  optional string place_name = 4;
+
+  // Address (optional, reverse geocoded)
+  optional string address = 5;
+
+  // Live location (continuously updated)
+  optional bool live = 6;
+
+  // Live location duration (seconds, if live=true)
+  optional uint32 live_duration_seconds = 7;
+
+  // Reserved for future features
+  reserved 8 to 10;
+}
+
+// ContactMessage - Shared contact card
+message ContactMessage {
+  // Contact name
+  string name = 1;
+
+  // Phone numbers
+  repeated string phone_numbers = 2;
+
+  // Email addresses
+  repeated string emails = 3;
+
+  // User ID (if contact is a Construct user)
+  optional string user_id = 4;
+
+  // vCard data (RFC 6350, optional)
+  optional string vcard = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// PollMessage - Poll/survey
+message PollMessage {
+  // Poll question
+  string question = 1;
+
+  // Poll options
+  repeated PollOption options = 2;
+
+  // Multiple choice allowed?
+  bool multiple_choice = 3;
+
+  // Anonymous voting?
+  bool anonymous = 4;
+
+  // Poll expiration timestamp (optional)
+  optional int64 expires_at = 5;
+
+  // Reserved for future features
+  reserved 6 to 10;
+}
+
+// PollOption - Single poll option
+message PollOption {
+  // Option ID (unique within poll)
+  string option_id = 1;
+
+  // Option text
+  string text = 2;
+
+  // Vote count (updated in real-time)
+  uint32 vote_count = 3;
+
+  // Voters (user IDs, if not anonymous)
+  repeated string voters = 4;
+}
+
+// QuotedMessage - Quote/reply to another message
+message QuotedMessage {
+  // Quoted message ID
+  string message_id = 1;
+
+  // Quoted message sender
+  string sender_id = 2;
+
+  // Quoted text (preview, max 200 chars)
+  optional string text_preview = 3;
+
+  // Quoted media type (if applicable)
+  optional MediaType media_type = 4;
+
+  // Reserved for future features
+  reserved 5 to 10;
+}
+
+// FormattingMetadata - Rich text formatting
+message FormattingMetadata {
+  // Formatting entities (bold, italic, code, links)
+  repeated FormatEntity entities = 1;
+
+  // Reserved for future formatting
+  reserved 2 to 10;
+}
+
+// FormatEntity - Single formatting entity
+message FormatEntity {
+  // Entity type
+  FormatType type = 1;
+
+  // Start offset (UTF-8 byte offset)
+  uint32 offset = 2;
+
+  // Length (UTF-8 bytes)
+  uint32 length = 3;
+
+  // Extra data (e.g., URL for links)
+  optional string extra = 4;
+}
+
+// FormatType - Formatting type
+enum FormatType {
+  // Unspecified format (must be 0)
+  FORMAT_TYPE_UNSPECIFIED = 0;
+
+  // Bold text
+  FORMAT_TYPE_BOLD = 1;
+
+  // Italic text
+  FORMAT_TYPE_ITALIC = 2;
+
+  // Inline code
+  FORMAT_TYPE_CODE = 3;
+
+  // Hyperlink (extra = URL)
+  FORMAT_TYPE_LINK = 4;
+
+  // Mention (extra = user_id)
+  FORMAT_TYPE_MENTION = 5;
+
+  // Strikethrough
+  FORMAT_TYPE_STRIKETHROUGH = 6;
+
+  // Reserved for future types
+  reserved 7 to 15;
+}
+
+// PreviewMetadata - Link preview metadata
+message PreviewMetadata {
+  // Original URL
+  string url = 1;
+
+  // Page title
+  optional string title = 2;
+
+  // Page description
+  optional string description = 3;
+
+  // Preview image URL
+  optional string image_url = 4;
+
+  // Site name (e.g., "YouTube", "GitHub")
+  optional string site_name = 5;
+
+  // Reserved for future metadata
+  reserved 6 to 10;
+}
