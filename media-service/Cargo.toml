@@ -3,7 +3,15 @@ name = "media-service"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "media-service"
+path = "src/main.rs"
+
 [dependencies]
+# Local crates
+construct-config = { path = "../crates/construct-config" }
+construct-server-shared = { path = "../shared" }
+
 # Workspace deps
 tokio = {workspace = true}
 anyhow = {workspace = true}
@@ -19,6 +27,11 @@ tower = {workspace = true}
 tower-http = {workspace = true}
 base64 = {workspace = true}
 hex = {workspace = true}
+sqlx = {workspace = true}
+
+# gRPC
+tonic = "0.14.2"
+tokio-stream = "0.1"
 
 # Media specific
 sha2 = "0.10"
