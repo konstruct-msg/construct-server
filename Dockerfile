@@ -27,6 +27,7 @@ COPY invite-service ./invite-service
 COPY gateway ./gateway
 COPY media-service ./media-service
 COPY delivery-worker ./delivery-worker
+COPY key-service ./key-service
 
 # Build all binaries in release mode
 RUN cargo build --release --bins
@@ -60,6 +61,7 @@ COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/
 COPY --from=builder --chmod=+x /app/target/release/notification-service /usr/local/bin/notification-service
 COPY --from=builder --chmod=+x /app/target/release/invite-service /usr/local/bin/invite-service
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
+COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 
 # Copy Envoy configuration for Fly.io (no TLS, localhost routing)
 COPY ops/envoy.fly.yaml /app/envoy.yaml
