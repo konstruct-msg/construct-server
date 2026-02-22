@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sentinel;
+package shared.proto.sentinel.v1;
 
 import "google/protobuf/timestamp.proto";
 
@@ -25,7 +25,7 @@ import "google/protobuf/timestamp.proto";
 
 service SentinelService {
   // User reports a device as spam. No message content is sent — server is blind.
-  rpc ReportSpam(SpamReportRequest) returns (SpamReportResponse);
+  rpc ReportSpam(ReportSpamRequest) returns (ReportSpamResponse);
 
   // Server-enforced block: server will not deliver messages from blocked device.
   rpc BlockDevice(BlockDeviceRequest) returns (BlockDeviceResponse);
@@ -38,7 +38,7 @@ service SentinelService {
 
   // Get caller's current trust level, active restrictions, and remaining rate limits.
   // Auth token provides identity — no parameters needed.
-  rpc GetTrustStatus(TrustStatusRequest) returns (TrustStatusResponse);
+  rpc GetTrustStatus(GetTrustStatusRequest) returns (GetTrustStatusResponse);
 
   // Check if caller is permitted to send a message to a specific target device.
   // Call BEFORE encrypting and sending to avoid wasted work on denied sends.
@@ -46,51 +46,51 @@ service SentinelService {
 
   // Appeal an automatic restriction (rate limit, flag, or ban).
   // Stub — full review workflow to be implemented later.
-  rpc AppealRestriction(AppealRequest) returns (AppealResponse);
+  rpc AppealRestriction(AppealRestrictionRequest) returns (AppealRestrictionResponse);
 
   // Aggregate protection statistics — admin/internal use only.
   // Returns no individual user data; aggregate counts only.
-  rpc GetProtectionStats(ProtectionStatsRequest) returns (ProtectionStatsResponse);
+  rpc GetProtectionStats(GetProtectionStatsRequest) returns (GetProtectionStatsResponse);
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 enum TrustLevel {
   TRUST_LEVEL_UNSPECIFIED = 0;
-  TRUST_NEW       = 1; // 0–48 h after registration: strict limits
-  TRUST_WARMING   = 2; // 48 h–7 d: moderate limits
-  TRUST_TRUSTED   = 3; // 7 d+: normal limits
-  TRUST_VERIFIED  = 4; // reserved: elevated trust via future verification mechanism
-  TRUST_FLAGGED   = 5; // suspicious patterns detected: minimal limits + under review
-  TRUST_BANNED    = 6; // device banned: no sends permitted
+  TRUST_LEVEL_NEW = 1; // 0–48 h after registration: strict limits
+  TRUST_LEVEL_WARMING = 2; // 48 h–7 d: moderate limits
+  TRUST_LEVEL_TRUSTED = 3; // 7 d+: normal limits
+  TRUST_LEVEL_VERIFIED = 4; // reserved: elevated trust via future verification mechanism
+  TRUST_LEVEL_FLAGGED = 5; // suspicious patterns detected: minimal limits + under review
+  TRUST_LEVEL_BANNED = 6; // device banned: no sends permitted
 }
 
 enum SpamCategory {
   SPAM_CATEGORY_UNSPECIFIED = 0;
-  SPAM_UNWANTED       = 1; // unsolicited contact
-  SPAM_HARASSMENT     = 2; // repeated / threatening messages
-  SPAM_SCAM           = 3; // fraud / phishing attempt
-  SPAM_BOT_SUSPECTED  = 4; // automated / non-human behavior
-  SPAM_IMPERSONATION  = 5; // pretending to be someone else
+  SPAM_CATEGORY_UNWANTED = 1; // unsolicited contact
+  SPAM_CATEGORY_HARASSMENT = 2; // repeated / threatening messages
+  SPAM_CATEGORY_SCAM = 3; // fraud / phishing attempt
+  SPAM_CATEGORY_BOT_SUSPECTED = 4; // automated / non-human behavior
+  SPAM_CATEGORY_IMPERSONATION = 5; // pretending to be someone else
 }
 
 enum RestrictionType {
-  RESTRICTION_UNSPECIFIED = 0;
-  RESTRICTION_RATE_LIMITED = 1; // temporary rate limit exceeded
-  RESTRICTION_FLAGGED      = 2; // flagged for review
-  RESTRICTION_BANNED       = 3; // permanent or long-term ban
+  RESTRICTION_TYPE_UNSPECIFIED = 0;
+  RESTRICTION_TYPE_RATE_LIMITED = 1; // temporary rate limit exceeded
+  RESTRICTION_TYPE_FLAGGED = 2; // flagged for review
+  RESTRICTION_TYPE_BANNED = 3; // permanent or long-term ban
 }
 
 // ─── ReportSpam ───────────────────────────────────────────────────────────────
 
-message SpamReportRequest {
+message ReportSpamRequest {
   string reported_device_id = 1; // device being reported
-  SpamCategory category     = 2; // report category — NO message content
+  SpamCategory category = 2; // report category — NO message content
   // Deliberately no message_id or content: server is blind to message content.
 }
 
-message SpamReportResponse {
-  bool   accepted  = 1; // report accepted for processing
+message ReportSpamResponse {
+  bool accepted = 1; // report accepted for processing
   string report_id = 2; // opaque reference for follow-up
 }
 
@@ -113,32 +113,32 @@ message UnblockDeviceResponse {
 }
 
 message GetBlockedDevicesRequest {
-  int32 page      = 1;
+  int32 page = 1;
   int32 page_size = 2;
 }
 
 message GetBlockedDevicesResponse {
   repeated string device_ids = 1;
-  bool            has_more   = 2;
+  bool has_more = 2;
 }
 
 // ─── TrustStatus ─────────────────────────────────────────────────────────────
 
-message TrustStatusRequest {
+message GetTrustStatusRequest {
   // Caller identity comes from auth token — no explicit field needed.
 }
 
-message TrustStatusResponse {
+message GetTrustStatusResponse {
   TrustLevel trust_level = 1;
 
   // Remaining quota in current window (–1 means unlimited).
-  int32 messages_remaining_hour       = 2;
-  int32 new_recipients_remaining_day  = 3;
-  int32 group_messages_remaining_day  = 4;
+  int32 messages_remaining_hour = 2;
+  int32 new_recipients_remaining_day = 3;
+  int32 group_messages_remaining_day = 4;
 
   // Set if device is flagged or banned.
   optional google.protobuf.Timestamp restriction_expires_at = 5;
-  optional string                    restriction_reason      = 6;
+  optional string restriction_reason = 6;
 }
 
 // ─── CheckSendPermission ─────────────────────────────────────────────────────
@@ -148,37 +148,37 @@ message CheckSendPermissionRequest {
 }
 
 message CheckSendPermissionResponse {
-  bool   allowed             = 1;
-  string denial_reason       = 2; // human-readable if allowed = false
-  int32  retry_after_seconds = 3; // > 0 if temporarily rate-limited
+  bool allowed = 1;
+  string denial_reason = 2; // human-readable if allowed = false
+  int32 retry_after_seconds = 3; // > 0 if temporarily rate-limited
 }
 
 // ─── AppealRestriction ───────────────────────────────────────────────────────
 
-message AppealRequest {
+message AppealRestrictionRequest {
   RestrictionType restriction_type = 1;
-  string          context          = 2; // user's explanation; plain text, no message content
+  string context = 2; // user's explanation; plain text, no message content
 }
 
-message AppealResponse {
-  bool   submitted = 1;
+message AppealRestrictionResponse {
+  bool submitted = 1;
   string appeal_id = 2;
   // status: "pending_review" | "approved" | "rejected"
-  string status    = 3;
+  string status = 3;
 }
 
 // ─── ProtectionStats (admin) ─────────────────────────────────────────────────
 
-message ProtectionStatsRequest {
+message GetProtectionStatsRequest {
   // Admin-authenticated requests only. No filters needed for MVP.
 }
 
-message ProtectionStatsResponse {
+message GetProtectionStatsResponse {
   // Aggregate counts — no individual user data.
-  int64 spam_reports_24h           = 1;
-  int64 devices_flagged_24h        = 2;
-  int64 devices_banned_7d          = 3;
-  int64 rate_limit_violations_24h  = 4;
-  int64 blocks_created_24h         = 5;
-  int64 appeals_pending            = 6;
+  int64 spam_reports_24h = 1;
+  int64 devices_flagged_24h = 2;
+  int64 devices_banned_7d = 3;
+  int64 rate_limit_violations_24h = 4;
+  int64 blocks_created_24h = 5;
+  int64 appeals_pending = 6;
 }
