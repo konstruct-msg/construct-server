@@ -1,13 +1,13 @@
-/// Stream ID Protocol Compliance Tests
-///
-/// SPECIFICATION: Our custom extension to Signal Protocol
-/// Redis Streams are used for message queuing with ACK-based pagination.
-///
-/// CRITICAL DISTINCTION:
-/// - Message ID (UUID): Unique identifier for deduplication and logging
-/// - Stream ID ({timestamp}-{sequence}): Redis Stream entry ID for pagination
-///
-/// The `nextSince` field MUST always contain a Stream ID, never a Message ID.
+//! Stream ID Protocol Compliance Tests
+//!
+//! SPECIFICATION: Our custom extension to Signal Protocol
+//! Redis Streams are used for message queuing with ACK-based pagination.
+//!
+//! CRITICAL DISTINCTION:
+//! - Message ID (UUID): Unique identifier for deduplication and logging
+//! - Stream ID ({timestamp}-{sequence}): Redis Stream entry ID for pagination
+//!
+//! The `nextSince` field MUST always contain a Stream ID, never a Message ID.
 use crate::test_utils::*;
 
 #[tokio::test]
