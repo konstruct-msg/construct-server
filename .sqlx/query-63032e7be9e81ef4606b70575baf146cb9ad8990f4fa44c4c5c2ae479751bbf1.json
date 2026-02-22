@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO spam_reports (reporter_device_id, reported_device_id, category)\n             VALUES ($1, $2, $3)\n             RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "63032e7be9e81ef4606b70575baf146cb9ad8990f4fa44c4c5c2ae479751bbf1"
+}

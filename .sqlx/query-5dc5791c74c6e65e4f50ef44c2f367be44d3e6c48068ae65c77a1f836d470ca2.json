@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT registered_at AS \"registered_at: chrono::DateTime<chrono::Utc>\" FROM devices WHERE device_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registered_at: chrono::DateTime<chrono::Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5dc5791c74c6e65e4f50ef44c2f367be44d3e6c48068ae65c77a1f836d470ca2"
+}
