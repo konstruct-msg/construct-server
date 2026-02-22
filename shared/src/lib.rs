@@ -29,10 +29,10 @@ pub mod shared {
     }
 }
 
-// SentinelService uses its own package namespace `sentinel`
+// SentinelService uses its own package namespace `shared.proto.sentinel.v1`
 pub mod sentinel {
     #![allow(clippy::large_enum_variant)]
-    tonic::include_proto!("sentinel");
+    tonic::include_proto!("shared.proto.sentinel.v1");
 }
 
 // Part 2: The new clients module for PROTO-4
