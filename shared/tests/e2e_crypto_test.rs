@@ -3,6 +3,7 @@
 //! These tests validate the COMPLETE cryptographic flow:
 //! 1. X3DH key exchange (Alice ← Bob's prekey bundle)
 //! 2. Initial message encryption with ephemeral key
+#![allow(clippy::needless_borrows_for_generic_args)]
 //! 3. Message transmission through server
 //! 4. Message decryption by recipient
 //! 5. Plaintext verification

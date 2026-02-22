@@ -495,6 +495,7 @@ struct IdentityKeyRow {
 // ============================================================================
 
 /// Delete expired archived signed pre-keys
+#[allow(dead_code)]
 pub async fn cleanup_expired_archives(db: &PgPool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM signed_prekey_archive WHERE expires_at < NOW()")
         .execute(db)

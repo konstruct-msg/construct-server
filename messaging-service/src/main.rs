@@ -173,6 +173,54 @@ impl MessagingService for MessagingGrpcService {
     ) -> Result<Response<proto::EditMessageResponse>, Status> {
         Err(Status::unimplemented("edit_message is not implemented yet"))
     }
+
+    // =========================================================================
+    // Reactions RPCs (Stubs)
+    // =========================================================================
+
+    async fn add_reaction(
+        &self,
+        request: Request<proto::AddReactionRequest>,
+    ) -> Result<Response<proto::AddReactionResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.message_id.is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+        if req.encrypted_reaction.is_empty() {
+            return Err(Status::invalid_argument("encrypted_reaction is required"));
+        }
+
+        // TODO: Implement add reaction
+        // 1. Get authenticated user
+        // 2. Validate message exists and user has access
+        // 3. Store reaction (encrypted: sender + emoji)
+        // 4. Notify message owner via streaming
+
+        Err(Status::unimplemented("AddReaction not implemented yet"))
+    }
+
+    async fn remove_reaction(
+        &self,
+        request: Request<proto::RemoveReactionRequest>,
+    ) -> Result<Response<proto::RemoveReactionResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.message_id.is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+        if req.reaction_id.is_empty() {
+            return Err(Status::invalid_argument("reaction_id is required"));
+        }
+
+        // TODO: Implement remove reaction
+        // 1. Get authenticated user
+        // 2. Validate user owns this reaction
+        // 3. Remove reaction from storage
+        // 4. Notify message owner via streaming
+
+        Err(Status::unimplemented("RemoveReaction not implemented yet"))
+    }
 }
 
 /// Handle incoming MessageStreamRequest from client

@@ -9,6 +9,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Validate upload token
 /// Expected format: {timestamp_hex}.{random_hex}.{hmac_hex}
+#[allow(dead_code)]
 pub fn validate_upload_token(token: &str, secret: &str) -> bool {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {

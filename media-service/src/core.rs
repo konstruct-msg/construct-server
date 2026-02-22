@@ -7,7 +7,7 @@
 //
 // ============================================================================
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -29,6 +29,7 @@ pub struct MediaMetadata {
     pub file_hash: String,
     pub created_at: i64,
     pub expires_at: i64,
+    #[allow(dead_code)]
     pub storage_backend: String,
     pub storage_key: String,
 }
@@ -97,6 +98,7 @@ pub fn validate_upload_token(token: &str, secret: &str) -> Result<(String, i64),
 
 /// Upload chunk state (tracks multi-chunk upload)
 pub struct UploadState {
+    #[allow(dead_code)]
     pub media_id: String,
     pub file_path: PathBuf,
     pub file: Option<fs::File>,
@@ -208,6 +210,7 @@ impl DownloadStream {
         self.total_size
     }
 
+    #[allow(dead_code)]
     pub fn bytes_read(&self) -> u64 {
         self.bytes_read
     }
@@ -236,7 +239,7 @@ pub async fn save_metadata(
         r#"
         INSERT INTO media_files (media_id, size_bytes, storage_backend, storage_key, file_hash)
         VALUES ($1, $2, $3, $4, $5)
-        RETURNING 
+        RETURNING
             media_id,
             size_bytes,
             storage_backend,
@@ -271,7 +274,7 @@ pub async fn get_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<Option<
 
     let record = sqlx::query!(
         r#"
-        SELECT 
+        SELECT
             media_id,
             size_bytes,
             storage_backend,
@@ -318,7 +321,7 @@ pub async fn delete_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<bool
 /// Delete media file from storage and database
 pub async fn delete_media(
     pool: &sqlx::PgPool,
-    storage_dir: &PathBuf,
+    storage_dir: &std::path::Path,
     media_id: &str,
 ) -> Result<bool> {
     // Get metadata first
@@ -345,6 +348,7 @@ pub async fn delete_media(
 // ============================================================================
 
 /// Validate file size limits
+#[allow(dead_code)]
 pub fn validate_file_size(size: i64, config: &MediaConfig) -> Result<(), &'static str> {
     if size <= 0 {
         return Err("File size must be positive");
@@ -358,6 +362,7 @@ pub fn validate_file_size(size: i64, config: &MediaConfig) -> Result<(), &'stati
 }
 
 /// Calculate file expiration timestamp (15 days from now)
+#[allow(dead_code)]
 pub fn calculate_expiration() -> i64 {
     Utc::now().timestamp() + (15 * 24 * 60 * 60) // 15 days
 }

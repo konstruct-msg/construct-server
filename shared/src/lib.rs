@@ -4,21 +4,25 @@ pub mod shared {
     pub mod proto {
         pub mod core {
             pub mod v1 {
+                #![allow(clippy::large_enum_variant)]
                 tonic::include_proto!("shared.proto.core.v1");
             }
         }
         pub mod services {
             pub mod v1 {
+                #![allow(clippy::large_enum_variant)]
                 tonic::include_proto!("shared.proto.services.v1");
             }
         }
         pub mod messaging {
             pub mod v1 {
+                #![allow(clippy::large_enum_variant)]
                 tonic::include_proto!("shared.proto.messaging.v1");
             }
         }
         pub mod signaling {
             pub mod v1 {
+                #![allow(clippy::large_enum_variant)]
                 tonic::include_proto!("shared.proto.signaling.v1");
             }
         }
