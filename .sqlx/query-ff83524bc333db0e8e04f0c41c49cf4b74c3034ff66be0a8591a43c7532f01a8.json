@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM device_blocks\n             WHERE blocker_device_id = $1 AND blocked_device_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ff83524bc333db0e8e04f0c41c49cf4b74c3034ff66be0a8591a43c7532f01a8"
+}

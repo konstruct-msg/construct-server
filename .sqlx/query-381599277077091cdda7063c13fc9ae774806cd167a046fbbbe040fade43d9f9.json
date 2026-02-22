@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT is_banned, is_flagged FROM device_flags WHERE device_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_banned",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "is_flagged",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "381599277077091cdda7063c13fc9ae774806cd167a046fbbbe040fade43d9f9"
+}
