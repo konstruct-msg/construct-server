@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            media_id,\n            size_bytes,\n            storage_backend,\n            storage_key,\n            file_hash,\n            EXTRACT(EPOCH FROM created_at)::BIGINT as \"created_at!\",\n            EXTRACT(EPOCH FROM expires_at)::BIGINT as \"expires_at!\"\n        FROM media_files\n        WHERE media_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "media_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "size_bytes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "storage_backend",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "storage_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "file_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "245910de7fe2c4737d6c2c83239b50963fc8b410de3ea1912b6d0231245c7313"
+}

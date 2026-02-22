@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO device_tokens (user_id, device_token_hash, device_token_encrypted, device_name_encrypted, notification_filter, enabled)\n        VALUES ($1, $2, $3, $4, $5, TRUE)\n        ON CONFLICT (user_id, device_token_hash)\n        DO UPDATE SET\n            device_name_encrypted = EXCLUDED.device_name_encrypted,\n            notification_filter = EXCLUDED.notification_filter,\n            enabled = TRUE\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Bytea",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "69fe5c49e1903a7f39f31451c1b5b6ed8e11e18043425a6116d017a4ff0a5e06"
+}
