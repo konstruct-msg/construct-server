@@ -214,7 +214,8 @@ impl Config {
             jwt_issuer: std::env::var("JWT_ISSUER")
                 .unwrap_or_else(|_| "construct-server".to_string()),
 
-            online_channel: std::env::var("ONLINE_CHANNEL")?,
+            online_channel: std::env::var("ONLINE_CHANNEL")
+                .unwrap_or_else(|_| "construct:online".to_string()),
 
             offline_queue_prefix: std::env::var("OFFLINE_QUEUE_PREFIX")
                 .unwrap_or_else(|_| "queue:".to_string()),
