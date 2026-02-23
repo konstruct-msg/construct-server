@@ -2,6 +2,7 @@
 Cargo.lock
 .cargo/
 !.cargo/audit.toml
+!.cargo/config.toml
 target/
 
 rpk
