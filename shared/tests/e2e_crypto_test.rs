@@ -32,7 +32,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use sha2::Sha256;
@@ -44,13 +44,6 @@ type HmacSha256 = Hmac<Sha256>;
 // ============================================================================
 // Crypto Helper Functions (Simplified Signal Protocol)
 // ============================================================================
-
-/// Generate identity keypair (Ed25519 for signing)
-fn generate_identity_keypair() -> (SigningKey, VerifyingKey) {
-    let signing_key = SigningKey::generate(&mut OsRng);
-    let verifying_key = signing_key.verifying_key();
-    (signing_key, verifying_key)
-}
 
 /// Generate DH keypair (X25519 for key agreement)
 fn generate_dh_keypair() -> (StaticSecret, PublicKey) {
@@ -133,25 +126,49 @@ fn decrypt_message(
 // Helper: Register user with real cryptographic keys
 // ============================================================================
 
-/// Register a test user with REAL cryptographic keys (not dummy)
+/// Register a test user with REAL cryptographic keys (not dummy).
+/// Uses the current passwordless device-based API.
+/// Returns (TestUser, identity_signing_key, signed_prekey_secret, signed_prekey_public)
 async fn register_user_with_crypto(
     ctx: &test_utils::TestApp,
-    username: &str,
+    _username: &str,
 ) -> (TestUser, SigningKey, StaticSecret, PublicKey) {
+    use sha2::Digest;
+    use x25519_dalek::StaticSecret;
+
     let client = reqwest::Client::new();
 
-    // 1. Generate real keys
-    let (identity_signing_key, identity_verifying_key) = generate_identity_keypair();
-    let (signed_prekey_secret, signed_prekey_public) = generate_dh_keypair();
+    // 1. Generate Ed25519 identity signing key
+    let identity_signing_key = SigningKey::generate(&mut OsRng);
+    let identity_verifying_key = identity_signing_key.verifying_key();
 
-    // 2. Sign the signed prekey with identity key
-    let signed_prekey_bytes = signed_prekey_public.as_bytes();
-    let signature = identity_signing_key.sign(signed_prekey_bytes);
+    // 2. Generate X25519 identity key pair (for E2EE identity)
+    let identity_x25519_secret = StaticSecret::random_from_rng(OsRng);
+    let identity_x25519_public = PublicKey::from(&identity_x25519_secret);
 
-    // 3. Get PoW challenge
-    let pow_response: serde_json::Value = client
-        .post(&format!(
-            "http://{}/api/v1/auth/pow/challenge",
+    // 3. Generate signed prekey (X25519, reusable StaticSecret so we can return it)
+    let signed_prekey_secret = StaticSecret::random_from_rng(OsRng);
+    let signed_prekey_public = PublicKey::from(&signed_prekey_secret);
+
+    // 4. Sign prekey with KonstruktX3DH-v1 prologue
+    let prekey_signature = {
+        let mut message = Vec::new();
+        message.extend_from_slice(b"KonstruktX3DH-v1");
+        message.extend_from_slice(&[0x00, 0x01]); // suite_id = 1
+        message.extend_from_slice(signed_prekey_public.as_bytes());
+        identity_signing_key.sign(&message)
+    };
+
+    // 5. Derive device_id = SHA256(identity_x25519_public)[0..16] as hex
+    let device_id = {
+        let hash = Sha256::digest(identity_x25519_public.as_bytes());
+        hex::encode(&hash[0..16])
+    };
+
+    // 6. Get PoW challenge
+    let challenge: test_utils::ChallengeResponse = client
+        .get(&format!(
+            "http://{}/api/v1/auth/challenge",
             ctx.auth_address
         ))
         .send()
@@ -161,64 +178,55 @@ async fn register_user_with_crypto(
         .await
         .expect("Failed to parse PoW challenge");
 
-    let challenge_id = pow_response["challengeId"].as_str().unwrap().to_string();
+    // 7. Solve PoW
+    let (nonce, hash) = test_utils::solve_pow(&challenge.challenge, challenge.difficulty);
 
-    // 4. Solve PoW (difficulty=1 for tests)
-    let nonce = 0u64; // difficulty=1 means any nonce works
-
-    // 5. Register device with real keys
+    // 8. Register device
     let register_body = serde_json::json!({
-        "deviceId": username,
-        "password": "test-password-123",
-        "identityKey": general_purpose::STANDARD.encode(identity_verifying_key.as_bytes()),
-        "signedPreKey": general_purpose::STANDARD.encode(signed_prekey_bytes),
-        "signedPreKeySignature": general_purpose::STANDARD.encode(signature.to_bytes()),
-        "signedPreKeyTimestamp": chrono::Utc::now().timestamp(),
-        "powChallengeId": challenge_id,
-        "powNonce": nonce,
+        "username": _username,
+        "deviceId": device_id,
+        "publicKeys": {
+            "verifyingKey": general_purpose::STANDARD.encode(identity_verifying_key.as_bytes()),
+            "identityPublic": general_purpose::STANDARD.encode(identity_x25519_public.as_bytes()),
+            "signedPrekeyPublic": general_purpose::STANDARD.encode(signed_prekey_public.as_bytes()),
+            "signedPrekeySignature": general_purpose::STANDARD.encode(prekey_signature.to_bytes()),
+            "suiteId": "Curve25519+Ed25519"
+        },
+        "powSolution": {
+            "challenge": challenge.challenge,
+            "nonce": nonce,
+            "hash": hash
+        }
     });
 
     let register_response = client
-        .post(&format!("http://{}/api/v1/auth/register", ctx.auth_address))
+        .post(&format!(
+            "http://{}/api/v1/auth/register-device",
+            ctx.auth_address
+        ))
         .json(&register_body)
         .send()
         .await
         .expect("Failed to register device");
 
-    assert_eq!(
-        register_response.status(),
-        201,
-        "Registration failed: {:?}",
-        register_response.text().await
-    );
+    let status = register_response.status();
+    if status != reqwest::StatusCode::CREATED {
+        panic!(
+            "Registration failed ({}): {}",
+            status,
+            register_response.text().await.unwrap()
+        );
+    }
 
-    // 6. Authenticate to get access token
-    let auth_body = serde_json::json!({
-        "deviceId": username,
-        "password": "test-password-123",
-        "timestamp": chrono::Utc::now().timestamp(),
-    });
-
-    let auth_response: serde_json::Value = client
-        .post(&format!(
-            "http://{}/api/v1/auth/authenticate",
-            ctx.auth_address
-        ))
-        .json(&auth_body)
-        .send()
-        .await
-        .expect("Failed to authenticate")
+    let reg: test_utils::RegisterDeviceResponse = register_response
         .json()
         .await
-        .expect("Failed to parse auth response");
-
-    let access_token = auth_response["accessToken"].as_str().unwrap().to_string();
-    let user_id = auth_response["userId"].as_str().unwrap().to_string();
+        .expect("Failed to parse registration response");
 
     (
         TestUser {
-            user_id,
-            access_token,
+            user_id: reg.user_id,
+            access_token: reg.access_token,
         },
         identity_signing_key,
         signed_prekey_secret,
@@ -237,10 +245,10 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
 
     // Register Alice and Bob with real crypto keys
     let (alice, _alice_id_key, _alice_prekey_secret, _alice_prekey_public) =
-        register_user_with_crypto(&ctx, "alice.x3dh").await;
+        register_user_with_crypto(&ctx, "alice_x3dh").await;
 
     let (bob, _bob_id_key, bob_prekey_secret, bob_prekey_public) =
-        register_user_with_crypto(&ctx, "bob.x3dh").await;
+        register_user_with_crypto(&ctx, "bob_x3dh").await;
 
     println!("✅ Alice and Bob registered with real keys");
 
@@ -276,15 +284,11 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
     let request_body = serde_json::json!({
         "recipientId": bob.user_id,
         "ciphertext": general_purpose::STANDARD.encode(&ciphertext),
-        "header": {
-            // In real Double Ratchet, this would be the current ratchet public key
-            // For first message, it's the ephemeral public key from X3DH
-            "ratchetPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-            "previousChainLength": 0,
-            "messageNumber": 0, // CRITICAL: First message must have messageNumber=0
-        },
+        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
+        "messageNumber": 0,
+        "previousChainLength": 0,
         "nonce": general_purpose::STANDARD.encode(&nonce),
-        "suiteId": 1, // CLASSIC_X25519
+        "suiteId": 1,
         "timestamp": chrono::Utc::now().timestamp(),
     });
 
@@ -348,10 +352,10 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
         .try_into()
         .expect("Nonce must be 12 bytes");
 
-    // Extract Alice's ephemeral public key from header
+    // Extract Alice's ephemeral public key
     let alice_ephemeral_from_header = general_purpose::STANDARD
-        .decode(first_msg["header"]["ratchetPublicKey"].as_str().unwrap())
-        .expect("Failed to decode ratchet public key");
+        .decode(first_msg["ephemeralPublicKey"].as_str().unwrap())
+        .expect("Failed to decode ephemeral public key");
 
     let alice_ephemeral_public_recovered =
         PublicKey::from(<[u8; 32]>::try_from(alice_ephemeral_from_header.as_slice()).unwrap());
@@ -402,10 +406,10 @@ async fn test_e2e_invalid_ciphertext_detection() {
 
     // Register Alice and Bob
     let (_alice, _alice_id_key, _alice_prekey_secret, _alice_prekey_public) =
-        register_user_with_crypto(&ctx, "alice.invalid").await;
+        register_user_with_crypto(&ctx, "alice_invalid").await;
 
     let (_bob, _bob_id_key, bob_prekey_secret, bob_prekey_public) =
-        register_user_with_crypto(&ctx, "bob.invalid").await;
+        register_user_with_crypto(&ctx, "bob_invalid").await;
 
     println!("✅ Test users registered");
 
@@ -454,8 +458,8 @@ async fn test_e2e_first_message_has_message_number_zero() {
 
     let ctx = spawn_app().await;
 
-    let (alice, _, _, _) = register_user_with_crypto(&ctx, "alice.mn0").await;
-    let (bob, _, _, bob_prekey_public) = register_user_with_crypto(&ctx, "bob.mn0").await;
+    let (alice, _, _, _) = register_user_with_crypto(&ctx, "alice_mn0").await;
+    let (bob, _, _, bob_prekey_public) = register_user_with_crypto(&ctx, "bob_mn0").await;
 
     println!("✅ Users registered");
 
@@ -471,11 +475,9 @@ async fn test_e2e_first_message_has_message_number_zero() {
     let request_body = serde_json::json!({
         "recipientId": bob.user_id,
         "ciphertext": general_purpose::STANDARD.encode(&ciphertext),
-        "header": {
-            "ratchetPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-            "previousChainLength": 0,
-            "messageNumber": 0, // ✅ Correct
-        },
+        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
+        "messageNumber": 0,
+        "previousChainLength": 0,
         "nonce": general_purpose::STANDARD.encode(&nonce),
         "suiteId": 1,
         "timestamp": chrono::Utc::now().timestamp(),
@@ -503,11 +505,9 @@ async fn test_e2e_first_message_has_message_number_zero() {
     let invalid_request = serde_json::json!({
         "recipientId": bob.user_id,
         "ciphertext": general_purpose::STANDARD.encode(&ciphertext2),
-        "header": {
-            "ratchetPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-            "previousChainLength": 0,
-            "messageNumber": 5, // ❌ Invalid for first message
-        },
+        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
+        "messageNumber": 5,
+        "previousChainLength": 0,
         "nonce": general_purpose::STANDARD.encode(&nonce2),
         "suiteId": 1,
         "timestamp": chrono::Utc::now().timestamp(),

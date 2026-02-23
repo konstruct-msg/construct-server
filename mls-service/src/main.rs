@@ -16,8 +16,8 @@
 // ============================================================================
 
 use std::net::SocketAddr;
-use tonic::{Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -41,21 +41,27 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::CreateGroupRequest>,
     ) -> Result<Response<proto::CreateGroupResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn get_group_state(
         &self,
         _request: Request<proto::GetGroupStateRequest>,
     ) -> Result<Response<proto::GetGroupStateResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn dissolve_group(
         &self,
         _request: Request<proto::DissolveGroupRequest>,
     ) -> Result<Response<proto::DissolveGroupResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     // ── Membership ────────────────────────────────────────────────────────
@@ -64,42 +70,54 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::InviteToGroupRequest>,
     ) -> Result<Response<proto::InviteToGroupResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn accept_group_invite(
         &self,
         _request: Request<proto::AcceptGroupInviteRequest>,
     ) -> Result<Response<proto::AcceptGroupInviteResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn decline_group_invite(
         &self,
         _request: Request<proto::DeclineGroupInviteRequest>,
     ) -> Result<Response<proto::DeclineGroupInviteResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn get_pending_invites(
         &self,
         _request: Request<proto::GetPendingInvitesRequest>,
     ) -> Result<Response<proto::GetPendingInvitesResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn leave_group(
         &self,
         _request: Request<proto::LeaveGroupRequest>,
     ) -> Result<Response<proto::LeaveGroupResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn remove_member(
         &self,
         _request: Request<proto::RemoveMemberRequest>,
     ) -> Result<Response<proto::RemoveMemberResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     // ── Admin ─────────────────────────────────────────────────────────────
@@ -108,7 +126,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::DelegateAdminRequest>,
     ) -> Result<Response<proto::DelegateAdminResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     // ── State Sync ────────────────────────────────────────────────────────
@@ -117,7 +137,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::SubmitCommitRequest>,
     ) -> Result<Response<proto::SubmitCommitResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     type FetchCommitsStream = tonic::codegen::BoxStream<proto::CommitEnvelope>;
@@ -126,7 +148,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::FetchCommitsRequest>,
     ) -> Result<Response<Self::FetchCommitsStream>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     // ── Messaging ─────────────────────────────────────────────────────────
@@ -135,7 +159,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::SendGroupMessageRequest>,
     ) -> Result<Response<proto::SendGroupMessageResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     type FetchGroupMessagesStream = tonic::codegen::BoxStream<proto::GroupMessageEnvelope>;
@@ -144,7 +170,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::FetchGroupMessagesRequest>,
     ) -> Result<Response<Self::FetchGroupMessagesStream>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     type MessageStreamStream = tonic::codegen::BoxStream<proto::GroupStreamResponse>;
@@ -153,7 +181,9 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<tonic::Streaming<proto::GroupStreamRequest>>,
     ) -> Result<Response<Self::MessageStreamStream>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     // ── KeyPackages ───────────────────────────────────────────────────────
@@ -162,21 +192,27 @@ impl MlsService for MlsServiceImpl {
         &self,
         _request: Request<proto::PublishKeyPackageRequest>,
     ) -> Result<Response<proto::PublishKeyPackageResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn consume_key_package(
         &self,
         _request: Request<proto::ConsumeKeyPackageRequest>,
     ) -> Result<Response<proto::ConsumeKeyPackageResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 
     async fn get_key_package_count(
         &self,
         _request: Request<proto::GetKeyPackageCountRequest>,
     ) -> Result<Response<proto::GetKeyPackageCountResponse>, Status> {
-        Err(Status::unimplemented("MLSService group chat — planned for v2"))
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
     }
 }
 
@@ -187,9 +223,10 @@ impl MlsService for MlsServiceImpl {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            "mls_service=debug,tower_http=info".into()
-        }))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "mls_service=debug,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -202,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Full OpenMLS integration planned for v2 (group chat release)");
 
     Server::builder()
-        .add_service(MlsServiceServer::new(MlsServiceImpl::default()))
+        .add_service(MlsServiceServer::new(MlsServiceImpl))
         .serve(addr)
         .await?;
 
