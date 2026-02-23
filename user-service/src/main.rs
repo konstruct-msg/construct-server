@@ -271,26 +271,130 @@ impl UserService for UserGrpcService {
 
     async fn delete_account(
         &self,
-        _request: Request<proto::DeleteAccountRequest>,
+        request: Request<proto::DeleteAccountRequest>,
     ) -> Result<Response<proto::DeleteAccountResponse>, Status> {
-        // TODO: Implement account deletion (GDPR right to be forgotten)
-        // - Verify confirmation token
-        // - Mark account as deleted (soft delete)
-        // - Schedule data cleanup job
-        // - Revoke all sessions/tokens
-        Err(Status::unimplemented("DeleteAccount not implemented yet"))
+        // Extract authenticated user_id from gRPC metadata (set by auth interceptor)
+        let user_id_str = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
+            .to_string();
+
+        let user_id = uuid::Uuid::parse_str(&user_id_str)
+            .map_err(|_| Status::invalid_argument("invalid user_id in metadata"))?;
+
+        let req = request.into_inner();
+
+        // Require confirmation string to prevent accidental deletion
+        if req.confirmation.trim().to_uppercase() != "DELETE" {
+            return Err(Status::invalid_argument(
+                "confirmation must be 'DELETE' to proceed with account deletion",
+            ));
+        }
+
+        // 1. Verify user exists
+        construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("user not found"))?;
+
+        // 2. Revoke all active sessions and refresh tokens in Redis
+        {
+            let mut queue = self.context.queue.lock().await;
+            if let Err(e) = queue.revoke_all_user_tokens(&user_id_str).await {
+                tracing::warn!(
+                    user_id = %user_id_str,
+                    error = %e,
+                    "Failed to revoke Redis tokens during account deletion (continuing)"
+                );
+            }
+        }
+
+        // 3. Delete user from DB — cascades to: devices, prekeys, blocked_users, invites, etc.
+        construct_server_shared::db::delete_user_account(&self.context.db_pool, &user_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to delete account: {}", e)))?;
+
+        tracing::info!(
+            target: "audit",
+            event_type = "ACCOUNT_DELETION",
+            user_id = %user_id_str,
+            reason = req.reason.as_deref().unwrap_or("user_request"),
+            "GDPR: Account deleted"
+        );
+
+        Ok(Response::new(proto::DeleteAccountResponse {
+            success: true,
+            message: "Account and all associated data have been permanently deleted.".to_string(),
+            scheduled_deletion_at: None,
+        }))
     }
 
     async fn export_user_data(
         &self,
-        _request: Request<proto::ExportUserDataRequest>,
+        request: Request<proto::ExportUserDataRequest>,
     ) -> Result<Response<proto::ExportUserDataResponse>, Status> {
-        // TODO: Implement data export (GDPR data portability)
-        // - Collect user profile, devices, keys
-        // - Optionally include message metadata (if stored)
-        // - Format as JSON/CSV based on request
-        // - Return download URL or inline data
-        Err(Status::unimplemented("ExportUserData not implemented yet"))
+        // Extract authenticated user_id from gRPC metadata
+        let user_id_str = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
+            .to_string();
+
+        let user_id = uuid::Uuid::parse_str(&user_id_str)
+            .map_err(|_| Status::invalid_argument("invalid user_id in metadata"))?;
+
+        // Fetch user profile
+        let user = construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("user not found"))?;
+
+        // Fetch active devices
+        let devices =
+            construct_server_shared::db::get_devices_by_user_id(&self.context.db_pool, &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        let device_list: Vec<serde_json::Value> = devices
+            .iter()
+            .map(|d| {
+                json!({
+                    "device_id": d.device_id,
+                    "registered_at": d.registered_at.to_rfc3339(),
+                    "is_active": d.is_active,
+                })
+            })
+            .collect();
+
+        // NOTE: Message content is NOT stored on the server (privacy-first design).
+        // This export contains only account metadata.
+        let export_data = json!({
+            "export_version": "1.0",
+            "exported_at": chrono::Utc::now().to_rfc3339(),
+            "data_notice": "Construct is a privacy-first messenger. Message content is never stored on the server. This export contains only your account metadata.",
+            "profile": {
+                "user_id": user.id.to_string(),
+                "username": user.username,
+                "account_created": null,
+            },
+            "devices": device_list,
+        });
+
+        tracing::info!(
+            target: "audit",
+            event_type = "DATA_EXPORT",
+            user_id = %user_id_str,
+            "GDPR: User data exported"
+        );
+
+        Ok(Response::new(proto::ExportUserDataResponse {
+            data: export_data.to_string(),
+            format: "json".to_string(),
+            exported_at: chrono::Utc::now().timestamp_millis(),
+        }))
     }
 
     async fn check_username_availability(
@@ -304,10 +408,11 @@ impl UserService for UserGrpcService {
 
         let normalized = req.username.to_lowercase();
 
-        // Basic format validation (3-30 chars, alphanumeric + underscores)
+        // Basic format validation (3-30 chars, ASCII alphanumeric + underscores only)
+        // ASCII-only prevents homograph attacks (Cyrillic/Greek lookalikes)
         let valid_format = normalized.len() >= 3
             && normalized.len() <= 30
-            && normalized.chars().all(|c| c.is_alphanumeric() || c == '_');
+            && normalized.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
 
         if !valid_format {
             return Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
