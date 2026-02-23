@@ -356,6 +356,10 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             "/api/v1/users/me/public-key",
             patch(user_handlers::update_verifying_key),
         )
+        .layer(axum_middleware::from_fn_with_state(
+            context.auth_manager.clone(),
+            jwt_to_user_id_middleware,
+        ))
         .with_state(context);
 
     tokio::spawn(async move {
