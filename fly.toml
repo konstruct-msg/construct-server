@@ -1,6 +1,11 @@
-# fly.toml - ARCHIVED
-# This file is no longer used. The active fly.toml is at the repo root.
-# Deploy: fly deploy --remote-only (from repo root)
+# fly.toml - Fly.io STAGING deployment (multi-container)
+#
+# Architecture: Envoy + all microservices in one VM
+# Purpose: Quick staging testing before production VPS deploy
+# Production: Digital Ocean VPS with docker-compose
+#
+# Deploy: fly deploy --remote-only
+# CI:     flyctl deploy --remote-only (no --config needed)
 
 app = 'construct-server-staging'
 primary_region = 'ams'
@@ -55,4 +60,3 @@ primary_region = 'ams'
 [deploy]
   strategy = "rolling"
   max_unavailable = 0
-
