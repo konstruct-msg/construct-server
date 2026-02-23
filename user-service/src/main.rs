@@ -307,9 +307,7 @@ impl UserService for UserGrpcService {
         // Basic format validation (3-30 chars, alphanumeric + underscores)
         let valid_format = normalized.len() >= 3
             && normalized.len() <= 30
-            && normalized
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_');
+            && normalized.chars().all(|c| c.is_alphanumeric() || c == '_');
 
         if !valid_format {
             return Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
