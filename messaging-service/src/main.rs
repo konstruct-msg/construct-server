@@ -221,6 +221,58 @@ impl MessagingService for MessagingGrpcService {
 
         Err(Status::unimplemented("RemoveReaction not implemented yet"))
     }
+
+    async fn get_pending_messages(
+        &self,
+        request: Request<proto::GetPendingMessagesRequest>,
+    ) -> Result<Response<proto::GetPendingMessagesResponse>, Status> {
+        let user_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
+            .to_string();
+
+        let req = request.into_inner();
+        let limit = req.limit.unwrap_or(50).min(100) as usize;
+        let since = req.since_cursor.as_deref();
+
+        let mut queue = self.context.queue.lock().await;
+        let stream_messages = queue
+            .read_user_messages_from_stream(&user_id, None, since, limit)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?;
+
+        let mut messages: Vec<proto::PendingMessage> = stream_messages
+            .into_iter()
+            .map(|(_stream_id, env)| proto::PendingMessage {
+                message_id: env.message_id,
+                sender_id: env.sender_id,
+                suite_id: env.suite_id as i32,
+                ephemeral_public_key: env.ephemeral_public_key.unwrap_or_default(),
+                message_number: env.message_number.unwrap_or(0),
+                previous_chain_length: 0,
+                ciphertext: env.encrypted_payload,
+                timestamp: env.timestamp,
+            })
+            .collect();
+
+        // Sort by message_number for correct Double Ratchet ordering
+        messages.sort_by_key(|m| m.message_number);
+
+        let next_cursor = messages
+            .last()
+            .map(|m| format!("{}", m.timestamp))
+            .unwrap_or_else(|| since.unwrap_or("0-0").to_string());
+
+        let has_more = messages.len() == limit;
+
+        Ok(Response::new(proto::GetPendingMessagesResponse {
+            messages,
+            next_cursor,
+            has_more,
+        }))
+    }
 }
 
 /// Handle incoming MessageStreamRequest from client

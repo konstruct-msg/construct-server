@@ -40,6 +40,11 @@ service MessagingService {
   // RemoveReaction - Remove reaction from message
   rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
 
+  // GetPendingMessages - Fetch pending messages (unary, for background fetch)
+  // Use this for iOS BackgroundFetchManager / silent push wake-up.
+  // For real-time delivery use MessageStream (bidirectional streaming).
+  rpc GetPendingMessages(GetPendingMessagesRequest) returns (GetPendingMessagesResponse);
+
 }
 
 // MessageStreamRequest - Client -> Server in bidirectional stream
@@ -348,4 +353,57 @@ enum ReactionEventType {
 
   // Reaction removed
   REACTION_EVENT_TYPE_REMOVED = 2;
+}
+
+// ============================================================================
+// GetPendingMessages Messages (unary fetch for background/silent push)
+// ============================================================================
+
+// Request to fetch pending messages (unary)
+message GetPendingMessagesRequest {
+  // Last seen stream cursor (opaque, returned in previous response)
+  // Omit on first request to get all pending messages
+  optional string since_cursor = 1;
+
+  // Maximum number of messages to return (default: 50, max: 100)
+  optional int32 limit = 2;
+}
+
+// Pending message entry
+message PendingMessage {
+  // Message ID (UUID)
+  string message_id = 1;
+
+  // Sender user ID
+  string sender_id = 2;
+
+  // Cipher suite ID
+  int32 suite_id = 3;
+
+  // Base64-encoded ephemeral public key
+  string ephemeral_public_key = 4;
+
+  // Message number in sending chain (Double Ratchet)
+  uint32 message_number = 5;
+
+  // Number of messages in previous chain
+  uint32 previous_chain_length = 6;
+
+  // Base64-encoded ciphertext
+  string ciphertext = 7;
+
+  // Unix timestamp (seconds)
+  int64 timestamp = 8;
+}
+
+// Response with pending messages
+message GetPendingMessagesResponse {
+  // Messages sorted by message_number ascending
+  repeated PendingMessage messages = 1;
+
+  // Cursor for next request (pass as since_cursor)
+  string next_cursor = 2;
+
+  // Whether more messages are available
+  bool has_more = 3;
 }
