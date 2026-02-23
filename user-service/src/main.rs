@@ -292,6 +292,45 @@ impl UserService for UserGrpcService {
         // - Return download URL or inline data
         Err(Status::unimplemented("ExportUserData not implemented yet"))
     }
+
+    async fn check_username_availability(
+        &self,
+        request: Request<proto::CheckUsernameAvailabilityRequest>,
+    ) -> Result<Response<proto::CheckUsernameAvailabilityResponse>, Status> {
+        let req = request.into_inner();
+        if req.username.is_empty() {
+            return Err(Status::invalid_argument("username is required"));
+        }
+
+        let normalized = req.username.to_lowercase();
+
+        // Basic format validation (3-30 chars, alphanumeric + underscores)
+        let valid_format = normalized.len() >= 3
+            && normalized.len() <= 30
+            && normalized
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_');
+
+        if !valid_format {
+            return Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
+                available: false,
+                reason: Some("invalid_format".to_string()),
+            }));
+        }
+
+        use construct_server_shared::db;
+        match db::get_user_by_username(&self.context.db_pool, &normalized).await {
+            Ok(None) => Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
+                available: true,
+                reason: None,
+            })),
+            Ok(Some(_)) => Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
+                available: false,
+                reason: Some("taken".to_string()),
+            })),
+            Err(e) => Err(Status::internal(format!("Database error: {}", e))),
+        }
+    }
 }
 
 /// Health check endpoint

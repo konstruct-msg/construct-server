@@ -33,6 +33,9 @@ service UserService {
   
   // ExportUserData - Export user data (GDPR data portability)
   rpc ExportUserData(ExportUserDataRequest) returns (ExportUserDataResponse);
+
+  // CheckUsernameAvailability - Check if username is available (no auth required)
+  rpc CheckUsernameAvailability(CheckUsernameAvailabilityRequest) returns (CheckUsernameAvailabilityResponse);
 }
 
 // UserProfile - User profile information
@@ -324,4 +327,24 @@ message ExportUserDataResponse {
   
   // Export timestamp
   int64 exported_at = 3;
+}
+
+// ============================================================================
+// CheckUsernameAvailability Messages
+// ============================================================================
+
+// Request to check if username is available
+// Note: No authentication required
+message CheckUsernameAvailabilityRequest {
+  // Username to check (3-30 chars, alphanumeric + underscores)
+  string username = 1;
+}
+
+// Response indicating availability
+message CheckUsernameAvailabilityResponse {
+  // true if username is available
+  bool available = 1;
+
+  // Reason if not available: "taken", "reserved", "invalid_format"
+  optional string reason = 2;
 }
