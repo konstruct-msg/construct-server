@@ -1,0 +1,9 @@
+[env]
+# Use pre-generated .sqlx/ cache for compile-time query checks.
+# This allows `cargo check`, `cargo clippy`, and `cargo build` to work
+# without a running database.
+#
+# To regenerate the cache after changing SQL queries:
+#   DATABASE_URL=postgresql://postgres:password@localhost:5432/construct_test \
+#   cargo sqlx prepare --workspace
+SQLX_OFFLINE = "true"
