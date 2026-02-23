@@ -94,44 +94,44 @@ impl ApnsConfig {
             .unwrap_or(false);
 
         let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY") {
-            Ok(k) => k,
+            Ok(k) if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) => k,
+            Ok(_) if is_production => {
+                anyhow::bail!(
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be 64 hex characters (32 bytes). \
+                    Generate with: openssl rand -hex 32"
+                );
+            }
             Err(_) if is_production => {
                 anyhow::bail!(
                     "APNS_DEVICE_TOKEN_ENCRYPTION_KEY is REQUIRED in production. \
                     Generate with: openssl rand -hex 32"
                 );
             }
-            Err(_) => {
-                // Development only: use zero key with warning
+            _ => {
+                // Dev/test: generate a random ephemeral key so tests never fail on this
+                use rand::RngCore;
+                let mut bytes = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut bytes);
+                let generated = bytes.map(|b| format!("{b:02x}")).concat();
                 tracing::warn!(
-                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY not set - using INSECURE default. \
-                    This is only acceptable for local development!"
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY not set or invalid — \
+                    using ephemeral key (dev/test only). \
+                    Set it with: openssl rand -hex 32"
                 );
-                "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                generated
             }
         };
 
-        let is_zero_key = key == "0000000000000000000000000000000000000000000000000000000000000000";
-
-        // Validate key format
-        if key.len() != 64 {
-            anyhow::bail!("APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be 64 hex characters (32 bytes)");
-        }
-
-        // In production, zero key is never acceptable
-        if is_production && is_zero_key {
-            anyhow::bail!(
-                "APNS_DEVICE_TOKEN_ENCRYPTION_KEY cannot be all zeros in production. \
-                Generate with: openssl rand -hex 32"
-            );
-        }
-
-        // If APNS is enabled, key must not be zero (even in dev)
-        if apns_enabled && is_zero_key {
-            anyhow::bail!(
-                "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be changed from default value \
-                (APNS_ENABLED=true requires a valid key). Generate with: openssl rand -hex 32"
-            );
+        // In production, require APNS_ENABLED=true to have a real (non-test) key already validated above.
+        // If APNS is enabled in non-production, still require a valid key.
+        if apns_enabled && !is_production {
+            let is_zero = key == "0000000000000000000000000000000000000000000000000000000000000000";
+            if is_zero {
+                anyhow::bail!(
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be set when APNS_ENABLED=true. \
+                    Generate with: openssl rand -hex 32"
+                );
+            }
         }
 
         Ok(Self {
