@@ -16,6 +16,7 @@ use argon2::{
 };
 use axum::Router;
 use axum::extract::State;
+use axum::middleware::{self as axum_middleware, Next};
 use axum::routing::{get, patch, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::Config;
@@ -39,6 +40,27 @@ use std::sync::Arc;
 use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+
+/// Axum middleware: validate Bearer JWT and inject x-user-id header for TrustedUser extractor.
+/// In production this is done by the Gateway; in tests we replicate the behavior directly.
+async fn jwt_to_user_id_middleware(
+    State(auth_manager): State<Arc<AuthManager>>,
+    mut req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    if let Some(auth_header) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_owned())
+        && let Ok(claims) = auth_manager.verify_token(&auth_header)
+        && let Ok(val) = axum::http::HeaderValue::from_str(&claims.sub)
+    {
+        req.headers_mut().insert("x-user-id", val);
+    }
+    next.run(req).await
+}
 
 /// Test application with all microservices
 pub struct TestApp {
@@ -393,6 +415,10 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> S
             "/api/v1/messages/confirm",
             post(messaging_handlers::confirm_message),
         )
+        .layer(axum_middleware::from_fn_with_state(
+            context.auth_manager.clone(),
+            jwt_to_user_id_middleware,
+        ))
         .with_state(context);
 
     tokio::spawn(async move {
@@ -614,10 +640,10 @@ impl SingleServiceApp {
 /// PoW challenge response from server
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ChallengeResponse {
-    challenge: String,
-    difficulty: u32,
-    expires_at: i64,
+pub struct ChallengeResponse {
+    pub challenge: String,
+    pub difficulty: u32,
+    pub expires_at: i64,
 }
 
 /// Device registration response
@@ -647,7 +673,7 @@ fn derive_pow_salt(challenge: &str) -> String {
 }
 
 /// Solve PoW challenge (find nonce that produces hash with required leading zero bits)
-fn solve_pow(challenge: &str, difficulty: u32) -> (u64, String) {
+pub fn solve_pow(challenge: &str, difficulty: u32) -> (u64, String) {
     let params = ParamsBuilder::new()
         .m_cost(MEMORY_COST_KIB)
         .t_cost(TIME_COST)

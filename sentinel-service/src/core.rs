@@ -21,7 +21,6 @@
 // ============================================================================
 
 use anyhow::Result;
-use chrono;
 use redis::AsyncCommands;
 use sqlx::PgPool;
 use tracing::{info, warn};
@@ -38,46 +37,36 @@ pub enum TrustLevel {
 }
 
 impl TrustLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::New     => "TRUST_LEVEL_NEW",
-            Self::Warming => "TRUST_LEVEL_WARMING",
-            Self::Trusted => "TRUST_LEVEL_TRUSTED",
-            Self::Flagged => "TRUST_LEVEL_FLAGGED",
-            Self::Banned  => "TRUST_LEVEL_BANNED",
-        }
-    }
-
     /// Maximum messages per hour. -1 = unlimited.
     pub fn msg_limit_hour(&self) -> i32 {
         match self {
-            Self::New     => 10,
+            Self::New => 10,
             Self::Warming => 50,
             Self::Trusted => 200,
             Self::Flagged => 5,
-            Self::Banned  => 0,
+            Self::Banned => 0,
         }
     }
 
     /// Maximum new unique recipients per day.
     pub fn recipient_limit_day(&self) -> i32 {
         match self {
-            Self::New     => 3,
+            Self::New => 3,
             Self::Warming => 10,
             Self::Trusted => 50,
             Self::Flagged => 1,
-            Self::Banned  => 0,
+            Self::Banned => 0,
         }
     }
 
     /// Maximum group messages per day.
     pub fn group_msg_limit_day(&self) -> i32 {
         match self {
-            Self::New     => 0,   // no group access in first 48h
+            Self::New => 0, // no group access in first 48h
             Self::Warming => 20,
             Self::Trusted => 100,
             Self::Flagged => 0,
-            Self::Banned  => 0,
+            Self::Banned => 0,
         }
     }
 }
@@ -85,34 +74,34 @@ impl TrustLevel {
 // ─── Trust level calculation ──────────────────────────────────────────────────
 
 /// Thresholds for automatic escalation.
-const AUTO_FLAG_REPORTS: i64 = 3;   // 3+ spam reports → flagged
-const AUTO_BAN_REPORTS:  i64 = 5;   // 5+ spam reports → banned
+const AUTO_FLAG_REPORTS: i64 = 3; // 3+ spam reports → flagged
+const AUTO_BAN_REPORTS: i64 = 5; // 5+ spam reports → banned
 
 pub struct SentinelCore {
-    pub db:    PgPool,
+    pub db: PgPool,
     pub redis: redis::Client,
 }
 
 // ─── Return types (must be at module level, not inside impl) ──────────────────
 
 pub struct SendPermission {
-    pub allowed:             bool,
-    pub denial_reason:       String,
+    pub allowed: bool,
+    pub denial_reason: String,
     pub retry_after_seconds: i32,
 }
 
 pub struct ProtectionStats {
-    pub spam_reports_24h:          i64,
-    pub devices_flagged_24h:       i64,
-    pub devices_banned_7d:         i64,
+    pub spam_reports_24h: i64,
+    pub devices_flagged_24h: i64,
+    pub devices_banned_7d: i64,
     pub rate_limit_violations_24h: i64,
-    pub blocks_created_24h:        i64,
-    pub appeals_pending:           i64,
+    pub blocks_created_24h: i64,
+    pub appeals_pending: i64,
 }
 
 impl SentinelCore {
     pub async fn new(database_url: &str, redis_url: &str) -> Result<Self> {
-        let db    = PgPool::connect(database_url).await?;
+        let db = PgPool::connect(database_url).await?;
         let redis = redis::Client::open(redis_url)?;
         Ok(Self { db, redis })
     }
@@ -129,7 +118,7 @@ impl SentinelCore {
         let mut conn = self.redis().await?;
 
         // Fast path: ban/flag cached in Redis
-        let ban_key  = format!("sentinel:ban:{}", device_id);
+        let ban_key = format!("sentinel:ban:{}", device_id);
         let flag_key = format!("sentinel:flag:{}", device_id);
 
         let is_banned: bool = conn.exists(&ban_key).await?;
@@ -176,9 +165,9 @@ impl SentinelCore {
         };
 
         Ok(match age_hours {
-            h if h < 48   => TrustLevel::New,
-            h if h < 168  => TrustLevel::Warming, // 7 days
-            _             => TrustLevel::Trusted,
+            h if h < 48 => TrustLevel::New,
+            h if h < 168 => TrustLevel::Warming, // 7 days
+            _ => TrustLevel::Trusted,
         })
     }
 
@@ -224,8 +213,8 @@ impl SentinelCore {
 
         if trust == TrustLevel::Banned {
             return Ok(SendPermission {
-                allowed:             false,
-                denial_reason:       "Device is banned".into(),
+                allowed: false,
+                denial_reason: "Device is banned".into(),
                 retry_after_seconds: 0,
             });
         }
@@ -234,8 +223,8 @@ impl SentinelCore {
         let blocked = self.is_blocked(target_device_id, caller_device_id).await?;
         if blocked {
             return Ok(SendPermission {
-                allowed:             false,
-                denial_reason:       "Recipient has blocked this device".into(),
+                allowed: false,
+                denial_reason: "Recipient has blocked this device".into(),
                 retry_after_seconds: 0,
             });
         }
@@ -244,15 +233,15 @@ impl SentinelCore {
         let (remaining, _) = self.msg_quota(caller_device_id, trust).await?;
         if remaining == 0 {
             return Ok(SendPermission {
-                allowed:             false,
-                denial_reason:       "Hourly message limit reached".into(),
+                allowed: false,
+                denial_reason: "Hourly message limit reached".into(),
                 retry_after_seconds: 3600,
             });
         }
 
         Ok(SendPermission {
-            allowed:             true,
-            denial_reason:       String::new(),
+            allowed: true,
+            denial_reason: String::new(),
             retry_after_seconds: 0,
         })
     }
@@ -264,7 +253,8 @@ impl SentinelCore {
         let row = sqlx::query_scalar!(
             "SELECT 1 FROM device_blocks
              WHERE blocker_device_id = $1 AND blocked_device_id = $2",
-            blocker, target
+            blocker,
+            target
         )
         .fetch_optional(&self.db)
         .await?;
@@ -276,7 +266,8 @@ impl SentinelCore {
             "INSERT INTO device_blocks (blocker_device_id, blocked_device_id)
              VALUES ($1, $2)
              ON CONFLICT DO NOTHING",
-            blocker, blocked
+            blocker,
+            blocked
         )
         .execute(&self.db)
         .await?;
@@ -288,7 +279,8 @@ impl SentinelCore {
         sqlx::query!(
             "DELETE FROM device_blocks
              WHERE blocker_device_id = $1 AND blocked_device_id = $2",
-            blocker, blocked
+            blocker,
+            blocked
         )
         .execute(&self.db)
         .await?;
@@ -301,7 +293,7 @@ impl SentinelCore {
         page: i32,
         page_size: i32,
     ) -> Result<(Vec<String>, bool)> {
-        let limit  = page_size.clamp(1, 100) as i64;
+        let limit = page_size.clamp(1, 100) as i64;
         let offset = (page.max(0) as i64) * limit;
 
         let rows = sqlx::query_scalar!(
@@ -309,13 +301,15 @@ impl SentinelCore {
              WHERE blocker_device_id = $1
              ORDER BY created_at DESC
              LIMIT $2 OFFSET $3",
-            blocker, limit + 1, offset
+            blocker,
+            limit + 1,
+            offset
         )
         .fetch_all(&self.db)
         .await?;
 
         let has_more = rows.len() as i64 > limit;
-        let results  = rows.into_iter().take(limit as usize).collect();
+        let results = rows.into_iter().take(limit as usize).collect();
         Ok((results, has_more))
     }
 
@@ -332,7 +326,9 @@ impl SentinelCore {
             "INSERT INTO spam_reports (reporter_device_id, reported_device_id, category)
              VALUES ($1, $2, $3)
              RETURNING id",
-            reporter, reported, category
+            reporter,
+            reported,
+            category
         )
         .fetch_one(&self.db)
         .await?;
@@ -340,11 +336,12 @@ impl SentinelCore {
         // Increment Redis counter
         let mut conn = self.redis().await?;
         let reports_key = format!("sentinel:reports:{}", reported);
-        let total: i64   = conn.incr(&reports_key, 1i64).await?;
+        let total: i64 = conn.incr(&reports_key, 1i64).await?;
 
         // Auto-escalation
         if total >= AUTO_BAN_REPORTS {
-            self.set_banned(reported, "Automatic ban: 5+ spam reports").await?;
+            self.set_banned(reported, "Automatic ban: 5+ spam reports")
+                .await?;
             warn!(reported, total, "device auto-banned");
         } else if total >= AUTO_FLAG_REPORTS {
             self.set_flagged(reported).await?;
@@ -358,7 +355,9 @@ impl SentinelCore {
 
     async fn set_flagged(&self, device_id: &str) -> Result<()> {
         let mut conn = self.redis().await?;
-        let _: () = conn.set(format!("sentinel:flag:{}", device_id), "1").await?;
+        let _: () = conn
+            .set(format!("sentinel:flag:{}", device_id), "1")
+            .await?;
 
         sqlx::query!(
             "INSERT INTO device_flags (device_id, is_flagged, flagged_at)
@@ -381,7 +380,8 @@ impl SentinelCore {
              VALUES ($1, TRUE, $2, NOW())
              ON CONFLICT (device_id) DO UPDATE
              SET is_banned = TRUE, ban_reason = $2, banned_at = NOW(), updated_at = NOW()",
-            device_id, reason
+            device_id,
+            reason
         )
         .execute(&self.db)
         .await?;
@@ -400,7 +400,9 @@ impl SentinelCore {
             "INSERT INTO restriction_appeals (device_id, restriction_type, context)
              VALUES ($1, $2, $3)
              RETURNING id",
-            device_id, restriction_type, context
+            device_id,
+            restriction_type,
+            context
         )
         .fetch_one(&self.db)
         .await?;
@@ -430,12 +432,12 @@ impl SentinelCore {
         )?;
 
         Ok(ProtectionStats {
-            spam_reports_24h:          spam_24h.unwrap_or(0),
-            devices_flagged_24h:       flagged_24h.unwrap_or(0),
-            devices_banned_7d:         banned_7d.unwrap_or(0),
+            spam_reports_24h: spam_24h.unwrap_or(0),
+            devices_flagged_24h: flagged_24h.unwrap_or(0),
+            devices_banned_7d: banned_7d.unwrap_or(0),
             rate_limit_violations_24h: 0, // tracked in Redis; skip for now
-            blocks_created_24h:        blocks_24h.unwrap_or(0),
-            appeals_pending:           appeals_pending.unwrap_or(0),
+            blocks_created_24h: blocks_24h.unwrap_or(0),
+            appeals_pending: appeals_pending.unwrap_or(0),
         })
     }
 }
