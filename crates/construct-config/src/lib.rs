@@ -315,12 +315,12 @@ mod tests {
         let user_uuid = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap();
 
         // Простой тест без полной конфигурации
-        let instance_domain = "eu.konstruct.cc";
+        let instance_domain = "ams.konstruct.cc";
         let federation_id = format!("{}@{}", user_uuid, instance_domain);
 
         assert_eq!(
             federation_id,
-            "12345678-1234-5678-1234-567812345678@eu.konstruct.cc"
+            "12345678-1234-5678-1234-567812345678@ams.konstruct.cc"
         );
     }
 }
