@@ -13,8 +13,8 @@ mod core;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tonic::{Request, Response, Status};
 use tonic::transport::Server;
+use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -78,8 +78,8 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::ReportSpamRequest>,
     ) -> Result<Response<proto::ReportSpamResponse>, Status> {
-        let reporter  = caller_device_id(&request)?;
-        let req       = request.into_inner();
+        let reporter = caller_device_id(&request)?;
+        let req = request.into_inner();
 
         if req.reported_device_id.is_empty() {
             return Err(Status::invalid_argument("reported_device_id is required"));
@@ -88,14 +88,15 @@ impl SentinelService for SentinelServiceImpl {
             return Err(Status::invalid_argument("Cannot report yourself"));
         }
 
-        let category  = spam_category_str(req.category);
-        let report_id = self.core
+        let category = spam_category_str(req.category);
+        let report_id = self
+            .core
             .report_spam(&reporter, &req.reported_device_id, category)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::ReportSpamResponse {
-            accepted:  true,
+            accepted: true,
             report_id,
         }))
     }
@@ -107,7 +108,7 @@ impl SentinelService for SentinelServiceImpl {
         request: Request<proto::BlockDeviceRequest>,
     ) -> Result<Response<proto::BlockDeviceResponse>, Status> {
         let blocker = caller_device_id(&request)?;
-        let req     = request.into_inner();
+        let req = request.into_inner();
 
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
@@ -131,14 +132,16 @@ impl SentinelService for SentinelServiceImpl {
         request: Request<proto::UnblockDeviceRequest>,
     ) -> Result<Response<proto::UnblockDeviceResponse>, Status> {
         let blocker = caller_device_id(&request)?;
-        let req     = request.into_inner();
+        let req = request.into_inner();
 
         self.core
             .unblock_device(&blocker, &req.device_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(proto::UnblockDeviceResponse { success: true }))
+        Ok(Response::new(proto::UnblockDeviceResponse {
+            success: true,
+        }))
     }
 
     // ── GetBlockedDevices ─────────────────────────────────────────────────────
@@ -148,14 +151,18 @@ impl SentinelService for SentinelServiceImpl {
         request: Request<proto::GetBlockedDevicesRequest>,
     ) -> Result<Response<proto::GetBlockedDevicesResponse>, Status> {
         let blocker = caller_device_id(&request)?;
-        let req     = request.into_inner();
+        let req = request.into_inner();
 
-        let (device_ids, has_more) = self.core
+        let (device_ids, has_more) = self
+            .core
             .get_blocked_devices(&blocker, req.page, req.page_size)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(proto::GetBlockedDevicesResponse { device_ids, has_more }))
+        Ok(Response::new(proto::GetBlockedDevicesResponse {
+            device_ids,
+            has_more,
+        }))
     }
 
     // ── GetTrustStatus ────────────────────────────────────────────────────────
@@ -165,32 +172,39 @@ impl SentinelService for SentinelServiceImpl {
         request: Request<proto::GetTrustStatusRequest>,
     ) -> Result<Response<proto::GetTrustStatusResponse>, Status> {
         let device_id = caller_device_id(&request)?;
-        let trust     = self.core
+        let trust = self
+            .core
             .trust_level(&device_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let (msgs_remaining, _)  = self.core.msg_quota(&device_id, trust).await
+        let (msgs_remaining, _) = self
+            .core
+            .msg_quota(&device_id, trust)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        let (rcpt_remaining, _)  = self.core.recipient_quota(&device_id, trust).await
+        let (rcpt_remaining, _) = self
+            .core
+            .recipient_quota(&device_id, trust)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Map internal enum to proto enum value
         let trust_level_val = match trust {
-            core::TrustLevel::New     => 1,
+            core::TrustLevel::New => 1,
             core::TrustLevel::Warming => 2,
             core::TrustLevel::Trusted => 3,
             core::TrustLevel::Flagged => 5,
-            core::TrustLevel::Banned  => 6,
+            core::TrustLevel::Banned => 6,
         };
 
         Ok(Response::new(proto::GetTrustStatusResponse {
-            trust_level:                  trust_level_val,
-            messages_remaining_hour:      msgs_remaining,
+            trust_level: trust_level_val,
+            messages_remaining_hour: msgs_remaining,
             new_recipients_remaining_day: rcpt_remaining,
             group_messages_remaining_day: trust.group_msg_limit_day(),
-            restriction_expires_at:       None,
-            restriction_reason:           None,
+            restriction_expires_at: None,
+            restriction_reason: None,
         }))
     }
 
@@ -201,20 +215,21 @@ impl SentinelService for SentinelServiceImpl {
         request: Request<proto::CheckSendPermissionRequest>,
     ) -> Result<Response<proto::CheckSendPermissionResponse>, Status> {
         let caller = caller_device_id(&request)?;
-        let req    = request.into_inner();
+        let req = request.into_inner();
 
         if req.target_device_id.is_empty() {
             return Err(Status::invalid_argument("target_device_id is required"));
         }
 
-        let perm = self.core
+        let perm = self
+            .core
             .check_send_permission(&caller, &req.target_device_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::CheckSendPermissionResponse {
-            allowed:             perm.allowed,
-            denial_reason:       perm.denial_reason,
+            allowed: perm.allowed,
+            denial_reason: perm.denial_reason,
             retry_after_seconds: perm.retry_after_seconds,
         }))
     }
@@ -225,11 +240,12 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::AppealRestrictionRequest>,
     ) -> Result<Response<proto::AppealRestrictionResponse>, Status> {
-        let device_id      = caller_device_id(&request)?;
-        let req            = request.into_inner();
-        let restriction    = restriction_type_str(req.restriction_type);
+        let device_id = caller_device_id(&request)?;
+        let req = request.into_inner();
+        let restriction = restriction_type_str(req.restriction_type);
 
-        let appeal_id = self.core
+        let appeal_id = self
+            .core
             .submit_appeal(&device_id, restriction, &req.context)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -237,7 +253,7 @@ impl SentinelService for SentinelServiceImpl {
         Ok(Response::new(proto::AppealRestrictionResponse {
             submitted: true,
             appeal_id,
-            status:    "pending_review".to_string(),
+            status: "pending_review".to_string(),
         }))
     }
 
@@ -248,18 +264,19 @@ impl SentinelService for SentinelServiceImpl {
         _request: Request<proto::GetProtectionStatsRequest>,
     ) -> Result<Response<proto::GetProtectionStatsResponse>, Status> {
         // TODO: add admin auth check
-        let stats = self.core
+        let stats = self
+            .core
             .protection_stats()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::GetProtectionStatsResponse {
-            spam_reports_24h:          stats.spam_reports_24h,
-            devices_flagged_24h:       stats.devices_flagged_24h,
-            devices_banned_7d:         stats.devices_banned_7d,
+            spam_reports_24h: stats.spam_reports_24h,
+            devices_flagged_24h: stats.devices_flagged_24h,
+            devices_banned_7d: stats.devices_banned_7d,
             rate_limit_violations_24h: stats.rate_limit_violations_24h,
-            blocks_created_24h:        stats.blocks_created_24h,
-            appeals_pending:           stats.appeals_pending,
+            blocks_created_24h: stats.blocks_created_24h,
+            appeals_pending: stats.appeals_pending,
         }))
     }
 }
@@ -271,15 +288,18 @@ impl SentinelService for SentinelServiceImpl {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            "sentinel_service=debug,tower_http=info".into()
-        }))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "sentinel_service=debug,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     let database_url = env::var("DATABASE_URL")?;
-    let redis_url    = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-    let port: u16    = env::var("PORT").unwrap_or_else(|_| "50059".into()).parse()?;
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let port: u16 = env::var("PORT")
+        .unwrap_or_else(|_| "50059".into())
+        .parse()?;
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
 
     let core = Arc::new(SentinelCore::new(&database_url, &redis_url).await?);
