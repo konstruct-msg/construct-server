@@ -60,7 +60,7 @@ async fn register_user_and_get_identity(
     let response = client
         .get(format!(
             "http://{}/api/v1/users/{}/public-key",
-            ctx.auth_address, user.user_id
+            ctx.user_address, user.user_id
         ))
         .header("Authorization", format!("Bearer {}", user.access_token))
         .send()
@@ -111,7 +111,7 @@ async fn test_get_public_key_returns_target_user_not_requester() {
     let kim_requests_max_response = client
         .get(format!(
             "http://{}/api/v1/users/{}/public-key",
-            ctx.auth_address, max.user_id
+            ctx.user_address, max.user_id
         ))
         .header("Authorization", format!("Bearer {}", kim.access_token))
         .send()
@@ -171,7 +171,7 @@ async fn test_get_public_key_returns_target_user_not_requester() {
     let max_requests_kim_response = client
         .get(format!(
             "http://{}/api/v1/users/{}/public-key",
-            ctx.auth_address, kim.user_id
+            ctx.user_address, kim.user_id
         ))
         .header("Authorization", format!("Bearer {}", max.access_token))
         .send()
@@ -234,7 +234,7 @@ async fn test_get_own_public_key() {
     let response = client
         .get(format!(
             "http://{}/api/v1/users/{}/public-key",
-            ctx.auth_address, kim.user_id
+            ctx.user_address, kim.user_id
         ))
         .header("Authorization", format!("Bearer {}", kim.access_token))
         .send()
