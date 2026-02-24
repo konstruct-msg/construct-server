@@ -6,7 +6,7 @@ app = 'construct-server-staging'
 primary_region = 'ams'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = "ops/Dockerfile"
 
 [env]
   RUST_LOG = "info,sqlx=warn"
