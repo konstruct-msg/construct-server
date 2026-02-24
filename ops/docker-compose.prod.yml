@@ -106,7 +106,7 @@ services:
     restart: "no"    # runs once, exits after writing secrets
     volumes:
       - vault-auth:/vault/auth:ro
-      - app-secrets:/secrets
+      - /opt/construct/secrets:/secrets
       - ./vault/agent.hcl:/vault/config/agent.hcl:ro
     command: vault agent -config=/vault/config/agent.hcl
     environment:
@@ -159,7 +159,7 @@ services:
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env   # populated by vault-agent at startup
+      - path: /opt/construct/secrets/app.env   # populated by vault-agent at startup
         required: true
     environment:
       PORT: "8081"
@@ -176,7 +176,7 @@ services:
       OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
       ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -188,13 +188,13 @@ services:
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       PORT: "8082"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -206,7 +206,7 @@ services:
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       PORT: "8083"
@@ -214,7 +214,7 @@ services:
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -226,7 +226,7 @@ services:
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       PORT: "8084"
@@ -234,7 +234,7 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-false}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -246,12 +246,12 @@ services:
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -263,12 +263,12 @@ services:
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -280,12 +280,12 @@ services:
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -297,12 +297,12 @@ services:
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -314,12 +314,12 @@ services:
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -331,14 +331,14 @@ services:
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -350,7 +350,7 @@ services:
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
-      - path: /secrets/app.env
+      - path: /opt/construct/secrets/app.env
         required: true
     environment:
       PORT: "8085"
@@ -368,7 +368,7 @@ services:
       KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-1}
       KAFKA_PRODUCER_COMPRESSION: ${KAFKA_PRODUCER_COMPRESSION:-none}
     volumes:
-      - app-secrets:/secrets:ro
+      - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
     depends_on:
@@ -379,7 +379,7 @@ volumes:
   traefik-certs:
   vault-data:       # Vault encrypted storage
   vault-auth:       # AppRole credentials (role_id, secret_id)
-  app-secrets:      # Populated by vault-agent, read by services
+
 
 networks:
   internal:
