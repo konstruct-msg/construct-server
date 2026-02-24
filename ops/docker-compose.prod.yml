@@ -1,201 +1,382 @@
-# Docker Compose for Production VPS (Digital Ocean)
-# 
-# Architecture: Envoy Proxy + Separate Service Containers
-# 
-# Deploy:
-#   docker-compose -f ops/docker-compose.prod.yml up -d
+# =============================================================================
+# Construct Server — Production Docker Compose (DigitalOcean VPS)
+# =============================================================================
+# Architecture:
+#   Traefik (TLS/443)
+#     └→ Envoy (gRPC-web routing, :8080)
+#          └→ Rust microservices (:5005x)
+#   Vault (secrets store, :8200)
+#   vault-agent (init container: fetches secrets → /secrets/app.env)
 #
-# Services:
-#   - envoy: Public-facing proxy (443, 80)
-#   - auth-service: Authentication (internal:50051)
-#   - user-service: User management (internal:50052)
-#   - messaging-service: Real-time messaging (internal:50053)
-#   - notification-service: Push notifications (internal:50054)
-#   - postgres: Database
-#   - redis: Cache & message queue
-#   - (optional) kafka: Message broker
+# External services (not in this compose):
+#   Database : Supabase (DATABASE_URL in Vault)
+#   Redis    : Upstash  (REDIS_URL in Vault)
+#
+# First-time setup:
+#   1. cp ops/.env.example .env && nano .env    # only Vault/Traefik bootstrap vars
+#   2. docker compose -f ops/docker-compose.prod.yml up -d vault
+#   3. docker exec construct-vault vault operator init  # save unseal keys!
+#   4. docker exec construct-vault vault operator unseal  # x3
+#   5. docker compose -f ops/docker-compose.prod.yml exec vault sh /vault/scripts/vault-setup.sh
+#   6. docker compose -f ops/docker-compose.prod.yml up -d
+#
+# Redeploy after code changes:
+#   docker compose -f ops/docker-compose.prod.yml up -d --build --no-deps <service>
+# =============================================================================
 
-version: '3.8'
+name: construct
 
 services:
-  # Envoy Proxy (public-facing)
-  envoy:
-    image: envoyproxy/envoy:v1.36-latest
-    container_name: construct-envoy
+
+  # ─── Traefik (TLS + Let's Encrypt) ───────────────────────────────────────
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.docker.network=construct_internal"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--api.dashboard=true"
+      - "--log.level=INFO"
     ports:
-      - "443:443"
       - "80:80"
-      - "9901:9901"  # Admin interface
+      - "443:443"
     volumes:
-      - ./envoy.prod.yaml:/etc/envoy/envoy.yaml:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro  # Let's Encrypt certificates
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/letsencrypt
     networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - auth-service
-      - user-service
-      - messaging-service
-      - notification-service
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9901/ready"]
-      interval: 10s
-      timeout: 2s
-      retries: 3
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth-basic"
+      - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
 
-  # Auth Service (gRPC)
-  auth-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-auth
-    command: /usr/local/bin/auth-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-      - INSTANCE_DOMAIN=${INSTANCE_DOMAIN}
-      - PORT=3000
-    ports:
-      - "50051:50051"  # gRPC
-      - "3000:3000"    # REST (.well-known)
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
-      timeout: 2s
-      retries: 3
+  # ─── Vault (secrets store) ───────────────────────────────────────────────
 
-  # User Service (gRPC)
-  user-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-user
-    command: /usr/local/bin/user-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-    ports:
-      - "50052:50052"
-    networks:
-      - construct-network
+  vault:
+    image: hashicorp/vault:1.19
+    container_name: construct-vault
     restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # Messaging Service (gRPC with bidirectional streaming)
-  messaging-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-messaging
-    command: /usr/local/bin/messaging-service
+    cap_add:
+      - IPC_LOCK    # prevents secrets from being swapped to disk
     environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - JWT_SECRET=${JWT_SECRET}
-      - MAX_MESSAGES_PER_HOUR=${MAX_MESSAGES_PER_HOUR:-1000}
-    ports:
-      - "50053:50053"
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # Notification Service (gRPC)
-  notification-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-notification
-    command: /usr/local/bin/notification-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-    ports:
-      - "50054:50054"
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # PostgreSQL Database
-  postgres:
-    image: postgres:16-alpine
-    container_name: construct-postgres
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-construct}
-      - POSTGRES_USER=${POSTGRES_USER:-construct}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      VAULT_ADDR: http://0.0.0.0:8200
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - vault-data:/vault/data
+      - vault-auth:/vault/auth       # AppRole credentials (role_id, secret_id)
+      - ./vault/vault.hcl:/vault/config/vault.hcl:ro
+      - ./vault/vault-setup.sh:/vault/scripts/vault-setup.sh:ro
+    command: vault server -config=/vault/config/vault.hcl
     networks:
-      - construct-network
-    restart: unless-stopped
+      - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-construct}"]
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 5s
+    labels:
+      - "traefik.enable=true"
+      # Vault UI only accessible via a separate subdomain, not the main API
+      - "traefik.http.routers.vault.rule=Host(`vault.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vault.loadbalancer.server.port=8200"
 
-  # Redis Cache & Message Queue
-  redis:
-    image: redis:7-alpine
-    container_name: construct-redis
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+  # ─── Vault Agent (init: fetches secrets → /secrets/app.env) ──────────────
+
+  vault-agent:
+    image: hashicorp/vault:1.19
+    restart: "no"    # runs once, exits after writing secrets
     volumes:
-      - redis-data:/data
+      - vault-auth:/vault/auth:ro
+      - app-secrets:/secrets
+      - ./vault/agent.hcl:/vault/config/agent.hcl:ro
+    command: vault agent -config=/vault/config/agent.hcl
+    environment:
+      VAULT_ADDR: http://vault:8200
     networks:
-      - construct-network
+      - internal
+    depends_on:
+      vault:
+        condition: service_healthy
+
+  # ─── Envoy (gRPC-web routing) ─────────────────────────────────────────────
+
+  envoy:
+    image: envoyproxy/envoy:v1.37.0
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+    volumes:
+      - ./envoy.docker.yaml:/etc/envoy/envoy.yaml:ro
+    networks:
+      - internal
+    depends_on:
+      - auth
+      - user
+      - messaging
+      - notification
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.envoy.entrypoints=websecure"
+      - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
+      - "traefik.http.services.envoy.loadbalancer.server.port=8080"
+      - "traefik.http.services.envoy.loadbalancer.server.scheme=h2c"
+      - "traefik.http.routers.envoy.middlewares=cors"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,POST,OPTIONS"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Grpc-Web,X-User-Agent,X-CSRF-Token,Grpc-Timeout"
+      - "traefik.http.middlewares.cors.headers.accesscontrolexposeheaders=Grpc-Status,Grpc-Message,Grpc-Encoding,Grpc-Accept-Encoding"
+      - "traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=${CORS_ALLOWED_ORIGINS:-*}"
+      - "traefik.http.middlewares.cors.headers.addvaryheader=true"
 
-  # (Optional) Kafka - uncomment if using message broker
-  # kafka:
-  #   image: confluentinc/cp-kafka:7.5.0
-  #   container_name: construct-kafka
-  #   environment:
-  #     KAFKA_NODE_ID: 1
-  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-  #     KAFKA_PROCESS_ROLES: broker,controller
-  #     KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-  #     KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-  #     KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-  #   volumes:
-  #     - kafka-data:/var/lib/kafka/data
-  #   networks:
-  #     - construct-network
-  #   restart: unless-stopped
+  # ─── Core Services ─────────────────────────────────────────────────────────
+  # All services:
+  #   - Use env_file from Vault-populated /secrets/app.env (via volume mount)
+  #   - Only non-secret env vars (PORT, RUST_LOG, INSTANCE_DOMAIN) set here
+  #   - Depend on vault-agent to ensure secrets are ready before starting
 
-networks:
-  construct-network:
-    driver: bridge
+  auth:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/auth-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env   # populated by vault-agent at startup
+        required: true
+    environment:
+      PORT: "8081"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+      MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
+      KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
+      DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
+      DELIVERY_EXPIRY_DAYS: ${DELIVERY_EXPIRY_DAYS:-7}
+      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
+      OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
+      ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  user:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/user-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      PORT: "8082"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  messaging:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/messaging-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      PORT: "8083"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  notification:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/notification-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      PORT: "8084"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  invite:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/invite-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  key:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/key-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  media:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/media-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  mls:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/mls-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  sentinel:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/sentinel-service
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  gateway:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/gateway
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      PORT: "3000"
+      RUST_LOG: ${RUST_LOG:-info}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  delivery:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/delivery-worker
+    restart: unless-stopped
+    env_file:
+      - path: /secrets/app.env
+        required: true
+    environment:
+      PORT: "8085"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
+      DELIVERY_EXPIRY_DAYS: ${DELIVERY_EXPIRY_DAYS:-7}
+      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
+      OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
+      ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
+      KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+      KAFKA_SSL_ENABLED: ${KAFKA_SSL_ENABLED:-false}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-construct-delivery}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
+      KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-1}
+      KAFKA_PRODUCER_COMPRESSION: ${KAFKA_PRODUCER_COMPRESSION:-none}
+    volumes:
+      - app-secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
 
 volumes:
-  postgres-data:
-  redis-data:
-  # kafka-data:
+  traefik-certs:
+  vault-data:       # Vault encrypted storage
+  vault-auth:       # AppRole credentials (role_id, secret_id)
+  app-secrets:      # Populated by vault-agent, read by services
+
+networks:
+  internal:
+    driver: bridge
