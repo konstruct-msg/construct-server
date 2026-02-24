@@ -1,12 +1,12 @@
 # =============================================================================
 # Construct Server — Production Docker Compose (DigitalOcean VPS)
 # =============================================================================
-# Architecture: Nginx (TLS) → Envoy (gRPC-web routing) → Microservices
+# Architecture: Traefik (TLS/443) → Envoy (gRPC-web routing) → Microservices
 #
 # First-time setup:
-#   1. cp ops/.env.example .env && nano .env
-#   2. ./ops/scripts/init-ssl.sh your-domain.com your@email.com
-#   3. docker compose -f ops/docker-compose.prod.yml up -d --build
+#   1. cp ops/.env.example .env && nano .env   # fill in secrets
+#   2. docker compose -f ops/docker-compose.prod.yml up -d --build
+#      (Traefik automatically issues Let's Encrypt certs on first request)
 #
 # Redeploy after code changes:
 #   docker compose -f ops/docker-compose.prod.yml up -d --build --no-deps <service>
@@ -51,30 +51,48 @@ services:
       retries: 5
       start_period: 5s
 
-  # ─── Proxy Layer ──────────────────────────────────────────────────────────
+  # ─── Traefik (TLS termination + Let's Encrypt) ────────────────────────────
 
-  nginx:
-    image: nginx:1.27-alpine
+  traefik:
+    image: traefik:v3.3
     restart: unless-stopped
+    command:
+      # Enable Docker provider — auto-discovers containers via labels
+      - "--providers.docker=true"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.docker.network=construct_internal"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Automatic HTTP→HTTPS redirect
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # Let's Encrypt (ACME)
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      # Traefik dashboard (optional, accessible via https://traefik.YOUR_DOMAIN)
+      - "--api.dashboard=true"
+      - "--log.level=INFO"
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      - certbot-www:/var/www/certbot:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/letsencrypt
     networks:
       - internal
-    depends_on:
-      - envoy
-      - gateway
+    labels:
+      # Expose the dashboard (optional — remove if you don't need it)
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=auth-basic"
+      - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
 
-  certbot:
-    image: certbot/certbot:latest
-    volumes:
-      - /etc/letsencrypt:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
-    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+  # ─── Envoy (gRPC-web routing) ─────────────────────────────────────────────
 
   envoy:
     image: envoyproxy/envoy:v1.37.0
@@ -83,6 +101,23 @@ services:
       - ./envoy.docker.yaml:/etc/envoy/envoy.yaml:ro
     networks:
       - internal
+    labels:
+      - "traefik.enable=true"
+      # Route all traffic for the main domain to Envoy
+      - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.envoy.entrypoints=websecure"
+      - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.envoy.service=envoy"
+      # h2c (HTTP/2 cleartext) — Traefik → Envoy is internal, no need for TLS here
+      - "traefik.http.services.envoy.loadbalancer.server.port=8080"
+      - "traefik.http.services.envoy.loadbalancer.server.scheme=h2c"
+      # CORS middleware
+      - "traefik.http.routers.envoy.middlewares=cors"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,POST,OPTIONS"
+      - "traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Grpc-Web,X-User-Agent,X-CSRF-Token,Grpc-Timeout"
+      - "traefik.http.middlewares.cors.headers.accesscontrolexposeheaders=Grpc-Status,Grpc-Message,Grpc-Encoding,Grpc-Accept-Encoding"
+      - "traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=${CORS_ALLOWED_ORIGINS:-*}"
+      - "traefik.http.middlewares.cors.headers.addvaryheader=true"
     depends_on:
       auth:
         condition: service_started
@@ -270,7 +305,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  certbot-www:
+  traefik-certs:    # Let's Encrypt certificates (persisted)
 
 networks:
   internal:
