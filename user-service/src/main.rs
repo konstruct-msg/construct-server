@@ -412,7 +412,9 @@ impl UserService for UserGrpcService {
         // ASCII-only prevents homograph attacks (Cyrillic/Greek lookalikes)
         let valid_format = normalized.len() >= 3
             && normalized.len() <= 30
-            && normalized.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
 
         if !valid_format {
             return Ok(Response::new(proto::CheckUsernameAvailabilityResponse {

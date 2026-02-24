@@ -524,7 +524,10 @@ pub async fn authenticate_device(
             // Track failed authentication attempts for brute force protection
             let device_id = request.device_id.clone();
             let max_failed = app_context.config.security.max_failed_login_attempts;
-            let block_duration = app_context.config.security.rate_limit_block_duration_seconds;
+            let block_duration = app_context
+                .config
+                .security
+                .rate_limit_block_duration_seconds;
             let queue = app_context.queue.clone();
             tokio::spawn(async move {
                 let mut q = queue.lock().await;
