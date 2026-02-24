@@ -16,14 +16,14 @@ primary_region = 'ams'
 [env]
   RUST_LOG = "info,sqlx=warn"
   INSTANCE_DOMAIN = "construct-server-staging.fly.dev"
-
+  
   # Database pool
   DB_MAX_CONNECTIONS = "10"
   DB_ACQUIRE_TIMEOUT_SECS = "30"
-
+  
   # Rate limiting
   MAX_MESSAGES_PER_HOUR = "1000"
-
+  
   # Message TTL
   MESSAGE_TTL_DAYS = "7"
 
@@ -38,8 +38,8 @@ primary_region = 'ams'
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
-    alpn = ["h2", "http/1.1"]
-
+    alpn = ["h2", "http/1.1"] 
+  
   [[services.ports]]
     port = 80
     handlers = ["http"]
