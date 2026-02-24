@@ -462,6 +462,17 @@ pub async fn authenticate_device(
         ));
     }
 
+    // 1b. Check if this device_id is temporarily blocked (brute force protection)
+    {
+        let mut queue = app_context.queue.lock().await;
+        if let Ok(Some(reason)) = queue.is_user_blocked(&request.device_id).await {
+            return Err(AppError::auth(&format!(
+                "Authentication temporarily blocked: {}",
+                reason
+            )));
+        }
+    }
+
     // 2. Find device in database
     let device = db::get_device_by_id(&app_context.db_pool, &request.device_id)
         .await
@@ -509,7 +520,37 @@ pub async fn authenticate_device(
 
     verifying_key
         .verify(message_bytes, &signature)
-        .map_err(|_| AppError::auth("Invalid signature"))?;
+        .map_err(|_| {
+            // Track failed authentication attempts for brute force protection
+            let device_id = request.device_id.clone();
+            let max_failed = app_context.config.security.max_failed_login_attempts;
+            let block_duration = app_context.config.security.rate_limit_block_duration_seconds;
+            let queue = app_context.queue.clone();
+            tokio::spawn(async move {
+                let mut q = queue.lock().await;
+                if let Ok(count) = q.increment_failed_login_count(&device_id).await {
+                    if count >= max_failed {
+                        let _ = q
+                            .block_user_temporarily(
+                                &device_id,
+                                block_duration,
+                                &format!(
+                                    "Too many failed auth attempts ({}/{})",
+                                    count, max_failed
+                                ),
+                            )
+                            .await;
+                    }
+                }
+            });
+            AppError::auth("Invalid signature")
+        })?;
+
+    // Reset failed attempt counter on successful authentication
+    {
+        let mut queue = app_context.queue.lock().await;
+        let _ = queue.reset_failed_login_count(&request.device_id).await;
+    }
 
     // 5. Get user_id from device
     let user_id = device
