@@ -85,7 +85,8 @@ services:
     networks:
       - internal
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      # exit 0=unsealed, exit 2=sealed/uninitialized — both mean Vault is running
+      test: ["CMD", "sh", "-c", "vault status -address=http://127.0.0.1:8200; r=$$?; [ $$r -eq 0 ] || [ $$r -eq 2 ]"]
       interval: 10s
       timeout: 5s
       retries: 5
