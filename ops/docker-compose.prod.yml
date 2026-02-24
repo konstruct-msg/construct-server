@@ -1,201 +1,277 @@
-# Docker Compose for Production VPS (Digital Ocean)
-# 
-# Architecture: Envoy Proxy + Separate Service Containers
-# 
-# Deploy:
-#   docker-compose -f ops/docker-compose.prod.yml up -d
+# =============================================================================
+# Construct Server — Production Docker Compose (DigitalOcean VPS)
+# =============================================================================
+# Architecture: Nginx (TLS) → Envoy (gRPC-web routing) → Microservices
 #
-# Services:
-#   - envoy: Public-facing proxy (443, 80)
-#   - auth-service: Authentication (internal:50051)
-#   - user-service: User management (internal:50052)
-#   - messaging-service: Real-time messaging (internal:50053)
-#   - notification-service: Push notifications (internal:50054)
-#   - postgres: Database
-#   - redis: Cache & message queue
-#   - (optional) kafka: Message broker
+# First-time setup:
+#   1. cp ops/.env.example .env && nano .env
+#   2. ./ops/scripts/init-ssl.sh your-domain.com your@email.com
+#   3. docker compose -f ops/docker-compose.prod.yml up -d --build
+#
+# Redeploy after code changes:
+#   docker compose -f ops/docker-compose.prod.yml up -d --build --no-deps <service>
+# =============================================================================
 
-version: '3.8'
+name: construct
 
 services:
-  # Envoy Proxy (public-facing)
-  envoy:
-    image: envoyproxy/envoy:v1.36-latest
-    container_name: construct-envoy
-    ports:
-      - "443:443"
-      - "80:80"
-      - "9901:9901"  # Admin interface
-    volumes:
-      - ./envoy.prod.yaml:/etc/envoy/envoy.yaml:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro  # Let's Encrypt certificates
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - auth-service
-      - user-service
-      - messaging-service
-      - notification-service
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9901/ready"]
-      interval: 10s
-      timeout: 2s
-      retries: 3
 
-  # Auth Service (gRPC)
-  auth-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-auth
-    command: /usr/local/bin/auth-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-      - INSTANCE_DOMAIN=${INSTANCE_DOMAIN}
-      - PORT=3000
-    ports:
-      - "50051:50051"  # gRPC
-      - "3000:3000"    # REST (.well-known)
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 10s
-      timeout: 2s
-      retries: 3
+  # ─── Infrastructure ────────────────────────────────────────────────────────
 
-  # User Service (gRPC)
-  user-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-user
-    command: /usr/local/bin/user-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-    ports:
-      - "50052:50052"
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # Messaging Service (gRPC with bidirectional streaming)
-  messaging-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-messaging
-    command: /usr/local/bin/messaging-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - JWT_SECRET=${JWT_SECRET}
-      - MAX_MESSAGES_PER_HOUR=${MAX_MESSAGES_PER_HOUR:-1000}
-    ports:
-      - "50053:50053"
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # Notification Service (gRPC)
-  notification-service:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: construct-notification
-    command: /usr/local/bin/notification-service
-    environment:
-      - RUST_LOG=info,sqlx=warn
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-    ports:
-      - "50054:50054"
-    networks:
-      - construct-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
-      - redis
-
-  # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
-    container_name: construct-postgres
+    restart: unless-stopped
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-construct}
-      - POSTGRES_USER=${POSTGRES_USER:-construct}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${DB_USER:-construct}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-construct}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
-      - construct-network
-    restart: unless-stopped
+      - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-construct}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-construct}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
-  # Redis Cache & Message Queue
   redis:
     image: redis:7-alpine
-    container_name: construct-redis
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
     networks:
-      - construct-network
-    restart: unless-stopped
+      - internal
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
-      timeout: 3s
-      retries: 3
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
-  # (Optional) Kafka - uncomment if using message broker
-  # kafka:
-  #   image: confluentinc/cp-kafka:7.5.0
-  #   container_name: construct-kafka
-  #   environment:
-  #     KAFKA_NODE_ID: 1
-  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-  #     KAFKA_PROCESS_ROLES: broker,controller
-  #     KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-  #     KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-  #     KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-  #   volumes:
-  #     - kafka-data:/var/lib/kafka/data
-  #   networks:
-  #     - construct-network
-  #   restart: unless-stopped
+  # ─── Proxy Layer ──────────────────────────────────────────────────────────
 
-networks:
-  construct-network:
-    driver: bridge
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    networks:
+      - internal
+    depends_on:
+      - envoy
+      - gateway
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+  envoy:
+    image: envoyproxy/envoy:v1.37.0
+    restart: unless-stopped
+    volumes:
+      - ./envoy.docker.yaml:/etc/envoy/envoy.yaml:ro
+    networks:
+      - internal
+    depends_on:
+      auth:
+        condition: service_started
+      user:
+        condition: service_started
+      messaging:
+        condition: service_started
+      notification:
+        condition: service_started
+
+  # ─── Core Services ─────────────────────────────────────────────────────────
+
+  auth:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/auth-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "8081"
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  user:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/user-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "8082"
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  messaging:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/messaging-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "8083"
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  notification:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/notification-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "8084"
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Supporting Services ──────────────────────────────────────────────────
+
+  invite:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/invite-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  key:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/key-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  media:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/media-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mls:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/mls-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sentinel:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/sentinel-service
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  gateway:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/gateway
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "3000"
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+    networks:
+      - internal
+
+  delivery:
+    image: construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/delivery-worker
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PORT: "8085"
+      DATABASE_URL: postgresql://${DB_USER:-construct}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-construct}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    networks:
+      - internal
+    depends_on:
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres-data:
   redis-data:
-  # kafka-data:
+  certbot-www:
+
+networks:
+  internal:
+    driver: bridge
