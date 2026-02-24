@@ -12,16 +12,19 @@
 #   Database : Supabase (DATABASE_URL in Vault)
 #   Redis    : Upstash  (REDIS_URL in Vault)
 #
-# First-time setup:
-#   1. cp ops/.env.example .env && nano .env    # only Vault/Traefik bootstrap vars
-#   2. docker compose -f ops/docker-compose.prod.yml up -d vault
+# First-time setup (run from REPO ROOT, not from ops/):
+#   1. cp ops/.env.example .env && nano .env
+#   2. docker compose -f ops/docker-compose.prod.yml --env-file .env up -d vault traefik
 #   3. docker exec construct-vault vault operator init  # save unseal keys!
 #   4. docker exec construct-vault vault operator unseal  # x3
-#   5. docker compose -f ops/docker-compose.prod.yml exec vault sh /vault/scripts/vault-setup.sh
-#   6. docker compose -f ops/docker-compose.prod.yml up -d
+#   5. docker exec construct-vault sh /vault/scripts/vault-setup.sh
+#   6. docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
 #
 # Redeploy after code changes:
-#   docker compose -f ops/docker-compose.prod.yml up -d --build --no-deps <service>
+#   docker compose -f ops/docker-compose.prod.yml --env-file .env up -d --build --no-deps <service>
+#
+# NOTE: Always run with --env-file .env from repo root, or create a symlink:
+#   ln -s $(pwd)/.env ops/.env
 # =============================================================================
 
 name: construct
