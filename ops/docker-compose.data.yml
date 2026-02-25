@@ -1,0 +1,94 @@
+# =============================================================================
+# Construct — Data Droplet
+# Runs: PostgreSQL 16 + Redpanda (Kafka-compatible broker)
+#
+# Setup on data droplet:
+#   1. git clone git@github.com:maximeliseyev/construct-server.git
+#   2. cp ops/.env.data.example .env.data
+#   3. nano .env.data  # fill in passwords
+#   4. docker compose -f ops/docker-compose.data.yml --env-file .env.data up -d
+#
+# Firewall: only allow app droplet IP on ports 5432 and 9092
+#   ufw allow from APP_DROPLET_IP to any port 5432
+#   ufw allow from APP_DROPLET_IP to any port 9092
+# =============================================================================
+
+name: construct-data
+
+services:
+
+  # ─── PostgreSQL 16 ───────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: construct
+      POSTGRES_USER: construct
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"    # accessible from app droplet (restrict via UFW)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct -d construct"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Redpanda (Kafka-compatible broker) ──────────────────────────────────
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    container_name: construct-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://${DATA_DROPLET_IP}:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr internal://redpanda:8082,external://${DATA_DROPLET_IP}:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr redpanda:33145
+      - --advertise-rpc-addr redpanda:33145
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --default-log-level=warn
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    ports:
+      - "9092:9092"      # Kafka API internal (from app droplet)
+      - "19092:19092"    # Kafka API external
+      - "8081:8081"      # Schema Registry
+      - "8082:8082"      # HTTP Proxy (Pandaproxy)
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── Redpanda Console (web UI) ────────────────────────────────────────────
+
+  redpanda-console:
+    image: redpandadata/console:v2.8.0
+    container_name: construct-redpanda-console
+    restart: unless-stopped
+    environment:
+      CONFIG_FILEPATH: /etc/redpanda/console-config.yaml
+    volumes:
+      - ./redpanda/console-config.yaml:/etc/redpanda/console-config.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"    # only localhost (use SSH tunnel to access)
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redpanda-data:
