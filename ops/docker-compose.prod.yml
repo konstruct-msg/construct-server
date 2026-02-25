@@ -66,27 +66,6 @@ services:
       - "traefik.http.routers.traefik.middlewares=auth-basic"
       - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
 
-  # ─── PostgreSQL ──────────────────────────────────────────────────────────
-
-  postgres:
-    image: postgres:16-alpine
-    container_name: construct-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: construct
-      POSTGRES_USER: construct
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U construct -d construct"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
   # ─── Vault (secrets store) ───────────────────────────────────────────────
 
   vault:
@@ -400,7 +379,6 @@ volumes:
   traefik-certs:
   vault-data:       # Vault encrypted storage
   vault-auth:       # AppRole credentials (role_id, secret_id)
-  postgres-data:    # PostgreSQL persistent storage
 
 
 networks:
