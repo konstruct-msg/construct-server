@@ -30,11 +30,12 @@
 name: construct
 
 services:
-
   # ─── Traefik (TLS + Let's Encrypt) ───────────────────────────────────────
 
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.6
+    environment:
+      - DOCKER_API_VERSION=1.44
     restart: unless-stopped
     command:
       - "--providers.docker=true"
@@ -73,12 +74,12 @@ services:
     container_name: construct-vault
     restart: unless-stopped
     cap_add:
-      - IPC_LOCK    # prevents secrets from being swapped to disk
+      - IPC_LOCK # prevents secrets from being swapped to disk
     environment:
       VAULT_ADDR: http://0.0.0.0:8200
     volumes:
       - vault-data:/vault/data
-      - vault-auth:/vault/auth       # AppRole credentials (role_id, secret_id)
+      - vault-auth:/vault/auth # AppRole credentials (role_id, secret_id)
       - ./vault/vault.hcl:/vault/config/vault.hcl:ro
       - ./vault/vault-setup.sh:/vault/scripts/vault-setup.sh:ro
     command: vault server -config=/vault/config/vault.hcl
@@ -86,7 +87,13 @@ services:
       - internal
     healthcheck:
       # exit 0=unsealed, exit 2=sealed/uninitialized — both mean Vault is running
-      test: ["CMD", "sh", "-c", "vault status -address=http://127.0.0.1:8200; r=$$?; [ $$r -eq 0 ] || [ $$r -eq 2 ]"]
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "vault status -address=http://127.0.0.1:8200; r=$$?; [ $$r -eq 0 ] || [ $$r -eq 2 ]",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -103,7 +110,7 @@ services:
 
   vault-agent:
     image: hashicorp/vault:1.19
-    restart: "no"    # runs once, exits after writing secrets
+    restart: "no" # runs once, exits after writing secrets
     volumes:
       - vault-auth:/vault/auth:ro
       - /opt/construct/secrets:/secrets
@@ -159,7 +166,7 @@ services:
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
-      - path: /opt/construct/secrets/app.env   # populated by vault-agent at startup
+      - path: /opt/construct/secrets/app.env # populated by vault-agent at startup
         required: true
     environment:
       PORT: "8081"
@@ -377,9 +384,8 @@ services:
 
 volumes:
   traefik-certs:
-  vault-data:       # Vault encrypted storage
-  vault-auth:       # AppRole credentials (role_id, secret_id)
-
+  vault-data: # Vault encrypted storage
+  vault-auth: # AppRole credentials (role_id, secret_id)
 
 networks:
   internal:
