@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: auth
+    static_configs:
+      - targets: ["auth:8081"]
+
+  - job_name: user
+    static_configs:
+      - targets: ["user:8082"]
+
+  - job_name: messaging
+    static_configs:
+      - targets: ["messaging:8083"]
+
+  - job_name: notification
+    static_configs:
+      - targets: ["notification:8084"]
+
+  - job_name: delivery
+    static_configs:
+      - targets: ["delivery:8085"]
+
+  - job_name: invite
+    static_configs:
+      - targets: ["invite:8086"]
+
+  - job_name: media
+    static_configs:
+      - targets: ["media:8087"]
+
+  - job_name: key
+    static_configs:
+      - targets: ["key:8057"]
+
+  - job_name: sentinel
+    static_configs:
+      - targets: ["sentinel:8090"]
+
+  - job_name: mls
+    static_configs:
+      - targets: ["mls:8091"]

@@ -527,6 +527,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
+        .route("/metrics", get(construct_server_shared::metrics::metrics_handler))
         // User profile endpoints
         .route(
             "/api/v1/users/:device_id/profile",
