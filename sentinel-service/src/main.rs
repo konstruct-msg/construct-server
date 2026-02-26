@@ -306,6 +306,20 @@ async fn main() -> anyhow::Result<()> {
 
     info!("SentinelService listening on {}", addr);
 
+    // Small HTTP server for /health and /metrics
+    let http_port: u16 = env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "8090".into())
+        .parse()?;
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
+    tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route("/health", axum::routing::get(|| async { "ok" }))
+            .route("/metrics", axum::routing::get(construct_server_shared::metrics::metrics_handler));
+        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+        info!("SentinelService HTTP/metrics listening on {}", http_addr);
+        axum::serve(listener, app).await.unwrap();
+    });
+
     Server::builder()
         .add_service(SentinelServiceServer::new(SentinelServiceImpl { core }))
         .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())

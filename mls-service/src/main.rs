@@ -238,6 +238,20 @@ async fn main() -> anyhow::Result<()> {
     info!("MLSService (stubs) listening on {}", addr);
     info!("Full OpenMLS integration planned for v2 (group chat release)");
 
+    // Small HTTP server for /health and /metrics
+    let http_port: u16 = std::env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "8091".into())
+        .parse()?;
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
+    tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route("/health", axum::routing::get(|| async { "ok" }))
+            .route("/metrics", axum::routing::get(construct_server_shared::metrics::metrics_handler));
+        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+        info!("MLSService HTTP/metrics listening on {}", http_addr);
+        axum::serve(listener, app).await.unwrap();
+    });
+
     Server::builder()
         .add_service(MlsServiceServer::new(MlsServiceImpl))
         .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
