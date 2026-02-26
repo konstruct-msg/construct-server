@@ -78,6 +78,23 @@ async fn main() -> Result<()> {
     info!("Kafka Topic: {}", config.kafka.topic);
     info!("Kafka Consumer Group: {}", config.kafka.consumer_group);
 
+    // Small HTTP server for /health and /metrics
+    {
+        let http_port: u16 = std::env::var("METRICS_PORT")
+            .unwrap_or_else(|_| "8085".into())
+            .parse()
+            .unwrap_or(8085);
+        let http_addr: std::net::SocketAddr = format!("0.0.0.0:{}", http_port).parse().unwrap();
+        tokio::spawn(async move {
+            let app = axum::Router::new()
+                .route("/health", axum::routing::get(|| async { "ok" }))
+                .route("/metrics", axum::routing::get(construct_server_shared::metrics::metrics_handler));
+            let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+            info!("Delivery Worker HTTP/metrics listening on {}", http_addr);
+            axum::serve(listener, app).await.unwrap();
+        });
+    }
+
     // Mask credentials in Redis URL for logging
     let redis_url_safe = if let Some(at_pos) = config.redis_url.find('@') {
         let protocol_end = config.redis_url.find("://").map(|p| p + 3).unwrap_or(0);
