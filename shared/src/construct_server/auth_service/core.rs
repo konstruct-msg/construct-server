@@ -161,21 +161,18 @@ pub async fn refresh_tokens_proto(
 
 pub async fn get_pow_challenge(
     app_context: Arc<AppContext>,
-) -> Result<Json<ChallengeResponse>, AppError> {
-    let (_headers, Json(challenge)) = devices::get_pow_challenge(
+    headers: axum::http::HeaderMap,
+) -> Result<(axum::http::HeaderMap, Json<devices::ChallengeResponse>), AppError> {
+    devices::get_pow_challenge(
         axum::extract::State(app_context),
-        axum::http::HeaderMap::new(),
+        headers,
     )
-    .await?;
-    Ok(Json(ChallengeResponse {
-        challenge: challenge.challenge,
-        difficulty: challenge.difficulty,
-        expires_at: challenge.expires_at,
-    }))
+    .await
 }
 
 pub async fn register_device(
     app_context: Arc<AppContext>,
+    headers: axum::http::HeaderMap,
     input: RegisterDeviceInput,
 ) -> Result<
     (
@@ -186,7 +183,7 @@ pub async fn register_device(
 > {
     devices::register_device_v2(
         axum::extract::State(app_context),
-        axum::http::HeaderMap::new(),
+        headers,
         Json(devices::RegisterDeviceRequest {
             username: input.username,
             device_id: input.device_id,

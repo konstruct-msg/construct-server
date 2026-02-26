@@ -60,9 +60,13 @@ impl AuthService for AuthGrpcService {
     ) -> Result<Response<proto::GetPowChallengeResponse>, Status> {
         let app_context = Arc::new(self.context.to_app_context());
         let axum::Json(challenge) =
-            construct_server_shared::auth_service::core::get_pow_challenge(app_context)
+            construct_server_shared::auth_service::core::get_pow_challenge(
+                app_context,
+                axum::http::HeaderMap::new(),
+            )
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| Status::internal(e.to_string()))?
+                .1;
         Ok(Response::new(proto::GetPowChallengeResponse {
             challenge: challenge.challenge,
             difficulty: challenge.difficulty,
@@ -85,6 +89,7 @@ impl AuthService for AuthGrpcService {
         let (_status, axum::Json(response)) =
             construct_server_shared::auth_service::core::register_device(
                 app_context,
+                axum::http::HeaderMap::new(),
                 construct_server_shared::auth_service::core::RegisterDeviceInput {
                     username: req.username,
                     device_id: req.device_id,
