@@ -163,11 +163,7 @@ pub async fn get_pow_challenge(
     app_context: Arc<AppContext>,
     headers: axum::http::HeaderMap,
 ) -> Result<(axum::http::HeaderMap, Json<devices::ChallengeResponse>), AppError> {
-    devices::get_pow_challenge(
-        axum::extract::State(app_context),
-        headers,
-    )
-    .await
+    devices::get_pow_challenge(axum::extract::State(app_context), headers).await
 }
 
 pub async fn register_device(
