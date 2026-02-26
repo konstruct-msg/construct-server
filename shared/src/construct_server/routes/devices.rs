@@ -39,19 +39,19 @@ use construct_error::AppError;
 /// Falls back to "unknown" if not present.
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
     // X-Forwarded-For: client, proxy1, proxy2 — take first (real client)
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(val) = forwarded.to_str() {
-            let ip = val.split(',').next().unwrap_or("").trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
+    if let Some(forwarded) = headers.get("x-forwarded-for")
+        && let Ok(val) = forwarded.to_str()
+    {
+        let ip = val.split(',').next().unwrap_or("").trim();
+        if !ip.is_empty() {
+            return ip.to_string();
         }
     }
     // X-Real-IP set by Envoy/nginx
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(val) = real_ip.to_str() {
-            return val.trim().to_string();
-        }
+    if let Some(real_ip) = headers.get("x-real-ip")
+        && let Ok(val) = real_ip.to_str()
+    {
+        return val.trim().to_string();
     }
     "unknown".to_string()
 }
