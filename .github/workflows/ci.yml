@@ -189,7 +189,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -e
-            cd /opt/construct
+            cd /opt/construct-server
 
             echo "=== Pulling latest code ==="
             git fetch origin main
