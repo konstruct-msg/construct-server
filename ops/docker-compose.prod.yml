@@ -253,6 +253,7 @@ services:
       - path: /opt/construct/secrets/app.env
         required: true
     environment:
+      PORT: "8086"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -287,6 +288,7 @@ services:
       - path: /opt/construct/secrets/app.env
         required: true
     environment:
+      PORT: "8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -305,6 +307,7 @@ services:
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      METRICS_PORT: "8091"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -322,6 +325,7 @@ services:
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      METRICS_PORT: "8090"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -361,10 +365,58 @@ services:
       vault-agent:
         condition: service_completed_successfully
 
+  # ─── Monitoring ──────────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: construct-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prometheus.middlewares=auth-basic"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: construct-grafana
+    restart: unless-stopped
+    environment:
+      GF_SERVER_ROOT_URL: "https://grafana.${INSTANCE_DOMAIN}"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - internal
+    depends_on:
+      - prometheus
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+
 volumes:
   traefik-certs:
   vault-data: # Vault encrypted storage
   vault-auth: # AppRole credentials (role_id, secret_id)
+  prometheus-data:
+  grafana-data:
 
 networks:
   internal:
