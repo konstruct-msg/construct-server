@@ -339,18 +339,21 @@ async fn main() -> Result<()> {
     let grpc_server = async move {
         Server::builder()
             .add_service(NotificationServiceServer::new(grpc_service))
-            .serve(grpc_addr)
+            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
             .context("Failed to start gRPC server")
     };
 
-    // Run both servers, exit if either fails
+    // Run both servers, exit if either fails or shutdown signal received
     tokio::select! {
         result = rest_server => {
             result?;
         }
         result = grpc_server => {
             result?;
+        }
+        _ = construct_server_shared::shutdown_signal() => {
+            info!("Shutdown signal received, stopping notification-service...");
         }
     }
 
