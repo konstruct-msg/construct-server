@@ -436,7 +436,6 @@ impl UserService for UserGrpcService {
             Err(e) => Err(Status::internal(format!("Database error: {}", e))),
         }
     }
-
 }
 
 /// Health check endpoint

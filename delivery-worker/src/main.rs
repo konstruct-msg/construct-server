@@ -118,8 +118,8 @@ async fn main() -> Result<()> {
             #[cfg(unix)]
             {
                 use tokio::signal::unix::{SignalKind, signal};
-                let mut sigterm = signal(SignalKind::terminate())
-                    .expect("Failed to register SIGTERM handler");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
                 tokio::select! {
                     _ = sigterm.recv() => {
                         info!("SIGTERM received, initiating graceful shutdown...");

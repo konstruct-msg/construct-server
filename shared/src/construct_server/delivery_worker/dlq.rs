@@ -57,7 +57,8 @@ pub struct DeadLetterMessage {
 pub async fn increment_retry_count(state: &WorkerState, message_id: &str) -> Result<u32> {
     let retry_key = format!("retry_count:{}", message_id);
     let ttl_seconds = ((state.config.message_ttl_days * SECONDS_PER_DAY)
-        + (state.config.dedup_safety_margin_hours * SECONDS_PER_HOUR)) as usize;
+        + (state.config.dedup_safety_margin_hours * SECONDS_PER_HOUR))
+        as usize;
 
     let count: u32 = execute_redis_with_retry(state, "increment_retry_count", |conn| {
         let key = retry_key.clone();
@@ -123,8 +124,7 @@ pub async fn send_to_dlq(
         dead_lettered_at: chrono::Utc::now().timestamp(),
     };
 
-    let payload =
-        serde_json::to_vec(&dlq_message).context("Failed to serialize DLQ message")?;
+    let payload = serde_json::to_vec(&dlq_message).context("Failed to serialize DLQ message")?;
 
     let dlq_topic = format!("{}-dlq", producer.topic());
     let key = envelope.recipient_id.as_bytes();

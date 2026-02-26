@@ -32,6 +32,6 @@ pub mod retry;
 pub mod state;
 
 // Re-export commonly used types and functions
-pub use dlq::{check_and_increment_retry, send_to_dlq, DeadLetterMessage, MAX_RETRIES};
+pub use dlq::{DeadLetterMessage, MAX_RETRIES, check_and_increment_retry, send_to_dlq};
 pub use processor::{ProcessResult, process_kafka_message};
 pub use state::WorkerState;
