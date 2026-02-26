@@ -173,25 +173,17 @@ impl DeviceTokenEncryption {
     /// Automatically detects format and uses appropriate key.
     /// Supports backward compatibility with older versions (legacy format without version byte).
     pub fn decrypt(&self, encrypted: &[u8]) -> Result<String> {
-        if encrypted.len() < NONCE_SIZE + 16 {
+        if encrypted.len() < MIN_ENCRYPTED_SIZE {
             anyhow::bail!(
                 "Encrypted data too short (expected at least {} bytes, got {})",
-                NONCE_SIZE + 16,
+                MIN_ENCRYPTED_SIZE,
                 encrypted.len()
             );
         }
 
-        // Detect format: if data starts with a version byte (< 10) and has enough bytes for versioned format, use versioned format
-        // Otherwise, use legacy format (no version byte, assume version 1)
-        let (version, encrypted_data) =
-            if encrypted.len() >= MIN_ENCRYPTED_SIZE && encrypted[0] < 10 {
-                // Versioned format: version (1 byte) || nonce || ciphertext || tag
-                let version = encrypted[0];
-                (version, &encrypted[VERSION_SIZE..])
-            } else {
-                // Legacy format: nonce || ciphertext || tag (no version byte, assume version 1)
-                (1, encrypted)
-            };
+        // Versioned format: version (1 byte) || nonce (12 bytes) || ciphertext || tag (16 bytes)
+        let version = encrypted[0];
+        let encrypted_data = &encrypted[VERSION_SIZE..];
 
         // Extract nonce and ciphertext
         let (nonce_bytes, ciphertext) = encrypted_data.split_at(NONCE_SIZE);
@@ -282,26 +274,6 @@ mod tests {
         // Both should decrypt with encryption_both (has both keys)
         assert_eq!(encryption_both.decrypt(&encrypted_v1).unwrap(), original);
         assert_eq!(encryption_both.decrypt(&encrypted_v2).unwrap(), original);
-    }
-
-    #[test]
-    fn test_legacy_format_backward_compatibility() {
-        // Create encryption with single key (version 1)
-        let key = [0u8; 32];
-        let encryption_v1 = DeviceTokenEncryption::new(&key).unwrap();
-
-        let original = "test_token";
-
-        // Encrypt with new format (includes version)
-        let encrypted_new = encryption_v1.encrypt(original).unwrap();
-        assert_eq!(encrypted_new[0], 1); // Version 1
-
-        // Create legacy format (no version byte) - simulate old data
-        let legacy_format = &encrypted_new[VERSION_SIZE..]; // Skip version byte
-
-        // Should still decrypt (assumes version 1)
-        let decrypted = encryption_v1.decrypt(legacy_format).unwrap();
-        assert_eq!(decrypted, original);
     }
 
     #[test]
