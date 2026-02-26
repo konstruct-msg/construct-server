@@ -474,7 +474,10 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
-        .route("/metrics", get(construct_server_shared::metrics::metrics_handler));
+        .route(
+            "/metrics",
+            get(construct_server_shared::metrics::metrics_handler),
+        );
 
     let listener = tokio::net::TcpListener::bind(&media_config.bind_address).await?;
     info!("Media REST listening on {}", media_config.bind_address);

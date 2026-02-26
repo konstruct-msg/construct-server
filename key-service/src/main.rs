@@ -463,7 +463,10 @@ async fn main() -> Result<()> {
     let http_app = Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
-        .route("/metrics", get(construct_server_shared::metrics::metrics_handler))
+        .route(
+            "/metrics",
+            get(construct_server_shared::metrics::metrics_handler),
+        )
         .with_state(context)
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
 
