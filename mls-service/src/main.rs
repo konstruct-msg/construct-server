@@ -16,7 +16,6 @@
 // ============================================================================
 
 use std::net::SocketAddr;
-use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

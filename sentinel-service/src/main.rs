@@ -13,7 +13,6 @@ mod core;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

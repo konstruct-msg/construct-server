@@ -32,7 +32,7 @@ use construct_server_shared::queue::MessageQueue;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tonic::{Request, Response, Status, metadata::MetadataMap, transport::Server};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;

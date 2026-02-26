@@ -7,7 +7,7 @@ use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use serde_json::json;
 use std::{env, sync::Arc};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
