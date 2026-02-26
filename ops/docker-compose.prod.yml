@@ -159,10 +159,7 @@ services:
   #   - Depend on vault-agent to ensure secrets are ready before starting
 
   auth:
-    build:
-      context: ..
-      dockerfile: ops/Dockerfile
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -191,7 +188,7 @@ services:
         condition: service_completed_successfully
 
   user:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -209,7 +206,7 @@ services:
         condition: service_completed_successfully
 
   messaging:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -229,7 +226,7 @@ services:
         condition: service_completed_successfully
 
   notification:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
@@ -249,7 +246,7 @@ services:
         condition: service_completed_successfully
 
   invite:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
@@ -266,7 +263,7 @@ services:
         condition: service_completed_successfully
 
   key:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -283,7 +280,7 @@ services:
         condition: service_completed_successfully
 
   media:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -300,7 +297,7 @@ services:
         condition: service_completed_successfully
 
   mls:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -317,7 +314,7 @@ services:
         condition: service_completed_successfully
 
   sentinel:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -334,7 +331,7 @@ services:
         condition: service_completed_successfully
 
   gateway:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:
@@ -353,7 +350,7 @@ services:
         condition: service_completed_successfully
 
   delivery:
-    image: construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
