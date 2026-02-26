@@ -59,14 +59,13 @@ impl AuthService for AuthGrpcService {
         _request: Request<proto::GetPowChallengeRequest>,
     ) -> Result<Response<proto::GetPowChallengeResponse>, Status> {
         let app_context = Arc::new(self.context.to_app_context());
-        let axum::Json(challenge) =
-            construct_server_shared::auth_service::core::get_pow_challenge(
-                app_context,
-                axum::http::HeaderMap::new(),
-            )
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .1;
+        let axum::Json(challenge) = construct_server_shared::auth_service::core::get_pow_challenge(
+            app_context,
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .1;
         Ok(Response::new(proto::GetPowChallengeResponse {
             challenge: challenge.challenge,
             difficulty: challenge.difficulty,
