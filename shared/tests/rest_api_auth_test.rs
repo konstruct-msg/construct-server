@@ -170,6 +170,7 @@ async fn test_get_pow_challenge_rate_limiting() {
                 "http://{}/api/v1/auth/challenge",
                 app.auth_address
             ))
+            .header("X-Forwarded-For", "10.0.0.1") // simulate real IP for rate limit test
             .send()
             .await
             .unwrap();
