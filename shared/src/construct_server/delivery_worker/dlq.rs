@@ -124,30 +124,11 @@ pub async fn send_to_dlq(
         dead_lettered_at: chrono::Utc::now().timestamp(),
     };
 
-    let payload = serde_json::to_vec(&dlq_message).context("Failed to serialize DLQ message")?;
-
     let dlq_topic = format!("{}-dlq", producer.topic());
-    let key = envelope.recipient_id.as_bytes();
 
-    use rdkafka::producer::{FutureRecord, Producer};
-    use rdkafka::util::Timeout;
-    use std::time::Duration;
-
-    // We need direct access to the underlying producer for the DLQ topic.
-    // Use send_raw which accepts topic override.
-    // Since MessageProducer doesn't expose raw producer, we use the circuit-broken path
-    // but with a wrapper envelope sent to DLQ topic via the same producer.
-    //
-    // Trade-off: DLQ uses same producer/circuit breaker. If Kafka is down,
-    // DLQ send also fails → we log the message as JSON to stderr as fallback.
-    let dlq_envelope = KafkaMessageEnvelope {
-        message_id: format!("dlq-{}", envelope.message_id),
-        ..envelope.clone()
-    };
-
-    // Try to send via standard producer (will go to wrong topic, so we log as fallback)
-    // TODO: Add DLQ-specific topic support to MessageProducer
-    let _ = dlq_envelope; // suppress unused warning
+    // We log the DLQ message as structured JSON to stderr as a recoverable fallback.
+    // TODO: Add DLQ-specific topic support to MessageProducer to actually send to Kafka.
+    let _ = producer; // producer reserved for future Kafka DLQ topic send
 
     // For now: serialize DLQ message to structured log (stderr)
     // This is safe and recoverable — ops team can grep logs for "DLQ_MESSAGE"
