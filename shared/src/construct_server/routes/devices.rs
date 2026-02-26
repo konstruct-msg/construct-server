@@ -538,10 +538,7 @@ pub async fn authenticate_device(
                         .block_user_temporarily(
                             &device_id,
                             block_duration,
-                            &format!(
-                                "Too many failed auth attempts ({}/{})",
-                                count, max_failed
-                            ),
+                            &format!("Too many failed auth attempts ({}/{})", count, max_failed),
                         )
                         .await;
                 }
