@@ -640,7 +640,7 @@ async fn main() -> Result<()> {
         let service = AuthGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = construct_server_shared::grpc_server()
             .add_service(AuthServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

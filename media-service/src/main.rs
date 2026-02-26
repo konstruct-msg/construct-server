@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
         let service = MediaGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = Server::builder()
+        if let Err(e) = construct_server_shared::grpc_server()
             .add_service(MediaServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

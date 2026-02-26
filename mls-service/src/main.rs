@@ -238,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
     info!("MLSService (stubs) listening on {}", addr);
     info!("Full OpenMLS integration planned for v2 (group chat release)");
 
-    Server::builder()
+    construct_server_shared::grpc_server()
         .add_service(MlsServiceServer::new(MlsServiceImpl))
         .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
         .await?;
