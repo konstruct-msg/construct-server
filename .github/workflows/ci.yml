@@ -200,20 +200,20 @@ jobs:
             echo "=== Building version: $VERSION ==="
 
             # Build with both version tag and latest
-            docker compose -f ops/docker-compose.prod.yml build --no-cache \
+            docker compose -f ops/docker-compose.prod.yml --env-file .env build --no-cache \
               --build-arg IMAGE_TAG=$VERSION
 
             # Tag as versioned
             docker tag construct-server:latest construct-server:$VERSION
 
             echo "=== Starting services (construct-server:$VERSION) ==="
-            IMAGE_TAG=$VERSION docker compose -f ops/docker-compose.prod.yml up -d
+            IMAGE_TAG=$VERSION docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
 
             echo "=== Waiting for health checks ==="
             sleep 15
 
             echo "=== Verifying services ==="
-            docker compose -f ops/docker-compose.prod.yml ps
+            docker compose -f ops/docker-compose.prod.yml --env-file .env ps
 
             echo "✅ Deploy complete: construct-server:$VERSION"
             echo "Commit: ${{ github.sha }}"
