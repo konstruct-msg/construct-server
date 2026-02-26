@@ -195,9 +195,19 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            echo "=== Rebuilding and restarting services ==="
-            docker compose -f ops/docker-compose.prod.yml build --no-cache
-            docker compose -f ops/docker-compose.prod.yml up -d
+            # Extract version from Cargo.toml
+            VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+            echo "=== Building version: $VERSION ==="
+
+            # Build with both version tag and latest
+            docker compose -f ops/docker-compose.prod.yml build --no-cache \
+              --build-arg IMAGE_TAG=$VERSION
+
+            # Tag as versioned
+            docker tag construct-server:latest construct-server:$VERSION
+
+            echo "=== Starting services (construct-server:$VERSION) ==="
+            IMAGE_TAG=$VERSION docker compose -f ops/docker-compose.prod.yml up -d
 
             echo "=== Waiting for health checks ==="
             sleep 15
@@ -205,8 +215,7 @@ jobs:
             echo "=== Verifying services ==="
             docker compose -f ops/docker-compose.prod.yml ps
 
-            echo "✅ Deploy complete"
-            echo "Branch: main"
+            echo "✅ Deploy complete: construct-server:$VERSION"
             echo "Commit: ${{ github.sha }}"
 
       - name: Notify deploy result
