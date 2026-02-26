@@ -14,6 +14,7 @@ use sqlx::PgPool;
 pub struct PreKeyBundle {
     pub device_id: String,
     pub identity_key: Vec<u8>,
+    pub verifying_key: Vec<u8>,
     pub signed_prekey: Vec<u8>,
     pub signed_prekey_id: u32,
     pub signed_prekey_signature: Vec<u8>,
@@ -50,7 +51,7 @@ pub async fn get_prekey_bundle(
     let device = if let Some(did) = device_id {
         sqlx::query_as::<_, DeviceRow>(
             r#"
-            SELECT device_id, identity_public, signed_prekey_public,
+            SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_signature, suite_id, registered_at
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
@@ -64,7 +65,7 @@ pub async fn get_prekey_bundle(
         // Get primary device (first registered)
         sqlx::query_as::<_, DeviceRow>(
             r#"
-            SELECT device_id, identity_public, signed_prekey_public,
+            SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_signature, suite_id, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
@@ -103,6 +104,7 @@ pub async fn get_prekey_bundle(
     Ok(Some(PreKeyBundle {
         device_id: device.device_id,
         identity_key: device.identity_public,
+        verifying_key: device.verifying_key,
         signed_prekey: device.signed_prekey_public,
         signed_prekey_id: 1, // TODO: Track signed prekey IDs
         signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
@@ -122,7 +124,7 @@ pub async fn get_prekey_bundles(
     let devices: Vec<DeviceRow> = if let Some(ids) = device_ids {
         sqlx::query_as(
             r#"
-            SELECT device_id, identity_public, signed_prekey_public,
+            SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_signature, suite_id, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
@@ -135,7 +137,7 @@ pub async fn get_prekey_bundles(
     } else {
         sqlx::query_as(
             r#"
-            SELECT device_id, identity_public, signed_prekey_public,
+            SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_signature, suite_id, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
@@ -171,6 +173,7 @@ pub async fn get_prekey_bundles(
         bundles.push(PreKeyBundle {
             device_id: device.device_id,
             identity_key: device.identity_public,
+            verifying_key: device.verifying_key,
             signed_prekey: device.signed_prekey_public,
             signed_prekey_id: 1,
             signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
@@ -454,6 +457,7 @@ pub fn calculate_safety_number(
 struct DeviceRow {
     device_id: String,
     identity_public: Vec<u8>,
+    verifying_key: Vec<u8>,
     signed_prekey_public: Vec<u8>,
     signed_prekey_signature: Option<Vec<u8>>,
     suite_id: String,

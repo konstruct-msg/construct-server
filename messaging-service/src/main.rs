@@ -80,7 +80,12 @@ impl MessagingService for MessagingGrpcService {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("Stream error: {}", e);
+                                // h2 protocol resets are normal client disconnects, not server errors
+                                if e.message().contains("h2 protocol") {
+                                    tracing::debug!("MessageStream closed by client: {}", e);
+                                } else {
+                                    tracing::warn!("Stream error: {}", e);
+                                }
                                 break;
                             }
                         }
@@ -598,7 +603,7 @@ async fn main() -> Result<()> {
         let service = MessagingGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = construct_server_shared::grpc_server()
             .add_service(MessagingServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

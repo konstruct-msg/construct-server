@@ -306,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("SentinelService listening on {}", addr);
 
-    Server::builder()
+    construct_server_shared::grpc_server()
         .add_service(SentinelServiceServer::new(SentinelServiceImpl { core }))
         .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
         .await?;

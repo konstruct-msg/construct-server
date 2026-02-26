@@ -337,7 +337,7 @@ async fn main() -> Result<()> {
     };
 
     let grpc_server = async move {
-        Server::builder()
+        construct_server_shared::grpc_server()
             .add_service(NotificationServiceServer::new(grpc_service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
