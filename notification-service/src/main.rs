@@ -289,6 +289,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
+        .route("/metrics", get(construct_server_shared::metrics::metrics_handler))
         // Notification endpoints
         .route(
             "/api/v1/notifications/register-device",
