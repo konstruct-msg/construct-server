@@ -25,11 +25,13 @@
 // ============================================================================
 
 pub mod deduplication;
+pub mod dlq;
 pub mod processor;
 pub mod redis_streams;
 pub mod retry;
 pub mod state;
 
 // Re-export commonly used types and functions
+pub use dlq::{check_and_increment_retry, send_to_dlq, DeadLetterMessage, MAX_RETRIES};
 pub use processor::{ProcessResult, process_kafka_message};
 pub use state::WorkerState;

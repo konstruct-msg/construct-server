@@ -593,13 +593,14 @@ async fn main() -> Result<()> {
     let grpc_addr = grpc_bind_address
         .parse()
         .context("Invalid MESSAGING_GRPC_BIND_ADDRESS")?;
+    // Replace bare .serve() with graceful shutdown for gRPC
     tokio::spawn(async move {
         let service = MessagingGrpcService {
             context: grpc_context,
         };
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(MessagingServiceServer::new(service))
-            .serve(grpc_addr)
+            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "Messaging gRPC server failed");
@@ -639,6 +640,7 @@ async fn main() -> Result<()> {
         .context("Failed to bind to address")?;
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(construct_server_shared::shutdown_signal())
         .await
         .context("Failed to start server")?;
 

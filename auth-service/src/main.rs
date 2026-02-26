@@ -638,7 +638,7 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(AuthServiceServer::new(service))
-            .serve(grpc_addr)
+            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "Auth gRPC server failed");
@@ -686,6 +686,7 @@ async fn main() -> Result<()> {
         .context("Failed to bind to address")?;
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(construct_server_shared::shutdown_signal())
         .await
         .context("Failed to start server")?;
 

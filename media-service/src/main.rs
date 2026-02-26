@@ -462,7 +462,7 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = Server::builder()
             .add_service(MediaServiceServer::new(service))
-            .serve(grpc_addr)
+            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "gRPC server failed");
@@ -478,6 +478,8 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&media_config.bind_address).await?;
     info!("Media REST listening on {}", media_config.bind_address);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(construct_server_shared::shutdown_signal())
+        .await?;
     Ok(())
 }

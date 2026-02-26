@@ -340,10 +340,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ = http_server => {
             tracing::info!("Server shut down.");
         },
-        _ = signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             tracing::info!("Shutdown signal received. Shutting down...");
         }
     }
 
     Ok(())
+}
+
+/// Wait for SIGTERM or Ctrl-C — used for graceful shutdown across all services.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = signal::ctrl_c() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.ok();
+    }
 }

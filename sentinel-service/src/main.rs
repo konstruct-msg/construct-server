@@ -308,7 +308,7 @@ async fn main() -> anyhow::Result<()> {
 
     Server::builder()
         .add_service(SentinelServiceServer::new(SentinelServiceImpl { core }))
-        .serve(addr)
+        .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
         .await?;
 
     Ok(())

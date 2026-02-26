@@ -451,7 +451,7 @@ async fn main() -> Result<()> {
 
     let grpc_server = tonic::transport::Server::builder()
         .add_service(KeyServiceServer::new(grpc_service))
-        .serve(grpc_addr);
+        .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
 
     // HTTP health server
     let http_addr: SocketAddr = env::var("KEY_SERVICE_HTTP_ADDR")
@@ -469,13 +469,16 @@ async fn main() -> Result<()> {
 
     let http_server = axum::serve(tokio::net::TcpListener::bind(http_addr).await?, http_app);
 
-    // Run both servers
+    // Run both servers, shutdown gracefully on SIGTERM/Ctrl-C
     tokio::select! {
         result = grpc_server => {
             result.context("gRPC server error")?;
         }
         result = http_server => {
             result.context("HTTP server error")?;
+        }
+        _ = construct_server_shared::shutdown_signal() => {
+            info!("Shutdown signal received, stopping key-service...");
         }
     }
 
