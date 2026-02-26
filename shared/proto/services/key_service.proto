@@ -111,6 +111,9 @@ message GetPreKeyBundleResponse {
   // If false, only signed pre-key available (less forward secrecy)
   bool has_one_time_key = 3;
 
+  // Ed25519 public key for verifying device signatures
+  bytes verifying_key = 11;
+
   // Reserved for future fields
   reserved 4 to 10;
 }
