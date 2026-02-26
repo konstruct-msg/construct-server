@@ -231,7 +231,7 @@ pub async fn register_device_v2(
     // 0. Check rate limiting + adaptive PoW difficulty
     let max_registrations = app_context.config.security.max_registrations_per_hour;
 
-    if max_registrations > 0 {
+    if max_registrations > 0 && client_ip != "unknown" {
         let count = crate::db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?;
@@ -780,8 +780,9 @@ pub async fn get_pow_challenge(
     let client_ip = extract_client_ip(&headers);
 
     // 1. Count how many challenges this IP has requested in the last hour
+    // Skip rate-limit check when IP is unknown (no proxy headers) to avoid inet cast errors
     let max_challenges = app_context.config.security.max_pow_challenges_per_hour;
-    let count = if max_challenges > 0 {
+    let count = if max_challenges > 0 && client_ip != "unknown" {
         crate::db::count_challenges_by_ip(&app_context.db_pool, &client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?
@@ -808,13 +809,19 @@ pub async fn get_pow_challenge(
     let params = adaptive_pow_params(base_difficulty, count);
 
     // 3. Generate and store challenge with adaptive difficulty
+    // Only pass IP when it's a valid address — PostgreSQL inet cast rejects "unknown"
     let challenge = crate::pow::generate_challenge();
     let ttl_seconds = 600; // 10 minutes
+    let requester_ip = if client_ip == "unknown" {
+        None
+    } else {
+        Some(client_ip.as_str())
+    };
     let pow_challenge = crate::db::create_pow_challenge(
         &app_context.db_pool,
         &challenge,
         params.difficulty as i16,
-        Some(&client_ip),
+        requester_ip,
         ttl_seconds,
     )
     .await
