@@ -274,7 +274,10 @@ async fn main() -> Result<()> {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
-        .route("/metrics", get(construct_server_shared::metrics::metrics_handler));
+        .route(
+            "/metrics",
+            get(construct_server_shared::metrics::metrics_handler),
+        );
 
     // Start REST server
     info!("Invite Service REST listening on {}", config.bind_address);

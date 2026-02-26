@@ -88,7 +88,10 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             let app = axum::Router::new()
                 .route("/health", axum::routing::get(|| async { "ok" }))
-                .route("/metrics", axum::routing::get(construct_server_shared::metrics::metrics_handler));
+                .route(
+                    "/metrics",
+                    axum::routing::get(construct_server_shared::metrics::metrics_handler),
+                );
             let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
             info!("Delivery Worker HTTP/metrics listening on {}", http_addr);
             axum::serve(listener, app).await.unwrap();
