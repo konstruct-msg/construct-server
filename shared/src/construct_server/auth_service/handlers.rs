@@ -93,17 +93,20 @@ pub struct AuthenticateDeviceRequest {
 /// Wrapper for get_pow_challenge handler
 pub async fn get_pow_challenge(
     State(context): State<Arc<AuthServiceContext>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    core::get_pow_challenge(app_state(&context).0).await
+    core::get_pow_challenge(app_state(&context).0, headers).await
 }
 
 /// Wrapper for register_device handler
 pub async fn register_device(
     State(context): State<Arc<AuthServiceContext>>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     core::register_device(
         app_state(&context).0,
+        headers,
         core::RegisterDeviceInput {
             username: request.username,
             device_id: request.device_id,

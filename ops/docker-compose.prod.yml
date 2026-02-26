@@ -330,25 +330,6 @@ services:
       vault-agent:
         condition: service_completed_successfully
 
-  gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
-    command: /usr/local/bin/gateway
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "3000"
-      RUST_LOG: ${RUST_LOG:-info}
-      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
-
   delivery:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/delivery-worker
