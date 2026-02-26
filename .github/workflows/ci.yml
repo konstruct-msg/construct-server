@@ -174,30 +174,49 @@ jobs:
       - name: List binaries
         run: ls -la target/release/
 
-  # Deploy to Fly.io (staging) - only on develop branch
-  deploy-staging:
-    name: Deploy to Fly.io (Staging)
+  # Deploy to VPS - only on push to main branch
+  deploy:
+    name: Deploy to VPS
     runs-on: ubuntu-latest
-    # Only deploy on push to develop (not on PRs)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [security-audit, fmt, clippy, test, build]
     steps:
-      - uses: actions/checkout@v4
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/construct
 
-      - name: Setup Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
+            echo "=== Pulling latest code ==="
+            git fetch origin main
+            git reset --hard origin/main
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+            echo "=== Rebuilding and restarting services ==="
+            docker compose -f ops/docker-compose.prod.yml build --no-cache
+            docker compose -f ops/docker-compose.prod.yml up -d
 
-      - name: Deployment notification
+            echo "=== Waiting for health checks ==="
+            sleep 15
+
+            echo "=== Verifying services ==="
+            docker compose -f ops/docker-compose.prod.yml ps
+
+            echo "✅ Deploy complete"
+            echo "Branch: main"
+            echo "Commit: ${{ github.sha }}"
+
+      - name: Notify deploy result
+        if: always()
         run: |
-          echo "✅ Deployed to staging (Fly.io)"
-          echo "Branch: ${{ github.ref }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Author: ${{ github.actor }}"
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployed ${{ github.sha }} to VPS (${{ secrets.VPS_HOST }})"
+          else
+            echo "❌ Deploy failed for ${{ github.sha }}"
+          fi
 
   # Dependency license check (optional, uncomment if needed)
   # licenses:

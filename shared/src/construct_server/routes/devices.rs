@@ -466,7 +466,7 @@ pub async fn authenticate_device(
     {
         let mut queue = app_context.queue.lock().await;
         if let Ok(Some(reason)) = queue.is_user_blocked(&request.device_id).await {
-            return Err(AppError::auth(&format!(
+            return Err(AppError::auth(format!(
                 "Authentication temporarily blocked: {}",
                 reason
             )));
@@ -531,19 +531,19 @@ pub async fn authenticate_device(
             let queue = app_context.queue.clone();
             tokio::spawn(async move {
                 let mut q = queue.lock().await;
-                if let Ok(count) = q.increment_failed_login_count(&device_id).await {
-                    if count >= max_failed {
-                        let _ = q
-                            .block_user_temporarily(
-                                &device_id,
-                                block_duration,
-                                &format!(
-                                    "Too many failed auth attempts ({}/{})",
-                                    count, max_failed
-                                ),
-                            )
-                            .await;
-                    }
+                if let Ok(count) = q.increment_failed_login_count(&device_id).await
+                    && count >= max_failed
+                {
+                    let _ = q
+                        .block_user_temporarily(
+                            &device_id,
+                            block_duration,
+                            &format!(
+                                "Too many failed auth attempts ({}/{})",
+                                count, max_failed
+                            ),
+                        )
+                        .await;
                 }
             });
             AppError::auth("Invalid signature")
