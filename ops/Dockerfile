@@ -43,12 +43,8 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Copy Envoy from official image
-COPY --from=envoyproxy/envoy:v1.37.0 /usr/local/bin/envoy /usr/local/bin/envoy
-
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
-    supervisor \
     ca-certificates \
     libssl3 \
     libsasl2-2 \
@@ -70,19 +66,14 @@ COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/ke
 COPY --from=builder --chmod=+x /app/target/release/mls-service /usr/local/bin/mls-service
 COPY --from=builder --chmod=+x /app/target/release/sentinel-service /usr/local/bin/sentinel-service
 
-# Copy Envoy configuration for Fly.io (no TLS, localhost routing)
-COPY ops/envoy.fly.yaml /app/envoy.yaml
-COPY ops/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Copy migrations for the main server
+# Copy migrations
 COPY shared/migrations /app/migrations
 
-# Create data directory for media-service (will be mounted as volume in production)
+# Create data directory for media-service (mounted as volume in production)
 RUN mkdir -p /data/media
 
-# Expose port (used by all services)
+# Expose port
 EXPOSE 8080
 
-# Default command (can be overridden in docker-compose or fly.toml)
-# Each service (server, worker, gateway) uses its own process name from fly.toml
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# CMD is overridden per-service in docker-compose
+CMD ["/bin/sh"]
