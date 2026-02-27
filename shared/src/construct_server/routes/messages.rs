@@ -10,12 +10,7 @@
 // ============================================================================
 
 use axum::http::HeaderMap;
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -346,8 +341,6 @@ pub async fn confirm_message(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_next_since_always_serialized() {
         // Test that nextSince field is always present in JSON (never omitted)
