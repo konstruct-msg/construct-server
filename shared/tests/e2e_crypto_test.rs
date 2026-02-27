@@ -154,7 +154,7 @@ async fn register_user_with_crypto(
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // suite_id = 1
+        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1
         message.extend_from_slice(signed_prekey_public.as_bytes());
         identity_signing_key.sign(&message)
     };
@@ -190,7 +190,7 @@ async fn register_user_with_crypto(
             "identityPublic": general_purpose::STANDARD.encode(identity_x25519_public.as_bytes()),
             "signedPrekeyPublic": general_purpose::STANDARD.encode(signed_prekey_public.as_bytes()),
             "signedPrekeySignature": general_purpose::STANDARD.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,

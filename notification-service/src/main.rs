@@ -32,7 +32,7 @@ use construct_server_shared::queue::MessageQueue;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tonic::{Request, Response, Status, metadata::MetadataMap, transport::Server};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
     };
 
     let grpc_server = async move {
-        Server::builder()
+        construct_server_shared::grpc_server()
             .add_service(NotificationServiceServer::new(grpc_service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

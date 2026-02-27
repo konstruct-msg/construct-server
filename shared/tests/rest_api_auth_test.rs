@@ -220,7 +220,7 @@ async fn test_register_device_success() {
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // suite_id = 1
+        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1
         message.extend_from_slice(prekey_public.as_bytes());
         signing_key.sign(&message)
     };
@@ -255,7 +255,7 @@ async fn test_register_device_success() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -341,7 +341,7 @@ async fn test_register_device_duplicate_device_id() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -386,7 +386,7 @@ async fn test_register_device_duplicate_device_id() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge2.challenge,
@@ -456,7 +456,7 @@ async fn test_register_device_missing_signed_prekey_signature() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             // Missing signedPrekeySignature!
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -536,7 +536,7 @@ async fn test_authenticate_device_success() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -667,7 +667,7 @@ async fn test_authenticate_device_expired_timestamp() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -773,7 +773,7 @@ async fn test_refresh_token_success() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -958,7 +958,7 @@ async fn test_register_device_invalid_device_id_format() {
                 "identityPublic": BASE64.encode(identity_public.as_bytes()),
                 "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
                 "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-                "suiteId": "Curve25519+Ed25519"
+                "cryptoSuite": "Curve25519+Ed25519"
             },
             "powSolution": {
                 "challenge": challenge.challenge,
@@ -1039,7 +1039,7 @@ async fn test_register_device_invalid_pow_solution() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
@@ -1117,7 +1117,7 @@ async fn test_authenticate_device_invalid_signature() {
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,

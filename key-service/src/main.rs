@@ -95,11 +95,12 @@ impl KeyService for KeyGrpcService {
                     signed_pre_key_signature: b.signed_prekey_signature,
                     one_time_pre_key: b.one_time_prekey,
                     one_time_pre_key_id: b.one_time_prekey_id,
-                    crypto_suite: b.suite_id,
+                    crypto_suite: b.crypto_suite,
                     generated_at: b.registered_at.timestamp(),
                 }),
                 device_id: b.device_id,
                 has_one_time_key: b.one_time_prekey_id.is_some(),
+                verifying_key: b.verifying_key,
             })),
             None => Err(Status::not_found("User or device not found")),
         }
@@ -382,7 +383,7 @@ impl KeyService for KeyGrpcService {
                     signed_pre_key_signature: b.signed_prekey_signature,
                     one_time_pre_key: b.one_time_prekey,
                     one_time_pre_key_id: b.one_time_prekey_id,
-                    crypto_suite: b.suite_id,
+                    crypto_suite: b.crypto_suite,
                     generated_at: b.registered_at.timestamp(),
                 }),
                 platform: 0, // Unknown
@@ -449,7 +450,7 @@ async fn main() -> Result<()> {
 
     info!("gRPC server listening on {}", grpc_addr);
 
-    let grpc_server = tonic::transport::Server::builder()
+    let grpc_server = construct_server_shared::grpc_server()
         .add_service(KeyServiceServer::new(grpc_service))
         .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
 

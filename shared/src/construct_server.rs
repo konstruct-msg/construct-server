@@ -365,3 +365,13 @@ pub async fn shutdown_signal() {
         signal::ctrl_c().await.ok();
     }
 }
+
+/// Create a pre-configured tonic gRPC server with HTTP/2 keepalive.
+///
+/// Keepalive pings the client every 20s and closes unresponsive connections after 10s.
+/// This prevents silent H2 connection hangs and reduces stream reset noise in logs.
+pub fn grpc_server() -> tonic::transport::Server {
+    tonic::transport::Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(20)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
+}

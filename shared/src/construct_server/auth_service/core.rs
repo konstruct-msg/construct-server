@@ -22,7 +22,7 @@ pub struct DevicePublicKeysInput {
     pub identity_public: String,
     pub signed_prekey_public: String,
     pub signed_prekey_signature: String,
-    pub suite_id: String,
+    pub crypto_suite: String,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +188,7 @@ pub async fn register_device(
                 identity_public: input.public_keys.identity_public,
                 signed_prekey_public: input.public_keys.signed_prekey_public,
                 signed_prekey_signature: input.public_keys.signed_prekey_signature,
-                suite_id: input.public_keys.suite_id,
+                crypto_suite: input.public_keys.crypto_suite,
             },
             pow_solution: devices::PowSolution {
                 challenge: input.pow_solution.challenge,
