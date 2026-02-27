@@ -95,7 +95,8 @@ message Envelope {
 
   // Group message ID moved to field 21 (in oneof above)
 
-  // Reserved for future features
+  // Reserved for future features (field 22 was reserved for E2eeMetadata but
+  // crypto parameters belong inside encrypted_payload, not in the outer envelope)
   reserved 22 to 50;
 
   // === Reserved for Extensions (fields 51-100) ===

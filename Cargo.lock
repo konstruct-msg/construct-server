@@ -727,6 +727,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "hkdf",
  "hmac",
  "http-body-util",
  "hyper",

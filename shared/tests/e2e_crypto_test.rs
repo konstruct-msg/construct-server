@@ -33,13 +33,11 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use ed25519_dalek::{Signer, SigningKey};
-use hmac::{Hmac, Mac};
+use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use test_utils::{TestUser, spawn_app};
 use x25519_dalek::{PublicKey, StaticSecret};
-
-type HmacSha256 = Hmac<Sha256>;
 
 // ============================================================================
 // Crypto Helper Functions (Simplified Signal Protocol)
@@ -52,40 +50,48 @@ fn generate_dh_keypair() -> (StaticSecret, PublicKey) {
     (secret, public)
 }
 
-/// Simplified X3DH: Compute shared secret from Alice's ephemeral key and Bob's signed prekey
-/// In real Signal Protocol: SS = DH(IK_A, SPK_B) || DH(EK_A, IK_B) || DH(EK_A, SPK_B) [|| DH(EK_A, OPK_B)]
-/// Simplified version: SS = DH(EK_A, SPK_B)
+/// X3DH initiator (Alice): compute shared secret.
+///
+/// Simplified version (one DH leg): SS = DH(EK_A, SPK_B)
+/// In full Signal: SS = DH(IK_A, SPK_B) || DH(EK_A, IK_B) || DH(EK_A, SPK_B) [|| DH(EK_A, OPK_B)]
+///
+/// Domain separator (info) = "KonstruktX3DH-v1" prevents cross-protocol key reuse (#14).
 fn x3dh_initiator(
     alice_ephemeral_secret: &StaticSecret,
     bob_signed_prekey_public: &PublicKey,
 ) -> [u8; 32] {
-    let shared_secret = alice_ephemeral_secret.diffie_hellman(bob_signed_prekey_public);
-    *shared_secret.as_bytes()
+    let raw_ss = alice_ephemeral_secret.diffie_hellman(bob_signed_prekey_public);
+    // HKDF-SHA256: salt=0x00*32 (constant), IKM=DH_output, info=domain-separator
+    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), raw_ss.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(b"KonstruktX3DH-v1", &mut okm)
+        .expect("HKDF expand length is valid");
+    okm
 }
 
-/// Simplified X3DH: Bob derives the same shared secret
+/// X3DH receiver (Bob): derives the same shared secret.
 fn x3dh_receiver(
     bob_signed_prekey_secret: &StaticSecret,
     alice_ephemeral_public: &PublicKey,
 ) -> [u8; 32] {
-    let shared_secret = bob_signed_prekey_secret.diffie_hellman(alice_ephemeral_public);
-    *shared_secret.as_bytes()
+    let raw_ss = bob_signed_prekey_secret.diffie_hellman(alice_ephemeral_public);
+    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), raw_ss.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(b"KonstruktX3DH-v1", &mut okm)
+        .expect("HKDF expand length is valid");
+    okm
 }
 
-/// KDF: Derive message key from shared secret using HKDF-like construction
-/// Signal uses HKDF(SS, info="WhisperMessageKeys")
-/// Simplified: HMAC-SHA256(SS, "construct-message-key")
-fn derive_message_key(shared_secret: &[u8; 32]) -> [u8; 32] {
-    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(shared_secret)
-        .expect("HMAC can take any key size");
-    mac.update(b"construct-message-key-v1");
-    let result = mac.finalize();
-    let bytes = result.into_bytes();
-    let array: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .expect("HMAC-SHA256 produces 32 bytes");
-    array
+/// KDF_MK: derive message key from chain key using HKDF-SHA256.
+///
+/// Signal spec: message_key = HMAC-SHA256(chain_key, 0x01)
+/// Here we use HKDF with explicit info to match Construct Protocol spec (#13).
+fn derive_message_key(chain_key: &[u8; 32]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, chain_key);
+    let mut okm = [0u8; 32];
+    hk.expand(b"KonstruktMessageKey-v1", &mut okm)
+        .expect("HKDF expand length is valid");
+    okm
 }
 
 /// Encrypt plaintext using ChaCha20Poly1305

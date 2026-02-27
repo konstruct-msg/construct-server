@@ -554,13 +554,17 @@ pub struct BundleData {
 }
 
 impl BundleData {
-    /// Returns the canonical byte representation for signing/verification
+    /// Returns the canonical byte representation for signing/verification.
     ///
-    /// Uses JSON serialization with deterministic field ordering (via serde_json)
-    /// This matches what the client signed when creating the bundle
+    /// IMPORTANT: The server MUST verify the original bytes as received from the client
+    /// (the raw base64-decoded `bundle_data` field), NOT a re-serialization of this struct.
+    /// Re-serialization can differ from the original bytes (whitespace, field order) and
+    /// would break signature verification — this is a canonicalization attack vector (#16).
+    ///
+    /// This method exists for client-side use (signing before upload).
+    /// serde_json serializes fields in struct declaration order, which is deterministic
+    /// for a given Rust struct version.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        // Use serde_json::to_vec which produces canonical JSON (deterministic ordering)
-        // This is the same format that the client signed
         serde_json::to_vec(self).context("Failed to serialize BundleData to canonical bytes")
     }
 }

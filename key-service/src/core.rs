@@ -296,7 +296,7 @@ pub async fn rotate_signed_prekey(
                 VALUES ($1, 0, $2, $3, $4)
                 ON CONFLICT (device_id, key_id) DO UPDATE SET
                     public_key = $2, signature = $3, rotation_reason = $4,
-                    archived_at = NOW(), expires_at = NOW() + INTERVAL '48 hours'
+                    archived_at = NOW(), expires_at = NOW() + INTERVAL '7 days'
                 "#
             )
             .bind(device_id)
@@ -326,8 +326,8 @@ pub async fn rotate_signed_prekey(
     .execute(db)
     .await?;
 
-    // Old key valid until
-    let expires_at = Utc::now() + chrono::Duration::hours(48);
+    // Old key valid until (7 days — aligns with signed_prekey_archive expires_at)
+    let expires_at = Utc::now() + chrono::Duration::days(7);
     Ok(expires_at)
 }
 
