@@ -55,16 +55,16 @@ fn generate_dh_keypair() -> (StaticSecret, PublicKey) {
 /// Simplified version (one DH leg): SS = DH(EK_A, SPK_B)
 /// In full Signal: SS = DH(IK_A, SPK_B) || DH(EK_A, IK_B) || DH(EK_A, SPK_B) [|| DH(EK_A, OPK_B)]
 ///
-/// Domain separator (info) = "KonstruktX3DH-v1" prevents cross-protocol key reuse (#14).
+/// Domain separator (info) = "Construct-X3DH-RootKey-v1" prevents cross-protocol key reuse (#14).
 fn x3dh_initiator(
     alice_ephemeral_secret: &StaticSecret,
     bob_signed_prekey_public: &PublicKey,
 ) -> [u8; 32] {
     let raw_ss = alice_ephemeral_secret.diffie_hellman(bob_signed_prekey_public);
-    // HKDF-SHA256: salt=0x00*32 (constant), IKM=DH_output, info=domain-separator
-    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), raw_ss.as_bytes());
+    // HKDF-SHA256: salt="Construct-X3DH-v1", IKM=DH_output, info="Construct-X3DH-RootKey-v1"
+    let hk = Hkdf::<Sha256>::new(Some(b"Construct-X3DH-v1"), raw_ss.as_bytes());
     let mut okm = [0u8; 32];
-    hk.expand(b"KonstruktX3DH-v1", &mut okm)
+    hk.expand(b"Construct-X3DH-RootKey-v1", &mut okm)
         .expect("HKDF expand length is valid");
     okm
 }
@@ -75,9 +75,9 @@ fn x3dh_receiver(
     alice_ephemeral_public: &PublicKey,
 ) -> [u8; 32] {
     let raw_ss = bob_signed_prekey_secret.diffie_hellman(alice_ephemeral_public);
-    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), raw_ss.as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(b"Construct-X3DH-v1"), raw_ss.as_bytes());
     let mut okm = [0u8; 32];
-    hk.expand(b"KonstruktX3DH-v1", &mut okm)
+    hk.expand(b"Construct-X3DH-RootKey-v1", &mut okm)
         .expect("HKDF expand length is valid");
     okm
 }
@@ -89,7 +89,7 @@ fn x3dh_receiver(
 fn derive_message_key(chain_key: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, chain_key);
     let mut okm = [0u8; 32];
-    hk.expand(b"KonstruktMessageKey-v1", &mut okm)
+    hk.expand(b"Construct-MsgKey-v1", &mut okm)
         .expect("HKDF expand length is valid");
     okm
 }

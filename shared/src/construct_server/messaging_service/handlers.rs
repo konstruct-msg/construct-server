@@ -13,7 +13,7 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::State,
     http::HeaderMap,
     response::IntoResponse,
 };
@@ -24,58 +24,12 @@ use crate::messaging_service::core as messaging_core;
 use crate::routes::extractors::TrustedUser;
 use crate::routes::messages;
 use crate::utils::log_safe_id;
-use construct_crypto::EncryptedMessage;
 use construct_error::AppError;
 use construct_types::message::EndSessionData;
 use uuid::Uuid;
 
 fn app_state(context: &Arc<MessagingServiceContext>) -> State<Arc<crate::context::AppContext>> {
     State(Arc::new(context.to_app_context()))
-}
-
-/// Wrapper for send_message handler (POST /api/v1/messages)
-pub async fn send_message(
-    State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
-    headers: HeaderMap,
-    Json(message): Json<EncryptedMessage>,
-) -> Result<impl IntoResponse, AppError> {
-    // Store recipient_id before message is consumed
-    let recipient_id = message.recipient_id.clone();
-
-    // Send message (existing handler)
-    let result = messaging_core::send_message(
-        app_state(&context),
-        TrustedUser(user_id),
-        headers,
-        Json(message),
-    )
-    .await?;
-
-    // ✅ NEW: Send push notification asynchronously (non-blocking)
-    if context.config.apns.enabled {
-        let context_clone = context.clone();
-        tokio::spawn(async move {
-            if let Err(e) = send_push_notification(&context_clone, &recipient_id).await {
-                tracing::warn!(
-                    recipient_hash = %log_safe_id(&recipient_id, &context_clone.config.logging.hash_salt),
-                    error = %e,
-                    "Failed to send push notification (non-fatal)"
-                );
-            }
-        });
-    }
-
-    Ok(result)
-}
-
-/// Wrapper for get_messages handler (GET /api/v1/messages?since=<id>)
-pub async fn get_messages(
-    State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
-    query: Query<messages::GetMessagesParams>,
-) -> Result<impl IntoResponse, AppError> {
-    messaging_core::get_messages(app_state(&context), TrustedUser(user_id), query).await
 }
 
 // ============================================================================

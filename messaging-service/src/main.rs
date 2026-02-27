@@ -640,9 +640,6 @@ async fn main() -> Result<()> {
             "/metrics",
             get(construct_server_shared::metrics::metrics_handler),
         )
-        // Messaging endpoints
-        .route("/api/v1/messages", post(handlers::send_message))
-        .route("/api/v1/messages", get(handlers::get_messages))
         // Phase 4.5: Control messages endpoint
         .route("/api/v1/control", post(handlers::send_control_message))
         // Media upload token endpoint
