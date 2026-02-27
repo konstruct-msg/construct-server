@@ -20,7 +20,7 @@ pub struct PreKeyBundle {
     pub signed_prekey_signature: Vec<u8>,
     pub one_time_prekey: Option<Vec<u8>>,
     pub one_time_prekey_id: Option<u32>,
-    pub suite_id: String,
+    pub crypto_suite: String,
     pub registered_at: DateTime<Utc>,
 }
 
@@ -52,7 +52,7 @@ pub async fn get_prekey_bundle(
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, suite_id, registered_at
+                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -66,7 +66,7 @@ pub async fn get_prekey_bundle(
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, suite_id, registered_at
+                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -110,7 +110,7 @@ pub async fn get_prekey_bundle(
         signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
         one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
         one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
-        suite_id: device.suite_id,
+        crypto_suite: device.crypto_suite,
         registered_at: device.registered_at,
     }))
 }
@@ -125,7 +125,7 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, suite_id, registered_at
+                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -138,7 +138,7 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, suite_id, registered_at
+                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -179,7 +179,7 @@ pub async fn get_prekey_bundles(
             signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
             one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
             one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
-            suite_id: device.suite_id,
+            crypto_suite: device.crypto_suite,
             registered_at: device.registered_at,
         });
     }
@@ -460,7 +460,7 @@ struct DeviceRow {
     verifying_key: Vec<u8>,
     signed_prekey_public: Vec<u8>,
     signed_prekey_signature: Option<Vec<u8>>,
-    suite_id: String,
+    crypto_suite: String,
     registered_at: DateTime<Utc>,
 }
 

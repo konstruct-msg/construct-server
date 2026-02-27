@@ -402,12 +402,12 @@ async fn get_key_bundle_from_device(
         return Ok(None);
     };
 
-    // Parse crypto_suites to determine suite_id
+    // Parse crypto_suites to determine crypto_suite_id
     let suites: Vec<String> = serde_json::from_value(d.crypto_suites.clone())
         .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
 
-    // Determine suite_id from first suite
-    let suite_id: u16 = if suites
+    // Determine crypto_suite_id from first suite
+    let crypto_suite_id: u16 = if suites
         .iter()
         .any(|s| s.contains("Kyber") || s.contains("PQ"))
     {
@@ -418,7 +418,7 @@ async fn get_key_bundle_from_device(
 
     // Construct SuiteKeyMaterial from device keys
     let suite_key = SuiteKeyMaterial {
-        suite_id,
+        suite_id: crypto_suite_id,
         identity_key: BASE64.encode(&d.identity_public),
         signed_prekey: BASE64.encode(&d.signed_prekey_public),
         signed_prekey_signature: BASE64.encode(vec![0u8; 64]), // Placeholder - device doesn't store this separately
@@ -524,12 +524,12 @@ pub async fn get_extended_key_bundle(
         return Ok(None);
     };
 
-    // Parse crypto_suites to determine suite_id
+    // Parse crypto_suites to determine crypto_suite_id
     let suites: Vec<String> = serde_json::from_value(d.crypto_suites.clone())
         .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
 
-    // Determine suite_id from first suite
-    let suite_id: u16 = if suites
+    // Determine crypto_suite_id from first suite
+    let crypto_suite_id: u16 = if suites
         .iter()
         .any(|s| s.contains("Kyber") || s.contains("PQ"))
     {
@@ -554,7 +554,7 @@ pub async fn get_extended_key_bundle(
 
     // Construct SuiteKeyMaterial from device keys
     let suite_key = SuiteKeyMaterial {
-        suite_id,
+        suite_id: crypto_suite_id,
         identity_key: BASE64.encode(&d.identity_public),
         signed_prekey: BASE64.encode(&d.signed_prekey_public),
         signed_prekey_signature: signed_prekey_sig,

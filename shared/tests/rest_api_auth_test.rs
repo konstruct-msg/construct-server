@@ -220,7 +220,7 @@ async fn test_register_device_success() {
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // suite_id = 1
+        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1
         message.extend_from_slice(prekey_public.as_bytes());
         signing_key.sign(&message)
     };
