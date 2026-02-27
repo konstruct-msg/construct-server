@@ -296,13 +296,6 @@ impl From<construct_types::ChatMessage> for KafkaMessageEnvelope {
 // Conversion from EncryptedMessage (REST API v1)
 // ============================================================================
 
-/// Context for creating KafkaMessageEnvelope from EncryptedMessage
-/// Provides sender_id and message_id which are not in the message itself
-pub struct EncryptedMessageContext {
-    pub sender_id: String,
-    pub message_id: String,
-}
-
 /// Context for creating KafkaMessageEnvelope from a proto Envelope.
 ///
 /// E2EE contract: encrypted_payload is opaque ciphertext — server never reads it.
@@ -343,41 +336,6 @@ impl KafkaMessageEnvelope {
             encrypted_payload: ciphertext_b64,
             content_hash,
             crypto_suite_id: 0, // unknown — inside encrypted_payload
-            origin_server: None,
-            federated: false,
-            server_signature: None,
-        }
-    }
-
-    /// Create a KafkaMessageEnvelope from an EncryptedMessage with additional context
-    ///
-    /// The EncryptedMessage doesn't contain sender_id (it comes from JWT auth)
-    /// and message_id (generated server-side), so they must be provided separately.
-    pub fn from_encrypted_message(
-        msg: &construct_crypto::EncryptedMessage,
-        ctx: &EncryptedMessageContext,
-    ) -> Self {
-        // Calculate content hash for deduplication
-        let mut hasher = Sha256::new();
-        hasher.update(ctx.message_id.as_bytes());
-        hasher.update(msg.ephemeral_public_key.as_bytes());
-        hasher.update(msg.ciphertext.as_bytes());
-        hasher.update(msg.message_number.to_be_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
-
-        Self {
-            message_id: ctx.message_id.clone(),
-            sender_id: ctx.sender_id.clone(),
-            recipient_id: msg.recipient_id.clone(),
-            timestamp: chrono::Utc::now().timestamp(),
-            message_type: MessageType::DirectMessage,
-            ephemeral_public_key: Some(msg.ephemeral_public_key.clone()),
-            message_number: Some(msg.message_number),
-            mls_payload: None,
-            group_id: None,
-            encrypted_payload: msg.ciphertext.clone(),
-            content_hash,
-            crypto_suite_id: msg.suite_id,
             origin_server: None,
             federated: false,
             server_signature: None,
