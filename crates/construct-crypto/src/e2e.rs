@@ -481,7 +481,8 @@ pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 // ============================================================================
 
 /// Suite ID identifies a set of cryptographic primitives (KEM, Signature, AEAD, Hash)
-pub type SuiteId = u16;
+/// u32 to align with protobuf uint32 (protobuf has no uint16 type)
+pub type SuiteId = u32;
 
 /// Known Suite IDs
 pub mod suite_ids {
@@ -517,55 +518,62 @@ pub mod suite_ids {
 }
 
 /// Key material for a single cipher suite
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, prost::Message)]
 #[serde(rename_all = "camelCase")]
 pub struct SuiteKeyMaterial {
     /// Cipher suite identifier
+    #[prost(uint32, tag = "1")]
     pub suite_id: SuiteId,
 
     /// Base64-encoded identity key (length depends on suite_id)
+    #[prost(string, tag = "2")]
     pub identity_key: String,
 
     /// Base64-encoded signed prekey (length depends on suite_id)
+    #[prost(string, tag = "3")]
     pub signed_prekey: String,
 
     /// Base64-encoded Ed25519 signature for signed_prekey (64 bytes)
     /// This signature is created with prologue (X3DH protocol + suite_id) for security
+    #[prost(string, tag = "4")]
     pub signed_prekey_signature: String,
 
     /// Optional Base64-encoded one-time prekeys
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[prost(string, repeated, tag = "5")]
     pub one_time_prekeys: Vec<String>,
 }
 
-/// Bundle data that gets serialized and signed
-/// This is the canonical format that the master identity key signs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Bundle data that gets serialized and signed.
+/// Canonical wire format is protobuf binary (encode_to_vec / decode).
+/// Serde derives are kept for UploadableKeyBundle JSON envelope compat.
+#[derive(Clone, Serialize, Deserialize, prost::Message)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleData {
     /// User ID this bundle belongs to
+    #[prost(string, tag = "1")]
     pub user_id: String,
 
     /// Timestamp when bundle was created (ISO8601)
+    #[prost(string, tag = "2")]
     pub timestamp: String,
 
     /// List of supported cipher suites with their key material
+    #[prost(message, repeated, tag = "3")]
     pub supported_suites: Vec<SuiteKeyMaterial>,
 }
 
 impl BundleData {
-    /// Returns the canonical byte representation for signing/verification.
+    /// Returns the canonical protobuf binary representation for signing/verification.
     ///
     /// IMPORTANT: The server MUST verify the original bytes as received from the client
     /// (the raw base64-decoded `bundle_data` field), NOT a re-serialization of this struct.
-    /// Re-serialization can differ from the original bytes (whitespace, field order) and
-    /// would break signature verification — this is a canonicalization attack vector (#16).
+    /// The field numbers (1, 2, 3) are stable — changing them breaks existing signatures.
     ///
     /// This method exists for client-side use (signing before upload).
-    /// serde_json serializes fields in struct declaration order, which is deterministic
-    /// for a given Rust struct version.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).context("Failed to serialize BundleData to canonical bytes")
+        use prost::Message;
+        Ok(self.encode_to_vec())
     }
 }
 

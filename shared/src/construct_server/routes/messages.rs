@@ -12,44 +12,20 @@
 use axum::http::HeaderMap;
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-// ============================================================================
-// Response Padding for Traffic Analysis Protection
-// ============================================================================
-//
-// All GET /messages responses are padded to fixed bucket sizes to prevent
-// traffic analysis attacks that could reveal message count or content size.
-//
-// Buckets: 4KB, 16KB, 64KB, 256KB
-// ============================================================================
-
-/// Response size buckets in bytes (after JSON serialization)
-const RESPONSE_BUCKETS: [usize; 4] = [
-    4 * 1024,   // 4 KB - empty or few small messages
-    16 * 1024,  // 16 KB - typical response
-    64 * 1024,  // 64 KB - many messages
-    256 * 1024, // 256 KB - maximum batch
-];
-
-/// Overhead for the _pad field in JSON: `,"_pad":"..."` = ~12 bytes + base64 content
-const PAD_FIELD_OVERHEAD: usize = 12;
-
 use crate::context::AppContext;
 use crate::kafka::types::KafkaMessageEnvelope;
 use crate::messaging_service::core as messaging_core;
-use crate::rate_limit::{RateLimitAction, is_user_in_warmup};
 use crate::routes::extractors::TrustedUser;
 use crate::utils::{extract_client_ip, log_safe_id};
-use construct_crypto::{EncryptedMessage, ServerCryptoValidator};
 use construct_error::AppError;
 use construct_types::message::{ChatMessage, EndSessionData};
 
