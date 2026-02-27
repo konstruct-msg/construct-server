@@ -77,7 +77,7 @@ message DevicePublicKeys {
   string identity_public = 2;
   string signed_prekey_public = 3;
   string signed_prekey_signature = 4;
-  string suite_id = 5;
+  string crypto_suite = 5;
 }
 
 message PowSolution {

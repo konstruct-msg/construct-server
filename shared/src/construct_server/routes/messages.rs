@@ -550,7 +550,7 @@ pub struct MessageResponse {
     // ✅ SPEC: "content" field contains encrypted data (Base64<nonce || ciphertext_with_tag>)
     pub content: String,
 
-    pub suite_id: u16, // ✅ Changed from u8 to u16 per spec, serialized as "suiteId"
+    pub crypto_suite_id: u16, // ✅ Changed from u8 to u16 per spec, serialized as "suiteId"
 
     pub timestamp: u64, // ✅ Changed from i64 to u64 per spec
 
@@ -795,7 +795,7 @@ pub async fn get_messages(
                         // ✅ SPEC: Use "content" field name
                         content: envelope.encrypted_payload,
                         timestamp: envelope.timestamp as u64,
-                        suite_id: envelope.suite_id,
+                        crypto_suite_id: envelope.crypto_suite_id,
                         nonce: None, // Nonce is not stored in envelope
                         delivery_status: Some("delivered".to_string()), // Messages from stream are delivered
                     }
@@ -952,7 +952,7 @@ pub async fn get_messages(
                         // SPEC: Use "content" field name
                         content: envelope.encrypted_payload,
                         timestamp: envelope.timestamp as u64,
-                        suite_id: envelope.suite_id,
+                        crypto_suite_id: envelope.crypto_suite_id,
                         nonce: None,
                         delivery_status: Some("delivered".to_string()),
                     }

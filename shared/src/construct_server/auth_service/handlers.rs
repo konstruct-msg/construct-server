@@ -57,11 +57,11 @@ pub struct DevicePublicKeys {
     pub identity_public: String,
     pub signed_prekey_public: String,
     pub signed_prekey_signature: String,
-    #[serde(default = "default_suite_id")]
-    pub suite_id: String,
+    #[serde(default = "default_crypto_suite")]
+    pub crypto_suite: String,
 }
 
-fn default_suite_id() -> String {
+fn default_crypto_suite() -> String {
     "Curve25519+Ed25519".to_string()
 }
 
@@ -115,7 +115,7 @@ pub async fn register_device(
                 identity_public: request.public_keys.identity_public,
                 signed_prekey_public: request.public_keys.signed_prekey_public,
                 signed_prekey_signature: request.public_keys.signed_prekey_signature,
-                suite_id: request.public_keys.suite_id,
+                crypto_suite: request.public_keys.crypto_suite,
             },
             pow_solution: core::PowSolutionInput {
                 challenge: request.pow_solution.challenge,

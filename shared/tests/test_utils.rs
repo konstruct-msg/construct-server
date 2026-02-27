@@ -749,11 +749,11 @@ pub async fn register_user_passwordless(
 
     // 3.5. Generate signedPrekeySignature for X3DH
     // Signature over: prologue || signed_prekey_public
-    // Prologue = "KonstruktX3DH-v1" || suite_id (2 bytes BE, 0x0001 for Curve25519+Ed25519)
+    // Prologue = "KonstruktX3DH-v1" || crypto_suite_id (2 bytes BE, 0x0001 for Curve25519+Ed25519)
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // suite_id = 1 (Curve25519+Ed25519)
+        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1 (Curve25519+Ed25519)
         message.extend_from_slice(prekey_public.as_bytes());
         signing_key.sign(&message)
     };

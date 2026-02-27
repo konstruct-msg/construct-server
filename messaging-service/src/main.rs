@@ -253,7 +253,7 @@ impl MessagingService for MessagingGrpcService {
             .map(|(_stream_id, env)| proto::PendingMessage {
                 message_id: env.message_id,
                 sender_id: env.sender_id,
-                suite_id: env.suite_id as i32,
+                crypto_suite_id: env.crypto_suite_id as i32,
                 ephemeral_public_key: env.ephemeral_public_key.unwrap_or_default(),
                 message_number: env.message_number.unwrap_or(0),
                 previous_chain_length: 0,

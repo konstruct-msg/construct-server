@@ -97,7 +97,7 @@ pub struct KafkaMessageEnvelope {
     /// 0 = ChaCha20-Poly1305 (Double Ratchet)
     /// 1+ = MLS cipher suites (TBD)
     #[serde(default)]
-    pub suite_id: u16,
+    pub crypto_suite_id: u16,
 
     // ===== Federation Fields =====
     /// Origin server name (e.g., "server.example.com")
@@ -141,7 +141,7 @@ impl KafkaMessageEnvelope {
             group_id: None,
             encrypted_payload,
             content_hash,
-            suite_id: 0, // ChaCha20-Poly1305
+            crypto_suite_id: 0, // ChaCha20-Poly1305
             origin_server: None,
             federated: false,
             server_signature: None,
@@ -248,7 +248,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     group_id: None,
                     encrypted_payload: msg.content.as_ref().unwrap().clone(),
                     content_hash,
-                    suite_id: 0, // ChaCha20-Poly1305 (classic Double Ratchet)
+                    crypto_suite_id: 0, // ChaCha20-Poly1305 (classic Double Ratchet)
                     origin_server: None,
                     federated: false,
                     server_signature: None,
@@ -275,7 +275,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     // Use encrypted_payload to store control message type
                     encrypted_payload: "END_SESSION".to_string(),
                     content_hash,
-                    suite_id: 0,
+                    crypto_suite_id: 0,
                     origin_server: None,
                     federated: false,
                     server_signature: None,
@@ -332,7 +332,7 @@ impl KafkaMessageEnvelope {
             group_id: None,
             encrypted_payload: msg.ciphertext.clone(),
             content_hash,
-            suite_id: msg.suite_id,
+            crypto_suite_id: msg.suite_id,
             origin_server: None,
             federated: false,
             server_signature: None,
