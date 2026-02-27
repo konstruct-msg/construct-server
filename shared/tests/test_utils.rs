@@ -800,7 +800,7 @@ pub async fn register_user_passwordless(
             "identityPublic": BASE64.encode(identity_public.as_bytes()),
             "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
             "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,
