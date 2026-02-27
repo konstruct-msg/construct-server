@@ -378,7 +378,7 @@ message PendingMessage {
   string sender_id = 2;
 
   // Cipher suite ID
-  int32 suite_id = 3;
+  int32 crypto_suite_id = 3;
 
   // Base64-encoded ephemeral public key
   string ephemeral_public_key = 4;

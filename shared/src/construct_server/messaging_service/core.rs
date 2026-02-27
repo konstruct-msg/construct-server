@@ -348,38 +348,36 @@ pub async fn send_message(
                     }
                 }
                 Err(e) => {
-                    use crate::kafka::CircuitBreakerError;
-
-                    // Handle circuit breaker errors
-                    let error_message = match &e {
-                        CircuitBreakerError::Open(elapsed) => {
-                            format!(
-                                "Messaging service temporarily unavailable (circuit breaker open for {} seconds)",
-                                elapsed.as_secs()
-                            )
-                        }
-                        CircuitBreakerError::Timeout { timeout } => {
-                            format!(
-                                "Messaging service timeout (exceeded {} seconds)",
-                                timeout.as_secs()
-                            )
-                        }
-                        CircuitBreakerError::Inner(_) => {
-                            "Messaging service unavailable".to_string()
-                        }
-                    };
-
-                    // SECURITY: Use hashed IDs in error logs
-                    tracing::error!(
+                    // Log the Kafka failure and fall back to Redis for delivery
+                    tracing::warn!(
                         error = %e,
                         sender_hash = %log_safe_id(&sender_id.to_string(), salt),
                         recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
                         message_id = %message_id,
-                        "Failed to send message to Kafka (circuit breaker)"
+                        "Kafka unavailable — falling back to Redis direct delivery"
                     );
 
-                    // Return 503 Service Unavailable
-                    return Err(AppError::MessageQueue(error_message));
+                    // Fallback: write directly to recipient's Redis stream
+                    // Message is delivered to online users; offline delivery may be delayed
+                    let mut queue = app_context.queue.lock().await;
+                    if let Err(redis_err) = queue
+                        .write_message_to_user_stream(&recipient_id.to_string(), &envelope)
+                        .await
+                    {
+                        drop(queue);
+                        tracing::error!(
+                            kafka_error = %e,
+                            redis_error = %redis_err,
+                            sender_hash = %log_safe_id(&sender_id.to_string(), salt),
+                            recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
+                            message_id = %message_id,
+                            "Both Kafka and Redis delivery failed"
+                        );
+                        return Err(AppError::Internal(
+                            "Message delivery failed: both Kafka and Redis unavailable".to_string(),
+                        ));
+                    }
+                    drop(queue);
                 }
             }
         } else {
@@ -613,7 +611,7 @@ pub async fn get_messages(
                         // ✅ SPEC: Use "content" field name
                         content: envelope.encrypted_payload,
                         timestamp: envelope.timestamp as u64,
-                        suite_id: envelope.suite_id,
+                        crypto_suite_id: envelope.crypto_suite_id,
                         nonce: None, // Nonce is not stored in envelope
                         delivery_status: Some("delivered".to_string()), // Messages from stream are delivered
                     }
@@ -770,7 +768,7 @@ pub async fn get_messages(
                         // SPEC: Use "content" field name
                         content: envelope.encrypted_payload,
                         timestamp: envelope.timestamp as u64,
-                        suite_id: envelope.suite_id,
+                        crypto_suite_id: envelope.crypto_suite_id,
                         nonce: None,
                         delivery_status: Some("delivered".to_string()),
                     }

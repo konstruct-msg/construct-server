@@ -117,11 +117,11 @@ pub struct DevicePublicKeys {
     pub signed_prekey_signature: String,
 
     /// Crypto suite identifier (e.g., "Curve25519+Ed25519", "ML-KEM-768+Ed25519")
-    #[serde(default = "default_suite_id")]
-    pub suite_id: String,
+    #[serde(default = "default_crypto_suite")]
+    pub crypto_suite: String,
 }
 
-fn default_suite_id() -> String {
+fn default_crypto_suite() -> String {
     "Curve25519+Ed25519".to_string()
 }
 
@@ -408,7 +408,7 @@ pub async fn register_device_v2(
     let server_hostname = app_context.config.instance_domain.clone();
 
     // Convert suite_id to crypto_suites JSONB format
-    let crypto_suites = format!(r#"["{}"]"#, request.public_keys.suite_id);
+    let crypto_suites = format!(r#"["{}"]"#, request.public_keys.crypto_suite);
 
     let device_data = CreateDeviceData {
         device_id: request.device_id.clone(),
@@ -715,7 +715,7 @@ pub async fn get_device_profile(
     let server_hostname = app_context.config.instance_domain.clone();
 
     // Extract first suite from crypto_suites JSONB array
-    let suite_id = device
+    let crypto_suite = device
         .crypto_suites
         .as_array()
         .and_then(|arr| arr.first())
@@ -740,7 +740,7 @@ pub async fn get_device_profile(
             identity_public: BASE64.encode(&device.identity_public),
             signed_prekey_public: BASE64.encode(&device.signed_prekey_public),
             signed_prekey_signature,
-            suite_id,
+            crypto_suite,
         },
     }))
 }

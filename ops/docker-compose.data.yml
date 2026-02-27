@@ -8,9 +8,10 @@
 #   3. nano .env.data  # fill in passwords
 #   4. docker compose -f ops/docker-compose.data.yml --env-file .env.data up -d
 #
-# Firewall: only allow app droplet IP on ports 5432 and 9092
+# Firewall: allow app droplet IP on ports 5432, 9092 (internal Kafka) and 19092 (external Kafka)
 #   ufw allow from APP_DROPLET_IP to any port 5432
 #   ufw allow from APP_DROPLET_IP to any port 9092
+#   ufw allow from APP_DROPLET_IP to any port 19092
 # =============================================================================
 
 name: construct-data

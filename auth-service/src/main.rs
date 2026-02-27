@@ -98,7 +98,7 @@ impl AuthService for AuthGrpcService {
                             identity_public: public_keys.identity_public,
                             signed_prekey_public: public_keys.signed_prekey_public,
                             signed_prekey_signature: public_keys.signed_prekey_signature,
-                            suite_id: public_keys.suite_id,
+                            crypto_suite: public_keys.crypto_suite,
                         },
                     pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
                         challenge: pow_solution.challenge,
@@ -396,7 +396,7 @@ impl AuthService for AuthGrpcService {
                 identity_public,
                 signed_prekey_public,
                 signed_prekey_signature,
-                crypto_suites: format!(r#"["{}"]"#, public_keys.suite_id),
+                crypto_suites: format!(r#"["{}"]"#, public_keys.crypto_suite),
             },
             Some(user_id),
         )
@@ -640,7 +640,7 @@ async fn main() -> Result<()> {
         let service = AuthGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = construct_server_shared::grpc_server()
             .add_service(AuthServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

@@ -7,7 +7,7 @@ use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use serde_json::json;
 use std::{env, sync::Arc};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
         let service = MediaGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = Server::builder()
+        if let Err(e) = construct_server_shared::grpc_server()
             .add_service(MediaServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
