@@ -413,8 +413,6 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> S
             ),
         )
         .route("/health/live", get(health::liveness_check))
-        .route("/api/v1/messages", post(messaging_handlers::send_message))
-        .route("/api/v1/messages", get(messaging_handlers::get_messages))
         .route(
             "/api/v1/messages/confirm",
             post(messaging_handlers::confirm_message),

@@ -11,12 +11,7 @@
 //
 // ============================================================================
 
-use axum::{
-    Json,
-    extract::State,
-    http::HeaderMap,
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
 use std::sync::Arc;
 
 use crate::messaging_service::MessagingServiceContext;
@@ -41,6 +36,7 @@ fn app_state(context: &Arc<MessagingServiceContext>) -> State<Arc<crate::context
 /// This is called asynchronously after message is stored, so failures don't
 /// affect message delivery. The push notification is silent (no content)
 /// and only wakes the app to fetch messages via long-polling.
+#[allow(dead_code)]
 async fn send_push_notification(
     context: &MessagingServiceContext,
     recipient_id: &str,
