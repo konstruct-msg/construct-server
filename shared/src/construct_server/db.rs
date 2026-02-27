@@ -255,9 +255,9 @@ pub async fn store_key_bundle(
         .decode(&bundle.signature)
         .context("Failed to decode signature from base64")?;
 
-    // Verify that bundle_data contains valid JSON and extract the user_id
-    let bundle_data: BundleData = serde_json::from_slice(&bundle_data_bytes)
-        .context("Failed to parse bundle_data as JSON")?;
+    // Verify that bundle_data decodes as valid protobuf BundleData and extract the user_id
+    let bundle_data: BundleData = prost::Message::decode(bundle_data_bytes.as_slice())
+        .context("Failed to decode bundle_data as protobuf")?;
 
     // Security check: ensure the user_id in bundle_data matches the authenticated user
     if bundle_data.user_id != user_id.to_string() {
@@ -407,7 +407,7 @@ async fn get_key_bundle_from_device(
         .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
 
     // Determine crypto_suite_id from first suite
-    let crypto_suite_id: u16 = if suites
+    let crypto_suite_id: u32 = if suites
         .iter()
         .any(|s| s.contains("Kyber") || s.contains("PQ"))
     {
@@ -529,7 +529,7 @@ pub async fn get_extended_key_bundle(
         .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
 
     // Determine crypto_suite_id from first suite
-    let crypto_suite_id: u16 = if suites
+    let crypto_suite_id: u32 = if suites
         .iter()
         .any(|s| s.contains("Kyber") || s.contains("PQ"))
     {
