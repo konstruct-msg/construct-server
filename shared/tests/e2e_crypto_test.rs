@@ -32,11 +32,16 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
+use construct_server_shared::shared::proto::{
+    core::v1::{Envelope, UserId},
+    services::v1::{SendMessageRequest, messaging_service_client::MessagingServiceClient},
+};
 use ed25519_dalek::{Signer, SigningKey};
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use test_utils::{TestUser, spawn_app};
+use tonic::transport::Channel;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 // ============================================================================
@@ -284,90 +289,54 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
         ciphertext.len()
     );
 
-    // === SEND MESSAGE TO SERVER ===
+    // === SEND MESSAGE TO SERVER via gRPC ===
 
-    let client = reqwest::Client::new();
-    let request_body = serde_json::json!({
-        "recipientId": bob.user_id,
-        "ciphertext": general_purpose::STANDARD.encode(&ciphertext),
-        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-        "messageNumber": 0,
-        "previousChainLength": 0,
-        "nonce": general_purpose::STANDARD.encode(&nonce),
-        "suiteId": 1,
-        "timestamp": chrono::Utc::now().timestamp(),
-    });
+    // In the new E2EE design, all ratchet parameters (nonce, dh_public_key, message_number)
+    // are bundled inside encrypted_payload as an opaque blob — server never reads them.
+    // For this test we concatenate nonce+ciphertext as the payload (real client uses protobuf).
+    let mut encrypted_payload = nonce.to_vec();
+    encrypted_payload.extend_from_slice(&ciphertext);
 
-    let send_response = client
-        .post(&format!("http://{}/api/v1/messages", ctx.messaging_address))
-        .header("Authorization", format!("Bearer {}", alice.access_token))
-        .json(&request_body)
-        .send()
+    let channel = Channel::from_shared(format!("http://{}", ctx.grpc_messaging_address))
+        .unwrap()
+        .connect()
         .await
-        .expect("Failed to send message");
+        .expect("Failed to connect to gRPC messaging service");
+    let mut grpc_client = MessagingServiceClient::new(channel);
 
-    let status = send_response.status();
-    if !status.is_success() {
-        let error_text = send_response.text().await.unwrap();
-        panic!("Message send failed with status {}: {}", status, error_text);
-    }
-
-    println!("✅ Message sent to server successfully");
-
-    // === BOB SIDE: Retrieve and decrypt ===
-
-    // Wait a bit for message delivery (in real system, delivery worker processes this)
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    // Bob fetches messages
-    let messages_response = client
-        .get(&format!("http://{}/api/v1/messages", ctx.messaging_address))
-        .header("Authorization", format!("Bearer {}", bob.access_token))
-        .query(&[("limit", "10")])
-        .send()
+    let send_response = grpc_client
+        .send_message(SendMessageRequest {
+            message: Some(Envelope {
+                sender: Some(UserId {
+                    user_id: alice.user_id.clone(),
+                    ..Default::default()
+                }),
+                recipient: Some(UserId {
+                    user_id: bob.user_id.clone(),
+                    ..Default::default()
+                }),
+                encrypted_payload,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
         .await
-        .expect("Failed to get messages");
+        .expect("gRPC send_message failed");
 
-    let messages_body: serde_json::Value = messages_response
-        .json()
-        .await
-        .expect("Failed to parse messages");
+    assert!(
+        send_response.into_inner().success,
+        "send_message gRPC response should be success"
+    );
 
-    let messages = messages_body["messages"]
-        .as_array()
-        .expect("Expected messages array");
+    println!("✅ Message sent to server successfully via gRPC");
 
-    if messages.is_empty() {
-        println!("⚠️  No messages delivered yet (delivery worker may not be running in test)");
-        println!("   This is a known limitation of current test infrastructure");
-        println!("   Skipping decryption test");
-        return;
-    }
-
-    let first_msg = &messages[0];
-    println!("✅ Bob received encrypted message");
-
-    // Extract ciphertext and nonce
-    let received_ciphertext = general_purpose::STANDARD
-        .decode(first_msg["ciphertext"].as_str().unwrap())
-        .expect("Failed to decode ciphertext");
-
-    let received_nonce_bytes: [u8; 12] = general_purpose::STANDARD
-        .decode(first_msg["nonce"].as_str().unwrap())
-        .expect("Failed to decode nonce")
-        .try_into()
-        .expect("Nonce must be 12 bytes");
-
-    // Extract Alice's ephemeral public key
-    let alice_ephemeral_from_header = general_purpose::STANDARD
-        .decode(first_msg["ephemeralPublicKey"].as_str().unwrap())
-        .expect("Failed to decode ephemeral public key");
-
-    let alice_ephemeral_public_recovered =
-        PublicKey::from(<[u8; 32]>::try_from(alice_ephemeral_from_header.as_slice()).unwrap());
+    // === BOB SIDE: Decrypt locally ===
+    // Note: In production, Bob would receive encrypted_payload via gRPC GetPendingMessages
+    // or MessageStream. In tests, delivery worker is not running, so we test the crypto
+    // math directly — Bob decrypts using the locally known alice_ephemeral_public.
 
     // Bob performs X3DH to derive same shared secret
-    let bob_shared_secret = x3dh_receiver(&bob_prekey_secret, &alice_ephemeral_public_recovered);
+    let bob_shared_secret = x3dh_receiver(&bob_prekey_secret, &alice_ephemeral_public);
     let bob_message_key = derive_message_key(&bob_shared_secret);
 
     println!("✅ Bob completed X3DH key exchange");
@@ -381,13 +350,10 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
 
     println!("✅ Shared secrets match!");
 
-    // Bob decrypts message
-    let decrypted = decrypt_message(
-        &received_ciphertext,
-        &received_nonce_bytes,
-        &bob_message_key,
-    )
-    .expect("❌ DECRYPTION FAILED (InvalidCiphertext)");
+    // Bob decrypts message (nonce is first 12 bytes, ciphertext is the rest)
+    let received_nonce_bytes: [u8; 12] = nonce[..12].try_into().expect("Nonce must be 12 bytes");
+    let decrypted = decrypt_message(&ciphertext, &received_nonce_bytes, &bob_message_key)
+        .expect("❌ DECRYPTION FAILED (InvalidCiphertext)");
 
     println!("✅ Bob decrypted message successfully");
     println!("   Decrypted: '{}'", decrypted);
@@ -401,7 +367,7 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
     println!("🎉 E2E CRYPTO TEST PASSED!");
     println!("   ✓ X3DH key exchange");
     println!("   ✓ ChaCha20Poly1305 encryption");
-    println!("   ✓ Message transmission");
+    println!("   ✓ gRPC message send accepted by server");
     println!("   ✓ Decryption and plaintext verification");
 }
 
@@ -470,73 +436,87 @@ async fn test_e2e_first_message_has_message_number_zero() {
     println!("✅ Users registered");
 
     // Alice encrypts first message
-    let (alice_ephemeral_secret, alice_ephemeral_public) = generate_dh_keypair();
+    let (alice_ephemeral_secret, _alice_ephemeral_public) = generate_dh_keypair();
     let alice_shared_secret = x3dh_initiator(&alice_ephemeral_secret, &bob_prekey_public);
     let alice_message_key = derive_message_key(&alice_shared_secret);
 
     let (ciphertext, nonce) = encrypt_message("First message", &alice_message_key);
 
-    // Send with messageNumber=0 (correct)
-    let client = reqwest::Client::new();
-    let request_body = serde_json::json!({
-        "recipientId": bob.user_id,
-        "ciphertext": general_purpose::STANDARD.encode(&ciphertext),
-        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-        "messageNumber": 0,
-        "previousChainLength": 0,
-        "nonce": general_purpose::STANDARD.encode(&nonce),
-        "suiteId": 1,
-        "timestamp": chrono::Utc::now().timestamp(),
-    });
+    // In the new E2EE design, all ratchet params (messageNumber, nonce, dh_public_key) are
+    // inside encrypted_payload. The server only sees opaque bytes. Signal Protocol §3.3
+    // is a client-side invariant: the client constructs the first EncryptedRatchetMessage
+    // with message_number=0 and embeds it inside encrypted_payload.
+    //
+    // Here we bundle nonce+ciphertext as a minimal encrypted_payload and verify the server
+    // accepts it (server never validates message_number since it's inside the opaque blob).
+    let mut encrypted_payload = nonce.to_vec();
+    encrypted_payload.extend_from_slice(&ciphertext);
 
-    let response = client
-        .post(&format!("http://{}/api/v1/messages", ctx.messaging_address))
-        .header("Authorization", format!("Bearer {}", alice.access_token))
-        .json(&request_body)
-        .send()
+    let channel = Channel::from_shared(format!("http://{}", ctx.grpc_messaging_address))
+        .unwrap()
+        .connect()
         .await
-        .expect("Failed to send message");
+        .expect("Failed to connect to gRPC messaging service");
+    let mut grpc_client = MessagingServiceClient::new(channel);
+
+    // Send first message (messageNumber=0 is inside encrypted_payload, invisible to server)
+    let response = grpc_client
+        .send_message(SendMessageRequest {
+            message: Some(Envelope {
+                sender: Some(UserId {
+                    user_id: alice.user_id.clone(),
+                    ..Default::default()
+                }),
+                recipient: Some(UserId {
+                    user_id: bob.user_id.clone(),
+                    ..Default::default()
+                }),
+                encrypted_payload: encrypted_payload.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("gRPC send_message failed");
 
     assert!(
-        response.status().is_success(),
-        "First message with messageNumber=0 should be accepted"
+        response.into_inner().success,
+        "First message (messageNumber=0 inside payload) should be accepted"
     );
 
-    println!("✅ First message with messageNumber=0 accepted");
+    println!("✅ First message with messageNumber=0 (inside payload) accepted");
 
-    // === NOW TEST INVALID CASE: messageNumber=5 for first message ===
+    // === SECOND MESSAGE: messageNumber=5 would also be accepted by server ===
+    // Server is stateless re: message numbers — that invariant is enforced client-side.
+    let (ciphertext2, nonce2) = encrypt_message("Second message", &alice_message_key);
+    let mut payload2 = nonce2.to_vec();
+    payload2.extend_from_slice(&ciphertext2);
 
-    let (ciphertext2, nonce2) = encrypt_message("Invalid first message", &alice_message_key);
-
-    let invalid_request = serde_json::json!({
-        "recipientId": bob.user_id,
-        "ciphertext": general_purpose::STANDARD.encode(&ciphertext2),
-        "ephemeralPublicKey": general_purpose::STANDARD.encode(alice_ephemeral_public.as_bytes()),
-        "messageNumber": 5,
-        "previousChainLength": 0,
-        "nonce": general_purpose::STANDARD.encode(&nonce2),
-        "suiteId": 1,
-        "timestamp": chrono::Utc::now().timestamp(),
-    });
-
-    let response2 = client
-        .post(&format!("http://{}/api/v1/messages", ctx.messaging_address))
-        .header("Authorization", format!("Bearer {}", alice.access_token))
-        .json(&invalid_request)
-        .send()
+    let response2 = grpc_client
+        .send_message(SendMessageRequest {
+            message: Some(Envelope {
+                sender: Some(UserId {
+                    user_id: alice.user_id.clone(),
+                    ..Default::default()
+                }),
+                recipient: Some(UserId {
+                    user_id: bob.user_id.clone(),
+                    ..Default::default()
+                }),
+                encrypted_payload: payload2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
         .await
-        .expect("Failed to send second message");
+        .expect("gRPC send second message failed");
 
-    // Currently our server doesn't validate this (because Double Ratchet state is client-side)
-    // But this test documents the PROTOCOL requirement
-    // In future, we could add stateful session tracking to enforce this
-
+    // Server accepts any opaque payload — messageNumber validation is client-side
     println!(
-        "⚠️  Server response to messageNumber=5 first message: {}",
-        response2.status()
+        "⚠️  Server response to second message: success={}",
+        response2.into_inner().success
     );
-    println!("   Note: Server currently doesn't enforce this (client-side protocol)");
-    println!("   But this test documents the requirement from Signal Protocol §3.3");
+    println!("   Note: Server doesn't enforce messageNumber (client-side Signal Protocol §3.3)");
 
     println!("🎉 MESSAGE NUMBER TEST COMPLETED!");
 }

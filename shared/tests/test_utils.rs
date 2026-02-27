@@ -24,20 +24,32 @@ use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
     auth_service::{AuthServiceContext, handlers as auth_handlers},
-    kafka::MessageProducer,
+    kafka::{
+        MessageProducer,
+        types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
+    },
     messaging_service::{MessagingServiceContext, handlers as messaging_handlers},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     routes::health,
+    shared::proto::services::v1::{
+        self as proto_svc,
+        messaging_service_server::{
+            MessagingService as GrpcMessagingService, MessagingServiceServer,
+        },
+    },
     user_service::{UserServiceContext, handlers as user_handlers},
 };
 use ed25519_dalek::{Signer, SigningKey};
+use futures_core::Stream;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::{net::TcpListener, sync::Mutex};
+use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
@@ -69,6 +81,7 @@ pub struct TestApp {
     pub auth_address: String,
     pub user_address: String,
     pub messaging_address: String,
+    pub grpc_messaging_address: String,
     pub notification_address: String,
     pub db_pool: PgPool,
     pub config: Arc<Config>,
@@ -369,8 +382,107 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
     address
 }
 
-/// Spawn messaging service
-async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String {
+/// Minimal gRPC MessagingService for integration tests.
+/// Only `send_message` is functional; all other RPCs return Unimplemented.
+#[derive(Clone)]
+struct TestMessagingGrpcService {
+    context: Arc<MessagingServiceContext>,
+}
+
+#[tonic::async_trait]
+impl GrpcMessagingService for TestMessagingGrpcService {
+    type MessageStreamStream = Pin<
+        Box<
+            dyn Stream<Item = Result<proto_svc::MessageStreamResponse, GrpcStatus>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn message_stream(
+        &self,
+        _request: GrpcRequest<tonic::Streaming<proto_svc::MessageStreamRequest>>,
+    ) -> Result<GrpcResponse<Self::MessageStreamStream>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented(
+            "message_stream not available in tests",
+        ))
+    }
+
+    async fn send_message(
+        &self,
+        request: GrpcRequest<proto_svc::SendMessageRequest>,
+    ) -> Result<GrpcResponse<proto_svc::SendMessageResponse>, GrpcStatus> {
+        let req = request.into_inner();
+        let envelope = req
+            .message
+            .ok_or_else(|| GrpcStatus::invalid_argument("message is required"))?;
+        let sender = envelope
+            .sender
+            .ok_or_else(|| GrpcStatus::invalid_argument("sender is required"))?;
+        let sender_id = uuid::Uuid::parse_str(&sender.user_id)
+            .map_err(|_| GrpcStatus::invalid_argument("invalid sender.user_id"))?;
+        let recipient = envelope
+            .recipient
+            .ok_or_else(|| GrpcStatus::invalid_argument("recipient is required"))?;
+        if envelope.encrypted_payload.is_empty() {
+            return Err(GrpcStatus::invalid_argument(
+                "encrypted_payload is required",
+            ));
+        }
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: sender_id.to_string(),
+            recipient_id: recipient.user_id.clone(),
+            message_id: message_id.clone(),
+            encrypted_payload: envelope.encrypted_payload.to_vec(),
+        });
+        let app_context = Arc::new(self.context.to_app_context());
+        construct_server_shared::messaging_service::core::dispatch_envelope(
+            &app_context,
+            kafka_envelope,
+        )
+        .await
+        .map_err(|e| GrpcStatus::internal(e.to_string()))?;
+        Ok(GrpcResponse::new(proto_svc::SendMessageResponse {
+            message_id,
+            message_number: 0,
+            server_timestamp: chrono::Utc::now().timestamp_millis(),
+            success: true,
+            error: None,
+        }))
+    }
+
+    async fn edit_message(
+        &self,
+        _: GrpcRequest<proto_svc::EditMessageRequest>,
+    ) -> Result<GrpcResponse<proto_svc::EditMessageResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("edit_message"))
+    }
+
+    async fn add_reaction(
+        &self,
+        _: GrpcRequest<proto_svc::AddReactionRequest>,
+    ) -> Result<GrpcResponse<proto_svc::AddReactionResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("add_reaction"))
+    }
+
+    async fn remove_reaction(
+        &self,
+        _: GrpcRequest<proto_svc::RemoveReactionRequest>,
+    ) -> Result<GrpcResponse<proto_svc::RemoveReactionResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("remove_reaction"))
+    }
+
+    async fn get_pending_messages(
+        &self,
+        _: GrpcRequest<proto_svc::GetPendingMessagesRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetPendingMessagesResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("get_pending_messages"))
+    }
+}
+
+/// Spawn messaging service — returns (http_address, grpc_address)
+async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (String, String) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let address = format!("127.0.0.1:{}", port);
@@ -421,13 +533,29 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> S
             context.auth_manager.clone(),
             jwt_to_user_id_middleware,
         ))
-        .with_state(context);
+        .with_state(context.clone());
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    address
+    // Spawn gRPC server for messaging
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_port = grpc_listener.local_addr().unwrap().port();
+    let grpc_address = format!("127.0.0.1:{}", grpc_port);
+    let grpc_service = TestMessagingGrpcService { context };
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(MessagingServiceServer::new(grpc_service))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
+            .await
+            .unwrap();
+    });
+
+    (address, grpc_address)
 }
 
 /// Spawn notification service
@@ -504,7 +632,8 @@ pub async fn spawn_app() -> TestApp {
 
     let auth_address = spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
     let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
-    let messaging_address = spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
+    let (messaging_address, grpc_messaging_address) =
+        spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
     let notification_address =
         spawn_notification_service(config.clone(), db_pool_arc.clone()).await;
 
@@ -516,6 +645,7 @@ pub async fn spawn_app() -> TestApp {
         auth_address,
         user_address,
         messaging_address,
+        grpc_messaging_address,
         notification_address,
         db_pool,
         config,
@@ -540,7 +670,8 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
 
     let auth_address = spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
     let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
-    let messaging_address = spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
+    let (messaging_address, grpc_messaging_address) =
+        spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
     let notification_address =
         spawn_notification_service(config.clone(), db_pool_arc.clone()).await;
 
@@ -558,6 +689,7 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
         auth_address,
         user_address,
         messaging_address,
+        grpc_messaging_address,
         notification_address,
         db_pool,
         config,
