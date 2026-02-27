@@ -370,30 +370,30 @@ message GetPendingMessagesRequest {
 }
 
 // Pending message entry
+// PendingMessage - an undelivered message waiting for pickup by the recipient device.
+//
+// E2EE design note: encrypted_payload is opaque bytes that the server never reads.
+// All Signal Protocol parameters (ephemeral key, message number, ratchet state)
+// are encoded inside encrypted_payload by the sender and decoded only by the recipient.
 message PendingMessage {
   // Message ID (UUID)
   string message_id = 1;
 
-  // Sender user ID
+  // Sender user ID — needed for UI "who sent this" before decryption
   string sender_id = 2;
 
-  // Cipher suite ID
-  int32 crypto_suite_id = 3;
+  // Opaque ciphertext. Contains inner envelope:
+  //   crypto_params_length (2 bytes BE) || crypto_params || ciphertext
+  // where crypto_params is client-defined binary encoding of ephemeral key,
+  // message_number, previous_chain_length, suite_id etc.
+  // Server never reads this field.
+  bytes encrypted_payload = 7;
 
-  // Base64-encoded ephemeral public key
-  string ephemeral_public_key = 4;
-
-  // Message number in sending chain (Double Ratchet)
-  uint32 message_number = 5;
-
-  // Number of messages in previous chain
-  uint32 previous_chain_length = 6;
-
-  // Base64-encoded ciphertext
-  string ciphertext = 7;
-
-  // Unix timestamp (seconds)
+  // Server-assigned receive timestamp (Unix seconds). Client ignores sender's timestamp.
   int64 timestamp = 8;
+
+  // Reserved for removed plaintext crypto fields — do not reuse
+  reserved 3, 4, 5, 6;
 }
 
 // Response with pending messages

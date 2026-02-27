@@ -441,7 +441,64 @@ pub async fn send_message(
     ))
 }
 
-/// Examples: "0", "1707584371151-0", "1707584371151-42"
+/// Dispatch a pre-built KafkaMessageEnvelope to Kafka (or Redis fallback).
+///
+/// Used by the gRPC path where the envelope is constructed without going
+/// through `EncryptedMessage` deserialization.
+pub async fn dispatch_envelope(
+    app_context: &Arc<AppContext>,
+    envelope: KafkaMessageEnvelope,
+) -> Result<(), AppError> {
+    let salt = &app_context.config.logging.hash_salt;
+    let message_id = &envelope.message_id;
+    let sender_id = &envelope.sender_id;
+    let recipient_id = &envelope.recipient_id;
+
+    if let Some(kafka_producer) = &app_context.kafka_producer {
+        if kafka_producer.is_enabled() {
+            match kafka_producer.send_message(&envelope).await {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        sender_hash = %log_safe_id(sender_id, salt),
+                        recipient_hash = %log_safe_id(recipient_id, salt),
+                        message_id = %message_id,
+                        "Kafka unavailable — falling back to Redis direct delivery"
+                    );
+                    let mut queue = app_context.queue.lock().await;
+                    queue
+                        .write_message_to_user_stream(recipient_id, &envelope)
+                        .await
+                        .map_err(|re| {
+                            AppError::Internal(format!(
+                                "Both Kafka and Redis delivery failed: {e} / {re}"
+                            ))
+                        })?;
+                }
+            }
+        } else {
+            // Kafka disabled (test mode) — write directly to Redis
+            let mut queue = app_context.queue.lock().await;
+            queue
+                .write_message_to_user_stream(recipient_id, &envelope)
+                .await
+                .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+        }
+    } else {
+        return Err(AppError::Kafka("Kafka producer not available".to_string()));
+    }
+
+    tracing::info!(
+        sender_hash = %log_safe_id(sender_id, salt),
+        recipient_hash = %log_safe_id(recipient_id, salt),
+        message_id = %message_id,
+        "Message dispatched successfully (gRPC path)"
+    );
+
+    Ok(())
+}
+
 fn is_valid_stream_id(id: &str) -> bool {
     // Special IDs
     if id == "0" || id == "$" || id == "*" {

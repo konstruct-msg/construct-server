@@ -303,7 +303,52 @@ pub struct EncryptedMessageContext {
     pub message_id: String,
 }
 
+/// Context for creating KafkaMessageEnvelope from a proto Envelope.
+///
+/// E2EE contract: encrypted_payload is opaque ciphertext — server never reads it.
+/// All Signal Protocol parameters live inside the payload. Server only needs
+/// routing fields (sender, recipient) and the opaque blob.
+pub struct ProtoEnvelopeContext {
+    pub sender_id: String,
+    pub recipient_id: String,
+    pub message_id: String,
+    pub encrypted_payload: Vec<u8>, // opaque ciphertext bytes — NOT parsed
+}
+
 impl KafkaMessageEnvelope {
+    /// Create a KafkaMessageEnvelope from a proto Envelope.
+    ///
+    /// The server stores `encrypted_payload` verbatim (as base64) and routes the
+    /// message to the recipient. It never inspects the payload contents.
+    pub fn from_proto_envelope(ctx: &ProtoEnvelopeContext) -> Self {
+        use base64::Engine;
+        let ciphertext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&ctx.encrypted_payload);
+
+        let mut hasher = Sha256::new();
+        hasher.update(ctx.message_id.as_bytes());
+        hasher.update(&ctx.encrypted_payload);
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id: ctx.message_id.clone(),
+            sender_id: ctx.sender_id.clone(),
+            recipient_id: ctx.recipient_id.clone(),
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::DirectMessage,
+            ephemeral_public_key: None, // inside encrypted_payload
+            message_number: None,       // inside encrypted_payload
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: ciphertext_b64,
+            content_hash,
+            crypto_suite_id: 0, // unknown — inside encrypted_payload
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+        }
+    }
+
     /// Create a KafkaMessageEnvelope from an EncryptedMessage with additional context
     ///
     /// The EncryptedMessage doesn't contain sender_id (it comes from JWT auth)
@@ -464,22 +509,43 @@ mod tests {
     }
 
     #[test]
-    fn test_envelope_validation() {
-        let valid_envelope = KafkaMessageEnvelope::new_direct_message(
-            "msg-123".to_string(),
-            "user-456".to_string(),
-            "user-789".to_string(),
-            vec![0u8; 32],
-            42,
-            "encrypted".to_string(),
-            "hash123".to_string(),
+    fn test_from_proto_envelope_e2ee_opaque() {
+        // Verify that from_proto_envelope stores encrypted_payload as opaque base64
+        // without deserializing it — server never reads crypto params from the payload.
+        let fake_ciphertext = b"this_is_not_json_it_is_opaque_bytes";
+        let ctx = ProtoEnvelopeContext {
+            sender_id: "sender-uuid".to_string(),
+            recipient_id: "recipient-uuid".to_string(),
+            message_id: "msg-uuid".to_string(),
+            encrypted_payload: fake_ciphertext.to_vec(),
+        };
+
+        let envelope = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+
+        assert_eq!(envelope.sender_id, "sender-uuid");
+        assert_eq!(envelope.recipient_id, "recipient-uuid");
+        // Crypto params must NOT be exposed outside the payload
+        assert!(
+            envelope.ephemeral_public_key.is_none(),
+            "ephemeral_public_key must not be visible to server"
+        );
+        assert!(
+            envelope.message_number.is_none(),
+            "message_number must not be visible to server"
+        );
+        assert_eq!(
+            envelope.crypto_suite_id, 0,
+            "crypto_suite_id must not be known to server"
         );
 
-        assert!(valid_envelope.validate().is_ok());
-
-        // Test invalid: empty message_id
-        let mut invalid = valid_envelope.clone();
-        invalid.message_id = String::new();
-        assert!(invalid.validate().is_err());
+        // The payload must be the base64 of the raw ciphertext bytes
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&envelope.encrypted_payload)
+            .expect("KafkaMessageEnvelope.encrypted_payload must be valid base64");
+        assert_eq!(
+            decoded, fake_ciphertext,
+            "encrypted_payload must be stored verbatim (base64), not parsed"
+        );
     }
 }

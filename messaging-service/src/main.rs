@@ -1,19 +1,17 @@
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
 use construct_config::Config;
-use construct_crypto::EncryptedMessage;
 use construct_server_shared::apns::DeviceTokenEncryption;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::kafka::MessageProducer;
 use construct_server_shared::messaging_service::MessagingServiceContext;
 use construct_server_shared::queue::MessageQueue;
-use construct_server_shared::routes::extractors::TrustedUser;
 use futures_core::Stream;
 use serde_json::json;
 use tokio_stream::StreamExt;
@@ -131,37 +129,31 @@ impl MessagingService for MessagingGrpcService {
         let sender_id = uuid::Uuid::parse_str(&sender.user_id)
             .map_err(|_| Status::invalid_argument("invalid sender.user_id"))?;
 
-        let encrypted_message: EncryptedMessage =
-            serde_json::from_slice(&envelope.encrypted_payload).map_err(|_| {
-                Status::invalid_argument(
-                    "message.encrypted_payload must contain EncryptedMessage JSON",
-                )
-            })?;
+        let recipient = envelope
+            .recipient
+            .ok_or_else(|| Status::invalid_argument("recipient is required"))?;
 
-        if let Some(recipient) = envelope.recipient
-            && encrypted_message.recipient_id != recipient.user_id
-        {
-            return Err(Status::invalid_argument(
-                "recipient mismatch between envelope and encrypted payload",
-            ));
+        if envelope.encrypted_payload.is_empty() {
+            return Err(Status::invalid_argument("encrypted_payload is required"));
         }
 
-        let app_context = Arc::new(self.context.to_app_context());
-        let (_status, Json(response_body)) =
-            construct_server_shared::messaging_service::core::send_message(
-                axum::extract::State(app_context),
-                TrustedUser(sender_id),
-                HeaderMap::new(),
-                Json(encrypted_message),
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let message_id = uuid::Uuid::new_v4().to_string();
 
-        let message_id = response_body
-            .get("messageId")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
+        let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: sender_id.to_string(),
+            recipient_id: recipient.user_id.clone(),
+            message_id: message_id.clone(),
+            encrypted_payload: envelope.encrypted_payload.to_vec(),
+        });
+
+        let app_context = Arc::new(self.context.to_app_context());
+        construct_server_shared::messaging_service::core::dispatch_envelope(
+            &app_context,
+            kafka_envelope,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::SendMessageResponse {
             message_id,
@@ -248,22 +240,23 @@ impl MessagingService for MessagingGrpcService {
             .await
             .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?;
 
-        let mut messages: Vec<proto::PendingMessage> = stream_messages
+        // encrypted_payload is opaque — server never reads crypto params from it.
+        // Sort is by server timestamp (already chronological from Redis stream).
+        let messages: Vec<proto::PendingMessage> = stream_messages
             .into_iter()
-            .map(|(_stream_id, env)| proto::PendingMessage {
-                message_id: env.message_id,
-                sender_id: env.sender_id,
-                crypto_suite_id: env.crypto_suite_id as i32,
-                ephemeral_public_key: env.ephemeral_public_key.unwrap_or_default(),
-                message_number: env.message_number.unwrap_or(0),
-                previous_chain_length: 0,
-                ciphertext: env.encrypted_payload,
-                timestamp: env.timestamp,
+            .map(|(_stream_id, env)| {
+                use base64::Engine;
+                let payload_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&env.encrypted_payload)
+                    .unwrap_or_else(|_| env.encrypted_payload.into_bytes());
+                proto::PendingMessage {
+                    message_id: env.message_id,
+                    sender_id: env.sender_id,
+                    encrypted_payload: payload_bytes,
+                    timestamp: env.timestamp,
+                }
             })
             .collect();
-
-        // Sort by message_number for correct Double Ratchet ordering
-        messages.sort_by_key(|m| m.message_number);
 
         let next_cursor = messages
             .last()
@@ -299,26 +292,38 @@ async fn handle_stream_request(
             }
 
             if let Some(uid) = user_id {
-                // Convert envelope to EncryptedMessage and send
-                let encrypted_message: EncryptedMessage =
-                    serde_json::from_slice(&envelope.encrypted_payload)?;
+                let recipient_id = envelope
+                    .recipient
+                    .as_ref()
+                    .map(|r| r.user_id.clone())
+                    .unwrap_or_default();
+                if recipient_id.is_empty() {
+                    return Err(anyhow::anyhow!("recipient is required"));
+                }
+                if envelope.encrypted_payload.is_empty() {
+                    return Err(anyhow::anyhow!("encrypted_payload is required"));
+                }
+                let message_id = uuid::Uuid::new_v4().to_string();
+
+                use construct_server_shared::kafka::types::{
+                    KafkaMessageEnvelope, ProtoEnvelopeContext,
+                };
+                let kafka_envelope =
+                    KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+                        sender_id: uid.to_string(),
+                        recipient_id,
+                        message_id: message_id.clone(),
+                        encrypted_payload: envelope.encrypted_payload.to_vec(),
+                    });
 
                 let app_context = Arc::new(context.to_app_context());
-                match construct_server_shared::messaging_service::core::send_message(
-                    axum::extract::State(app_context),
-                    TrustedUser(*uid),
-                    HeaderMap::new(),
-                    Json(encrypted_message),
+                match construct_server_shared::messaging_service::core::dispatch_envelope(
+                    &app_context,
+                    kafka_envelope,
                 )
                 .await
                 {
-                    Ok((_status, Json(response_body))) => {
-                        let message_id = response_body
-                            .get("messageId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-
+                    Ok(()) => {
                         let ack = proto::MessageAck {
                             message_id,
                             message_number: 0,
@@ -376,6 +381,9 @@ async fn handle_stream_request(
             tx.send(Ok(response)).await?;
         }
 
+        // Subscribe/Unsubscribe: conversation_ids are intentionally not logged or stored
+        // to avoid leaking the client's contact graph to the server.
+        // All messages for this user are already routed to their Redis stream regardless.
         Some(StreamReq::Receipt(_))
         | Some(StreamReq::Typing(_))
         | Some(StreamReq::Subscribe(_))
@@ -431,7 +439,13 @@ async fn poll_messages(
 fn convert_kafka_envelope_to_proto(
     envelope: construct_server_shared::kafka::types::KafkaMessageEnvelope,
 ) -> anyhow::Result<construct_server_shared::shared::proto::core::v1::Envelope> {
+    use base64::Engine;
     use construct_server_shared::shared::proto::core::v1 as core;
+
+    // Decode base64 ciphertext back to raw bytes — forwarded verbatim, never read.
+    let payload_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&envelope.encrypted_payload)
+        .unwrap_or_else(|_| envelope.encrypted_payload.into_bytes());
 
     Ok(core::Envelope {
         sender: Some(core::UserId {
@@ -453,7 +467,7 @@ fn convert_kafka_envelope_to_proto(
         timestamp: envelope.timestamp,
         ttl: 0,
         priority: core::MessagePriority::Normal.into(),
-        encrypted_payload: envelope.encrypted_payload.into_bytes(),
+        encrypted_payload: payload_bytes,
         conversation_id: String::new(),
         server_metadata: None,
         client_metadata: None,
