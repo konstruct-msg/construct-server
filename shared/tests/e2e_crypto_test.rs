@@ -190,7 +190,7 @@ async fn register_user_with_crypto(
             "identityPublic": general_purpose::STANDARD.encode(identity_x25519_public.as_bytes()),
             "signedPrekeyPublic": general_purpose::STANDARD.encode(signed_prekey_public.as_bytes()),
             "signedPrekeySignature": general_purpose::STANDARD.encode(prekey_signature.to_bytes()),
-            "suiteId": "Curve25519+Ed25519"
+            "cryptoSuite": "Curve25519+Ed25519"
         },
         "powSolution": {
             "challenge": challenge.challenge,

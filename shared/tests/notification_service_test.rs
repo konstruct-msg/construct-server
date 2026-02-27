@@ -49,7 +49,7 @@ fn create_test_bundle(user_id: Option<String>) -> UploadableKeyBundle {
     let verifying_key = signing_key.verifying_key();
 
     let suite_material = SuiteKeyMaterial {
-        crypto_suite_id: 1,
+        suite_id: 1,
         identity_key: BASE64.encode(vec![0u8; 32]),
         signed_prekey: BASE64.encode(vec![1u8; 32]),
         signed_prekey_signature: BASE64.encode(vec![2u8; 64]),
