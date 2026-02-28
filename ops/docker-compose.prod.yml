@@ -48,7 +48,7 @@ services:
       - DOCKER_API_VERSION=1.44
       # Cloudflare DNS-01 challenge — required when behind Cloudflare Proxy.
       # Create a Cloudflare API token with Zone:DNS:Edit permission.
-      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+      - CLOUDFLARE_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN}
     restart: unless-stopped
     command:
       - "--providers.docker=true"
