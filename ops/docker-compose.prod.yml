@@ -241,6 +241,10 @@ services:
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-localhost:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-construct-delivery}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+      KAFKA_SSL_ENABLED: ${KAFKA_SSL_ENABLED:-false}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
