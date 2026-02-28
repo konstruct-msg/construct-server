@@ -250,17 +250,18 @@ impl MessagingService for MessagingGrpcService {
         // Sort is by server timestamp (already chronological from Redis stream).
         let messages: Vec<proto::PendingMessage> = stream_messages
             .into_iter()
-            .map(|(_stream_id, env)| {
+            .filter_map(|(_stream_id, env)| {
+                let env = env?; // skip corrupt / wrong-recipient entries
                 use base64::Engine;
                 let payload_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&env.encrypted_payload)
                     .unwrap_or_else(|_| env.encrypted_payload.into_bytes());
-                proto::PendingMessage {
+                Some(proto::PendingMessage {
                     message_id: env.message_id,
                     sender_id: env.sender_id,
                     encrypted_payload: payload_bytes,
                     timestamp: env.timestamp,
-                }
+                })
             })
             .collect();
 
@@ -425,6 +426,10 @@ async fn poll_messages(
 
     for (stream_id, envelope) in messages {
         // Convert KafkaMessageEnvelope to proto::Envelope
+        let Some(envelope) = envelope else {
+            *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
+            continue;
+        };
         let proto_envelope = convert_kafka_envelope_to_proto(envelope)?;
 
         let response = proto::MessageStreamResponse {
