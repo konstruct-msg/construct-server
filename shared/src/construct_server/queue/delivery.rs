@@ -42,7 +42,7 @@ impl<'a> DeliveryManager<'a> {
         _server_instance_id: Option<&str>, // Ignored - kept for API compatibility
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, crate::kafka::types::KafkaMessageEnvelope)>> {
+    ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
         // Always read from user-based stream
         let stream_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -50,11 +50,22 @@ impl<'a> DeliveryManager<'a> {
             .read_stream_messages(&stream_key, since_id, count)
             .await?;
 
-        // Parse messages
+        // Parse messages. Unparseable entries return None so callers advance stream_id
+        // past them without delivering garbage to the client.
         let mut result = Vec::new();
         for (stream_id, fields) in messages {
-            if let Some(envelope) = self.parse_stream_message(fields, user_id)? {
-                result.push((stream_id, envelope));
+            match self.parse_stream_message(fields, user_id) {
+                Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
+                Ok(None) => result.push((stream_id, None)), // wrong recipient, still advance
+                Err(e) => {
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        user_id = %user_id,
+                        error = %e,
+                        "Skipping unparseable Redis stream entry"
+                    );
+                    result.push((stream_id, None)); // advance past corrupt entry
+                }
             }
         }
 

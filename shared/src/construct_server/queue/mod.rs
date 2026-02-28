@@ -473,7 +473,7 @@ impl MessageQueue {
         server_instance_id: Option<&str>,
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, crate::kafka::types::KafkaMessageEnvelope)>> {
+    ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
         delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,

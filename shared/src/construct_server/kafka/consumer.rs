@@ -46,6 +46,8 @@ impl MessageConsumer {
             // Offset management
             .set("enable.auto.commit", "false") // Manual commit after delivery
             .set("auto.offset.reset", "earliest") // Read from beginning
+            // Allow broker to auto-create topic on first subscription
+            .set("allow.auto.create.topics", "true")
             // Performance
             .set("fetch.min.bytes", "1")
             .set("fetch.wait.max.ms", "500") // Max wait for fetch
