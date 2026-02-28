@@ -2,11 +2,21 @@
 # Construct Server — Production Docker Compose (DigitalOcean VPS)
 # =============================================================================
 # Architecture:
-#   Traefik (TLS/443)
-#     └→ Envoy (gRPC-web routing, :8080)
-#          └→ Rust microservices (:5005x)
+#   Cloudflare Proxy (ECH + hides origin IP)
+#     └→ Traefik (TLS/443, DNS-01 challenge via Cloudflare API)
+#          └→ Envoy (gRPC-web routing, :8080)
+#               └→ Rust microservices (:5005x)
 #   Vault (secrets store, :8200)
 #   vault-agent (init container: fetches secrets → /secrets/app.env)
+#
+# ECH (Encrypted Client Hello) is provided automatically by Cloudflare Proxy
+# for all orange-cloud proxied records. No server-side config needed.
+#
+# TLS between Cloudflare and this server uses Full (Strict) mode:
+#   - Use Cloudflare Origin Certificate OR keep Let's Encrypt
+#   - Let's Encrypt uses DNS-01 challenge (required because Cloudflare Proxy
+#     intercepts port 443 before TLS-ALPN-01 can complete)
+#   - Set CF_DNS_API_TOKEN in .env (Cloudflare API token with Zone:DNS:Edit)
 #
 # External services (not in this compose):
 #   Database : Supabase (DATABASE_URL in Vault)
@@ -36,6 +46,9 @@ services:
     image: traefik:v3.6
     environment:
       - DOCKER_API_VERSION=1.44
+      # Cloudflare DNS-01 challenge — required when behind Cloudflare Proxy.
+      # Create a Cloudflare API token with Zone:DNS:Edit permission.
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
     restart: unless-stopped
     command:
       - "--providers.docker=true"
@@ -51,7 +64,11 @@ services:
       - "--entrypoints.websecure.transport.respondingtimeouts.idleTimeout=3600"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      # DNS-01 challenge via Cloudflare API (works behind Cloudflare Proxy).
+      # tlschallenge does NOT work when Cloudflare Proxy intercepts port 443.
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
       - "--api.dashboard=true"
       - "--log.level=INFO"
     ports:
