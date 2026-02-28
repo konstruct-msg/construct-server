@@ -45,17 +45,23 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<tonic::Streaming<proto::MessageStreamRequest>>,
     ) -> Result<Response<Self::MessageStreamStream>, Status> {
+        // Extract authenticated user_id from metadata set by auth interceptor
+        let auth_user_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
 
-        // Extract user_id from metadata (set by auth interceptor)
-        // For now, we'll require it to be set externally or extract from first message
         let (tx, rx) = mpsc::channel(128);
 
         tokio::spawn(async move {
             // Track last seen stream_id for pagination
             let mut last_stream_id: Option<String> = None;
-            let mut user_id: Option<uuid::Uuid> = None;
+            // Initialise from auth metadata; may also be set from first Send message
+            let mut user_id: Option<uuid::Uuid> = auth_user_id;
 
             // Poll interval for checking new messages (5 seconds)
             let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
