@@ -22,6 +22,8 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 codec_type: AUTO
                 stat_prefix: ingress_grpc
+                # Disable stream idle timeout — gRPC streams can be long-lived
+                stream_idle_timeout: 0s
                 route_config:
                   name: grpc_routes
                   virtual_hosts:
@@ -112,7 +114,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 20s
+                timeout: 10s
       load_assignment:
         cluster_name: messaging_service
         endpoints:
