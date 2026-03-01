@@ -31,7 +31,7 @@ impl<'a> DeliveryManager<'a> {
 
     /// Read messages from Redis Stream for a user
     ///
-    /// Reads from user-based stream: delivery_queue:offline:{user_id}
+    /// Reads from user-based stream: {delivery_queue_prefix}:offline:{user_id}
     ///
     /// ARCHITECTURE NOTE: We always use user-based streams to ensure reliable
     /// delivery in multi-instance deployments. The server_instance_id parameter
@@ -44,7 +44,7 @@ impl<'a> DeliveryManager<'a> {
         count: usize,
     ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
         // Always read from user-based stream
-        let stream_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
+        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
         let messages = self
             .read_stream_messages(&stream_key, since_id, count)
@@ -324,7 +324,7 @@ impl<'a> DeliveryManager<'a> {
     }
 
     /// Process offline messages for a user when they come online
-    /// Moves messages from delivery_queue:offline:{user_id} to delivery_queue:{server_instance_id}
+    /// Moves messages from {prefix}:offline:{user_id} to {prefix}:{server_instance_id}
     /// so they can be delivered via the delivery listener mechanism
     ///
     /// Messages are moved in FIFO order (oldest first) to maintain message ordering
@@ -333,8 +333,8 @@ impl<'a> DeliveryManager<'a> {
         user_id: &str,
         server_instance_id: &str,
     ) -> Result<usize> {
-        let offline_queue_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
-        let delivery_queue_key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let offline_queue_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+        let delivery_queue_key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages from offline queue and move to delivery queue
         // This ensures atomicity and maintains FIFO order
@@ -417,7 +417,7 @@ impl<'a> DeliveryManager<'a> {
         &mut self,
         server_instance_id: &str,
     ) -> Result<Vec<Vec<u8>>> {
-        let key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages and delete the queue
         // This replaces the loop of LMOVE operations with a single atomic operation
@@ -559,14 +559,14 @@ impl<'a> DeliveryManager<'a> {
     /// This bypasses Kafka and writes directly to Redis, similar to what
     /// the delivery worker would do. Used only when Kafka is disabled.
     ///
-    /// Stream format: {delivery_queue_prefix}offline:{user_id}
+    /// Stream format: {delivery_queue_prefix}:offline:{user_id}
     /// Fields: message_id (string), payload (MessagePack serialized envelope)
     pub(crate) async fn write_message_to_user_stream(
         &mut self,
         user_id: &str,
         envelope: &crate::kafka::types::KafkaMessageEnvelope,
     ) -> Result<String> {
-        let stream_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
+        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
         // Serialize envelope to MessagePack (same as delivery worker)
         let payload = rmp_serde::to_vec(envelope)

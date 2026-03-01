@@ -48,7 +48,7 @@ async fn create_test_state() -> WorkerState {
         jwt_issuer: "construct-test".to_string(),
         online_channel: "test-online-channel".to_string(),
         offline_queue_prefix: "test_queue:".to_string(),
-        delivery_queue_prefix: "test_delivery_queue:".to_string(),
+        delivery_queue_prefix: "test_delivery_queue".to_string(),
         delivery_poll_interval_ms: 30000,
         rust_log: "info".to_string(),
         logging: construct_config::LoggingConfig {

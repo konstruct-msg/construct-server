@@ -195,8 +195,8 @@ pub async fn push_to_offline_stream(
     max_len: Option<usize>,
 ) -> Result<String> {
     let stream_key = format!(
-        "{}offline:{}",
-        state.config.delivery_queue_prefix, // Reuse existing prefix for now
+        "{}:offline:{}",
+        state.config.delivery_queue_prefix,
         user_id
     );
 

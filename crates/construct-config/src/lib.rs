@@ -221,7 +221,7 @@ impl Config {
                 .unwrap_or_else(|_| "queue:".to_string()),
 
             delivery_queue_prefix: std::env::var("DELIVERY_QUEUE_PREFIX")
-                .unwrap_or_else(|_| "delivery_queue:".to_string()),
+                .unwrap_or_else(|_| "delivery".to_string()),
 
             delivery_poll_interval_ms: std::env::var("DELIVERY_POLL_INTERVAL_MS")
                 .ok()

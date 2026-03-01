@@ -42,7 +42,7 @@ impl<'a> DeliveryManager<'a> {
         count: usize,
     ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
         // Always read from user-based stream
-        let stream_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
+        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
         let messages = self
             .read_stream_messages(&stream_key, since_id, count)
@@ -298,8 +298,8 @@ impl<'a> DeliveryManager<'a> {
         user_id: &str,
         server_instance_id: &str,
     ) -> Result<usize> {
-        let offline_queue_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
-        let delivery_queue_key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let offline_queue_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+        let delivery_queue_key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages from offline queue and move to delivery queue
         // This ensures atomicity and maintains FIFO order
@@ -381,7 +381,7 @@ impl<'a> DeliveryManager<'a> {
         &mut self,
         server_instance_id: &str,
     ) -> Result<Vec<Vec<u8>>> {
-        let key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages and delete the queue
         // This replaces the loop of LMOVE operations with a single atomic operation

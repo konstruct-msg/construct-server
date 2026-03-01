@@ -172,7 +172,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "construct-error"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "construct-metrics"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -909,7 +909,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "delivery-worker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "invite-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2091,7 +2091,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "notification-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -4559,7 +4559,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
