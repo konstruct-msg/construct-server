@@ -106,6 +106,15 @@ impl ServerSigner {
         BASE64.encode(signature.to_bytes())
     }
 
+    /// Sign arbitrary bytes and return the raw Ed25519 signature (64 bytes)
+    ///
+    /// Used for SenderCertificate signing where the payload is
+    /// a canonical concatenation of certificate fields.
+    pub fn sign_bytes(&self, data: &[u8]) -> Vec<u8> {
+        let signature = self.signing_key.sign(data);
+        signature.to_bytes().to_vec()
+    }
+
     /// Verify a signature from a remote server
     ///
     /// Uses the provided public key to verify the signature

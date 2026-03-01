@@ -450,17 +450,98 @@ impl AuthService for AuthGrpcService {
 
     async fn get_sender_certificate(
         &self,
-        _request: Request<proto::GetSenderCertificateRequest>,
+        request: Request<proto::GetSenderCertificateRequest>,
     ) -> Result<Response<proto::GetSenderCertificateResponse>, Status> {
-        // TODO: Phase 1 — implement sender certificate issuance
-        // 1. Extract user_id + device_id from JWT
-        // 2. Look up user's identity key
-        // 3. Build SenderCertificate proto
-        // 4. Sign with server Ed25519 federation key
-        // 5. Return serialized cert + signature
-        Err(Status::unimplemented(
-            "GetSenderCertificate not yet implemented — sealed sender Phase 1",
-        ))
+        use construct_server_shared::shared::proto::core::v1::SenderCertificate;
+        use prost::Message;
+
+        // 1. Get server signer
+        let signer = self
+            .context
+            .server_signer
+            .as_ref()
+            .ok_or_else(|| {
+                Status::unavailable("sealed sender not available: federation signing key not configured")
+            })?;
+
+        // 2. Authenticate: extract user_id from JWT
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|e| Status::unauthenticated(format!("invalid token: {}", e)))?;
+        let user_id = &claims.sub;
+
+        // 3. Get device_id from x-device-id header
+        let device_id = request
+            .metadata()
+            .get("x-device-id")
+            .ok_or_else(|| Status::invalid_argument("x-device-id header required"))?
+            .to_str()
+            .map_err(|_| Status::invalid_argument("invalid x-device-id header"))?
+            .to_string();
+
+        // 4. Look up device identity key from DB
+        let user_uuid = uuid::Uuid::parse_str(user_id)
+            .map_err(|_| Status::internal("invalid user_id in token"))?;
+
+        let identity_key: Vec<u8> = sqlx::query_scalar(
+            "SELECT identity_public FROM devices WHERE user_id = $1 AND device_id = $2 AND is_active = true",
+        )
+        .bind(user_uuid)
+        .bind(&device_id)
+        .fetch_optional(self.context.db_pool.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("database error: {}", e)))?
+        .ok_or_else(|| Status::not_found("device not found or inactive"))?;
+
+        // 5. Build SenderCertificate
+        let now = chrono::Utc::now().timestamp();
+        let expires_at = now + 86400; // 24 hours
+
+        let domain = signer.instance_domain().to_string();
+
+        // 6. Create canonical bytes for signing:
+        // sender_user_id || sender_domain || sender_identity_key || sender_device_id || issued_at || expires_at
+        let mut sign_payload = Vec::new();
+        sign_payload.extend_from_slice(user_id.as_bytes());
+        sign_payload.push(b':');
+        sign_payload.extend_from_slice(domain.as_bytes());
+        sign_payload.push(b':');
+        sign_payload.extend_from_slice(&identity_key);
+        sign_payload.push(b':');
+        sign_payload.extend_from_slice(device_id.as_bytes());
+        sign_payload.push(b':');
+        sign_payload.extend_from_slice(now.to_string().as_bytes());
+        sign_payload.push(b':');
+        sign_payload.extend_from_slice(expires_at.to_string().as_bytes());
+
+        let signature = signer.sign_bytes(&sign_payload);
+
+        let cert = SenderCertificate {
+            sender_user_id: user_id.to_string(),
+            sender_domain: domain,
+            sender_identity_key: identity_key,
+            sender_device_id: device_id,
+            issued_at: now,
+            expires_at,
+            server_signature: signature,
+        };
+
+        // 7. Serialize certificate to protobuf bytes
+        let cert_bytes = cert.encode_to_vec();
+
+        tracing::info!(
+            user_id = %user_id,
+            expires_at = %expires_at,
+            "Issued sender certificate"
+        );
+
+        Ok(Response::new(proto::GetSenderCertificateResponse {
+            certificate: cert_bytes,
+            expires_at,
+        }))
     }
 }
 
@@ -632,6 +713,21 @@ async fn main() -> Result<()> {
             }
         };
 
+    // Initialize server signer for sealed sender certificates
+    let server_signer = config
+        .federation
+        .signing_key_seed
+        .as_ref()
+        .and_then(|seed| {
+            construct_server_shared::federation::ServerSigner::from_seed_base64(
+                seed,
+                config.federation.instance_domain.clone(),
+            )
+            .map(Arc::new)
+            .map_err(|e| tracing::warn!(error = %e, "Failed to init server signer for sealed sender"))
+            .ok()
+        });
+
     // Create service context
     let context = Arc::new(AuthServiceContext {
         db_pool,
@@ -639,6 +735,7 @@ async fn main() -> Result<()> {
         auth_manager,
         config: config.clone(),
         key_management,
+        server_signer,
     });
 
     // Import auth service handlers

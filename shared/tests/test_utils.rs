@@ -291,6 +291,7 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         auth_manager,
         config: config.clone(),
         key_management: None,
+        server_signer: None,
     });
 
     let app = Router::new()
