@@ -194,11 +194,7 @@ pub async fn push_to_offline_stream(
     message_bytes: &[u8],
     max_len: Option<usize>,
 ) -> Result<String> {
-    let stream_key = format!(
-        "{}:offline:{}",
-        state.config.delivery_queue_prefix,
-        user_id
-    );
+    let stream_key = format!("{}:offline:{}", state.config.delivery_queue_prefix, user_id);
 
     push_to_delivery_stream(state, &stream_key, message_id, message_bytes, max_len).await
 }
