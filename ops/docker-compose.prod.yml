@@ -57,6 +57,9 @@ services:
       # HTTPS entrypoint
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.websecure.http2.maxConcurrentStreams=250"
+      # Disable timeouts for long-lived gRPC bidirectional streams
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0s"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0s"
       # Let's Encrypt ACME (TLS-ALPN-01 — works without Cloudflare)
       - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@konstruct.cc}"
