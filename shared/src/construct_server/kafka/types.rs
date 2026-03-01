@@ -170,15 +170,10 @@ impl KafkaMessageEnvelope {
         // Type-specific validation
         match self.message_type {
             MessageType::DirectMessage => {
-                // Double Ratchet protocol requires these fields
-                if self.ephemeral_public_key.is_none() {
-                    anyhow::bail!(
-                        "ephemeral_public_key required for DirectMessage (Double Ratchet)"
-                    );
-                }
-                if self.message_number.is_none() {
-                    anyhow::bail!("message_number required for DirectMessage (Double Ratchet)");
-                }
+                // Note: ephemeral_public_key and message_number are optional here.
+                // For E2EE opaque payloads (gRPC path), these fields live inside
+                // encrypted_payload and are NOT visible to the server.
+                // Only the REST/ChatMessage path populates them externally.
             }
             MessageType::ControlMessage => {
                 // Control messages (END_SESSION) have no encryption fields
