@@ -241,6 +241,7 @@ services:
       KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-construct-delivery}
       KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
       KAFKA_SSL_ENABLED: ${KAFKA_SSL_ENABLED:-false}
+      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
