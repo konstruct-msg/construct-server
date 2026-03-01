@@ -456,13 +456,11 @@ impl AuthService for AuthGrpcService {
         use prost::Message;
 
         // 1. Get server signer
-        let signer = self
-            .context
-            .server_signer
-            .as_ref()
-            .ok_or_else(|| {
-                Status::unavailable("sealed sender not available: federation signing key not configured")
-            })?;
+        let signer = self.context.server_signer.as_ref().ok_or_else(|| {
+            Status::unavailable(
+                "sealed sender not available: federation signing key not configured",
+            )
+        })?;
 
         // 2. Authenticate: extract user_id from JWT
         let token = request_token(request.metadata())?;
@@ -724,7 +722,9 @@ async fn main() -> Result<()> {
                 config.federation.instance_domain.clone(),
             )
             .map(Arc::new)
-            .map_err(|e| tracing::warn!(error = %e, "Failed to init server signer for sealed sender"))
+            .map_err(
+                |e| tracing::warn!(error = %e, "Failed to init server signer for sealed sender"),
+            )
             .ok()
         });
 
