@@ -447,6 +447,21 @@ impl AuthService for AuthGrpcService {
             error: None,
         }))
     }
+
+    async fn get_sender_certificate(
+        &self,
+        _request: Request<proto::GetSenderCertificateRequest>,
+    ) -> Result<Response<proto::GetSenderCertificateResponse>, Status> {
+        // TODO: Phase 1 — implement sender certificate issuance
+        // 1. Extract user_id + device_id from JWT
+        // 2. Look up user's identity key
+        // 3. Build SenderCertificate proto
+        // 4. Sign with server Ed25519 federation key
+        // 5. Return serialized cert + signature
+        Err(Status::unimplemented(
+            "GetSenderCertificate not yet implemented — sealed sender Phase 1",
+        ))
+    }
 }
 
 /// Extract Bearer token from gRPC metadata

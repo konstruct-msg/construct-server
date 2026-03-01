@@ -488,6 +488,7 @@ fn convert_kafka_envelope_to_proto(
         edits_message_id: None,
         reactions: vec![],
         mentions: vec![],
+        sealed_sender: None,
     })
 }
 
