@@ -2,21 +2,17 @@
 # Construct Server — Production Docker Compose (DigitalOcean VPS)
 # =============================================================================
 # Architecture:
-#   Cloudflare Tunnel (cloudflared) — hides origin IP, ECH, bidirectional gRPC
+#   Traefik — TLS termination (Let's Encrypt ACME) + routing
 #     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
-#     ├→ traefik.ams.konstruct.cc  → Traefik dashboard (:8080)
 #     ├→ vault.ams.konstruct.cc    → Vault (:8200)
 #     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
 #     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
 #   Envoy — gRPC-web routing to Rust microservices
-#   Traefik — kept for internal routing / admin access (no external TLS needed)
 #   Vault — secrets store
 #   vault-agent — init container: fetches secrets → /secrets/app.env
 #
-# Cloudflare Tunnel public hostnames are configured in Zero Trust dashboard:
-#   https://one.dash.cloudflare.com → Networks → Tunnels → construct → Public Hostnames
-#   Each hostname: Type=HTTP, URL=<service>:<port>, enable "HTTP/2 Origin"
-#   For ams.konstruct.cc also enable "gRPC"
+# DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
+# TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
 #
 # External services (not in this compose):
 #   Database : Supabase (DATABASE_URL in Vault)
@@ -40,24 +36,10 @@
 name: construct
 
 services:
-  # ─── Cloudflare Tunnel ───────────────────────────────────────────────────
-  # Outbound tunnel to Cloudflare — no inbound ports needed.
-  # Create tunnel: Zero Trust → Networks → Tunnels → Create → copy token.
-  # Configure public hostnames in the dashboard (see architecture comment above).
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    networks:
-      - internal
-
-  # ─── Traefik (internal routing + admin dashboards) ───────────────────────
-  # With Cloudflare Tunnel, Traefik no longer handles TLS or external traffic.
-  # It is kept for internal routing to admin subdomains (vault, grafana, etc.)
-  # and for convenience when accessing services directly from the server.
+  # ─── Traefik (TLS + routing) ─────────────────────────────────────────────
+  # Handles Let's Encrypt certificates via TLS-ALPN-01 challenge.
+  # All external traffic enters through Traefik on ports 80/443.
+  # HTTP automatically redirects to HTTPS.
 
   traefik:
     image: traefik:v3.6
@@ -68,19 +50,33 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedByDefault=false"
       - "--providers.docker.network=construct_internal"
+      # HTTP entrypoint — redirect to HTTPS
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # HTTPS entrypoint
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http2.maxConcurrentStreams=250"
+      # Let's Encrypt ACME (TLS-ALPN-01 — works without Cloudflare)
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@konstruct.cc}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/certs/acme.json"
+      # Dashboard
       - "--api.dashboard=true"
       - "--log.level=INFO"
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/certs
     networks:
       - internal
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`traefik.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.traefik.entrypoints=web"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.middlewares=auth-basic"
       - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
@@ -120,7 +116,8 @@ services:
       - "traefik.enable=true"
       # Vault UI only accessible via a separate subdomain, not the main API
       - "traefik.http.routers.vault.rule=Host(`vault.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.vault.entrypoints=web"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
       - "traefik.http.services.vault.loadbalancer.server.port=8200"
 
   # ─── Vault Agent (init: fetches secrets → /secrets/app.env) ──────────────
@@ -158,7 +155,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.envoy.entrypoints=web"
+      - "traefik.http.routers.envoy.entrypoints=websecure"
+      - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
       - "traefik.http.services.envoy.loadbalancer.server.port=8080"
       - "traefik.http.services.envoy.loadbalancer.server.scheme=h2c"
       - "traefik.http.routers.envoy.middlewares=cors"
@@ -407,7 +405,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.prometheus.rule=Host(`prometheus.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.prometheus.entrypoints=web"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
       - "traefik.http.routers.prometheus.middlewares=auth-basic"
       - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
 
@@ -429,7 +428,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.grafana.rule=Host(`grafana.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
 
 volumes:
