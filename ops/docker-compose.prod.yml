@@ -2,21 +2,21 @@
 # Construct Server — Production Docker Compose (DigitalOcean VPS)
 # =============================================================================
 # Architecture:
-#   Cloudflare Proxy (ECH + hides origin IP)
-#     └→ Traefik (TLS/443, DNS-01 challenge via Cloudflare API)
-#          └→ Envoy (gRPC-web routing, :8080)
-#               └→ Rust microservices (:5005x)
-#   Vault (secrets store, :8200)
-#   vault-agent (init container: fetches secrets → /secrets/app.env)
+#   Cloudflare Tunnel (cloudflared) — hides origin IP, ECH, bidirectional gRPC
+#     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
+#     ├→ traefik.ams.konstruct.cc  → Traefik dashboard (:8080)
+#     ├→ vault.ams.konstruct.cc    → Vault (:8200)
+#     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
+#     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
+#   Envoy — gRPC-web routing to Rust microservices
+#   Traefik — kept for internal routing / admin access (no external TLS needed)
+#   Vault — secrets store
+#   vault-agent — init container: fetches secrets → /secrets/app.env
 #
-# ECH (Encrypted Client Hello) is provided automatically by Cloudflare Proxy
-# for all orange-cloud proxied records. No server-side config needed.
-#
-# TLS between Cloudflare and this server uses Full (Strict) mode:
-#   - Use Cloudflare Origin Certificate OR keep Let's Encrypt
-#   - Let's Encrypt uses DNS-01 challenge (required because Cloudflare Proxy
-#     intercepts port 443 before TLS-ALPN-01 can complete)
-#   - Set CF_DNS_API_TOKEN in .env (Cloudflare API token with Zone:DNS:Edit)
+# Cloudflare Tunnel public hostnames are configured in Zero Trust dashboard:
+#   https://one.dash.cloudflare.com → Networks → Tunnels → construct → Public Hostnames
+#   Each hostname: Type=HTTP, URL=<service>:<port>, enable "HTTP/2 Origin"
+#   For ams.konstruct.cc also enable "gRPC"
 #
 # External services (not in this compose):
 #   Database : Supabase (DATABASE_URL in Vault)
@@ -40,50 +40,47 @@
 name: construct
 
 services:
-  # ─── Traefik (TLS + Let's Encrypt) ───────────────────────────────────────
+  # ─── Cloudflare Tunnel ───────────────────────────────────────────────────
+  # Outbound tunnel to Cloudflare — no inbound ports needed.
+  # Create tunnel: Zero Trust → Networks → Tunnels → Create → copy token.
+  # Configure public hostnames in the dashboard (see architecture comment above).
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - internal
+
+  # ─── Traefik (internal routing + admin dashboards) ───────────────────────
+  # With Cloudflare Tunnel, Traefik no longer handles TLS or external traffic.
+  # It is kept for internal routing to admin subdomains (vault, grafana, etc.)
+  # and for convenience when accessing services directly from the server.
 
   traefik:
     image: traefik:v3.6
     environment:
       - DOCKER_API_VERSION=1.44
-      # Cloudflare DNS-01 challenge — required when behind Cloudflare Proxy.
-      # Create a Cloudflare API token with Zone:DNS:Edit permission.
-      - CLOUDFLARE_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN}
     restart: unless-stopped
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedByDefault=false"
       - "--providers.docker.network=construct_internal"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      # gRPC streaming: disable read/write timeouts on websecure entrypoint
-      - "--entrypoints.websecure.transport.respondingtimeouts.readTimeout=0"
-      - "--entrypoints.websecure.transport.respondingtimeouts.writeTimeout=0"
-      - "--entrypoints.websecure.transport.respondingtimeouts.idleTimeout=3600"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-      # DNS-01 challenge via Cloudflare API (works behind Cloudflare Proxy).
-      # tlschallenge does NOT work when Cloudflare Proxy intercepts port 443.
-      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
-      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
       - "--api.dashboard=true"
       - "--log.level=INFO"
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik-certs:/letsencrypt
     networks:
       - internal
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.traefik.rule=Host(`traefik.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.traefik.entrypoints=websecure"
-      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.entrypoints=web"
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.middlewares=auth-basic"
       - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
@@ -123,8 +120,7 @@ services:
       - "traefik.enable=true"
       # Vault UI only accessible via a separate subdomain, not the main API
       - "traefik.http.routers.vault.rule=Host(`vault.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.vault.entrypoints=websecure"
-      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.vault.entrypoints=web"
       - "traefik.http.services.vault.loadbalancer.server.port=8200"
 
   # ─── Vault Agent (init: fetches secrets → /secrets/app.env) ──────────────
@@ -162,8 +158,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.envoy.entrypoints=websecure"
-      - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.envoy.entrypoints=web"
       - "traefik.http.services.envoy.loadbalancer.server.port=8080"
       - "traefik.http.services.envoy.loadbalancer.server.scheme=h2c"
       - "traefik.http.routers.envoy.middlewares=cors"
@@ -412,8 +407,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.prometheus.rule=Host(`prometheus.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.prometheus.entrypoints=websecure"
-      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prometheus.entrypoints=web"
       - "traefik.http.routers.prometheus.middlewares=auth-basic"
       - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
 
@@ -435,8 +429,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.grafana.rule=Host(`grafana.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.grafana.entrypoints=websecure"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.grafana.entrypoints=web"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
 
 volumes:
