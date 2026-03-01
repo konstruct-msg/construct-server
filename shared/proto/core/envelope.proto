@@ -104,8 +104,11 @@ message Envelope {
   // Federation routing (future)
   reserved 51 to 60;
 
-  // Sealed sender metadata (future)
-  reserved 61 to 70;
+  // Sealed sender (fields 61-70)
+  // Used only for cross-server (federation) messages where sender must be hidden
+  // from destination server. For local messages, use regular sender field above.
+  optional SealedSenderEnvelope sealed_sender = 61;
+  reserved 62 to 70;
 
   // Compliance & audit (future)
   reserved 71 to 80;
@@ -259,4 +262,110 @@ message Reaction {
 
   // Reaction timestamp
   int64 timestamp = 3;
+}
+
+// ============================================================================
+// Sealed Sender — Split-Knowledge Onion Envelope for Federation Privacy
+// ============================================================================
+//
+// Architecture: no single server sees the full sender→recipient pair.
+//
+//   Home Server (A):  knows sender (JWT session), sees only recipient_server
+//   Dest Server (B):  knows recipient_user_id, cannot see sender
+//   Recipient (Bob):  decrypts sender_cert_ciphertext → learns sender identity
+//
+// Used ONLY for cross-server (federation) messages. Local messages use the
+// regular Envelope.sender field since the server already knows both parties.
+// ============================================================================
+
+// SealedSenderEnvelope — outer wrapper visible to the home server
+// Home server uses recipient_server for S2S routing, then forwards sealed_inner
+// opaquely to the destination server.
+message SealedSenderEnvelope {
+  // Destination federation server domain
+  // Example: "eu.konstruct.cc"
+  string recipient_server = 1;
+
+  // Serialized SealedInner — opaque to home server (do NOT parse)
+  bytes sealed_inner = 2;
+
+  // Anti-replay HMAC: HMAC-SHA256(server_secret, sealed_inner || timestamp)
+  // Home server validates freshness before forwarding
+  bytes forwarding_token = 3;
+
+  // Timestamp for freshness check (reject if >5 min old)
+  int64 timestamp = 4;
+
+  // Reserved for future routing metadata
+  reserved 5 to 15;
+}
+
+// SealedInner — delivered to the destination server
+// Server sees recipient but NOT sender identity.
+message SealedInner {
+  // Recipient user ID (local to destination server)
+  string recipient_user_id = 1;
+
+  // Random anti-replay tag (32 bytes)
+  // Destination server stores tags for 24h; duplicate tag = drop
+  bytes delivery_tag = 2;
+
+  // SenderCertificate encrypted to recipient's identity key
+  // X25519-AEAD-encrypt(ephemeral_key, recipient.identity_key, cert + signature)
+  // Server MUST NOT attempt to decrypt this field
+  bytes sender_cert_ciphertext = 3;
+
+  // Opaque E2EE payload (Double Ratchet encrypted message)
+  bytes encrypted_payload = 4;
+
+  // Content type (needed by server for priority routing / notification text)
+  ContentType content_type = 5;
+
+  // Message priority
+  MessagePriority priority = 6;
+
+  // TTL in seconds (0 = no expiration)
+  uint32 ttl = 7;
+
+  // Reserved for future sealed fields
+  reserved 8 to 15;
+}
+
+// SenderCertificate — encrypted inside sender_cert_ciphertext
+// Only the recipient can decrypt and verify this.
+// Proves sender identity without revealing it to any server.
+//
+// Trust chain:
+//   1. Sender's home server signs this cert (Ed25519, same key as .well-known/konstruct)
+//   2. Sender encrypts cert to recipient's identity key
+//   3. Recipient decrypts → verifies server_signature against home server's public key
+//   4. Recipient checks sender_identity_key matches existing session
+message SenderCertificate {
+  // Sender user ID (local to sender's home server)
+  string sender_user_id = 1;
+
+  // Sender's home server domain
+  // Used to look up server's public key for signature verification
+  string sender_domain = 2;
+
+  // Sender's X25519 identity public key (32 bytes)
+  // Recipient verifies this matches the existing Signal session
+  bytes sender_identity_key = 3;
+
+  // Sender's device ID
+  string sender_device_id = 4;
+
+  // Certificate issue time (Unix seconds)
+  int64 issued_at = 5;
+
+  // Certificate expiry (Unix seconds, typically issued_at + 24h)
+  // Recipient rejects expired certificates
+  int64 expires_at = 6;
+
+  // Ed25519 signature by sender's home server
+  // Signs: sender_user_id || sender_domain || sender_identity_key || sender_device_id || issued_at || expires_at
+  bytes server_signature = 7;
+
+  // Reserved for future cert fields (e.g., PQ signature, capabilities)
+  reserved 8 to 15;
 }

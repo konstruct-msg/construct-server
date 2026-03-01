@@ -42,6 +42,15 @@ service AuthService {
   // Proves ownership by signing challenge with recovery key
   // Creates new device, revokes all existing sessions
   rpc RecoverAccount(RecoverAccountRequest) returns (RecoverAccountResponse);
+  // =========================================================================
+  // Sealed Sender Certificate Issuance
+  // =========================================================================
+
+  // GetSenderCertificate - Get a signed sender certificate for sealed sender
+  // Certificate proves sender identity to recipients without revealing it to servers.
+  // Signed by this server's Ed25519 federation key.
+  // Client should cache the certificate for up to 24 hours.
+  rpc GetSenderCertificate(GetSenderCertificateRequest) returns (GetSenderCertificateResponse);
 }
 
 // DeviceService - Device management
@@ -447,4 +456,24 @@ enum RecoveryErrorCode {
 
   // Reserved for future errors
   reserved 7 to 15;
+}
+
+// ============================================================================
+// Sealed Sender Certificate Messages
+// ============================================================================
+
+// GetSenderCertificateRequest - Request a signed sender certificate
+// Authenticated via JWT — server derives user/device identity from the token.
+message GetSenderCertificateRequest {
+  // Empty — identity comes from the authenticated JWT context
+}
+
+// GetSenderCertificateResponse - Signed sender certificate
+message GetSenderCertificateResponse {
+  // Serialized SenderCertificate (from envelope.proto)
+  bytes certificate = 1;
+
+  // Certificate expiry (Unix seconds, typically now + 24h)
+  // Client should re-fetch before this time
+  int64 expires_at = 2;
 }
