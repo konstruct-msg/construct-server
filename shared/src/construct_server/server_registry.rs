@@ -28,7 +28,7 @@ pub fn spawn_server_heartbeat(
         loop {
             ticker.tick().await;
 
-            let queue_key = format!("{}{}", delivery_queue_prefix, server_instance_id);
+            let queue_key = format!("{}:{}", delivery_queue_prefix, server_instance_id);
 
             // Create/update the delivery queue key with TTL
             // This signals to delivery-worker that this server is alive

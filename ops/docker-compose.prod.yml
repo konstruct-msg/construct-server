@@ -2,11 +2,17 @@
 # Construct Server — Production Docker Compose (DigitalOcean VPS)
 # =============================================================================
 # Architecture:
-#   Traefik (TLS/443)
-#     └→ Envoy (gRPC-web routing, :8080)
-#          └→ Rust microservices (:5005x)
-#   Vault (secrets store, :8200)
-#   vault-agent (init container: fetches secrets → /secrets/app.env)
+#   Traefik — TLS termination (Let's Encrypt ACME) + routing
+#     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
+#     ├→ vault.ams.konstruct.cc    → Vault (:8200)
+#     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
+#     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
+#   Envoy — gRPC-web routing to Rust microservices
+#   Vault — secrets store
+#   vault-agent — init container: fetches secrets → /secrets/app.env
+#
+# DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
+# TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
 #
 # External services (not in this compose):
 #   Database : Supabase (DATABASE_URL in Vault)
@@ -30,7 +36,10 @@
 name: construct
 
 services:
-  # ─── Traefik (TLS + Let's Encrypt) ───────────────────────────────────────
+  # ─── Traefik (TLS + routing) ─────────────────────────────────────────────
+  # Handles Let's Encrypt certificates via TLS-ALPN-01 challenge.
+  # All external traffic enters through Traefik on ports 80/443.
+  # HTTP automatically redirects to HTTPS.
 
   traefik:
     image: traefik:v3.6
@@ -41,13 +50,21 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedByDefault=false"
       - "--providers.docker.network=construct_internal"
+      # HTTP entrypoint — redirect to HTTPS
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # HTTPS entrypoint
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http2.maxConcurrentStreams=250"
+      # Disable timeouts for long-lived gRPC bidirectional streams
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0s"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0s"
+      # Let's Encrypt ACME (TLS-ALPN-01 — works without Cloudflare)
       - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@konstruct.cc}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/certs/acme.json"
+      # Dashboard
       - "--api.dashboard=true"
       - "--log.level=INFO"
     ports:
@@ -55,7 +72,7 @@ services:
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik-certs:/letsencrypt
+      - traefik-certs:/certs
     networks:
       - internal
     labels:
@@ -159,7 +176,7 @@ services:
   #   - Depend on vault-agent to ensure secrets are ready before starting
 
   auth:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -171,6 +188,11 @@ services:
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-false}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey.p8}
+      APNS_KEY_ID: ${APNS_KEY_ID}
+      APNS_TEAM_ID: ${APNS_TEAM_ID}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
@@ -189,7 +211,7 @@ services:
         condition: service_completed_successfully
 
   user:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -207,7 +229,7 @@ services:
         condition: service_completed_successfully
 
   messaging:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -220,6 +242,11 @@ services:
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-localhost:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-construct-delivery}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+      KAFKA_SSL_ENABLED: ${KAFKA_SSL_ENABLED:-false}
+      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -229,7 +256,7 @@ services:
         condition: service_completed_successfully
 
   notification:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
@@ -240,6 +267,11 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       APNS_ENABLED: ${APNS_ENABLED:-false}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey.p8}
+      APNS_KEY_ID: ${APNS_KEY_ID}
+      APNS_TEAM_ID: ${APNS_TEAM_ID}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -249,7 +281,7 @@ services:
         condition: service_completed_successfully
 
   invite:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
@@ -267,7 +299,7 @@ services:
         condition: service_completed_successfully
 
   key:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -284,7 +316,7 @@ services:
         condition: service_completed_successfully
 
   media:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -302,7 +334,7 @@ services:
         condition: service_completed_successfully
 
   mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -320,7 +352,7 @@ services:
         condition: service_completed_successfully
 
   sentinel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -338,7 +370,7 @@ services:
         condition: service_completed_successfully
 
   delivery:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
@@ -360,6 +392,25 @@ services:
       KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
       KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-all}
       KAFKA_PRODUCER_COMPRESSION: ${KAFKA_PRODUCER_COMPRESSION:-none}
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
+  gateway:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    command: /usr/local/bin/gateway
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      PORT: "3000"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:

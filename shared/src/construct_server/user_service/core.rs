@@ -257,10 +257,10 @@ pub async fn upload_keys(
         AppError::Validation("Invalid bundle_data encoding".to_string())
     })?;
 
-    let bundle_data: BundleData = match serde_json::from_slice(&bundle_data_bytes) {
+    let bundle_data: BundleData = match prost::Message::decode(bundle_data_bytes.as_slice()) {
         Ok(data) => data,
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse bundle_data");
+            tracing::warn!(error = %e, "Failed to decode bundle_data as protobuf");
             return Err(AppError::Validation(
                 "Invalid bundle_data format".to_string(),
             ));

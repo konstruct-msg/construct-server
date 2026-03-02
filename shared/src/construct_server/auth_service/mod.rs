@@ -11,6 +11,7 @@ pub mod handlers;
 
 use crate::auth::AuthManager;
 use crate::db::DbPool;
+use crate::federation::signing::ServerSigner;
 use construct_config::Config;
 
 use crate::key_management::KeyManagementSystem;
@@ -26,6 +27,7 @@ pub struct AuthServiceContext {
     pub auth_manager: Arc<AuthManager>,
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
+    pub server_signer: Option<Arc<ServerSigner>>,
 }
 
 impl AuthServiceContext {

@@ -105,6 +105,19 @@ impl NotificationService for NotificationGrpcService {
             device_token: req.device_token,
             device_name: req.device_name,
             notification_filter: req.notification_filter,
+            device_id: if req.device_id.is_empty() {
+                None
+            } else {
+                Some(req.device_id)
+            },
+            push_provider: match req.provider {
+                2 => "fcm".to_string(),
+                _ => "apns".to_string(), // default
+            },
+            push_environment: match req.environment {
+                2 => "production".to_string(),
+                _ => "sandbox".to_string(), // default
+            },
         };
 
         let output = core::register_device_token(&self.context, input)
