@@ -148,7 +148,7 @@ pub async fn process_kafka_message(
     // - Kafka redelivers → duplicate delivery
     // Solution: MULTI/EXEC transaction - both succeed or both fail
     let stream_key = format!(
-        "{}offline:{}",
+        "{}:offline:{}",
         state.config.delivery_queue_prefix, recipient_id
     );
 
@@ -174,7 +174,7 @@ pub async fn process_kafka_message(
     }
 
     let stream_key = format!(
-        "{}offline:{}",
+        "{}:offline:{}",
         state.config.delivery_queue_prefix, recipient_id
     );
 

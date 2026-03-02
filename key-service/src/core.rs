@@ -326,7 +326,7 @@ pub async fn rotate_signed_prekey(
     .execute(db)
     .await?;
 
-    // Old key valid until
+    // Old key valid until (48 hours — aligns with signed_prekey_archive expires_at)
     let expires_at = Utc::now() + chrono::Duration::hours(48);
     Ok(expires_at)
 }

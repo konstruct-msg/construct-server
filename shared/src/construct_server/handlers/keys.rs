@@ -26,9 +26,10 @@ fn extract_first_suite_data(
         .decode(&bundle.bundle_data)
         .map_err(|_| "Invalid base64 in bundle_data".to_string())?;
 
-    // 2. Parse JSON to get BundleData
-    let bundle_data: construct_crypto::BundleData = serde_json::from_slice(&bundle_data_bytes)
-        .map_err(|e| format!("Invalid JSON in bundle_data: {}", e))?;
+    // 2. Decode protobuf to get BundleData
+    let bundle_data: construct_crypto::BundleData =
+        prost::Message::decode(bundle_data_bytes.as_slice())
+            .map_err(|e| format!("Invalid protobuf in bundle_data: {}", e))?;
 
     // 3. Get the first suite (suite_id = 1, CLASSIC_X25519)
     let first_suite = bundle_data

@@ -155,7 +155,18 @@ impl MessageProducer {
             .ok_or_else(|| anyhow::anyhow!("Kafka producer not initialized"))?;
 
         // Validate envelope before sending
-        envelope.validate().context("Invalid message envelope")?;
+        if let Err(e) = envelope.validate() {
+            tracing::warn!(
+                message_id = %envelope.message_id,
+                sender_id_empty = envelope.sender_id.is_empty(),
+                recipient_id_empty = envelope.recipient_id.is_empty(),
+                encrypted_payload_empty = envelope.encrypted_payload.is_empty(),
+                content_hash_empty = envelope.content_hash.is_empty(),
+                error = %e,
+                "Kafka envelope validation failed"
+            );
+            return Err(e.context("Invalid message envelope"));
+        }
 
         // Serialize to JSON
         let payload =

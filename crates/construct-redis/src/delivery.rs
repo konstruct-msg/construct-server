@@ -40,19 +40,30 @@ impl<'a> DeliveryManager<'a> {
         _server_instance_id: Option<&str>, // Ignored - kept for API compatibility
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, crate::kafka::types::KafkaMessageEnvelope)>> {
+    ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
         // Always read from user-based stream
-        let stream_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
+        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
         let messages = self
             .read_stream_messages(&stream_key, since_id, count)
             .await?;
 
-        // Parse messages
+        // Parse messages. Unparseable entries return None so callers advance stream_id
+        // past them without delivering garbage to the client.
         let mut result = Vec::new();
         for (stream_id, fields) in messages {
-            if let Some(envelope) = self.parse_stream_message(fields, user_id)? {
-                result.push((stream_id, envelope));
+            match self.parse_stream_message(fields, user_id) {
+                Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
+                Ok(None) => result.push((stream_id, None)), // wrong recipient, still advance
+                Err(e) => {
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        user_id = %user_id,
+                        error = %e,
+                        "Skipping unparseable Redis stream entry"
+                    );
+                    result.push((stream_id, None)); // advance past corrupt entry
+                }
             }
         }
 
@@ -287,8 +298,8 @@ impl<'a> DeliveryManager<'a> {
         user_id: &str,
         server_instance_id: &str,
     ) -> Result<usize> {
-        let offline_queue_key = format!("{}offline:{}", self.delivery_queue_prefix, user_id);
-        let delivery_queue_key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let offline_queue_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+        let delivery_queue_key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages from offline queue and move to delivery queue
         // This ensures atomicity and maintains FIFO order
@@ -370,7 +381,7 @@ impl<'a> DeliveryManager<'a> {
         &mut self,
         server_instance_id: &str,
     ) -> Result<Vec<Vec<u8>>> {
-        let key = format!("{}{}", self.delivery_queue_prefix, server_instance_id);
+        let key = format!("{}:{}", self.delivery_queue_prefix, server_instance_id);
 
         // Use Lua script to atomically get all messages and delete the queue
         // This replaces the loop of LMOVE operations with a single atomic operation
