@@ -391,8 +391,20 @@ async fn handle_stream_request(
         // Subscribe/Unsubscribe: conversation_ids are intentionally not logged or stored
         // to avoid leaking the client's contact graph to the server.
         // All messages for this user are already routed to their Redis stream regardless.
-        Some(StreamReq::Receipt(_))
-        | Some(StreamReq::Typing(_))
+        Some(StreamReq::Receipt(receipt)) => {
+            if let Some(direct) = receipt.receipt_type.and_then(|r| {
+                if let construct_server_shared::shared::proto::signaling::v1::delivery_receipt::ReceiptType::Direct(d) = r {
+                    Some(d)
+                } else {
+                    None
+                }
+            }) {
+                if let Some(uid) = user_id {
+                    relay_delivery_receipt(context, direct, uid.to_string()).await?;
+                }
+            }
+        }
+        Some(StreamReq::Typing(_))
         | Some(StreamReq::Subscribe(_))
         | Some(StreamReq::Unsubscribe(_)) => {
             // Not implemented yet
@@ -425,18 +437,33 @@ async fn poll_messages(
     drop(queue);
 
     for (stream_id, envelope) in messages {
-        // Convert KafkaMessageEnvelope to proto::Envelope
+        // Convert KafkaMessageEnvelope to the appropriate stream response
         let Some(envelope) = envelope else {
             *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
             continue;
         };
-        let proto_envelope = convert_kafka_envelope_to_proto(envelope)?;
 
-        let response = proto::MessageStreamResponse {
-            response: Some(proto::message_stream_response::Response::Message(
-                proto_envelope,
-            )),
-            response_id: None,
+        let response = if matches!(
+            envelope.message_type,
+            construct_server_shared::kafka::types::MessageType::Receipt
+        ) {
+            // Parse receipt JSON and send as MessageStreamResponse::Receipt
+            match build_receipt_response(&envelope) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to parse receipt envelope, skipping");
+                    *last_stream_id = Some(stream_id);
+                    continue;
+                }
+            }
+        } else {
+            let proto_envelope = convert_kafka_envelope_to_proto(envelope)?;
+            proto::MessageStreamResponse {
+                response: Some(proto::message_stream_response::Response::Message(
+                    proto_envelope,
+                )),
+                response_id: None,
+            }
         };
 
         tx.send(Ok(response)).await?;
@@ -489,6 +516,112 @@ fn convert_kafka_envelope_to_proto(
         reactions: vec![],
         mentions: vec![],
         sealed_sender: None,
+    })
+}
+
+/// Relay a DeliveryReceipt from the recipient to the original sender's stream.
+///
+/// Looks up the original sender via the Redis `receipt:sender:{message_id}` mapping
+/// stored by `dispatch_envelope()`. Writes a Receipt-type envelope to the sender's
+/// offline delivery stream so they pick it up on the next poll.
+async fn relay_delivery_receipt(
+    context: &Arc<MessagingServiceContext>,
+    direct: construct_server_shared::shared::proto::signaling::v1::DirectReceipt,
+    receipt_sender_id: String,
+) -> anyhow::Result<()> {
+    use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+
+    if direct.message_ids.is_empty() {
+        return Ok(());
+    }
+
+    let status = match direct.status {
+        1 => "delivered",
+        2 => "read",
+        _ => "delivered",
+    };
+
+    // Group message_ids by original sender
+    let mut sender_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    {
+        let mut queue = context.queue.lock().await;
+        for message_id in &direct.message_ids {
+            match queue.get_message_sender(message_id).await {
+                Ok(Some(sender_id)) => {
+                    sender_map
+                        .entry(sender_id)
+                        .or_default()
+                        .push(message_id.clone());
+                }
+                Ok(None) => {
+                    tracing::debug!(message_id = %message_id, "No sender mapping found for receipt (expired or unknown)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, message_id = %message_id, "Failed to look up sender for receipt");
+                }
+            }
+        }
+    }
+
+    // Write one receipt envelope per sender
+    let mut queue = context.queue.lock().await;
+    for (sender_id, msg_ids) in sender_map {
+        let receipt_envelope = KafkaMessageEnvelope::from_receipt(
+            sender_id.clone(),
+            receipt_sender_id.clone(),
+            msg_ids,
+            status,
+        );
+        if let Err(e) = queue
+            .write_message_to_user_stream(&sender_id, &receipt_envelope)
+            .await
+        {
+            tracing::warn!(error = %e, sender_id = %sender_id, "Failed to relay receipt to sender stream (non-critical)");
+        } else {
+            tracing::debug!(sender_id = %sender_id, "Relayed delivery receipt to sender stream");
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a MessageStreamResponse::Receipt from a Receipt-type KafkaMessageEnvelope.
+fn build_receipt_response(
+    envelope: &construct_server_shared::kafka::types::KafkaMessageEnvelope,
+) -> anyhow::Result<proto::MessageStreamResponse> {
+    use construct_server_shared::shared::proto::signaling::v1 as signaling;
+
+    #[derive(serde::Deserialize)]
+    struct ReceiptPayload {
+        message_ids: Vec<String>,
+        status: String,
+        timestamp: i64,
+    }
+
+    let payload: ReceiptPayload = serde_json::from_str(&envelope.encrypted_payload)
+        .map_err(|e| anyhow::anyhow!("Invalid receipt payload: {}", e))?;
+
+    let status = match payload.status.as_str() {
+        "read" => 2i32,
+        _ => 1i32, // delivered
+    };
+
+    let direct = signaling::DirectReceipt {
+        message_ids: payload.message_ids,
+        status,
+        timestamp: payload.timestamp,
+        sender_device_id: String::new(),
+    };
+
+    let receipt = signaling::DeliveryReceipt {
+        receipt_type: Some(signaling::delivery_receipt::ReceiptType::Direct(direct)),
+    };
+
+    Ok(proto::MessageStreamResponse {
+        response: Some(proto::message_stream_response::Response::Receipt(receipt)),
+        response_id: None,
     })
 }
 

@@ -598,4 +598,30 @@ impl<'a> DeliveryManager<'a> {
 
         Ok(stream_id)
     }
+
+    // ── Receipt routing ──────────────────────────────────────────────────────
+
+    /// Store sender_id for a message so receipts can be routed back.
+    /// Key: `receipt:sender:{message_id}` — TTL 30 days.
+    pub(crate) async fn store_message_sender(
+        &mut self,
+        message_id: &str,
+        sender_id: &str,
+    ) -> Result<()> {
+        const TTL_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+        let key = format!("receipt:sender:{}", message_id);
+        self.client
+            .set_ex(&key, sender_id, TTL_SECS)
+            .await
+            .context("Failed to store message sender for receipt routing")?;
+        Ok(())
+    }
+
+    /// Look up the original sender_id for a message_id.
+    /// Returns `None` if the mapping has expired or never existed.
+    pub(crate) async fn get_message_sender(&mut self, message_id: &str) -> Result<Option<String>> {
+        let key = format!("receipt:sender:{}", message_id);
+        let result: Option<String> = self.client.get(&key).await?;
+        Ok(result)
+    }
 }

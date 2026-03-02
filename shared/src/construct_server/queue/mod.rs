@@ -619,4 +619,27 @@ impl MessageQueue {
         .write_message_to_user_stream(user_id, envelope)
         .await
     }
+
+    /// Store the sender_id of a message for receipt routing.
+    /// Called when dispatching a message so receipts can be relayed back to the sender.
+    pub async fn store_message_sender(&mut self, message_id: &str, sender_id: &str) -> Result<()> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .store_message_sender(message_id, sender_id)
+        .await
+    }
+
+    /// Look up the original sender_id for a message_id (for receipt routing).
+    pub async fn get_message_sender(&mut self, message_id: &str) -> Result<Option<String>> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .get_message_sender(message_id)
+        .await
+    }
 }
