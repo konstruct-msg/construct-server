@@ -642,4 +642,26 @@ impl MessageQueue {
         .get_message_sender(message_id)
         .await
     }
+
+    /// Returns true if this message_id was already dispatched (duplicate retry).
+    pub async fn is_message_duplicate(&mut self, message_id: &str) -> Result<bool> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .is_message_duplicate(message_id)
+        .await
+    }
+
+    /// Mark message_id as dispatched (idempotency key, TTL 24h).
+    pub async fn mark_message_dispatched(&mut self, message_id: &str) -> Result<()> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .mark_message_dispatched(message_id)
+        .await
+    }
 }

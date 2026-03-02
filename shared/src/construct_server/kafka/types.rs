@@ -154,6 +154,71 @@ impl KafkaMessageEnvelope {
         }
     }
 
+    /// Create a SESSION_RESET control envelope.
+    ///
+    /// Used by the server to signal that the receiving party should discard their
+    /// current session state and re-initialise (fetch a fresh prekey bundle).
+    ///
+    /// `trigger_user_id` — the user whose decryption failed (triggers the reset).
+    /// `recipient_id` — who receives this SESSION_RESET signal (original sender).
+    pub fn new_session_reset(trigger_user_id: String, recipient_id: String) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let payload = "SESSION_RESET";
+
+        let mut hasher = Sha256::new();
+        hasher.update(message_id.as_bytes());
+        hasher.update(payload.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id,
+            sender_id: trigger_user_id,
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::ControlMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: payload.to_string(),
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+        }
+    }
+
+    /// Create a KEY_SYNC control envelope.
+    /// Recipient will perform a full X3DH re-init with `sender_user_id`.
+    pub fn new_key_sync(sender_user_id: String, recipient_id: String) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let payload = "KEY_SYNC";
+
+        let mut hasher = Sha256::new();
+        hasher.update(message_id.as_bytes());
+        hasher.update(payload.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id,
+            sender_id: sender_user_id,
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::ControlMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: payload.to_string(),
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+        }
+    }
+
     /// Validate message envelope structure
     pub fn validate(&self) -> Result<()> {
         // Check required fields
