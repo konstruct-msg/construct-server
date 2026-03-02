@@ -278,6 +278,41 @@ impl MessagingService for MessagingGrpcService {
             has_more,
         }))
     }
+
+    async fn request_key_sync(
+        &self,
+        request: Request<proto::RequestKeySyncRequest>,
+    ) -> Result<Response<proto::RequestKeySyncResponse>, Status> {
+        let sender_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?;
+
+        let recipient_user_id = request.into_inner().recipient_user_id;
+        if recipient_user_id.is_empty() {
+            return Err(Status::invalid_argument("recipient_user_id is required"));
+        }
+
+        use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+        let envelope =
+            KafkaMessageEnvelope::new_key_sync(sender_id.to_string(), recipient_user_id.clone());
+
+        let mut queue = self.context.queue.lock().await;
+        queue
+            .write_message_to_user_stream(&recipient_user_id, &envelope)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to queue KEY_SYNC: {e}")))?;
+
+        tracing::info!(
+            sender = %sender_id,
+            recipient = %recipient_user_id,
+            "KEY_SYNC queued"
+        );
+
+        Ok(Response::new(proto::RequestKeySyncResponse {}))
+    }
 }
 
 /// Handle incoming MessageStreamRequest from client
@@ -535,9 +570,14 @@ async fn relay_delivery_receipt(
         return Ok(());
     }
 
+    // RECEIPT_STATUS_FAILED (3) — session is broken on recipient side.
+    // Server queues SESSION_RESET to the original sender so they can re-init the session.
+    let is_failed = direct.status == 3;
+
     let status = match direct.status {
         1 => "delivered",
         2 => "read",
+        3 => "failed",
         _ => "delivered",
     };
 
@@ -565,9 +605,10 @@ async fn relay_delivery_receipt(
         }
     }
 
-    // Write one receipt envelope per sender
+    // Write receipt envelope (and optionally SESSION_RESET) per sender
     let mut queue = context.queue.lock().await;
     for (sender_id, msg_ids) in sender_map {
+        // Relay the receipt
         let receipt_envelope = KafkaMessageEnvelope::from_receipt(
             sender_id.clone(),
             receipt_sender_id.clone(),
@@ -580,7 +621,28 @@ async fn relay_delivery_receipt(
         {
             tracing::warn!(error = %e, sender_id = %sender_id, "Failed to relay receipt to sender stream (non-critical)");
         } else {
-            tracing::debug!(sender_id = %sender_id, "Relayed delivery receipt to sender stream");
+            tracing::debug!(sender_id = %sender_id, status, "Relayed delivery receipt to sender stream");
+        }
+
+        // If decryption failed: queue SESSION_RESET so the sender re-initialises the session.
+        // This mirrors Signal's "archived session retry → give up → reset" behaviour.
+        if is_failed {
+            let reset_envelope = KafkaMessageEnvelope::new_session_reset(
+                receipt_sender_id.clone(), // "from" recipient (triggers reset on sender side)
+                sender_id.clone(),
+            );
+            if let Err(e) = queue
+                .write_message_to_user_stream(&sender_id, &reset_envelope)
+                .await
+            {
+                tracing::warn!(error = %e, sender_id = %sender_id, "Failed to queue SESSION_RESET (non-critical)");
+            } else {
+                tracing::info!(
+                    sender_id = %sender_id,
+                    recipient_id = %receipt_sender_id,
+                    "Queued SESSION_RESET due to RECEIPT_STATUS_FAILED"
+                );
+            }
         }
     }
 

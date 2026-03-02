@@ -28,6 +28,29 @@ pub async fn dispatch_envelope(
     let sender_id = &envelope.sender_id;
     let recipient_id = &envelope.recipient_id;
 
+    // Idempotency: reject duplicate message_ids (client retry with same UUID).
+    // Receipt and control envelopes are excluded — they are server-generated.
+    use crate::kafka::types::MessageType;
+    let is_user_message = matches!(
+        envelope.message_type,
+        MessageType::DirectMessage | MessageType::MLSMessage
+    );
+    if is_user_message {
+        let mut queue = app_context.queue.lock().await;
+        match queue.is_message_duplicate(message_id).await {
+            Ok(true) => {
+                tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
+                return Ok(());
+            }
+            Ok(false) => {
+                let _ = queue.mark_message_dispatched(message_id).await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
+            }
+        }
+    }
+
     if let Some(kafka_producer) = &app_context.kafka_producer {
         if kafka_producer.is_enabled() {
             match kafka_producer.send_message(&envelope).await {
