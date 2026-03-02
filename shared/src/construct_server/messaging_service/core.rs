@@ -94,6 +94,14 @@ async fn send_push_notification(
 ) -> anyhow::Result<()> {
     use crate::utils::log_safe_id;
 
+    // Only send to devices matching the server's configured APNs environment.
+    // dev server (APNS_ENVIRONMENT=development) → sandbox tokens only
+    // prod server (APNS_ENVIRONMENT=production) → production tokens only
+    let env_str = match app_context.config.apns.environment {
+        construct_config::ApnsEnvironment::Production => "production",
+        _ => "sandbox",
+    };
+
     #[derive(sqlx::FromRow)]
     struct DeviceTokenRow {
         device_token_encrypted: Vec<u8>,
@@ -101,9 +109,11 @@ async fn send_push_notification(
 
     let rows = sqlx::query_as::<_, DeviceTokenRow>(
         "SELECT device_token_encrypted FROM device_tokens \
-         WHERE user_id = $1::uuid AND enabled = true",
+         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns' \
+         AND push_environment = $2",
     )
     .bind(recipient_id)
+    .bind(env_str)
     .fetch_all(&*app_context.db_pool)
     .await?;
 

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package shared.proto.services.v1;
 
+import "services/auth_service.proto"; // PushProvider, PushEnvironment
+
 // NotificationService - отвечает за управление push-уведомлениями
 // и отправку "слепых" уведомлений (privacy-preserving notifications).
 service NotificationService {
@@ -58,6 +60,16 @@ message RegisterDeviceTokenRequest {
   
   // Фильтр уведомлений
   NotificationFilter notification_filter = 3;
+
+  // ID устройства из Keychain — стабильный идентификатор для upsert.
+  // Позволяет обновить токен при его ротации, не создавая дубликат.
+  string device_id = 4;
+
+  // Провайдер push-уведомлений
+  PushProvider provider = 5;
+
+  // Окружение APNs (sandbox для debug-сборок, production для релиза)
+  PushEnvironment environment = 6;
 }
 
 // Ответ на регистрацию device token
