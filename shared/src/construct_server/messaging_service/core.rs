@@ -70,6 +70,83 @@ pub async fn dispatch_envelope(
         "Message dispatched successfully (gRPC path)"
     );
 
+    // Send silent push notification asynchronously — failures do not affect delivery
+    if app_context.config.apns.enabled {
+        let ctx = app_context.clone();
+        let recipient = recipient_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = send_push_notification(&ctx, &recipient).await {
+                tracing::warn!(error = %e, "Failed to send push notification (non-critical)");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+/// Send silent push notification to all active devices of a recipient.
+///
+/// Non-blocking helper — always called via `tokio::spawn`. Failures are logged
+/// but never propagate to the caller.
+async fn send_push_notification(
+    app_context: &Arc<AppContext>,
+    recipient_id: &str,
+) -> anyhow::Result<()> {
+    use crate::utils::log_safe_id;
+
+    #[derive(sqlx::FromRow)]
+    struct DeviceTokenRow {
+        device_token_encrypted: Vec<u8>,
+    }
+
+    let rows = sqlx::query_as::<_, DeviceTokenRow>(
+        "SELECT device_token_encrypted FROM device_tokens \
+         WHERE user_id = $1::uuid AND enabled = true",
+    )
+    .bind(recipient_id)
+    .fetch_all(&*app_context.db_pool)
+    .await?;
+
+    if rows.is_empty() {
+        tracing::debug!(
+            recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+            "No active device tokens — push skipped"
+        );
+        return Ok(());
+    }
+
+    let mut success = 0u32;
+    let mut failed = 0u32;
+    for row in &rows {
+        match app_context.token_encryption.decrypt(&row.device_token_encrypted) {
+            Ok(token) => match app_context.apns_client.send_silent_push(&token, None).await {
+                Ok(_) => success += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        error = %e,
+                        "Silent push failed for device"
+                    );
+                }
+            },
+            Err(e) => {
+                failed += 1;
+                tracing::error!(
+                    recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                    error = %e,
+                    "Failed to decrypt device token"
+                );
+            }
+        }
+    }
+
+    tracing::debug!(
+        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+        success,
+        failed,
+        "Push notification attempt complete"
+    );
     Ok(())
 }
 
