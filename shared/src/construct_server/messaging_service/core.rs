@@ -70,6 +70,14 @@ pub async fn dispatch_envelope(
         "Message dispatched successfully (gRPC path)"
     );
 
+    // Store sender mapping for receipt routing — non-critical, log and continue on error.
+    if !sender_id.is_empty() {
+        let mut queue = app_context.queue.lock().await;
+        if let Err(e) = queue.store_message_sender(message_id, sender_id).await {
+            tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping (non-critical)");
+        }
+    }
+
     // Send silent push notification asynchronously — failures do not affect delivery
     if app_context.config.apns.enabled {
         let ctx = app_context.clone();
