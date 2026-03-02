@@ -35,6 +35,10 @@ pub enum MessageType {
     /// Federated S2S message from another server
     #[allow(dead_code)]
     FederatedMessage,
+
+    /// Sealed sender message — sender identity is hidden from server.
+    /// `sender_id` is empty; recipient extracted from SealedInner.recipient_user_id.
+    SealedSender,
 }
 
 /// Kafka message envelope containing all message types
@@ -113,6 +117,16 @@ pub struct KafkaMessageEnvelope {
     /// Only present for FederatedMessage type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_signature: Option<String>,
+
+    // ===== Sealed Sender Fields =====
+    /// True when this is a sealed-sender message. `sender_id` will be empty.
+    #[serde(default)]
+    pub is_sealed_sender: bool,
+
+    /// Base64-encoded serialized `SealedInner` protobuf — opaque to server.
+    /// Contains recipient_user_id (plaintext for routing) + E2EE payload (opaque).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sealed_inner_b64: Option<String>,
 }
 
 impl KafkaMessageEnvelope {
@@ -145,6 +159,47 @@ impl KafkaMessageEnvelope {
             origin_server: None,
             federated: false,
             server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
+        }
+    }
+
+    /// Create a KafkaMessageEnvelope for a sealed-sender message.
+    ///
+    /// The server does NOT know the sender. `recipient_id` is extracted from the
+    /// plaintext `SealedInner.recipient_user_id` field before calling this.
+    /// The full `sealed_inner` bytes are stored opaquely for delivery to the client.
+    pub fn from_sealed_sender(
+        message_id: String,
+        recipient_id: String,
+        sealed_inner: Vec<u8>,
+    ) -> Self {
+        use base64::Engine;
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&sealed_inner);
+
+        let mut hasher = Sha256::new();
+        hasher.update(message_id.as_bytes());
+        hasher.update(&sealed_inner);
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id,
+            sender_id: String::new(), // intentionally empty — sealed sender
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::SealedSender,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: sealed_b64.clone(),
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: true,
+            sealed_inner_b64: Some(sealed_b64),
         }
     }
 
@@ -154,7 +209,8 @@ impl KafkaMessageEnvelope {
         if self.message_id.is_empty() {
             anyhow::bail!("message_id is required");
         }
-        if self.sender_id.is_empty() {
+        // sender_id is intentionally empty for sealed sender messages
+        if !self.is_sealed_sender && self.sender_id.is_empty() {
             anyhow::bail!("sender_id is required");
         }
         if self.recipient_id.is_empty() {
@@ -195,6 +251,11 @@ impl KafkaMessageEnvelope {
                 }
                 if self.server_signature.is_none() {
                     anyhow::bail!("server_signature required for FederatedMessage");
+                }
+            }
+            MessageType::SealedSender => {
+                if self.sealed_inner_b64.is_none() {
+                    anyhow::bail!("sealed_inner_b64 required for SealedSender");
                 }
             }
         }
@@ -247,6 +308,8 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     origin_server: None,
                     federated: false,
                     server_signature: None,
+                    is_sealed_sender: false,
+                    sealed_inner_b64: None,
                 }
             }
             ConstructMessageType::EndSession => {
@@ -274,6 +337,8 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     origin_server: None,
                     federated: false,
                     server_signature: None,
+                    is_sealed_sender: false,
+                    sealed_inner_b64: None,
                 }
             }
         }
@@ -334,6 +399,8 @@ impl KafkaMessageEnvelope {
             origin_server: None,
             federated: false,
             server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
         }
     }
 }
