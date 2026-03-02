@@ -118,7 +118,10 @@ async fn send_push_notification(
     let mut success = 0u32;
     let mut failed = 0u32;
     for row in &rows {
-        match app_context.token_encryption.decrypt(&row.device_token_encrypted) {
+        match app_context
+            .token_encryption
+            .decrypt(&row.device_token_encrypted)
+        {
             Ok(token) => match app_context.apns_client.send_silent_push(&token, None).await {
                 Ok(_) => success += 1,
                 Err(e) => {
