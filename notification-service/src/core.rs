@@ -34,6 +34,9 @@ pub struct RegisterDeviceTokenInput {
     pub device_token: String,
     pub device_name: Option<String>,
     pub notification_filter: i32, // proto enum as i32
+    pub device_id: Option<String>,
+    pub push_provider: String,    // "apns" | "fcm"
+    pub push_environment: String, // "sandbox" | "production"
 }
 
 #[derive(Debug, Clone)]
@@ -290,26 +293,66 @@ pub async fn register_device_token(
         None
     };
 
-    // Insert or update device token in database
-    sqlx::query!(
-        r#"
-        INSERT INTO device_tokens (user_id, device_token_hash, device_token_encrypted, device_name_encrypted, notification_filter, enabled)
-        VALUES ($1, $2, $3, $4, $5, TRUE)
-        ON CONFLICT (user_id, device_token_hash)
-        DO UPDATE SET
-            device_name_encrypted = EXCLUDED.device_name_encrypted,
-            notification_filter = EXCLUDED.notification_filter,
-            enabled = TRUE
-        "#,
-        input.user_id,
-        token_hash,
-        token_encrypted,
-        name_encrypted.as_deref(),
-        filter
-    )
-    .execute(&*context.db_pool)
-    .await
-    .context("Failed to insert/update device token")?;
+    // Insert or update device token in database.
+    // Conflict resolution:
+    //   - If device_id provided: upsert on (user_id, device_id) — handles token rotation
+    //   - Otherwise: upsert on (user_id, device_token_hash) — legacy path
+    if let Some(ref device_id) = input.device_id {
+        sqlx::query!(
+            r#"
+            INSERT INTO device_tokens
+                (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
+                 notification_filter, enabled, device_id, push_provider, push_environment)
+            VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET
+                device_token_hash      = EXCLUDED.device_token_hash,
+                device_token_encrypted = EXCLUDED.device_token_encrypted,
+                device_name_encrypted  = EXCLUDED.device_name_encrypted,
+                notification_filter    = EXCLUDED.notification_filter,
+                push_provider          = EXCLUDED.push_provider,
+                push_environment       = EXCLUDED.push_environment,
+                enabled                = TRUE
+            "#,
+            input.user_id,
+            token_hash,
+            token_encrypted,
+            name_encrypted.as_deref(),
+            filter,
+            device_id,
+            input.push_provider,
+            input.push_environment,
+        )
+        .execute(&*context.db_pool)
+        .await
+        .context("Failed to insert/update device token")?;
+    } else {
+        sqlx::query!(
+            r#"
+            INSERT INTO device_tokens
+                (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
+                 notification_filter, enabled, push_provider, push_environment)
+            VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7)
+            ON CONFLICT (user_id, device_token_hash)
+            DO UPDATE SET
+                device_name_encrypted = EXCLUDED.device_name_encrypted,
+                notification_filter   = EXCLUDED.notification_filter,
+                push_provider         = EXCLUDED.push_provider,
+                push_environment      = EXCLUDED.push_environment,
+                enabled               = TRUE
+            "#,
+            input.user_id,
+            token_hash,
+            token_encrypted,
+            name_encrypted.as_deref(),
+            filter,
+            input.push_provider,
+            input.push_environment,
+        )
+        .execute(&*context.db_pool)
+        .await
+        .context("Failed to insert/update device token")?;
+    }
 
     tracing::info!(
         user_hash = %user_id_hash,
