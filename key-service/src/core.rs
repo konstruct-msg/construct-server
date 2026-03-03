@@ -83,16 +83,17 @@ pub async fn get_prekey_bundle(
         None => return Ok(None),
     };
 
-    // Try to consume a one-time pre-key
+    // Try to consume a one-time pre-key.
+    // FOR UPDATE SKIP LOCKED prevents two concurrent GetPreKeyBundle calls from burning the same key.
     let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
         r#"
         DELETE FROM one_time_prekeys
-        WHERE device_id = $1
-        AND key_id = (
-            SELECT key_id FROM one_time_prekeys
+        WHERE (device_id, key_id) = (
+            SELECT device_id, key_id FROM one_time_prekeys
             WHERE device_id = $1
             ORDER BY uploaded_at ASC
             LIMIT 1
+            FOR UPDATE SKIP LOCKED
         )
         RETURNING key_id, public_key
         "#,
@@ -152,16 +153,17 @@ pub async fn get_prekey_bundles(
     let mut unavailable = Vec::new();
 
     for device in devices {
-        // Try to get one-time pre-key
+        // Try to get one-time pre-key.
+        // FOR UPDATE SKIP LOCKED prevents two concurrent requests from burning the same key.
         let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
             r#"
             DELETE FROM one_time_prekeys
-            WHERE device_id = $1
-            AND key_id = (
-                SELECT key_id FROM one_time_prekeys
+            WHERE (device_id, key_id) = (
+                SELECT device_id, key_id FROM one_time_prekeys
                 WHERE device_id = $1
                 ORDER BY uploaded_at ASC
                 LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
             RETURNING key_id, public_key
             "#,
