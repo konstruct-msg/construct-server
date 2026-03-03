@@ -602,6 +602,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "construct-broker"
+version = "0.8.4"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "construct-config",
+ "construct-types",
+ "hex",
+ "once_cell",
+ "prometheus",
+ "rdkafka 0.36.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-config"
 version = "0.1.0"
 dependencies = [
@@ -717,6 +739,7 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "chrono",
+ "construct-broker",
  "construct-config",
  "construct-crypto",
  "construct-db",
