@@ -26,7 +26,8 @@ pub mod handlers {
     pub mod federation; // Used in routes/federation.rs
 }
 pub mod health;
-pub mod kafka;
+// Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
+pub use construct_broker as kafka;
 pub mod key_management;
 // pub mod message_gateway; // TODO PROTO-1: Replace with new gRPC MessagingService
 pub mod messaging_service;

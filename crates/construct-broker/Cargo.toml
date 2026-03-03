@@ -1,0 +1,32 @@
+[package]
+name = "construct-broker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-config = { path = "../construct-config" }
+construct-types = { path = "../construct-types" }
+
+# Kafka
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async
+tokio = { version = "1.40", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+
+# Utils
+sha2 = "0.10"
+hex = { workspace = true }
+once_cell = "1.21"
+base64 = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+prometheus = { version = "0.14", features = ["process"] }
