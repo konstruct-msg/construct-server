@@ -52,7 +52,7 @@ pub async fn get_prekey_bundle(
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -66,7 +66,7 @@ pub async fn get_prekey_bundle(
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -106,7 +106,7 @@ pub async fn get_prekey_bundle(
         identity_key: device.identity_public,
         verifying_key: device.verifying_key,
         signed_prekey: device.signed_prekey_public,
-        signed_prekey_id: 1, // TODO: Track signed prekey IDs
+        signed_prekey_id: device.signed_prekey_id as u32,
         signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
         one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
         one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
@@ -125,7 +125,7 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -138,7 +138,7 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -175,7 +175,7 @@ pub async fn get_prekey_bundles(
             identity_key: device.identity_public,
             verifying_key: device.verifying_key,
             signed_prekey: device.signed_prekey_public,
-            signed_prekey_id: 1,
+            signed_prekey_id: device.signed_prekey_id as u32,
             signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
             one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
             one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
@@ -225,7 +225,7 @@ pub async fn upload_prekeys(
             r#"
             INSERT INTO one_time_prekeys (device_id, key_id, public_key)
             VALUES ($1, $2, $3)
-            ON CONFLICT (device_id, key_id) DO UPDATE SET public_key = $3
+            ON CONFLICT (device_id, key_id) DO NOTHING
             "#,
         )
         .bind(device_id)
@@ -275,10 +275,10 @@ pub async fn rotate_signed_prekey(
     new_key: &SignedPreKey,
     reason: &str,
 ) -> Result<DateTime<Utc>> {
-    // Get current signed prekey before updating
+    // Get current signed prekey (including its ID) before updating
     let current = sqlx::query_as::<_, SignedPreKeyRow>(
         r#"
-        SELECT signed_prekey_public, signed_prekey_signature
+        SELECT signed_prekey_id, signed_prekey_public, signed_prekey_signature
         FROM devices
         WHERE device_id = $1 AND is_active = true
         "#,
@@ -287,19 +287,20 @@ pub async fn rotate_signed_prekey(
     .fetch_optional(db)
     .await?;
 
-    // Archive old key if it exists
+    // Archive old key with its real key_id
     if let Some(old) = current {
         if let Some(sig) = old.signed_prekey_signature {
             sqlx::query(
                 r#"
                 INSERT INTO signed_prekey_archive (device_id, key_id, public_key, signature, rotation_reason)
-                VALUES ($1, 0, $2, $3, $4)
+                VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (device_id, key_id) DO UPDATE SET
-                    public_key = $2, signature = $3, rotation_reason = $4,
+                    public_key = $3, signature = $4, rotation_reason = $5,
                     archived_at = NOW(), expires_at = NOW() + INTERVAL '48 hours'
-                "#
+                "#,
             )
             .bind(device_id)
+            .bind(old.signed_prekey_id)
             .bind(&old.signed_prekey_public)
             .bind(&sig)
             .bind(reason)
@@ -308,19 +309,21 @@ pub async fn rotate_signed_prekey(
         }
     }
 
-    // Update device with new signed prekey
+    // Update device with new signed prekey and its ID
     sqlx::query(
         r#"
         UPDATE devices
         SET signed_prekey_public = $2,
-            signed_prekey_signature = $3,
+            signed_prekey_id = $3,
+            signed_prekey_signature = $4,
             key_updated_at = NOW(),
-            key_update_reason = $4
+            key_update_reason = $5
         WHERE device_id = $1
         "#,
     )
     .bind(device_id)
     .bind(&new_key.public_key)
+    .bind(new_key.key_id as i32)
     .bind(&new_key.signature)
     .bind(reason)
     .execute(db)
@@ -335,10 +338,10 @@ pub async fn rotate_signed_prekey(
 pub async fn get_signed_prekey_age(
     db: &PgPool,
     device_id: &str,
-) -> Result<Option<(DateTime<Utc>, bool)>> {
+) -> Result<Option<(u32, DateTime<Utc>, bool)>> {
     let row = sqlx::query_as::<_, SignedPreKeyAgeRow>(
         r#"
-        SELECT key_updated_at, registered_at
+        SELECT signed_prekey_id, key_updated_at, registered_at
         FROM devices
         WHERE device_id = $1 AND is_active = true
         "#,
@@ -352,7 +355,11 @@ pub async fn get_signed_prekey_age(
             let uploaded_at = r.key_updated_at.unwrap_or(r.registered_at);
             let age = Utc::now() - uploaded_at;
             let should_rotate = age.num_days() >= 30;
-            Ok(Some((uploaded_at, should_rotate)))
+            Ok(Some((
+                r.signed_prekey_id as u32,
+                uploaded_at,
+                should_rotate,
+            )))
         }
         None => Ok(None),
     }
@@ -459,6 +466,7 @@ struct DeviceRow {
     identity_public: Vec<u8>,
     verifying_key: Vec<u8>,
     signed_prekey_public: Vec<u8>,
+    signed_prekey_id: i32,
     signed_prekey_signature: Option<Vec<u8>>,
     crypto_suite: String,
     registered_at: DateTime<Utc>,
@@ -478,12 +486,14 @@ struct PreKeyCountRow {
 
 #[derive(sqlx::FromRow)]
 struct SignedPreKeyRow {
+    signed_prekey_id: i32,
     signed_prekey_public: Vec<u8>,
     signed_prekey_signature: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
 struct SignedPreKeyAgeRow {
+    signed_prekey_id: i32,
     key_updated_at: Option<DateTime<Utc>>,
     registered_at: DateTime<Utc>,
 }

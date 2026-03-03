@@ -243,10 +243,10 @@ impl KeyService for KeyGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match result {
-            Some((uploaded_at, should_rotate)) => {
+            Some((key_id, uploaded_at, should_rotate)) => {
                 let age = chrono::Utc::now() - uploaded_at;
                 Ok(Response::new(proto::GetSignedPreKeyAgeResponse {
-                    key_id: 1,
+                    key_id,
                     uploaded_at: uploaded_at.timestamp(),
                     age_seconds: age.num_seconds(),
                     should_rotate,
