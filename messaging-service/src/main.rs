@@ -253,14 +253,28 @@ impl MessagingService for MessagingGrpcService {
             .filter_map(|(_stream_id, env)| {
                 let env = env?; // skip corrupt / wrong-recipient entries
                 use base64::Engine;
+                use construct_server_shared::kafka::types::MessageType;
+                use construct_server_shared::shared::proto::core::v1 as core;
+
+                let content_type = match env.message_type {
+                    MessageType::ControlMessage => match env.encrypted_payload.as_str() {
+                        "SESSION_RESET" => core::ContentType::SessionReset,
+                        "KEY_SYNC" => core::ContentType::KeySync,
+                        _ => core::ContentType::E2eeSignal,
+                    },
+                    _ => core::ContentType::E2eeSignal,
+                };
+
                 let payload_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&env.encrypted_payload)
                     .unwrap_or_else(|_| env.encrypted_payload.into_bytes());
+
                 Some(proto::PendingMessage {
                     message_id: env.message_id,
                     sender_id: env.sender_id,
                     encrypted_payload: payload_bytes,
                     timestamp: env.timestamp,
+                    content_type: content_type.into(),
                 })
             })
             .collect();
@@ -511,7 +525,19 @@ fn convert_kafka_envelope_to_proto(
     envelope: construct_server_shared::kafka::types::KafkaMessageEnvelope,
 ) -> anyhow::Result<construct_server_shared::shared::proto::core::v1::Envelope> {
     use base64::Engine;
+    use construct_server_shared::kafka::types::MessageType;
     use construct_server_shared::shared::proto::core::v1 as core;
+
+    // Map Kafka MessageType → proto ContentType so clients can detect control messages
+    // (SESSION_RESET, KEY_SYNC) without trying to decrypt them.
+    let content_type = match envelope.message_type {
+        MessageType::ControlMessage => match envelope.encrypted_payload.as_str() {
+            "SESSION_RESET" => core::ContentType::SessionReset,
+            "KEY_SYNC" => core::ContentType::KeySync,
+            _ => core::ContentType::E2eeSignal,
+        },
+        _ => core::ContentType::E2eeSignal,
+    };
 
     // Decode base64 ciphertext back to raw bytes — forwarded verbatim, never read.
     let payload_bytes = base64::engine::general_purpose::STANDARD
@@ -531,7 +557,7 @@ fn convert_kafka_envelope_to_proto(
             display_name: None,
         }),
         recipient_device: None,
-        content_type: core::ContentType::E2eeSignal.into(),
+        content_type: content_type.into(),
         message_id_type: Some(core::envelope::MessageIdType::MessageId(
             envelope.message_id,
         )),
