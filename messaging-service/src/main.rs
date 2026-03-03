@@ -601,27 +601,56 @@ async fn relay_delivery_receipt(
         _ => "delivered",
     };
 
-    // Group message_ids by original sender
+    // Group message_ids by original sender.
+    // Primary lookup: Redis (fast). Fallback: delivery_pending DB table (survives Redis restarts).
     let mut sender_map: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
-    {
-        let mut queue = context.queue.lock().await;
-        for message_id in &direct.message_ids {
-            match queue.get_message_sender(message_id).await {
-                Ok(Some(sender_id)) => {
-                    sender_map
-                        .entry(sender_id)
-                        .or_default()
-                        .push(message_id.clone());
-                }
-                Ok(None) => {
-                    tracing::debug!(message_id = %message_id, "No sender mapping found for receipt (expired or unknown)");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, message_id = %message_id, "Failed to look up sender for receipt");
+    for message_id in &direct.message_ids {
+        // Try Redis first
+        let redis_result = {
+            let mut queue = context.queue.lock().await;
+            queue.get_message_sender(message_id).await
+        };
+
+        let sender_id = match redis_result {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                // Redis miss — fall back to DB
+                let hash_salt = &context.config.logging.hash_salt;
+                let message_hash =
+                    construct_server_shared::messaging_service::core::receipt_routing_hash(
+                        message_id, hash_salt,
+                    );
+                match sqlx::query_scalar::<_, String>(
+                    "DELETE FROM delivery_pending WHERE message_hash = $1 RETURNING sender_id",
+                )
+                .bind(&message_hash)
+                .fetch_optional(&*context.db_pool)
+                .await
+                {
+                    Ok(Some(id)) => {
+                        tracing::debug!(message_id = %message_id, "Receipt sender found in DB fallback");
+                        Some(id)
+                    }
+                    Ok(None) => {
+                        tracing::debug!(message_id = %message_id, "No sender mapping found for receipt (expired or unknown)");
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, message_id = %message_id, "DB fallback lookup failed for receipt");
+                        None
+                    }
                 }
             }
+            Err(e) => {
+                tracing::warn!(error = %e, message_id = %message_id, "Failed to look up sender for receipt");
+                None
+            }
+        };
+
+        if let Some(id) = sender_id {
+            sender_map.entry(id).or_default().push(message_id.clone());
         }
     }
 

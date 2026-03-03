@@ -94,11 +94,33 @@ pub async fn dispatch_envelope(
     );
 
     // Store sender mapping for receipt routing — non-critical, log and continue on error.
+    // Stored in both Redis (fast path) and DB (durability fallback).
     if !sender_id.is_empty() {
         let mut queue = app_context.queue.lock().await;
         if let Err(e) = queue.store_message_sender(message_id, sender_id).await {
-            tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping (non-critical)");
+            tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
         }
+        drop(queue);
+        // DB fallback: persist to delivery_pending so receipts survive Redis restarts.
+        let hash_salt = app_context.config.logging.hash_salt.clone();
+        let msg_id = message_id.clone();
+        let snd_id = sender_id.clone();
+        let pool = app_context.db_pool.clone();
+        tokio::spawn(async move {
+            let message_hash = receipt_routing_hash(&msg_id, &hash_salt);
+            let result = sqlx::query(
+                "INSERT INTO delivery_pending (message_hash, sender_id, expires_at) \
+                 VALUES ($1, $2, NOW() + INTERVAL '30 days') \
+                 ON CONFLICT (message_hash) DO NOTHING",
+            )
+            .bind(&message_hash)
+            .bind(&snd_id)
+            .execute(&*pool)
+            .await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, message_id = %msg_id, "Failed to persist receipt sender to DB (non-critical)");
+            }
+        });
     }
 
     // Send silent push notification asynchronously — failures do not affect delivery
@@ -435,4 +457,16 @@ pub async fn confirm_pending_message(
             }))
         }
     }
+}
+
+/// Compute HMAC-SHA256(message_id, salt) as a hex string for delivery_pending lookups.
+/// UUIDs have 122 bits of entropy — brute force is impractical without the salt.
+pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
+        .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+    mac.update(message_id.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
