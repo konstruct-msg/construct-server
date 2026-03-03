@@ -397,6 +397,11 @@ message PendingMessage {
   // Server-assigned receive timestamp (Unix seconds). Client ignores sender's timestamp.
   int64 timestamp = 8;
 
+  // Content type — required for control messages (SESSION_RESET = 21, KEY_SYNC = 22).
+  // Clients MUST check this before attempting to decrypt encrypted_payload.
+  // For regular E2EE messages this will be CONTENT_TYPE_E2EE_SIGNAL (= 11).
+  shared.proto.core.v1.ContentType content_type = 9;
+
   // Reserved for removed plaintext crypto fields — do not reuse
   reserved 3, 4, 5, 6;
 }
