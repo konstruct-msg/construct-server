@@ -620,6 +620,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-audit"
+version = "0.8.4"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "construct-auth"
 version = "0.8.4"
 dependencies = [
@@ -696,19 +706,19 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.5.11"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "bcrypt",
  "chrono",
+ "construct-config",
  "construct-crypto",
  "crypto-agility",
  "prost 0.14.3",
  "serde_json",
  "sqlx",
- "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -745,6 +755,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-pow"
+version = "0.8.4"
+dependencies = [
+ "argon2",
+ "hex",
+ "rand 0.8.5",
+ "tracing",
+]
+
+[[package]]
 name = "construct-queue"
 version = "0.8.4"
 dependencies = [
@@ -762,6 +782,19 @@ dependencies = [
  "sha2",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "construct-rate-limit"
+version = "0.8.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "construct-error",
+ "redis",
+ "sqlx",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -791,6 +824,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "construct-apns",
+ "construct-audit",
  "construct-auth",
  "construct-broker",
  "construct-config",
@@ -798,9 +832,12 @@ dependencies = [
  "construct-db",
  "construct-error",
  "construct-metrics",
+ "construct-pow",
  "construct-queue",
+ "construct-rate-limit",
  "construct-redis",
  "construct-types",
+ "construct-utils",
  "crypto-agility",
  "dotenvy",
  "ed25519-dalek",
@@ -859,6 +896,16 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "construct-utils"
+version = "0.8.4"
+dependencies = [
+ "axum 0.7.9",
+ "hyper",
+ "sha2",
+ "tracing",
 ]
 
 [[package]]

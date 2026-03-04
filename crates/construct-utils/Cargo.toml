@@ -1,0 +1,10 @@
+[package]
+name = "construct-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hyper = { version = "1.5", features = ["full"] }
+axum = { workspace = true }
+sha2 = "0.10"
+tracing = { workspace = true }

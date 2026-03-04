@@ -15,12 +15,12 @@ pub use construct_types::{ChatMessage, ClientMessage, ServerMessage, UserId};
 
 // APNs module: re-exported from construct-apns crate
 pub use construct_apns as apns;
-pub mod audit;
+pub use construct_audit as audit;
 // Auth module: re-exported from construct-auth crate (JWT management)
 pub use construct_auth as auth;
 pub mod auth_service;
 pub mod context;
-pub mod db;
+pub use construct_db as db;
 pub mod delivery_ack;
 pub mod federation;
 pub mod gateway;
@@ -36,14 +36,14 @@ pub mod metrics;
 pub mod models; // Invite objects and other data models
 pub mod notification_service;
 pub mod pending_messages; // 2-Phase commit protocol for message delivery
-pub mod pow; // Proof of Work for device registration
+pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;
-pub mod rate_limit; // ← NEW: Rate limiting & warmup sandbox
+pub use construct_rate_limit as rate_limit; // Rate limiting & warmup sandbox
 pub mod routes;
 pub mod server_registry;
 pub mod user_service;
-pub mod utils;
+pub use construct_utils as utils;
 
 // Re-export delivery_worker modules for use in bin/delivery_worker.rs
 pub mod delivery_worker;

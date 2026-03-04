@@ -1,0 +1,10 @@
+[package]
+name = "construct-pow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+argon2 = { version = "0.5", features = ["password-hash"] }
+hex = { workspace = true }
+tracing = { workspace = true }
+rand = "0.8"
