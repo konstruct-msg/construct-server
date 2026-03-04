@@ -2,9 +2,6 @@ use std::sync::Arc;
 
 use crate::context::AppContext;
 use crate::db;
-use crate::routes::request_signing::{
-    compute_body_hash, extract_request_signature, verify_request_signature,
-};
 use crate::utils::log_safe_id;
 use crate::{audit::AuditLogger, utils::extract_client_ip};
 use axum::{
@@ -15,6 +12,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use construct_crypto::{BundleData, ServerCryptoValidator, UploadableKeyBundle};
 use construct_error::AppError;
 use construct_types::api::{KeyBundleResponse, PublicKeyResponse};
+use construct_utils::request_signing::{
+    compute_body_hash, extract_request_signature, verify_request_signature,
+};
 use serde_json::{Value, json};
 use std::net::IpAddr;
 use uuid::Uuid;

@@ -471,3 +471,5 @@ mod tests {
         assert_eq!(secret.as_str(), "my_secret_password");
     }
 }
+
+pub mod request_signing;
