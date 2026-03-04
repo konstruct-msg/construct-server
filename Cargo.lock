@@ -730,6 +730,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "construct-broker",
+ "construct-config",
  "construct-crypto",
  "construct-utils",
  "hex",
@@ -819,6 +820,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

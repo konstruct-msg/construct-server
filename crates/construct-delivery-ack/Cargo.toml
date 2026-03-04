@@ -7,6 +7,7 @@ edition.workspace = true
 construct-broker = { path = "../construct-broker" }
 construct-crypto = { path = "../construct-crypto", features = ["e2ee"] }
 construct-utils  = { path = "../construct-utils" }
+construct-config = { path = "../construct-config" }
 
 anyhow = { workspace = true }
 serde = { workspace = true }
