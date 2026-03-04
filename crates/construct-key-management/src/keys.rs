@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::vault::VaultClient;
-use crate::db::DbPool;
+use construct_db::DbPool;
 
 /// Types of managed keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

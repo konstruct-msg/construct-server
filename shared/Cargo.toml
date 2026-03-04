@@ -23,6 +23,7 @@ construct-pow        = { path = "../crates/construct-pow" }
 construct-federation    = { path = "../crates/construct-federation" }
 construct-delivery-ack  = { path = "../crates/construct-delivery-ack" }
 construct-pending       = { path = "../crates/construct-pending" }
+construct-key-management = { path = "../crates/construct-key-management" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 tokio = {workspace = true}

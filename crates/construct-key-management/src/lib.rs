@@ -16,8 +16,8 @@ pub mod keys;
 pub mod rotation;
 pub mod vault;
 
-use crate::db::DbPool;
 use anyhow::Result;
+use construct_db::DbPool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

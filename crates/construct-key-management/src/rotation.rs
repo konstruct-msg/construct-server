@@ -20,7 +20,7 @@ use uuid::Uuid;
 use super::audit;
 use super::keys::{KeyManager, KeyType};
 use super::vault::VaultClient;
-use crate::db::DbPool;
+use construct_db::DbPool;
 
 /// Rotation policy for a key type
 #[derive(Debug, Clone)]

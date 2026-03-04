@@ -1,0 +1,19 @@
+[package]
+name = "construct-key-management"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-db = { path = "../construct-db" }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+sqlx = { workspace = true }
+base64 = { workspace = true }
+jsonwebtoken = "9.3"
+reqwest = { workspace = true }
