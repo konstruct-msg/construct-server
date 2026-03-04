@@ -199,8 +199,13 @@ message UploadPreKeysRequest {
   // Optional: also update signed pre-key
   optional SignedPreKeyUpload signed_pre_key = 3;
 
+  // If true, delete all existing one-time pre-keys before inserting new ones.
+  // Use when uploading a fresh batch after key corruption or re-registration.
+  // Default: false (additive upload, Signal normal replenishment).
+  bool replace_existing = 4;
+
   // Reserved for future options
-  reserved 4 to 10;
+  reserved 5 to 10;
 }
 
 message OneTimePreKey {
