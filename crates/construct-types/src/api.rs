@@ -37,3 +37,22 @@ pub struct RequestSignature {
     /// Timestamp when request was signed (Unix epoch seconds)
     pub timestamp: i64,
 }
+
+/// Request body for PATCH /api/v1/users/me/public-key
+/// Per INVITE_LINKS_QR_API_SPEC.md Section 6B
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateVerifyingKeyRequest {
+    /// Base64-encoded Ed25519 verifying key
+    pub verifying_key: String,
+    /// Optional reason for update (e.g., "invite_signature_mismatch")
+    pub reason: Option<String>,
+}
+
+/// Request body for POST /api/v1/messages/confirm
+#[derive(Debug, Deserialize)]
+pub struct ConfirmMessageRequest {
+    /// Temporary ID from Phase 1 (send_message response)
+    #[serde(rename = "tempId")]
+    pub temp_id: String,
+}
