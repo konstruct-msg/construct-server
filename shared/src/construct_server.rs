@@ -36,7 +36,8 @@ pub mod models; // Invite objects and other data models
 pub mod notification_service;
 pub mod pending_messages; // 2-Phase commit protocol for message delivery
 pub mod pow; // Proof of Work for device registration
-pub mod queue;
+// Queue module: re-exported from construct-queue crate
+pub use construct_queue as queue;
 pub mod rate_limit; // ← NEW: Rate limiting & warmup sandbox
 pub mod routes;
 pub mod server_registry;

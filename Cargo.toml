@@ -22,6 +22,7 @@ members = [
     "crates/construct-redis",
     "crates/construct-config",
     "crates/construct-broker",
+    "crates/construct-queue",
     # Phase 5 - Crypto-Agility
     "crates/crypto-agility", "crates/construct-metrics",
 ]

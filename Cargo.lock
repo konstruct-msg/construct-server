@@ -714,6 +714,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-queue"
+version = "0.8.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "construct-broker",
+ "construct-config",
+ "construct-crypto",
+ "construct-redis",
+ "hex",
+ "redis",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "construct-redis"
 version = "0.5.11"
 dependencies = [
@@ -745,6 +765,7 @@ dependencies = [
  "construct-db",
  "construct-error",
  "construct-metrics",
+ "construct-queue",
  "construct-redis",
  "construct-types",
  "crypto-agility",
