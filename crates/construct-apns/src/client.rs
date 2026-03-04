@@ -96,7 +96,7 @@ impl ApnsClient {
             serde_json::to_string(&payload).with_context(|| "Failed to serialize APNs payload")?;
 
         // SECURITY: Hash device token for logging (never log full token)
-        use crate::apns::DeviceTokenEncryption;
+        use crate::DeviceTokenEncryption;
         let token_hash_bytes = DeviceTokenEncryption::hash_token(device_token);
         let token_hash_hex = hex::encode(&token_hash_bytes);
         debug!(

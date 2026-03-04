@@ -36,15 +36,22 @@
 //
 // ============================================================================
 
+mod deduplication;
+mod dlq;
+mod processor;
+mod redis_streams;
+mod retry;
+mod state;
+
 use anyhow::{Context, Result};
+use construct_broker::{MessageConsumer, MessageProducer};
 use construct_config::Config;
-use construct_server_shared::delivery_worker::{
-    ProcessResult, WorkerState, check_and_increment_retry, process_kafka_message, send_to_dlq,
-};
-use construct_server_shared::kafka::{MessageConsumer, MessageProducer};
 use construct_server_shared::utils::log_safe_id;
+use dlq::{check_and_increment_retry, send_to_dlq};
 use futures_util::stream::StreamExt;
+use processor::{ProcessResult, process_kafka_message};
 use serde::{Deserialize, Serialize};
+use state::WorkerState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, warn};

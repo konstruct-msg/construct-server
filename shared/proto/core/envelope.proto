@@ -146,8 +146,14 @@ enum ContentType {
   // Session reset request
   CONTENT_TYPE_SESSION_RESET = 21;
 
+  // KEY_SYNC — server-triggered silent key renegotiation (Matrix-inspired).
+  // Recipient receives this, fetches a fresh PreKeyBundle from the sender,
+  // and performs a full X3DH re-init without resetting the visible session.
+  // No UI shown to user. Triggered when sender detects a broken session.
+  CONTENT_TYPE_KEY_SYNC = 22;
+
   // Reserved for future types
-  reserved 3 to 9, 12 to 19, 22 to 100;
+  reserved 3 to 9, 12 to 19, 23 to 100;
 }
 
 // MessagePriority - Delivery priority

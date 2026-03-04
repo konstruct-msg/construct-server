@@ -480,6 +480,13 @@ impl GrpcMessagingService for TestMessagingGrpcService {
     ) -> Result<GrpcResponse<proto_svc::GetPendingMessagesResponse>, GrpcStatus> {
         Err(GrpcStatus::unimplemented("get_pending_messages"))
     }
+
+    async fn request_key_sync(
+        &self,
+        _: GrpcRequest<proto_svc::RequestKeySyncRequest>,
+    ) -> Result<GrpcResponse<proto_svc::RequestKeySyncResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("request_key_sync"))
+    }
 }
 
 /// Spawn messaging service — returns (http_address, grpc_address)

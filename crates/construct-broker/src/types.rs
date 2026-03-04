@@ -39,6 +39,12 @@ pub enum MessageType {
     /// Sealed sender message — sender identity is hidden from server.
     /// `sender_id` is empty; recipient extracted from SealedInner.recipient_user_id.
     SealedSender,
+
+    /// Delivery receipt relayed from recipient back to original sender.
+    /// `sender_id` = original message sender (receives the receipt).
+    /// `recipient_id` = receipt sender (who acknowledged the message).
+    /// `encrypted_payload` = JSON-serialized receipt info.
+    Receipt,
 }
 
 /// Kafka message envelope containing all message types
@@ -203,6 +209,75 @@ impl KafkaMessageEnvelope {
         }
     }
 
+    /// Create a SESSION_RESET control envelope.
+    ///
+    /// Used by the server to signal that the receiving party should discard their
+    /// current session state and re-initialise (fetch a fresh prekey bundle).
+    ///
+    /// `trigger_user_id` — the user whose decryption failed (triggers the reset).
+    /// `recipient_id` — who receives this SESSION_RESET signal (original sender).
+    pub fn new_session_reset(trigger_user_id: String, recipient_id: String) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let payload = "SESSION_RESET";
+
+        let mut hasher = Sha256::new();
+        hasher.update(message_id.as_bytes());
+        hasher.update(payload.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id,
+            sender_id: trigger_user_id,
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::ControlMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: payload.to_string(),
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
+        }
+    }
+
+    /// Create a KEY_SYNC control envelope.
+    /// Recipient will perform a full X3DH re-init with `sender_user_id`.
+    pub fn new_key_sync(sender_user_id: String, recipient_id: String) -> Self {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let payload = "KEY_SYNC";
+
+        let mut hasher = Sha256::new();
+        hasher.update(message_id.as_bytes());
+        hasher.update(payload.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id,
+            sender_id: sender_user_id,
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::ControlMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: payload.to_string(),
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
+        }
+    }
+
     /// Validate message envelope structure
     pub fn validate(&self) -> Result<()> {
         // Check required fields
@@ -258,9 +333,58 @@ impl KafkaMessageEnvelope {
                     anyhow::bail!("sealed_inner_b64 required for SealedSender");
                 }
             }
+            MessageType::Receipt => {
+                // encrypted_payload contains receipt JSON — already checked above
+            }
         }
 
         Ok(())
+    }
+
+    /// Create a KafkaMessageEnvelope representing a delivery receipt.
+    ///
+    /// `original_sender_id` — who originally sent the message (receives this receipt).
+    /// `receipt_sender_id` — who is sending the receipt (the message recipient).
+    /// `message_ids` — the messages being acknowledged.
+    /// `status` — receipt status string (e.g. "delivered", "read").
+    pub fn from_receipt(
+        original_sender_id: String,
+        receipt_sender_id: String,
+        message_ids: Vec<String>,
+        status: &str,
+    ) -> Self {
+        let receipt_id = uuid::Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "message_ids": message_ids,
+            "status": status,
+            "timestamp": chrono::Utc::now().timestamp_millis(),
+        })
+        .to_string();
+
+        let mut hasher = Sha256::new();
+        hasher.update(receipt_id.as_bytes());
+        hasher.update(payload.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id: receipt_id,
+            sender_id: original_sender_id,   // receives the receipt
+            recipient_id: receipt_sender_id, // sent the receipt
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::Receipt,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: payload,
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
+        }
     }
 }
 
