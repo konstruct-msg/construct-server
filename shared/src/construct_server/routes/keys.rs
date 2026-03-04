@@ -32,16 +32,8 @@ use construct_error::AppError;
 // Types moved to construct-types; re-exported here for backward compat
 pub use construct_types::api::{KeyBundleResponse, PublicKeyResponse};
 
-/// Request body for PATCH /api/v1/users/me/public-key
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6B
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateVerifyingKeyRequest {
-    /// Base64-encoded Ed25519 verifying key
-    pub verifying_key: String,
-    /// Optional reason for update (e.g., "invite_signature_mismatch")
-    pub reason: Option<String>,
-}
+// UpdateVerifyingKeyRequest moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::UpdateVerifyingKeyRequest;
 
 /// POST /keys/upload (legacy) or POST /api/v1/keys/upload
 /// Uploads or updates a user's key bundle
