@@ -16,7 +16,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use serde::Deserialize;
+
 use std::sync::Arc;
 
 use crate::context::AppContext;

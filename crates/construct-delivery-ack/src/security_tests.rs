@@ -347,7 +347,7 @@ fn test_batching_configuration() {
 // Integration Tests (require Redis + Kafka)
 // ============================================================================
 
-#[cfg(all(test, feature = "integration-tests"))]
+#[cfg(all(test, feature = "integration_tests"))]
 mod integration_tests {
 
     /// Integration test: Verify Redis ephemeral mappings expire

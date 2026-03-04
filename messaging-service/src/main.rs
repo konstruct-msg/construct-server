@@ -609,8 +609,8 @@ fn convert_kafka_envelope_to_proto(
             mentions: vec![],
             sealed_sender: Some(core::SealedSenderEnvelope {
                 recipient_server: String::new(),
-                sealed_inner: sealed_inner_bytes.into(),
-                forwarding_token: vec![].into(),
+                sealed_inner: sealed_inner_bytes,
+                forwarding_token: vec![],
                 timestamp: 0,
             }),
         });

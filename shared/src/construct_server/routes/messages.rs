@@ -11,7 +11,7 @@
 
 use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use serde::Deserialize;
+
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
