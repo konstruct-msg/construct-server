@@ -1,3 +1,5 @@
+// lint: some pub fns used only in integration tests
+#![allow(dead_code)]
 // ============================================================================
 // Dead Letter Queue (DLQ) for Delivery Worker
 // ============================================================================
