@@ -12,8 +12,8 @@
 //
 // ============================================================================
 
-use crate::federation::mtls::{FederationTrustStore, MtlsConfig};
-use crate::federation::signing::{FederatedEnvelope, ServerSigner};
+use crate::mtls::{FederationTrustStore, MtlsConfig};
+use crate::signing::{FederatedEnvelope, ServerSigner};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use construct_types::ChatMessage;

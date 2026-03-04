@@ -20,6 +20,9 @@ construct-utils      = { path = "../crates/construct-utils" }
 construct-audit      = { path = "../crates/construct-audit" }
 construct-rate-limit = { path = "../crates/construct-rate-limit" }
 construct-pow        = { path = "../crates/construct-pow" }
+construct-federation    = { path = "../crates/construct-federation" }
+construct-delivery-ack  = { path = "../crates/construct-delivery-ack" }
+construct-pending       = { path = "../crates/construct-pending" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 tokio = {workspace = true}

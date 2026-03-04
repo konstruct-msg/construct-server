@@ -124,17 +124,14 @@ mod tests {
 
     #[async_trait]
     impl DeliveryPendingStorage for MockStorage {
-        async fn save(
-            &self,
-            _record: &crate::delivery_ack::models::DeliveryPending,
-        ) -> anyhow::Result<()> {
+        async fn save(&self, _record: &crate::models::DeliveryPending) -> anyhow::Result<()> {
             Ok(())
         }
 
         async fn find_by_hash(
             &self,
             _message_hash: &str,
-        ) -> anyhow::Result<Option<crate::delivery_ack::models::DeliveryPending>> {
+        ) -> anyhow::Result<Option<crate::models::DeliveryPending>> {
             Ok(None)
         }
 
