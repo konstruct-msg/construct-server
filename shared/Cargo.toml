@@ -12,6 +12,8 @@ construct-config = { path = "../crates/construct-config" }
 construct-redis = { path = "../crates/construct-redis" }
 construct-broker = { path = "../crates/construct-broker" }
 construct-queue  = { path = "../crates/construct-queue" }
+construct-auth   = { path = "../crates/construct-auth" }
+construct-apns   = { path = "../crates/construct-apns" }
 construct-db = { path = "../crates/construct-db" }
 construct-metrics = { path = "../crates/construct-metrics" }
 crypto-agility = { path = "../crates/crypto-agility" }
