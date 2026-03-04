@@ -36,6 +36,8 @@ members = [
     "crates/construct-delivery-ack",
     "crates/construct-pending",
     "crates/construct-key-management",
+    "crates/construct-context",
+    "crates/construct-extractors",
 ]
 
 # Единая версия для всех пакетов

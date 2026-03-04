@@ -19,7 +19,7 @@ pub use construct_audit as audit;
 // Auth module: re-exported from construct-auth crate (JWT management)
 pub use construct_auth as auth;
 pub mod auth_service;
-pub mod context;
+pub use construct_context as context;
 pub use construct_db as db;
 pub use construct_delivery_ack as delivery_ack;
 pub use construct_federation as federation;

@@ -1,0 +1,20 @@
+[package]
+name = "construct-context"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-apns          = { path = "../construct-apns" }
+construct-auth          = { path = "../construct-auth" }
+construct-db            = { path = "../construct-db" }
+construct-delivery-ack  = { path = "../construct-delivery-ack" }
+construct-federation    = { path = "../construct-federation" }
+construct-pending       = { path = "../construct-pending" }
+construct-config        = { path = "../construct-config" }
+construct-broker        = { path = "../construct-broker" }
+construct-key-management = { path = "../construct-key-management" }
+construct-queue         = { path = "../construct-queue" }
+
+tokio  = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

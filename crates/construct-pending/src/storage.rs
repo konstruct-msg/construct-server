@@ -5,7 +5,6 @@
 use super::types::PendingMessageData;
 use anyhow::{Context, Result};
 use redis::AsyncCommands;
-use serde_json;
 
 /// Redis keys for pending messages
 const PENDING_MSG_PREFIX: &str = "pending_msg:";

@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use crate::auth_service::AuthServiceContext;
 use crate::auth_service::core;
-use crate::routes::extractors::TrustedUser;
 use crate::shared::proto::services::v1 as proto_services;
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
 
 fn app_state(context: &Arc<AuthServiceContext>) -> State<Arc<crate::context::AppContext>> {
     State(Arc::new(context.to_app_context()))

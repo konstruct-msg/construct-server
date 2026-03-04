@@ -85,3 +85,9 @@ impl AuthServiceContext {
             .expect("Failed to build AppContext for auth service")
     }
 }
+
+impl construct_db::HasDbPool for AuthServiceContext {
+    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
+        &self.db_pool
+    }
+}

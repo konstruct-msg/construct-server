@@ -1373,3 +1373,8 @@ pub async fn cleanup_expired_invites(pool: &DbPool) -> Result<u64> {
 
     Ok(result.rows_affected())
 }
+
+/// Trait for types that provide a database pool
+pub trait HasDbPool {
+    fn db_pool(&self) -> &std::sync::Arc<DbPool>;
+}

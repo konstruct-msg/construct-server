@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use crate::messaging_service::MessagingServiceContext;
 use crate::messaging_service::core as messaging_core;
-use crate::routes::extractors::TrustedUser;
 use crate::routes::messages;
 use crate::utils::log_safe_id;
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
 use construct_types::message::EndSessionData;
 use uuid::Uuid;
 
