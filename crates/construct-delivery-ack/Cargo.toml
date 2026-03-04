@@ -25,3 +25,6 @@ rand = "0.8"
 [dev-dependencies]
 serial_test = "3"
 tokio = { workspace = true }
+
+[features]
+integration_tests = []
