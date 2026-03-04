@@ -16,7 +16,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::context::AppContext;
@@ -29,31 +29,8 @@ use construct_error::AppError;
 // Public Key Response (Invite Links & QR API Spec)
 // ============================================================================
 
-/// Nested key bundle structure for public key response
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6A
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyBundleResponse {
-    /// Base64-encoded JSON bundle data (contains cipher suites, keys)
-    pub bundle_data: String,
-    /// Base64-encoded X25519 identity key (for key exchange/sessions)
-    pub master_identity_key: String,
-    /// Base64-encoded Ed25519 signature of bundle_data (64 bytes)
-    pub signature: String,
-}
-
-/// Public key response structure matching the spec
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6A
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicKeyResponse {
-    /// Nested key bundle with bundleData and masterIdentityKey
-    pub key_bundle: KeyBundleResponse,
-    /// Username of the user
-    pub username: String,
-    /// Base64-encoded Ed25519 verifying key (REQUIRED for invite verification)
-    pub verifying_key: String,
-}
+// Types moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::{KeyBundleResponse, PublicKeyResponse};
 
 /// Request body for PATCH /api/v1/users/me/public-key
 /// Per INVITE_LINKS_QR_API_SPEC.md Section 6B

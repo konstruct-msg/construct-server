@@ -67,3 +67,9 @@ impl NotificationServiceContext {
             .expect("Failed to build AppContext for notification service")
     }
 }
+
+impl construct_db::HasDbPool for NotificationServiceContext {
+    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
+        &self.db_pool
+    }
+}

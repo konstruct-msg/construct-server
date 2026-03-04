@@ -13,9 +13,9 @@ use axum::{Json, extract::State, response::IntoResponse};
 use std::sync::Arc;
 
 use crate::notification_service::NotificationServiceContext;
-use crate::routes::extractors::TrustedUser;
 use crate::routes::notifications;
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
 
 /// Wrapper for register_device handler (POST /api/v1/notifications/register-device)
 pub async fn register_device(

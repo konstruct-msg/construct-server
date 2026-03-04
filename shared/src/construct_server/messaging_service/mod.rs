@@ -68,3 +68,9 @@ impl MessagingServiceContext {
             .expect("Failed to build AppContext for messaging service")
     }
 }
+
+impl construct_db::HasDbPool for MessagingServiceContext {
+    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
+        &self.db_pool
+    }
+}

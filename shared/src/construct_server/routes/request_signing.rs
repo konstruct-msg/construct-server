@@ -15,7 +15,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -48,17 +48,8 @@ impl fmt::Display for RequestSigningError {
 
 impl std::error::Error for RequestSigningError {}
 
-/// Request signature metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RequestSignature {
-    /// Base64-encoded Ed25519 signature (64 bytes)
-    pub signature: String,
-    /// Base64-encoded Ed25519 public key (32 bytes) - client's master_identity_key
-    pub public_key: String,
-    /// Timestamp when request was signed (Unix epoch seconds)
-    pub timestamp: i64,
-}
+// RequestSignature moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::RequestSignature;
 
 /// Create canonical bytes for request signing
 ///

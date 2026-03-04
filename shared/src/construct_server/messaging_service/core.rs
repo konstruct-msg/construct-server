@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::context::AppContext;
 use crate::kafka::types::KafkaMessageEnvelope;
-use crate::routes::extractors::TrustedUser;
 use crate::utils::{extract_client_ip, log_safe_id};
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
 use construct_types::message::{ChatMessage, EndSessionData};
 
 /// Dispatch a pre-built KafkaMessageEnvelope to Kafka (or Redis fallback).
