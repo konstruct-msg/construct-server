@@ -108,6 +108,10 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
             post(federation::receive_federated_message),
         )
         .route(
+            "/federation/v1/sealed",
+            post(federation::receive_federated_sealed),
+        )
+        .route(
             "/federation/v1/keys/:user_id",
             get(federation::get_federation_keys),
         )

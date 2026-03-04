@@ -147,6 +147,12 @@ impl AppContext {
     /// that was previously in AppContext::new(), AppContext::new_with_gateway(),
     /// and AppContextBuilder::build().
     fn init_server_signer(config: &Config) -> Option<Arc<ServerSigner>> {
+        Self::init_server_signer_pub(config)
+    }
+
+    /// Public helper: initialize server signer from config.
+    /// Available to services that build their own context (e.g. messaging-service).
+    pub fn init_server_signer_pub(config: &Config) -> Option<Arc<ServerSigner>> {
         config
             .federation
             .signing_key_seed
@@ -283,6 +289,7 @@ pub struct AppContextBuilder {
     delivery_ack_manager: Option<Arc<DeliveryAckManager<PostgresDeliveryStorage>>>,
     key_management: Option<Arc<KeyManagementSystem>>,
     pending_message_storage: Option<Arc<PendingMessageStorage>>,
+    server_signer_override: Option<Arc<ServerSigner>>,
 }
 
 impl AppContextBuilder {
@@ -300,6 +307,7 @@ impl AppContextBuilder {
             delivery_ack_manager: None,
             key_management: None,
             pending_message_storage: None,
+            server_signer_override: None,
         }
     }
 
@@ -358,6 +366,11 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn with_server_signer(mut self, signer: Arc<ServerSigner>) -> Self {
+        self.server_signer_override = Some(signer);
+        self
+    }
+
     pub fn with_pending_message_storage(mut self, storage: Arc<PendingMessageStorage>) -> Self {
         self.pending_message_storage = Some(storage);
         self
@@ -371,8 +384,10 @@ impl AppContextBuilder {
             .config
             .ok_or_else(|| "Config is required".to_string())?;
 
-        // Initialize server signer if signing key is configured
-        let server_signer = AppContext::init_server_signer(&config);
+        // Use override signer if provided, otherwise init from config
+        let server_signer = self
+            .server_signer_override
+            .or_else(|| AppContext::init_server_signer(&config));
 
         Ok(AppContext {
             db_pool: self

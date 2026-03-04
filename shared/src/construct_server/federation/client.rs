@@ -15,6 +15,7 @@
 use crate::federation::mtls::{FederationTrustStore, MtlsConfig};
 use crate::federation::signing::{FederatedEnvelope, ServerSigner};
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use construct_types::ChatMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -273,6 +274,80 @@ impl FederationClient {
 
         Ok(())
     }
+
+    /// Send a sealed sender message to a remote federation server.
+    ///
+    /// PRIVACY: The home server forwards `sealed_inner` opaquely — it does NOT
+    /// parse sender identity. Only the destination server (and ultimately the
+    /// recipient's client) can decrypt the sender certificate.
+    pub async fn send_sealed_message(
+        &self,
+        target_domain: &str,
+        message_id: &str,
+        sealed_inner: &[u8],
+        timestamp: i64,
+    ) -> Result<()> {
+        let url = format!("https://{}/federation/v1/sealed", target_domain);
+
+        // Sign over (message_id || sealed_inner_hash || timestamp || origin || destination)
+        let sealed_inner_hash = FederatedEnvelope::hash_payload(
+            &base64::engine::general_purpose::STANDARD.encode(sealed_inner),
+        );
+        let envelope = FederatedEnvelope {
+            message_id: message_id.to_string(),
+            from: String::new(), // Sealed sender — no from field
+            to: String::new(),   // Recipient is inside sealed_inner
+            origin_server: self.instance_domain.clone(),
+            destination_server: target_domain.to_string(),
+            timestamp: timestamp as u64,
+            payload_hash: sealed_inner_hash.clone(),
+        };
+
+        let server_signature = self
+            .server_signer
+            .as_ref()
+            .map(|signer| signer.sign_message(&envelope));
+
+        let payload = FederatedSealedRequest {
+            message_id: message_id.to_string(),
+            sealed_inner: base64::engine::general_purpose::STANDARD.encode(sealed_inner),
+            origin_server: self.instance_domain.clone(),
+            timestamp: timestamp as u64,
+            payload_hash: sealed_inner_hash,
+            server_signature,
+        };
+
+        tracing::info!(
+            message_id = %message_id,
+            target_domain = %target_domain,
+            signed = payload.server_signature.is_some(),
+            "Forwarding sealed sender message to remote server"
+        );
+
+        let response = self.http_client.post(&url).json(&payload).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!(
+                "Sealed sender federation failed: HTTP {} - {}",
+                status,
+                error_text
+            );
+        }
+
+        let response_body: FederatedMessageResponse = response.json().await?;
+        tracing::info!(
+            message_id = %message_id,
+            status = %response_body.status,
+            "Sealed sender message accepted by remote server"
+        );
+
+        Ok(())
+    }
 }
 
 impl Default for FederationClient {
@@ -297,6 +372,21 @@ struct FederatedMessageRequest {
     /// Hash of the ciphertext (for integrity verification)
     pub payload_hash: String,
     /// Ed25519 signature over the canonical envelope (base64)
+    pub server_signature: Option<String>,
+}
+
+/// S2S sealed sender forwarding request
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FederatedSealedRequest {
+    pub message_id: String,
+    /// Base64-encoded serialized SealedInner proto (opaque to origin server)
+    pub sealed_inner: String,
+    pub origin_server: String,
+    pub timestamp: u64,
+    /// SHA-256 hash of sealed_inner for integrity
+    pub payload_hash: String,
+    /// Ed25519 signature (base64) — authenticates origin_server identity
     pub server_signature: Option<String>,
 }
 
