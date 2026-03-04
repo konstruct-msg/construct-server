@@ -519,6 +519,7 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
         token_encryption,
         config: config.clone(),
         key_management: None,
+        server_signer: None,
     });
 
     let app = Router::new()

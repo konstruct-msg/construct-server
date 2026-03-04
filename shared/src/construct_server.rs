@@ -31,7 +31,6 @@ pub mod health;
 // Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
 pub use construct_broker as kafka;
 pub mod key_management;
-// pub mod message_gateway; // TODO PROTO-1: Replace with new gRPC MessagingService
 pub mod messaging_service;
 pub mod metrics;
 pub mod models; // Invite objects and other data models
@@ -74,18 +73,6 @@ pub async fn run_http_server(app_context: AppContext, listener: TcpListener) {
 
 // WebSocket delivery listener removed - all clients use REST API now
 // Delivery worker writes to Redis Streams, clients poll via GET /api/v1/messages
-
-// Legacy code removed - kept for reference only
-#[allow(dead_code)]
-fn _spawn_delivery_listener_removed(
-    _queue: Arc<Mutex<MessageQueue>>,
-    _clients: (),
-    _server_instance_id: String,
-    _config: Arc<Config>,
-) {
-    // WebSocket delivery removed - clients use REST API long polling instead
-    // Delivery worker writes to Redis Streams, clients poll via GET /api/v1/messages
-}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration first (needed for logging)
