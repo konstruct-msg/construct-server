@@ -587,20 +587,37 @@ async fn dispatch_sealed_sender(
     context: &Arc<MessagingServiceContext>,
     sealed: &construct_server_shared::shared::proto::core::v1::SealedSenderEnvelope,
 ) -> anyhow::Result<proto::SendMessageResponse> {
+    use construct_server_shared::federation::FederationClient;
     use construct_server_shared::kafka::types::KafkaMessageEnvelope;
     use construct_server_shared::shared::proto::core::v1 as core;
     use prost::Message;
 
-    // Cross-server federation (Phase 3 — not yet implemented)
     let our_domain = &context.config.federation.instance_domain;
+    let message_id = uuid::Uuid::new_v4().to_string();
+
+    // Cross-server: forward sealed_inner opaquely to recipient server
     if !sealed.recipient_server.is_empty() && sealed.recipient_server != *our_domain {
-        anyhow::bail!(
-            "Cross-server federation not yet supported (Phase 3): {}",
-            sealed.recipient_server
-        );
+        let target = &sealed.recipient_server;
+        let client = match &context.server_signer {
+            Some(signer) => FederationClient::new_with_signer(signer.clone(), our_domain.clone()),
+            None => FederationClient::new(),
+        };
+
+        client
+            .send_sealed_message(target, &message_id, &sealed.sealed_inner, sealed.timestamp)
+            .await
+            .map_err(|e| anyhow::anyhow!("Sealed sender federation failed to {}: {}", target, e))?;
+
+        return Ok(proto::SendMessageResponse {
+            message_id,
+            message_number: 0,
+            server_timestamp: chrono::Utc::now().timestamp_millis(),
+            success: true,
+            error: None,
+        });
     }
 
-    // Decode SealedInner to extract recipient_user_id (the only plaintext field)
+    // Local delivery: decode SealedInner to get recipient_user_id
     let sealed_inner = core::SealedInner::decode(sealed.sealed_inner.as_ref())
         .map_err(|e| anyhow::anyhow!("Failed to decode SealedInner: {}", e))?;
 
@@ -609,7 +626,6 @@ async fn dispatch_sealed_sender(
         anyhow::bail!("SealedInner.recipient_user_id is required");
     }
 
-    let message_id = uuid::Uuid::new_v4().to_string();
     let kafka_envelope = KafkaMessageEnvelope::from_sealed_sender(
         message_id.clone(),
         recipient_id,
@@ -742,6 +758,10 @@ async fn main() -> Result<()> {
             }
         };
 
+    // Initialize server signer for federation (sealed sender cross-server forwarding)
+    let server_signer =
+        construct_server_shared::context::AppContext::init_server_signer_pub(&config);
+
     // Create service context
     let context = Arc::new(MessagingServiceContext {
         db_pool,
@@ -752,6 +772,7 @@ async fn main() -> Result<()> {
         token_encryption,
         config: config.clone(),
         key_management,
+        server_signer,
     });
 
     // Import messaging service handlers
