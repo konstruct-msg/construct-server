@@ -42,7 +42,12 @@ impl<'a> DeliveryManager<'a> {
         _server_instance_id: Option<&str>, // Ignored - kept for API compatibility
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            Option<construct_broker::types::KafkaMessageEnvelope>,
+        )>,
+    > {
         // Always read from user-based stream
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -216,7 +221,7 @@ impl<'a> DeliveryManager<'a> {
         &self,
         fields: HashMap<String, Vec<u8>>,
         user_id: &str,
-    ) -> Result<Option<crate::kafka::types::KafkaMessageEnvelope>> {
+    ) -> Result<Option<construct_broker::types::KafkaMessageEnvelope>> {
         // Extract message_id and payload from fields
         let message_id_bytes = fields
             .get("message_id")
@@ -229,8 +234,9 @@ impl<'a> DeliveryManager<'a> {
             .ok_or_else(|| anyhow::anyhow!("Missing payload in stream message"))?;
 
         // Deserialize KafkaMessageEnvelope from MessagePack
-        let envelope: crate::kafka::types::KafkaMessageEnvelope = rmp_serde::from_slice(payload)
-            .context("Failed to deserialize KafkaMessageEnvelope from stream")?;
+        let envelope: construct_broker::types::KafkaMessageEnvelope =
+            rmp_serde::from_slice(payload)
+                .context("Failed to deserialize KafkaMessageEnvelope from stream")?;
 
         // SECURITY: Filter by recipient_id - only return messages for this user
         if envelope.recipient_id != user_id {
@@ -564,7 +570,7 @@ impl<'a> DeliveryManager<'a> {
     pub(crate) async fn write_message_to_user_stream(
         &mut self,
         user_id: &str,
-        envelope: &crate::kafka::types::KafkaMessageEnvelope,
+        envelope: &construct_broker::types::KafkaMessageEnvelope,
     ) -> Result<String> {
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -597,5 +603,53 @@ impl<'a> DeliveryManager<'a> {
         );
 
         Ok(stream_id)
+    }
+
+    // ── Message deduplication ────────────────────────────────────────────────
+
+    /// Returns true if `message_id` was already dispatched (duplicate).
+    /// Uses a Redis key `msg:dedup:{message_id}` with 24h TTL.
+    pub(crate) async fn is_message_duplicate(&mut self, message_id: &str) -> Result<bool> {
+        let key = format!("msg:dedup:{}", message_id);
+        let exists: bool = self.client.exists(&key).await?;
+        Ok(exists)
+    }
+
+    /// Mark `message_id` as dispatched to prevent duplicate delivery.
+    /// TTL 24h — covers any realistic client retry window.
+    pub(crate) async fn mark_message_dispatched(&mut self, message_id: &str) -> Result<()> {
+        const TTL_SECS: u64 = 24 * 60 * 60;
+        let key = format!("msg:dedup:{}", message_id);
+        self.client
+            .set_ex(&key, "1", TTL_SECS)
+            .await
+            .context("Failed to mark message as dispatched")?;
+        Ok(())
+    }
+
+    // ── Receipt routing ──────────────────────────────────────────────────────
+
+    /// Store sender_id for a message so receipts can be routed back.
+    /// Key: `receipt:sender:{message_id}` — TTL 30 days.
+    pub(crate) async fn store_message_sender(
+        &mut self,
+        message_id: &str,
+        sender_id: &str,
+    ) -> Result<()> {
+        const TTL_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+        let key = format!("receipt:sender:{}", message_id);
+        self.client
+            .set_ex(&key, sender_id, TTL_SECS)
+            .await
+            .context("Failed to store message sender for receipt routing")?;
+        Ok(())
+    }
+
+    /// Look up the original sender_id for a message_id.
+    /// Returns `None` if the mapping has expired or never existed.
+    pub(crate) async fn get_message_sender(&mut self, message_id: &str) -> Result<Option<String>> {
+        let key = format!("receipt:sender:{}", message_id);
+        let result: Option<String> = self.client.get(&key).await?;
+        Ok(result)
     }
 }

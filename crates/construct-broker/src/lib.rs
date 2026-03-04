@@ -1,7 +1,7 @@
-// Kafka module for reliable message delivery
+// Message broker client for reliable message delivery (Redpanda/Kafka compatible).
 //
-// This module provides Kafka integration for persistent message storage and delivery.
-// It supports multiple message types: Direct (Double Ratchet), MLS (groups), and S2S (federation).
+// Supports multiple message types: Direct (Double Ratchet), MLS (groups), S2S (federation).
+// Backend: Redpanda (Kafka-compatible API).
 
 pub mod circuit_breaker;
 pub mod config;

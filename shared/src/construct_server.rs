@@ -13,9 +13,11 @@ pub use construct_crypto::{
 pub use construct_error::AppError;
 pub use construct_types::{ChatMessage, ClientMessage, ServerMessage, UserId};
 
-pub mod apns;
+// APNs module: re-exported from construct-apns crate
+pub use construct_apns as apns;
 pub mod audit;
-pub mod auth;
+// Auth module: re-exported from construct-auth crate (JWT management)
+pub use construct_auth as auth;
 pub mod auth_service;
 pub mod context;
 pub mod db;
@@ -26,7 +28,8 @@ pub mod handlers {
     pub mod federation; // Used in routes/federation.rs
 }
 pub mod health;
-pub mod kafka;
+// Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
+pub use construct_broker as kafka;
 pub mod key_management;
 // pub mod message_gateway; // TODO PROTO-1: Replace with new gRPC MessagingService
 pub mod messaging_service;
@@ -35,7 +38,8 @@ pub mod models; // Invite objects and other data models
 pub mod notification_service;
 pub mod pending_messages; // 2-Phase commit protocol for message delivery
 pub mod pow; // Proof of Work for device registration
-pub mod queue;
+// Queue module: re-exported from construct-queue crate
+pub use construct_queue as queue;
 pub mod rate_limit; // ← NEW: Rate limiting & warmup sandbox
 pub mod routes;
 pub mod server_registry;

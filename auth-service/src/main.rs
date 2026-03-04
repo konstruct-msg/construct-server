@@ -45,6 +45,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
     auth_service_server::{AuthService, AuthServiceServer},
+    device_service_server::DeviceServiceServer,
 };
 
 #[derive(Clone)]
@@ -543,6 +544,129 @@ impl AuthService for AuthGrpcService {
     }
 }
 
+// =============================================================================
+// DeviceService — manages device tokens and device-level operations
+// =============================================================================
+
+#[tonic::async_trait]
+impl proto::device_service_server::DeviceService for AuthGrpcService {
+    type ListDevicesStream = std::pin::Pin<
+        Box<
+            dyn tonic::codegen::tokio_stream::Stream<Item = Result<proto::DeviceInfo, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn list_devices(
+        &self,
+        _request: Request<proto::ListDevicesRequest>,
+    ) -> Result<Response<Self::ListDevicesStream>, Status> {
+        Err(Status::unimplemented("ListDevices not implemented"))
+    }
+
+    async fn revoke_device(
+        &self,
+        _request: Request<proto::RevokeDeviceRequest>,
+    ) -> Result<Response<proto::RevokeDeviceResponse>, Status> {
+        Err(Status::unimplemented("RevokeDevice not implemented"))
+    }
+
+    /// UpdatePushToken — upsert APNs/FCM token for the authenticated device.
+    /// Writes to the same `device_tokens` table as NotificationService.RegisterDeviceToken.
+    async fn update_push_token(
+        &self,
+        request: Request<proto::UpdatePushTokenRequest>,
+    ) -> Result<Response<proto::UpdatePushTokenResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+        if req.push_token.is_empty() {
+            return Err(Status::invalid_argument("push_token is required"));
+        }
+
+        let provider = match req.provider {
+            1 => "apns",
+            2 => "fcm",
+            _ => "apns",
+        };
+        let environment = match req.environment {
+            1 => "sandbox",
+            2 => "production",
+            _ => "sandbox",
+        };
+
+        use construct_server_shared::apns::DeviceTokenEncryption;
+        let token_hash = DeviceTokenEncryption::hash_token(&req.push_token);
+        let token_encryption =
+            DeviceTokenEncryption::from_hex(&self.context.config.apns.device_token_encryption_key)
+                .map_err(|e| Status::internal(format!("Token encryption unavailable: {e}")))?;
+        let token_encrypted = token_encryption
+            .encrypt(&req.push_token)
+            .map_err(|e| Status::internal(format!("Failed to encrypt token: {e}")))?;
+
+        let db: &sqlx::PgPool = self.context.db_pool.as_ref();
+        sqlx::query(
+            r#"
+            INSERT INTO device_tokens
+                (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
+                 notification_filter, enabled, device_id, push_provider, push_environment)
+            VALUES ($1, $2, $3, NULL, 'silent', TRUE, $4, $5, $6)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET
+                device_token_hash      = EXCLUDED.device_token_hash,
+                device_token_encrypted = EXCLUDED.device_token_encrypted,
+                push_provider          = EXCLUDED.push_provider,
+                push_environment       = EXCLUDED.push_environment,
+                enabled                = TRUE
+            "#,
+        )
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(token_encrypted)
+        .bind(req.device_id.clone())
+        .bind(provider)
+        .bind(environment)
+        .execute(db)
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {e}")))?;
+
+        tracing::info!(
+            device_id = %req.device_id,
+            provider  = %provider,
+            "Push token updated via DeviceService"
+        );
+
+        Ok(Response::new(proto::UpdatePushTokenResponse {
+            success: true,
+        }))
+    }
+
+    async fn verify_device(
+        &self,
+        _request: Request<proto::VerifyDeviceRequest>,
+    ) -> Result<Response<proto::VerifyDeviceResponse>, Status> {
+        Err(Status::unimplemented("VerifyDevice not implemented"))
+    }
+
+    async fn get_device_info(
+        &self,
+        _request: Request<proto::GetDeviceInfoRequest>,
+    ) -> Result<Response<proto::DeviceInfo>, Status> {
+        Err(Status::unimplemented("GetDeviceInfo not implemented"))
+    }
+}
+
 /// Extract Bearer token from gRPC metadata
 fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Status> {
     let auth = metadata
@@ -753,7 +877,8 @@ async fn main() -> Result<()> {
             context: grpc_context,
         };
         if let Err(e) = construct_server_shared::grpc_server()
-            .add_service(AuthServiceServer::new(service))
+            .add_service(AuthServiceServer::new(service.clone()))
+            .add_service(DeviceServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
