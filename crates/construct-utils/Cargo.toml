@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+construct-types = { path = "../construct-types" }
 hyper = { version = "1.5", features = ["full"] }
 axum = { workspace = true }
 sha2 = "0.10"
+base64 = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 tracing = { workspace = true }
