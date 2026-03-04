@@ -13,9 +13,11 @@ pub use construct_crypto::{
 pub use construct_error::AppError;
 pub use construct_types::{ChatMessage, ClientMessage, ServerMessage, UserId};
 
-pub mod apns;
+// APNs module: re-exported from construct-apns crate
+pub use construct_apns as apns;
 pub mod audit;
-pub mod auth;
+// Auth module: re-exported from construct-auth crate (JWT management)
+pub use construct_auth as auth;
 pub mod auth_service;
 pub mod context;
 pub mod db;

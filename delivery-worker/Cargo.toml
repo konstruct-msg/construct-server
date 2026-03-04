@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
+construct-broker  = { path = "../crates/construct-broker" }
 construct-server-shared = { path = "../shared" }
 
 # Workspace deps
@@ -34,3 +35,5 @@ prometheus = {workspace = true}
 
 # Delivery worker specific
 futures-util = "0.3"
+sha2         = "0.10"
+rmp-serde    = "1.1"

@@ -602,6 +602,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "construct-apns"
+version = "0.8.4"
+dependencies = [
+ "anyhow",
+ "apns-h2",
+ "chacha20poly1305",
+ "construct-config",
+ "hex",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "construct-auth"
+version = "0.8.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "construct-config",
+ "jsonwebtoken",
+ "serde",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-broker"
 version = "0.8.4"
 dependencies = [
@@ -759,6 +790,8 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "chrono",
+ "construct-apns",
+ "construct-auth",
  "construct-broker",
  "construct-config",
  "construct-crypto",
@@ -961,6 +994,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "chrono",
+ "construct-broker",
  "construct-config",
  "construct-server-shared",
  "dotenvy",
@@ -970,8 +1004,10 @@ dependencies = [
  "prometheus",
  "redis",
  "reqwest",
+ "rmp-serde",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
