@@ -27,6 +27,11 @@ members = [
     "crates/construct-apns",
     # Phase 5 - Crypto-Agility
     "crates/crypto-agility", "crates/construct-metrics",
+    # Phase 6 - Infrastructure crates
+    "crates/construct-utils",
+    "crates/construct-audit",
+    "crates/construct-rate-limit",
+    "crates/construct-pow",
 ]
 
 # Единая версия для всех пакетов
