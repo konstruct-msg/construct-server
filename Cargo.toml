@@ -35,6 +35,7 @@ members = [
     "crates/construct-federation",
     "crates/construct-delivery-ack",
     "crates/construct-pending",
+    "crates/construct-key-management",
 ]
 
 # Единая версия для всех пакетов

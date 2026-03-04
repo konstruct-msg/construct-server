@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::keys::KeyType;
-use crate::db::DbPool;
+use construct_db::DbPool;
 
 /// Audit event types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

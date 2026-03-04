@@ -30,7 +30,7 @@ pub mod handlers {
 pub mod health;
 // Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
 pub use construct_broker as kafka;
-pub mod key_management;
+pub use construct_key_management as key_management;
 pub mod messaging_service;
 pub mod metrics;
 pub mod models; // Invite objects and other data models
