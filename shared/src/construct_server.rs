@@ -21,8 +21,8 @@ pub use construct_auth as auth;
 pub mod auth_service;
 pub mod context;
 pub use construct_db as db;
-pub mod delivery_ack;
-pub mod federation;
+pub use construct_delivery_ack as delivery_ack;
+pub use construct_federation as federation;
 pub mod gateway;
 pub mod handlers {
     pub mod federation; // Used in routes/federation.rs
@@ -35,7 +35,7 @@ pub mod messaging_service;
 pub mod metrics;
 pub mod models; // Invite objects and other data models
 pub mod notification_service;
-pub mod pending_messages; // 2-Phase commit protocol for message delivery
+pub use construct_pending as pending_messages; // 2-Phase commit protocol for message delivery
 pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;

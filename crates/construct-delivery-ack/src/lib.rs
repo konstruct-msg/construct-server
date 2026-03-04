@@ -160,7 +160,7 @@ impl DeliveryAckConfig {
         }
 
         // SECURITY: Validate secret key strength (entropy, patterns)
-        if let Err(e) = crate::utils::validate_secret_strength(
+        if let Err(e) = construct_utils::validate_secret_strength(
             &secret_key_hex,
             64, // 32 bytes = 64 hex chars
         ) {
