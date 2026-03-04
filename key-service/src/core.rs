@@ -5,6 +5,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use tracing;
 
 // ============================================================================
 // Types
@@ -208,6 +209,7 @@ pub async fn upload_prekeys(
     db: &PgPool,
     device_id: &str,
     prekeys: &[OneTimePreKey],
+    replace_existing: bool,
 ) -> Result<u32> {
     // Verify device exists
     let exists: bool = sqlx::query_scalar(
@@ -219,6 +221,15 @@ pub async fn upload_prekeys(
 
     if !exists {
         anyhow::bail!("Device not found or inactive");
+    }
+
+    // If replace_existing, purge stale keys atomically before inserting fresh ones
+    if replace_existing {
+        sqlx::query("DELETE FROM one_time_prekeys WHERE device_id = $1")
+            .bind(device_id)
+            .execute(db)
+            .await?;
+        tracing::info!(device_id = %device_id, "Cleared stale OTPK pool (replace_existing=true)");
     }
 
     // Insert pre-keys
