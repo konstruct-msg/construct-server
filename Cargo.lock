@@ -870,6 +870,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-messaging-service"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "construct-apns",
+ "construct-auth",
+ "construct-broker",
+ "construct-config",
+ "construct-context",
+ "construct-db",
+ "construct-error",
+ "construct-extractors",
+ "construct-federation",
+ "construct-key-management",
+ "construct-queue",
+ "construct-types",
+ "construct-utils",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-metrics"
 version = "0.9.0"
 dependencies = [
@@ -974,6 +1004,7 @@ dependencies = [
  "construct-extractors",
  "construct-federation",
  "construct-key-management",
+ "construct-messaging-service",
  "construct-metrics",
  "construct-pending",
  "construct-pow",
