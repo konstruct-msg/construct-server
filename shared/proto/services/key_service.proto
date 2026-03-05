@@ -199,13 +199,15 @@ message UploadPreKeysRequest {
   // Optional: also update signed pre-key
   optional SignedPreKeyUpload signed_pre_key = 3;
 
-  // If true, delete all existing one-time pre-keys before inserting new ones.
-  // Use when uploading a fresh batch after key corruption or re-registration.
-  // Default: false (additive upload, Signal normal replenishment).
-  bool replace_existing = 4;
+  // If true, atomically delete all existing one-time pre-keys for this device
+  // before inserting the new batch. Use after key corruption, re-registration,
+  // or forced key refresh when the stale pool must be purged entirely.
+  // Default: false (additive upload — normal Signal replenishment behaviour).
+  // NOTE: field 4 is reserved (was used in a prior version); this field is 11.
+  bool replace_existing = 11;
 
   // Reserved for future options
-  reserved 5 to 10;
+  reserved 4 to 10;
 }
 
 message OneTimePreKey {

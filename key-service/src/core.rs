@@ -203,7 +203,9 @@ pub async fn get_prekey_bundles(
 // One-Time Pre-Key Management
 // ============================================================================
 
-/// Upload one-time pre-keys for a device
+/// Upload one-time pre-keys for a device.
+/// If `replace_existing` is true, all existing keys for the device are
+/// atomically deleted before the new batch is inserted (stale pool recovery).
 pub async fn upload_prekeys(
     db: &PgPool,
     device_id: &str,
