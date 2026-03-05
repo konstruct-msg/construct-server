@@ -64,6 +64,9 @@ service DeviceService {
   // UpdatePushToken - Update push notification token
   rpc UpdatePushToken(UpdatePushTokenRequest) returns (UpdatePushTokenResponse);
 
+  // UnregisterPushToken - Remove push token when notifications are disabled or on logout
+  rpc UnregisterPushToken(UnregisterPushTokenRequest) returns (UnregisterPushTokenResponse);
+
   // VerifyDevice - Verify device (2FA)
   rpc VerifyDevice(VerifyDeviceRequest) returns (VerifyDeviceResponse);
 
@@ -237,6 +240,18 @@ message UpdatePushTokenRequest {
 // UpdatePushTokenResponse - Update confirmation
 message UpdatePushTokenResponse {
   // Success
+  bool success = 1;
+}
+
+// UnregisterPushTokenRequest - Remove push token for a device
+message UnregisterPushTokenRequest {
+  // Device ID whose push token should be removed
+  string device_id = 1;
+}
+
+// UnregisterPushTokenResponse - Removal confirmation
+message UnregisterPushTokenResponse {
+  // true if a token was removed, false if device had no registered token
   bool success = 1;
 }
 

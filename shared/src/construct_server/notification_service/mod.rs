@@ -7,6 +7,7 @@
 // ============================================================================
 
 pub mod handlers;
+pub mod notifications;
 
 use crate::apns::{ApnsClient, DeviceTokenEncryption};
 use crate::auth::AuthManager;
@@ -65,5 +66,11 @@ impl NotificationServiceContext {
             .with_server_instance_id(uuid::Uuid::new_v4().to_string())
             .build()
             .expect("Failed to build AppContext for notification service")
+    }
+}
+
+impl construct_db::HasDbPool for NotificationServiceContext {
+    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
+        &self.db_pool
     }
 }

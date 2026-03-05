@@ -405,3 +405,151 @@ async fn receive_federated_message_http_impl(
         }),
     ))
 }
+
+// ============================================================================
+// POST /federation/v1/sealed — Receive sealed sender message from remote server
+// ============================================================================
+
+/// Request body for sealed sender federation
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FederatedSealedRequest {
+    pub message_id: String,
+    /// Base64-encoded serialized SealedInner proto
+    pub sealed_inner: String,
+    pub origin_server: String,
+    pub timestamp: u64,
+    pub payload_hash: String,
+    pub server_signature: Option<String>,
+}
+
+/// Receive a sealed sender message forwarded from a remote server.
+///
+/// PRIVACY: We decode `SealedInner.recipient_user_id` (plaintext) for routing only.
+/// The actual sender identity is encrypted inside `sender_cert_ciphertext` and is
+/// never accessible to the server.
+pub async fn receive_federated_sealed(
+    ctx: &AppContext,
+    body_bytes: bytes::Bytes,
+) -> Result<hyper::Response<Full<Bytes>>, AppError> {
+    let req: FederatedSealedRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| AppError::Validation(format!("Invalid JSON: {e}")))?;
+
+    let salt = &ctx.config.logging.hash_salt;
+
+    // 1. Verify server signature (required)
+    match (&req.origin_server, &req.server_signature) {
+        (origin, Some(signature)) => {
+            let envelope = FederatedEnvelope {
+                message_id: req.message_id.clone(),
+                from: String::new(),
+                to: String::new(),
+                origin_server: origin.clone(),
+                destination_server: ctx.config.instance_domain.clone(),
+                timestamp: req.timestamp,
+                payload_hash: req.payload_hash.clone(),
+            };
+
+            match ctx.public_key_cache.get_public_key(origin).await {
+                Ok(public_key) => {
+                    if let Err(e) =
+                        ServerSigner::verify_signature(&public_key, &envelope, signature)
+                    {
+                        tracing::warn!(
+                            message_id = %req.message_id,
+                            origin_server = %origin,
+                            error = %e,
+                            "Sealed sender: S2S signature verification FAILED"
+                        );
+                        return Ok(json_response(
+                            StatusCode::UNAUTHORIZED,
+                            json!({"error": "Invalid server signature"}),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        message_id = %req.message_id,
+                        origin_server = %origin,
+                        error = %e,
+                        "Sealed sender: cannot fetch origin public key"
+                    );
+                    return Ok(json_response(
+                        StatusCode::BAD_GATEWAY,
+                        json!({"error": "Cannot verify origin server"}),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::Auth(
+                "Server signature required for sealed federation".to_string(),
+            ));
+        }
+    }
+
+    // 2. Decode sealed_inner to get recipient_user_id (routing only)
+    use base64::Engine as _;
+    let sealed_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&req.sealed_inner)
+        .map_err(|e| AppError::Validation(format!("Invalid sealed_inner base64: {e}")))?;
+
+    use crate::shared::proto::core::v1 as core;
+    use prost::Message;
+    let sealed_inner_proto = core::SealedInner::decode(sealed_bytes.as_slice())
+        .map_err(|e| AppError::Validation(format!("Invalid SealedInner proto: {e}")))?;
+
+    let recipient_id = sealed_inner_proto.recipient_user_id.clone();
+    if recipient_id.is_empty() {
+        return Err(AppError::Validation(
+            "SealedInner.recipient_user_id is required".to_string(),
+        ));
+    }
+
+    tracing::info!(
+        message_id = %req.message_id,
+        origin_server = %req.origin_server,
+        recipient_hash = %log_safe_id(&recipient_id, salt),
+        "Received sealed sender message from remote server"
+    );
+
+    // 3. Route via Kafka (recipient_user_id is local to this server)
+    let kafka_envelope = KafkaMessageEnvelope::from_sealed_sender(
+        req.message_id.clone(),
+        recipient_id,
+        sealed_bytes,
+    );
+
+    let Some(kafka_producer) = &ctx.kafka_producer else {
+        tracing::error!(message_id = %req.message_id, "Kafka producer not available");
+        return Ok(json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "Message persistence unavailable"}),
+        ));
+    };
+
+    if let Err(e) = kafka_producer.send_message(&kafka_envelope).await {
+        tracing::error!(
+            message_id = %req.message_id,
+            error = %e,
+            "Failed to persist sealed sender message to Kafka"
+        );
+        return Ok(json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "Failed to persist message"}),
+        ));
+    }
+
+    tracing::info!(
+        message_id = %req.message_id,
+        "Sealed sender message queued in Kafka"
+    );
+
+    Ok(json_response(
+        StatusCode::OK,
+        json!(FederatedMessageResponse {
+            status: "queued".to_string(),
+            message_id: req.message_id,
+        }),
+    ))
+}

@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use crate::messaging_service::MessagingServiceContext;
 use crate::messaging_service::core as messaging_core;
-use crate::routes::extractors::TrustedUser;
-use crate::routes::messages;
 use crate::utils::log_safe_id;
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
+use construct_types::api::ConfirmMessageRequest;
 use construct_types::message::EndSessionData;
 use uuid::Uuid;
 
@@ -155,7 +155,7 @@ pub async fn send_control_message(
 pub async fn confirm_message(
     State(context): State<Arc<MessagingServiceContext>>,
     TrustedUser(user_id): TrustedUser,
-    Json(data): Json<messages::ConfirmMessageRequest>,
+    Json(data): Json<ConfirmMessageRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = Uuid::parse_str(&user_id.to_string())
         .map_err(|_| AppError::Validation("Invalid authenticated user ID".to_string()))?;

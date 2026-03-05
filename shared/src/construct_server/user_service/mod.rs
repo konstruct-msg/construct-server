@@ -6,8 +6,11 @@
 //
 // ============================================================================
 
+pub mod account;
+pub mod account_deletion;
 pub mod core;
 pub mod handlers;
+pub mod invites;
 
 use crate::auth::AuthManager;
 use crate::db::DbPool;
@@ -78,5 +81,11 @@ impl UserServiceContext {
             .with_server_instance_id(uuid::Uuid::new_v4().to_string())
             .build()
             .expect("Failed to build AppContext for user service")
+    }
+}
+
+impl construct_db::HasDbPool for UserServiceContext {
+    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
+        &self.db_pool
     }
 }

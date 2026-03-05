@@ -199,6 +199,41 @@ pub async fn receive_federated_message(
         .map_err(|e| AppError::Hyper(format!("Failed to build response: {}", e)))
 }
 
+/// POST /federation/v1/sealed
+/// Receive sealed sender message forwarded from a remote server
+pub async fn receive_federated_sealed(
+    State(app_context): State<Arc<AppContext>>,
+    body: axum::body::Body,
+) -> Result<impl IntoResponse, AppError> {
+    use crate::handlers::federation::receive_federated_sealed as handler;
+    use http_body_util::BodyExt;
+
+    let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| AppError::Hyper(format!("Failed to read body: {}", e)))?;
+
+    let response = handler(&app_context, body_bytes).await?;
+
+    let (parts, body) = response.into_parts();
+    let out = body
+        .collect()
+        .await
+        .map_err(|e| AppError::Hyper(format!("{}", e)))?
+        .to_bytes();
+
+    let mut axum_response = axum::response::Response::builder().status(parts.status);
+    for (key, value) in parts.headers {
+        if let (Some(name), Ok(val)) = (key, axum::http::HeaderValue::from_bytes(value.as_bytes()))
+        {
+            axum_response = axum_response.header(name, val);
+        }
+    }
+
+    axum_response
+        .body(axum::body::Body::from(out.to_vec()))
+        .map_err(|e| AppError::Hyper(format!("{}", e)))
+}
+
 /// GET /federation/v1/keys/:user_id
 /// Get user's key bundle for federation
 ///

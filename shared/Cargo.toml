@@ -12,10 +12,21 @@ construct-config = { path = "../crates/construct-config" }
 construct-redis = { path = "../crates/construct-redis" }
 construct-broker = { path = "../crates/construct-broker" }
 construct-queue  = { path = "../crates/construct-queue" }
-construct-auth   = { path = "../crates/construct-auth" }
+construct-auth         = { path = "../crates/construct-auth" }
+construct-auth-service = { path = "../crates/construct-auth-service" }
 construct-apns   = { path = "../crates/construct-apns" }
 construct-db = { path = "../crates/construct-db" }
 construct-metrics = { path = "../crates/construct-metrics" }
+construct-utils      = { path = "../crates/construct-utils" }
+construct-audit      = { path = "../crates/construct-audit" }
+construct-rate-limit = { path = "../crates/construct-rate-limit" }
+construct-pow        = { path = "../crates/construct-pow" }
+construct-federation    = { path = "../crates/construct-federation" }
+construct-delivery-ack  = { path = "../crates/construct-delivery-ack" }
+construct-pending       = { path = "../crates/construct-pending" }
+construct-key-management = { path = "../crates/construct-key-management" }
+construct-context        = { path = "../crates/construct-context" }
+construct-extractors     = { path = "../crates/construct-extractors" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 tokio = {workspace = true}
