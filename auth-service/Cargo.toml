@@ -34,6 +34,9 @@ prometheus = {workspace = true}
 tonic = "0.14.2"
 prost = "0.14.3"
 
+construct-error = { path = "../crates/construct-error" }
+construct-extractors = { path = "../crates/construct-extractors" }
+
 # Auth specific
 rand = "0.8"
 hkdf = "0.12"

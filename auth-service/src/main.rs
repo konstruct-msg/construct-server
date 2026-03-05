@@ -18,6 +18,7 @@
 //
 // ============================================================================
 
+mod handlers;
 mod recovery;
 
 use anyhow::{Context, Result};
@@ -949,8 +950,7 @@ async fn main() -> Result<()> {
         server_signer,
     });
 
-    // Import auth service handlers
-    use construct_server_shared::auth_service::handlers;
+    // handlers module is local (auth-service/src/handlers.rs)
 
     // Start gRPC AuthService (hard-cut target transport)
     let grpc_context = context.clone();

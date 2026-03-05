@@ -44,8 +44,9 @@ use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::notification_service_server::{NotificationService, NotificationServiceServer};
 
 mod core;
+mod handlers;
 
-/// Extract user_id from gRPC metadata (set by auth interceptor)
+/// Extract user_id from gRPC metadata
 fn extract_user_id(metadata: &MetadataMap) -> Result<Uuid, Status> {
     let user_id_str = metadata
         .get("x-user-id")
@@ -309,8 +310,7 @@ async fn main() -> Result<()> {
         key_management,
     });
 
-    // Import notification service handlers
-    use construct_server_shared::notification_service::handlers;
+    // handlers module is local (notification-service/src/handlers.rs)
 
     // Create router
     let app = Router::new()

@@ -1,23 +1,15 @@
 // ============================================================================
-// Notification Service Handlers - Phase 2.6.5
-// ============================================================================
-//
-// Wrapper handlers that convert NotificationServiceContext to AppContext
-// for use with existing notification-related route handlers.
-//
-// This is a temporary solution until handlers are refactored to use traits.
-//
+// Notification Service Handlers
 // ============================================================================
 
 use axum::{Json, extract::State, response::IntoResponse};
 use std::sync::Arc;
 
-use crate::notification_service::NotificationServiceContext;
-use crate::notification_service::notifications;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
+use construct_server_shared::notification_service::NotificationServiceContext;
+use construct_server_shared::notification_service::notifications;
 
-/// Wrapper for register_device handler (POST /api/v1/notifications/register-device)
 pub async fn register_device(
     State(context): State<Arc<NotificationServiceContext>>,
     user: TrustedUser,
@@ -27,7 +19,6 @@ pub async fn register_device(
     notifications::register_device(State(app_context), user, Json(request)).await
 }
 
-/// Wrapper for unregister_device handler (POST /api/v1/notifications/unregister-device)
 pub async fn unregister_device(
     State(context): State<Arc<NotificationServiceContext>>,
     user: TrustedUser,
@@ -37,7 +28,6 @@ pub async fn unregister_device(
     notifications::unregister_device(State(app_context), user, Json(request)).await
 }
 
-/// Wrapper for update_preferences handler (PUT /api/v1/notifications/preferences)
 pub async fn update_preferences(
     State(context): State<Arc<NotificationServiceContext>>,
     user: TrustedUser,

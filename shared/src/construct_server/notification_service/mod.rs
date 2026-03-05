@@ -6,5 +6,3 @@ pub use construct_notification_service::NotificationServiceContext;
 pub mod notifications {
     pub use construct_notification_service::notifications::*;
 }
-
-pub mod handlers;
