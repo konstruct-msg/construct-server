@@ -46,9 +46,6 @@ pub mod server_registry;
 pub mod user_service;
 pub use construct_utils as utils;
 
-// Re-export delivery_worker modules for use in bin/delivery_worker.rs
-pub mod delivery_worker;
-
 use auth::AuthManager;
 use construct_config::Config;
 use context::AppContext;
