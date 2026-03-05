@@ -1,0 +1,30 @@
+[package]
+name = "construct-delivery-ack"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-broker = { path = "../construct-broker" }
+construct-crypto = { path = "../construct-crypto", features = ["e2ee"] }
+construct-utils  = { path = "../construct-utils" }
+construct-config = { path = "../construct-config" }
+
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+
+[dev-dependencies]
+serial_test = "3"
+tokio = { workspace = true }
+
+[features]
+integration_tests = []

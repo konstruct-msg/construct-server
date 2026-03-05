@@ -22,7 +22,7 @@ pub mod account_deletion; // Device-signed account deletion (Phase 5.0.1)
 mod capabilities; // Phase 5: Crypto-agility capabilities endpoint
 pub mod csrf; // Made public for gateway middleware
 pub mod devices; // Device-based passwordless authentication
-pub mod extractors; // Made public for auth-service, user-service, messaging-service, and notification-service
+pub use construct_extractors as extractors; // re-exported for auth-service, user-service, messaging-service, and notification-service
 pub mod federation; // Made public for service discovery
 pub mod health; // Made public for tests
 pub mod invites; // Phase 5: Dynamic invite tokens (one-time QR codes) - Made public for user-service
@@ -106,6 +106,10 @@ pub fn create_router(app_context: Arc<AppContext>) -> Router {
         .route(
             "/federation/v1/messages",
             post(federation::receive_federated_message),
+        )
+        .route(
+            "/federation/v1/sealed",
+            post(federation::receive_federated_sealed),
         )
         .route(
             "/federation/v1/keys/:user_id",

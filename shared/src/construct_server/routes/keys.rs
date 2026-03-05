@@ -16,7 +16,7 @@ use axum::{
     http::HeaderMap,
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+
 use std::sync::Arc;
 
 use crate::context::AppContext;
@@ -29,42 +29,11 @@ use construct_error::AppError;
 // Public Key Response (Invite Links & QR API Spec)
 // ============================================================================
 
-/// Nested key bundle structure for public key response
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6A
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeyBundleResponse {
-    /// Base64-encoded JSON bundle data (contains cipher suites, keys)
-    pub bundle_data: String,
-    /// Base64-encoded X25519 identity key (for key exchange/sessions)
-    pub master_identity_key: String,
-    /// Base64-encoded Ed25519 signature of bundle_data (64 bytes)
-    pub signature: String,
-}
+// Types moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::{KeyBundleResponse, PublicKeyResponse};
 
-/// Public key response structure matching the spec
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6A
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicKeyResponse {
-    /// Nested key bundle with bundleData and masterIdentityKey
-    pub key_bundle: KeyBundleResponse,
-    /// Username of the user
-    pub username: String,
-    /// Base64-encoded Ed25519 verifying key (REQUIRED for invite verification)
-    pub verifying_key: String,
-}
-
-/// Request body for PATCH /api/v1/users/me/public-key
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6B
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateVerifyingKeyRequest {
-    /// Base64-encoded Ed25519 verifying key
-    pub verifying_key: String,
-    /// Optional reason for update (e.g., "invite_signature_mismatch")
-    pub reason: Option<String>,
-}
+// UpdateVerifyingKeyRequest moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::UpdateVerifyingKeyRequest;
 
 /// POST /keys/upload (legacy) or POST /api/v1/keys/upload
 /// Uploads or updates a user's key bundle

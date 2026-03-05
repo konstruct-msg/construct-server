@@ -24,14 +24,26 @@ members = [
     "crates/construct-broker",
     "crates/construct-queue",
     "crates/construct-auth",
+    "crates/construct-auth-service",
     "crates/construct-apns",
     # Phase 5 - Crypto-Agility
     "crates/crypto-agility", "crates/construct-metrics",
+    # Phase 6 - Infrastructure crates
+    "crates/construct-utils",
+    "crates/construct-audit",
+    "crates/construct-rate-limit",
+    "crates/construct-pow",
+    "crates/construct-federation",
+    "crates/construct-delivery-ack",
+    "crates/construct-pending",
+    "crates/construct-key-management",
+    "crates/construct-context",
+    "crates/construct-extractors",
 ]
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.8.4"
+version = "0.9.0"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/maximeliseyev/construct-server"

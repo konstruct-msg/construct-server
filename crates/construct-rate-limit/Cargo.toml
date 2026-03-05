@@ -1,0 +1,13 @@
+[package]
+name = "construct-rate-limit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-error = { path = "../construct-error" }
+anyhow = { workspace = true }
+redis = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

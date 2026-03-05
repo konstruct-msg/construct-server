@@ -10,10 +10,8 @@
 // ============================================================================
 
 use crate::auth::AuthManager;
+use crate::csrf::{extract_csrf_token, has_custom_header, is_browser_request, validate_csrf_token};
 use crate::queue::MessageQueue;
-use crate::routes::csrf::{
-    extract_csrf_token, has_custom_header, is_browser_request, validate_csrf_token,
-};
 use crate::utils::extract_client_ip;
 use axum::{
     extract::{Request, State},

@@ -172,7 +172,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -603,7 +603,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "construct-apns"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -620,8 +620,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-audit"
+version = "0.9.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "construct-auth"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -633,8 +643,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-auth-service"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "chrono",
+ "construct-apns",
+ "construct-auth",
+ "construct-broker",
+ "construct-config",
+ "construct-context",
+ "construct-db",
+ "construct-error",
+ "construct-federation",
+ "construct-key-management",
+ "construct-pow",
+ "construct-queue",
+ "construct-utils",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-broker"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -669,6 +710,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-context"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "construct-apns",
+ "construct-auth",
+ "construct-broker",
+ "construct-config",
+ "construct-db",
+ "construct-delivery-ack",
+ "construct-federation",
+ "construct-key-management",
+ "construct-pending",
+ "construct-queue",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "construct-crypto"
 version = "0.5.11"
 dependencies = [
@@ -696,25 +756,48 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.5.11"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "bcrypt",
  "chrono",
+ "construct-config",
  "construct-crypto",
  "crypto-agility",
  "prost 0.14.3",
  "serde_json",
  "sqlx",
- "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "construct-delivery-ack"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "construct-broker",
+ "construct-config",
+ "construct-crypto",
+ "construct-utils",
+ "hex",
+ "rand 0.8.5",
+ "redis",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sqlx",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "construct-error"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -736,8 +819,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-extractors"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "construct-db",
+ "construct-error",
+ "ed25519-dalek",
+ "hex",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "construct-federation"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "construct-types",
+ "ed25519-dalek",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "construct-key-management"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "construct-db",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-metrics"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -745,8 +879,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-pending"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "redis",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "construct-pow"
+version = "0.9.0"
+dependencies = [
+ "argon2",
+ "hex",
+ "rand 0.8.5",
+ "tracing",
+]
+
+[[package]]
 name = "construct-queue"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -765,6 +922,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-rate-limit"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "construct-error",
+ "redis",
+ "sqlx",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-redis"
 version = "0.5.11"
 dependencies = [
@@ -776,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -791,16 +961,27 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "construct-apns",
+ "construct-audit",
  "construct-auth",
+ "construct-auth-service",
  "construct-broker",
  "construct-config",
+ "construct-context",
  "construct-crypto",
  "construct-db",
+ "construct-delivery-ack",
  "construct-error",
+ "construct-extractors",
+ "construct-federation",
+ "construct-key-management",
  "construct-metrics",
+ "construct-pending",
+ "construct-pow",
  "construct-queue",
+ "construct-rate-limit",
  "construct-redis",
  "construct-types",
+ "construct-utils",
  "crypto-agility",
  "dotenvy",
  "ed25519-dalek",
@@ -850,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -859,6 +1040,20 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "construct-utils"
+version = "0.9.0"
+dependencies = [
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "construct-types",
+ "ed25519-dalek",
+ "hyper",
+ "serde_json",
+ "sha2",
+ "tracing",
 ]
 
 [[package]]
@@ -986,7 +1181,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "delivery-worker"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1398,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1865,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "invite-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2136,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2171,7 +2366,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2187,6 +2382,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "prometheus",
+ "prost 0.14.3",
  "rdkafka 0.36.2",
  "redis",
  "reqwest",
@@ -2297,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "notification-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -4639,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",

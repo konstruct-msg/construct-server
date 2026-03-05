@@ -1,3 +1,4 @@
+// lint: some variants used in integration tests
 #![allow(dead_code)]
 // ============================================================================
 // Message Processor

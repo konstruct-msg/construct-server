@@ -11,7 +11,7 @@
 
 use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use serde::Deserialize;
+
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -240,12 +240,8 @@ pub async fn send_control_message(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ConfirmMessageRequest {
-    /// Temporary ID from Phase 1 (send_message response)
-    #[serde(rename = "tempId")]
-    pub temp_id: String,
-}
+// ConfirmMessageRequest moved to construct-types; re-exported here for backward compat
+pub use construct_types::api::ConfirmMessageRequest;
 
 /// POST /api/v1/messages/confirm - Phase 2 of 2-phase commit
 ///

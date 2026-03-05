@@ -601,8 +601,8 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
             _ => "apns",
         };
         let environment = match req.environment {
-            1 => "sandbox",
-            2 => "production",
+            1 => "production",
+            2 => "sandbox",
             _ => "sandbox",
         };
 
@@ -649,6 +649,44 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
 
         Ok(Response::new(proto::UpdatePushTokenResponse {
             success: true,
+        }))
+    }
+
+    async fn unregister_push_token(
+        &self,
+        request: Request<proto::UnregisterPushTokenRequest>,
+    ) -> Result<Response<proto::UnregisterPushTokenResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        let db: &sqlx::PgPool = self.context.db_pool.as_ref();
+        let result =
+            sqlx::query(r#"DELETE FROM device_tokens WHERE user_id = $1 AND device_id = $2"#)
+                .bind(user_id)
+                .bind(&req.device_id)
+                .execute(db)
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {e}")))?;
+
+        tracing::info!(
+            device_id = %req.device_id,
+            removed   = result.rows_affected(),
+            "Push token unregistered via DeviceService"
+        );
+
+        Ok(Response::new(proto::UnregisterPushTokenResponse {
+            success: result.rows_affected() > 0,
         }))
     }
 

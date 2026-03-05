@@ -19,15 +19,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::routes::account;
-use crate::routes::account_deletion;
-use crate::routes::devices;
-use crate::routes::extractors::TrustedUser;
-use crate::routes::invites;
-use crate::routes::keys::UpdateVerifyingKeyRequest;
+use crate::auth_service::devices;
 use crate::user_service::UserServiceContext;
+use crate::user_service::account;
+use crate::user_service::account_deletion;
 use crate::user_service::core as user_core;
+use crate::user_service::invites;
 use construct_error::AppError;
+use construct_extractors::TrustedUser;
+use construct_types::api::UpdateVerifyingKeyRequest;
 
 fn app_state(context: &Arc<UserServiceContext>) -> State<Arc<crate::context::AppContext>> {
     State(Arc::new(context.to_app_context()))

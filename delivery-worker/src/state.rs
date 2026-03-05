@@ -1,3 +1,4 @@
+// lint: some pub fns used only in integration tests
 #![allow(dead_code)]
 // ============================================================================
 // Delivery Worker State

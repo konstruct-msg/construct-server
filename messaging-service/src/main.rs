@@ -129,6 +129,15 @@ impl MessagingService for MessagingGrpcService {
             .message
             .ok_or_else(|| Status::invalid_argument("message is required"))?;
 
+        // ── Sealed Sender path ──────────────────────────────────────────────
+        if let Some(sealed) = &envelope.sealed_sender {
+            let resp = dispatch_sealed_sender(&self.context, sealed)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            return Ok(Response::new(resp));
+        }
+
+        // ── Regular (local) message path ────────────────────────────────────
         let sender = envelope
             .sender
             .ok_or_else(|| Status::invalid_argument("sender is required"))?;
@@ -340,13 +349,49 @@ async fn handle_stream_request(
 
     match req.request {
         Some(StreamReq::Send(envelope)) => {
-            // Extract user_id from envelope if not set yet
+            // Extract user_id from envelope if not set yet (regular messages only)
             if user_id.is_none()
+                && envelope.sealed_sender.is_none()
                 && let Some(sender) = &envelope.sender
             {
                 *user_id = Some(uuid::Uuid::parse_str(&sender.user_id)?);
             }
 
+            // ── Sealed Sender path ──────────────────────────────────────────
+            if let Some(sealed) = &envelope.sealed_sender {
+                let message_id = match dispatch_sealed_sender(context, sealed).await {
+                    Ok(resp) => resp.message_id,
+                    Err(e) => {
+                        let error = proto::MessageError {
+                            message_id: String::new(),
+                            error_code: proto::ErrorCode::Unspecified.into(),
+                            error_message: e.to_string(),
+                            retryable: false,
+                        };
+                        let response = proto::MessageStreamResponse {
+                            response: Some(proto::message_stream_response::Response::Error(error)),
+                            response_id: Some(req.request_id.clone()),
+                        };
+                        tx.send(Ok(response)).await?;
+                        return Ok(());
+                    }
+                };
+
+                let ack = proto::MessageAck {
+                    message_id,
+                    message_number: 0,
+                    server_timestamp: chrono::Utc::now().timestamp_millis(),
+                    delivery_count: 1,
+                };
+                let response = proto::MessageStreamResponse {
+                    response: Some(proto::message_stream_response::Response::Ack(ack)),
+                    response_id: Some(req.request_id.clone()),
+                };
+                tx.send(Ok(response)).await?;
+                return Ok(());
+            }
+
+            // ── Regular message path ────────────────────────────────────────
             if let Some(uid) = user_id {
                 let recipient_id = envelope
                     .recipient
@@ -528,6 +573,49 @@ fn convert_kafka_envelope_to_proto(
     use construct_server_shared::kafka::types::MessageType;
     use construct_server_shared::shared::proto::core::v1 as core;
 
+    // Sealed sender — reconstruct SealedSenderEnvelope, hide sender from proto.
+    if envelope.is_sealed_sender {
+        let sealed_inner_bytes = envelope
+            .sealed_inner_b64
+            .as_deref()
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+            .unwrap_or_default();
+
+        return Ok(core::Envelope {
+            sender: None, // anonymous — server does not know sender
+            sender_device: None,
+            recipient: Some(core::UserId {
+                user_id: envelope.recipient_id,
+                domain: None,
+                display_name: None,
+            }),
+            recipient_device: None,
+            content_type: core::ContentType::E2eeSignal.into(),
+            message_id_type: Some(core::envelope::MessageIdType::MessageId(
+                envelope.message_id,
+            )),
+            timestamp: envelope.timestamp,
+            ttl: 0,
+            priority: core::MessagePriority::Normal.into(),
+            encrypted_payload: vec![],
+            conversation_id: String::new(),
+            server_metadata: None,
+            client_metadata: None,
+            forwarding_path: vec![],
+            ephemeral_seconds: None,
+            reply_to_message_id: None,
+            edits_message_id: None,
+            reactions: vec![],
+            mentions: vec![],
+            sealed_sender: Some(core::SealedSenderEnvelope {
+                recipient_server: String::new(),
+                sealed_inner: sealed_inner_bytes,
+                forwarding_token: vec![],
+                timestamp: 0,
+            }),
+        });
+    }
+
     // Map Kafka MessageType → proto ContentType so clients can detect control messages
     // (SESSION_RESET, KEY_SYNC) without trying to decrypt them.
     let content_type = match envelope.message_type {
@@ -539,7 +627,7 @@ fn convert_kafka_envelope_to_proto(
         _ => core::ContentType::E2eeSignal,
     };
 
-    // Decode base64 ciphertext back to raw bytes — forwarded verbatim, never read.
+    // Regular message — decode base64 ciphertext back to raw bytes (forwarded verbatim).
     let payload_bytes = base64::engine::general_purpose::STANDARD
         .decode(&envelope.encrypted_payload)
         .unwrap_or_else(|_| envelope.encrypted_payload.into_bytes());
@@ -575,6 +663,74 @@ fn convert_kafka_envelope_to_proto(
         reactions: vec![],
         mentions: vec![],
         sealed_sender: None,
+    })
+}
+
+/// Route a SealedSenderEnvelope:
+///  - Cross-server (recipient_server ≠ ours): forward via FederationClient
+///  - Local (same server or empty): parse SealedInner → deliver to recipient_user_id
+async fn dispatch_sealed_sender(
+    context: &Arc<MessagingServiceContext>,
+    sealed: &construct_server_shared::shared::proto::core::v1::SealedSenderEnvelope,
+) -> anyhow::Result<proto::SendMessageResponse> {
+    use construct_server_shared::federation::FederationClient;
+    use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+    use construct_server_shared::shared::proto::core::v1 as core;
+    use prost::Message;
+
+    let our_domain = &context.config.federation.instance_domain;
+    let message_id = uuid::Uuid::new_v4().to_string();
+
+    // Cross-server: forward sealed_inner opaquely to recipient server
+    if !sealed.recipient_server.is_empty() && sealed.recipient_server != *our_domain {
+        let target = &sealed.recipient_server;
+        let client = match &context.server_signer {
+            Some(signer) => FederationClient::new_with_signer(signer.clone(), our_domain.clone()),
+            None => FederationClient::new(),
+        };
+
+        client
+            .send_sealed_message(target, &message_id, &sealed.sealed_inner, sealed.timestamp)
+            .await
+            .map_err(|e| anyhow::anyhow!("Sealed sender federation failed to {}: {}", target, e))?;
+
+        return Ok(proto::SendMessageResponse {
+            message_id,
+            message_number: 0,
+            server_timestamp: chrono::Utc::now().timestamp_millis(),
+            success: true,
+            error: None,
+        });
+    }
+
+    // Local delivery: decode SealedInner to get recipient_user_id
+    let sealed_inner = core::SealedInner::decode(sealed.sealed_inner.as_ref())
+        .map_err(|e| anyhow::anyhow!("Failed to decode SealedInner: {}", e))?;
+
+    let recipient_id = sealed_inner.recipient_user_id.clone();
+    if recipient_id.is_empty() {
+        anyhow::bail!("SealedInner.recipient_user_id is required");
+    }
+
+    let kafka_envelope = KafkaMessageEnvelope::from_sealed_sender(
+        message_id.clone(),
+        recipient_id,
+        sealed.sealed_inner.to_vec(),
+    );
+
+    let app_context = Arc::new(context.to_app_context());
+    construct_server_shared::messaging_service::core::dispatch_envelope(
+        &app_context,
+        kafka_envelope,
+    )
+    .await?;
+
+    Ok(proto::SendMessageResponse {
+        message_id,
+        message_number: 0,
+        server_timestamp: chrono::Utc::now().timestamp_millis(),
+        success: true,
+        error: None,
     })
 }
 
@@ -781,6 +937,10 @@ async fn main() -> Result<()> {
         construct_server_shared::apns::ApnsClient::new(config.apns.clone())
             .context("Failed to initialize APNs client")?,
     );
+    apns_client
+        .initialize()
+        .await
+        .context("Failed to connect APNs client")?;
     let token_encryption = Arc::new(
         DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
             .context("Failed to initialize device token encryption")?,
@@ -829,6 +989,10 @@ async fn main() -> Result<()> {
             }
         };
 
+    // Initialize server signer for federation (sealed sender cross-server forwarding)
+    let server_signer =
+        construct_server_shared::context::AppContext::init_server_signer_pub(&config);
+
     // Create service context
     let context = Arc::new(MessagingServiceContext {
         db_pool,
@@ -839,6 +1003,7 @@ async fn main() -> Result<()> {
         token_encryption,
         config: config.clone(),
         key_management,
+        server_signer,
     });
 
     // Import messaging service handlers
