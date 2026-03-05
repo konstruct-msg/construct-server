@@ -1,0 +1,37 @@
+[package]
+name = "construct-user-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+construct-apns           = { path = "../construct-apns" }
+construct-audit          = { path = "../construct-audit" }
+construct-auth           = { path = "../construct-auth" }
+construct-broker         = { path = "../construct-broker" }
+construct-config         = { path = "../construct-config" }
+construct-context        = { path = "../construct-context" }
+construct-crypto         = { path = "../construct-crypto", features = ["full"] }
+construct-db             = { path = "../construct-db" }
+construct-error          = { path = "../construct-error", features = ["full"] }
+construct-extractors     = { path = "../construct-extractors" }
+construct-queue          = { path = "../construct-queue" }
+construct-rate-limit     = { path = "../construct-rate-limit" }
+construct-types          = { path = "../construct-types" }
+construct-utils          = { path = "../construct-utils" }
+crypto-agility           = { path = "../crypto-agility" }
+
+anyhow     = "1.0"
+axum       = { workspace = true }
+base64     = { workspace = true }
+chrono     = { workspace = true }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hex        = { workspace = true }
+prost      = "0.14.3"
+rand       = "0.8"
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+subtle     = "2.6"
+tokio      = { version = "1", features = ["sync"] }
+tracing    = "0.1"
+uuid       = { version = "1.11", features = ["v4"] }
