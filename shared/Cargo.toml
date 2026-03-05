@@ -14,7 +14,8 @@ construct-broker = { path = "../crates/construct-broker" }
 construct-queue  = { path = "../crates/construct-queue" }
 construct-auth         = { path = "../crates/construct-auth" }
 construct-auth-service      = { path = "../crates/construct-auth-service" }
-construct-messaging-service = { path = "../crates/construct-messaging-service" }
+construct-messaging-service      = { path = "../crates/construct-messaging-service" }
+construct-notification-service  = { path = "../crates/construct-notification-service" }
 construct-apns   = { path = "../crates/construct-apns" }
 construct-db = { path = "../crates/construct-db" }
 construct-metrics = { path = "../crates/construct-metrics" }
