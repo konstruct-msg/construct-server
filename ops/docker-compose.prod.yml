@@ -325,7 +325,7 @@ services:
     environment:
       PORT: "8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      MEDIA_PUBLIC_HOST: ${MEDIA_PUBLIC_HOST:-localhost:50056}
+      MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
