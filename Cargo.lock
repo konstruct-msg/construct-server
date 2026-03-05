@@ -643,6 +643,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-auth-service"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "chrono",
+ "construct-apns",
+ "construct-auth",
+ "construct-broker",
+ "construct-config",
+ "construct-context",
+ "construct-db",
+ "construct-error",
+ "construct-federation",
+ "construct-key-management",
+ "construct-pow",
+ "construct-queue",
+ "construct-utils",
+ "ed25519-dalek",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "construct-broker"
 version = "0.9.0"
 dependencies = [
@@ -932,6 +963,7 @@ dependencies = [
  "construct-apns",
  "construct-audit",
  "construct-auth",
+ "construct-auth-service",
  "construct-broker",
  "construct-config",
  "construct-context",
