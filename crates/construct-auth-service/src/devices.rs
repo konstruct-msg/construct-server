@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::context::AppContext;
-use crate::db::{self, CreateDeviceData};
+use construct_context::AppContext;
+use construct_db::{self as db, CreateDeviceData};
 use construct_error::AppError;
 
 // ============================================================================
@@ -232,7 +232,7 @@ pub async fn register_device_v2(
     let max_registrations = app_context.config.security.max_registrations_per_hour;
 
     if max_registrations > 0 && client_ip != "unknown" {
-        let count = crate::db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
+        let count = construct_db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?;
 
@@ -366,7 +366,7 @@ pub async fn register_device_v2(
 
     // 6. Verify PoW solution
     let pow_challenge =
-        crate::db::get_pow_challenge(&app_context.db_pool, &request.pow_solution.challenge)
+        construct_db::get_pow_challenge(&app_context.db_pool, &request.pow_solution.challenge)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to fetch PoW challenge: {}", e)))?
             .ok_or_else(|| AppError::Validation("Invalid or expired PoW challenge".to_string()))?;
@@ -384,7 +384,7 @@ pub async fn register_device_v2(
     }
 
     // Verify PoW solution
-    if !crate::pow::verify_pow_solution(
+    if !construct_pow::verify_pow_solution(
         &request.pow_solution.challenge,
         request.pow_solution.nonce,
         &request.pow_solution.hash,
@@ -400,7 +400,7 @@ pub async fn register_device_v2(
     }
 
     // Mark challenge as used (prevent reuse)
-    crate::db::mark_challenge_used(&app_context.db_pool, &request.pow_solution.challenge)
+    construct_db::mark_challenge_used(&app_context.db_pool, &request.pow_solution.challenge)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
 
@@ -783,7 +783,7 @@ pub async fn get_pow_challenge(
     // Skip rate-limit check when IP is unknown (no proxy headers) to avoid inet cast errors
     let max_challenges = app_context.config.security.max_pow_challenges_per_hour;
     let count = if max_challenges > 0 && client_ip != "unknown" {
-        crate::db::count_challenges_by_ip(&app_context.db_pool, &client_ip, 60)
+        construct_db::count_challenges_by_ip(&app_context.db_pool, &client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?
     } else {
@@ -810,14 +810,14 @@ pub async fn get_pow_challenge(
 
     // 3. Generate and store challenge with adaptive difficulty
     // Only pass IP when it's a valid address — PostgreSQL inet cast rejects "unknown"
-    let challenge = crate::pow::generate_challenge();
+    let challenge = construct_pow::generate_challenge();
     let ttl_seconds = 600; // 10 minutes
     let requester_ip = if client_ip == "unknown" {
         None
     } else {
         Some(client_ip.as_str())
     };
-    let pow_challenge = crate::db::create_pow_challenge(
+    let pow_challenge = construct_db::create_pow_challenge(
         &app_context.db_pool,
         &challenge,
         params.difficulty as i16,
