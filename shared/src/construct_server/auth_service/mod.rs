@@ -7,6 +7,7 @@
 // ============================================================================
 
 pub mod core;
+pub mod devices;
 pub mod handlers;
 
 use crate::auth::AuthManager;

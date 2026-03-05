@@ -6,8 +6,11 @@
 //
 // ============================================================================
 
+pub mod account;
+pub mod account_deletion;
 pub mod core;
 pub mod handlers;
+pub mod invites;
 
 use crate::auth::AuthManager;
 use crate::db::DbPool;

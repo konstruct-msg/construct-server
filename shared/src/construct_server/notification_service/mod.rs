@@ -7,6 +7,7 @@
 // ============================================================================
 
 pub mod handlers;
+pub mod notifications;
 
 use crate::apns::{ApnsClient, DeviceTokenEncryption};
 use crate::auth::AuthManager;
