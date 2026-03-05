@@ -40,6 +40,7 @@ pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;
 pub use construct_rate_limit as rate_limit; // Rate limiting & warmup sandbox
+pub mod csrf; // CSRF utilities (used by gateway/middleware.rs and routes/csrf.rs)
 pub mod routes;
 pub mod server_registry;
 pub mod user_service;
