@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::auth_service::devices;
 use crate::context::AppContext;
-use crate::routes::devices;
 use crate::shared::proto::services::v1 as proto_services;
 use crate::utils::log_safe_id;
 use axum::Json;

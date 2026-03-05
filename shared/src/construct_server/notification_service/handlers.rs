@@ -13,7 +13,7 @@ use axum::{Json, extract::State, response::IntoResponse};
 use std::sync::Arc;
 
 use crate::notification_service::NotificationServiceContext;
-use crate::routes::notifications;
+use crate::notification_service::notifications;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
 
