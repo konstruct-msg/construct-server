@@ -233,11 +233,18 @@ async fn main() -> Result<()> {
     info!("Initializing APNs client...");
     let apns_client =
         Arc::new(ApnsClient::new(config.apns.clone()).context("Failed to initialize APNs client")?);
-    apns_client
-        .initialize()
-        .await
-        .context("Failed to connect APNs client")?;
-    if config.apns.enabled {
+    if let Err(e) = apns_client.initialize().await {
+        if config.apns.enabled {
+            // Key file missing or invalid — log error but don't crash.
+            // Notifications will be silently skipped until the key is deployed.
+            tracing::error!(
+                error = %e,
+                key_path = %config.apns.key_path,
+                "APNs initialization failed — push notifications DISABLED until key is deployed"
+            );
+        }
+        // If disabled: expected, ignore
+    } else if config.apns.enabled {
         info!("APNs client initialized and ENABLED");
     } else {
         info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");

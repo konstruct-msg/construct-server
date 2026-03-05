@@ -937,19 +937,23 @@ async fn main() -> Result<()> {
         construct_server_shared::apns::ApnsClient::new(config.apns.clone())
             .context("Failed to initialize APNs client")?,
     );
-    apns_client
-        .initialize()
-        .await
-        .context("Failed to connect APNs client")?;
-    let token_encryption = Arc::new(
-        DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
-            .context("Failed to initialize device token encryption")?,
-    );
-    if config.apns.enabled {
+    if let Err(e) = apns_client.initialize().await {
+        if config.apns.enabled {
+            tracing::error!(
+                error = %e,
+                key_path = %config.apns.key_path,
+                "APNs initialization failed — push notifications DISABLED until key is deployed"
+            );
+        }
+    } else if config.apns.enabled {
         info!("APNs client initialized and ENABLED");
     } else {
         info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");
     }
+    let token_encryption = Arc::new(
+        DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
+            .context("Failed to initialize device token encryption")?,
+    );
 
     // Initialize Key Management System (optional, requires VAULT_ADDR)
     let key_management =
