@@ -1,3 +1,3 @@
 // Account logic moved to user_service::account.
 // Re-exported here for backward compatibility.
-pub use crate::user_service::account::*;
+pub use construct_server_shared::user_service::account::*;

@@ -9,14 +9,14 @@
 //
 // ============================================================================
 
-use crate::{
+use bytes::Bytes;
+use construct_error::AppError;
+use construct_server_shared::{
     context::AppContext,
     federation::{FederatedEnvelope, ServerSigner},
     kafka::KafkaMessageEnvelope,
     utils::{add_security_headers, log_safe_id},
 };
-use bytes::Bytes;
-use construct_error::AppError;
 use construct_types::{ChatMessage, UserId};
 use http_body_util::{BodyExt, Full};
 use hyper::{StatusCode, body::Incoming as IncomingBody};
@@ -494,7 +494,7 @@ pub async fn receive_federated_sealed(
         .decode(&req.sealed_inner)
         .map_err(|e| AppError::Validation(format!("Invalid sealed_inner base64: {e}")))?;
 
-    use crate::shared::proto::core::v1 as core;
+    use construct_server_shared::shared::proto::core::v1 as core;
     use prost::Message;
     let sealed_inner_proto = core::SealedInner::decode(sealed_bytes.as_slice())
         .map_err(|e| AppError::Validation(format!("Invalid SealedInner proto: {e}")))?;

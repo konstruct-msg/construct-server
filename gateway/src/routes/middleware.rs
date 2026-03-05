@@ -19,13 +19,15 @@ use axum::{
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::context::AppContext;
 use crate::routes::csrf::{
     extract_csrf_token, has_custom_header, is_browser_request, validate_csrf_token, validate_origin,
 };
 use crate::routes::extractors::TrustedUser;
-use crate::utils::{add_security_headers as utils_add_security_headers, extract_client_ip};
 use construct_error::AppError;
+use construct_server_shared::context::AppContext;
+use construct_server_shared::utils::{
+    add_security_headers as utils_add_security_headers, extract_client_ip,
+};
 use subtle::ConstantTimeEq;
 
 /// Request logging middleware
@@ -367,7 +369,7 @@ pub async fn combined_rate_limiting(
                     drop(queue);
                     let user_id_for_log = user_id.to_string();
                     tracing::warn!(
-                        user_hash = %crate::utils::log_safe_id(&user_id_for_log, &ctx.config.logging.hash_salt),
+                        user_hash = %construct_server_shared::utils::log_safe_id(&user_id_for_log, &ctx.config.logging.hash_salt),
                         ip = %client_ip,
                         count = count,
                         limit = max_combined_requests,
@@ -385,7 +387,7 @@ pub async fn combined_rate_limiting(
                 let user_id_for_log = user_id.to_string();
                 tracing::error!(
                     error = %e,
-                    user_hash = %crate::utils::log_safe_id(&user_id_for_log, &ctx.config.logging.hash_salt),
+                    user_hash = %construct_server_shared::utils::log_safe_id(&user_id_for_log, &ctx.config.logging.hash_salt),
                     ip = %client_ip,
                     "Failed to check combined rate limit"
                 );

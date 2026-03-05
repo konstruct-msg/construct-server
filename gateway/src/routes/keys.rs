@@ -19,11 +19,11 @@ use axum::{
 
 use std::sync::Arc;
 
-use crate::context::AppContext;
 use crate::routes::extractors::TrustedUser;
-use crate::user_service::core as user_core;
 use construct_crypto::UploadableKeyBundle;
 use construct_error::AppError;
+use construct_server_shared::context::AppContext;
+use construct_server_shared::user_service::core as user_core;
 
 // ============================================================================
 // Public Key Response (Invite Links & QR API Spec)

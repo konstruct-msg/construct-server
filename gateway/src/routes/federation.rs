@@ -20,10 +20,10 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::context::AppContext;
-use crate::db;
-use crate::utils::log_safe_id;
 use construct_error::AppError;
+use construct_server_shared::context::AppContext;
+use construct_server_shared::db;
+use construct_server_shared::utils::log_safe_id;
 
 /// GET /.well-known/construct-server
 /// gRPC Service Discovery Endpoint (Hybrid Discovery Protocol v1.0)

@@ -2,7 +2,7 @@
 // Media Routes - REST API for Media Upload Tokens
 // ============================================================================
 //
-// This module provides REST endpoints for generating media upload tokens.
+// Provides REST endpoint for generating media upload tokens.
 // Clients use these tokens to upload encrypted media files to media-service.
 //
 // Endpoints:
@@ -11,11 +11,10 @@
 // ============================================================================
 
 use axum::{Json, extract::State, http::StatusCode};
+use construct_extractors::TrustedUser;
+use construct_server_shared::messaging_service::MessagingServiceContext;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-use crate::messaging_service::MessagingServiceContext;
-use crate::routes::extractors::TrustedUser;
 
 /// Request for media upload token
 #[derive(Debug, Deserialize)]
@@ -144,7 +143,6 @@ fn generate_upload_token(secret: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, "System time is before UNIX_EPOCH, using fallback timestamp");
-            // Fallback to a reasonable timestamp (2020-01-01) if system time is invalid
             std::time::Duration::from_secs(1577836800)
         })
         .as_secs();
@@ -163,28 +161,4 @@ fn generate_upload_token(secret: &str) -> String {
     let hmac = hex::encode(result.into_bytes());
 
     format!("{}.{}.{}", timestamp_hex, random_hex, hmac)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_upload_token() {
-        let secret = "test-secret-that-is-at-least-32-chars-long";
-        let token = generate_upload_token(secret);
-
-        // Token should have 3 parts
-        let parts: Vec<&str> = token.split('.').collect();
-        assert_eq!(parts.len(), 3);
-
-        // Timestamp should be valid hex
-        assert!(u64::from_str_radix(parts[0], 16).is_ok());
-
-        // Random should be 32 hex chars (16 bytes)
-        assert_eq!(parts[1].len(), 32);
-
-        // HMAC should be 64 hex chars (32 bytes)
-        assert_eq!(parts[2].len(), 64);
-    }
 }

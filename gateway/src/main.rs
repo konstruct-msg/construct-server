@@ -17,14 +17,22 @@
 //
 // ============================================================================
 
+mod circuit_breaker;
+mod discovery;
+mod handlers;
+mod middleware;
+mod router;
+pub mod routes;
+mod service_client;
+
+use crate::middleware::{GatewayMiddlewareState, csrf_protection, jwt_verification, rate_limiting};
+use crate::router::{GatewayRouter, route_request};
 use anyhow::{Context, Result};
-use axum::{Router, http::StatusCode, middleware, response::Response, routing::any};
+use axum::{
+    Router, http::StatusCode, middleware as axum_middleware, response::Response, routing::any,
+};
 use construct_config::Config;
 use construct_server_shared::auth::AuthManager;
-use construct_server_shared::gateway::middleware::{
-    GatewayMiddlewareState, csrf_protection, jwt_verification, rate_limiting,
-};
-use construct_server_shared::gateway::router::{GatewayRouter, route_request};
 use construct_server_shared::metrics;
 use construct_server_shared::queue::MessageQueue;
 use std::sync::Arc;
@@ -85,15 +93,15 @@ async fn main() -> Result<()> {
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
-                .layer(middleware::from_fn_with_state(
+                .layer(axum_middleware::from_fn_with_state(
                     middleware_state.clone(),
                     csrf_protection,
                 ))
-                .layer(middleware::from_fn_with_state(
+                .layer(axum_middleware::from_fn_with_state(
                     middleware_state.clone(),
                     rate_limiting,
                 ))
-                .layer(middleware::from_fn_with_state(
+                .layer(axum_middleware::from_fn_with_state(
                     middleware_state,
                     jwt_verification,
                 ))

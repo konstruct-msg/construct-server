@@ -20,9 +20,9 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::context::AppContext;
 use construct_db;
 use construct_error::AppError;
+use construct_server_shared::context::AppContext;
 use crypto_agility::{CryptoSuite, ProtocolVersion};
 
 /// GET /api/v1/users/:id/capabilities
