@@ -35,6 +35,8 @@ tonic = "0.14.2"
 prost = "0.14.3"
 construct-crypto = { path = "../crates/construct-crypto" }
 construct-extractors = { path = "../crates/construct-extractors" }
+construct-error = { path = "../crates/construct-error" }
+construct-types = { path = "../crates/construct-types" }
 futures-core = "0.3"
 tokio-stream = "0.1"
 

@@ -1,3 +1,4 @@
+mod handlers;
 mod media_routes;
 
 use anyhow::{Context, Result};
@@ -1012,8 +1013,7 @@ async fn main() -> Result<()> {
         server_signer,
     });
 
-    // Import messaging service handlers
-    use construct_server_shared::messaging_service::handlers;
+    // handlers module is local (messaging-service/src/handlers.rs)
 
     // Start gRPC MessagingService (SVC-3 scaffold)
     let grpc_context = context.clone();

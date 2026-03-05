@@ -18,5 +18,3 @@ pub mod account {
 pub mod account_deletion {
     pub use construct_user_service::account_deletion::*;
 }
-
-pub mod handlers;

@@ -6,5 +6,3 @@ pub use construct_messaging_service::context::MessagingServiceContext;
 pub mod core {
     pub use construct_messaging_service::core::*;
 }
-
-pub mod handlers;

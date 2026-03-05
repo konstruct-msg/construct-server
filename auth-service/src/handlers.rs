@@ -1,17 +1,6 @@
 // ============================================================================
 // Auth Service Handlers - Passwordless Authentication
 // ============================================================================
-//
-// Wrapper handlers that convert AuthServiceContext to AppContext
-// for use with existing device-based authentication handlers.
-//
-// This service handles ONLY passwordless device-based authentication:
-// - PoW challenge generation
-// - Device registration (with Ed25519 keys)
-// - Device authentication (Ed25519 signature verification)
-// - JWT token management (refresh, logout)
-//
-// ============================================================================
 
 use axum::http::StatusCode;
 use axum::{Json, extract::State, response::IntoResponse};
@@ -19,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::auth_service::AuthServiceContext;
-use crate::auth_service::core;
-use crate::shared::proto::services::v1 as proto_services;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
+use construct_server_shared::auth_service::AuthServiceContext;
+use construct_server_shared::auth_service::core;
+use construct_server_shared::context::AppContext;
+use construct_server_shared::shared::proto::services::v1 as proto_services;
 
-fn app_state(context: &Arc<AuthServiceContext>) -> State<Arc<crate::context::AppContext>> {
+fn app_state(context: &Arc<AuthServiceContext>) -> State<Arc<AppContext>> {
     State(Arc::new(context.to_app_context()))
 }
 
@@ -90,7 +80,6 @@ pub struct AuthenticateDeviceRequest {
     pub signature: String,
 }
 
-/// Wrapper for get_pow_challenge handler
 pub async fn get_pow_challenge(
     State(context): State<Arc<AuthServiceContext>>,
     headers: axum::http::HeaderMap,
@@ -98,7 +87,6 @@ pub async fn get_pow_challenge(
     core::get_pow_challenge(app_state(&context).0, headers).await
 }
 
-/// Wrapper for register_device handler
 pub async fn register_device(
     State(context): State<Arc<AuthServiceContext>>,
     headers: axum::http::HeaderMap,
@@ -127,7 +115,6 @@ pub async fn register_device(
     .await
 }
 
-/// Wrapper for authenticate_device handler
 pub async fn authenticate_device(
     State(context): State<Arc<AuthServiceContext>>,
     Json(request): Json<AuthenticateDeviceRequest>,
@@ -143,7 +130,6 @@ pub async fn authenticate_device(
     .await
 }
 
-/// Wrapper for refresh_token handler
 pub async fn refresh_token(
     State(context): State<Arc<AuthServiceContext>>,
     Json(request): Json<RefreshTokenRequest>,
@@ -166,7 +152,6 @@ pub async fn refresh_token(
     ))
 }
 
-/// Wrapper for logout handler
 pub async fn logout(
     State(context): State<Arc<AuthServiceContext>>,
     user: TrustedUser,
