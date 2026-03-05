@@ -23,6 +23,7 @@ use config::MediaConfig;
 pub struct MediaServiceContext {
     pub db_pool: Arc<DbPool>,
     pub media_config: Arc<MediaConfig>,
+    pub public_host: String,
 }
 
 #[derive(Clone)]
@@ -74,7 +75,10 @@ impl MediaService for MediaGrpcService {
 
         Ok(Response::new(proto::GenerateUploadTokenResponse {
             upload_token,
-            upload_url: "grpc://localhost:50056/MediaService/UploadMedia".to_string(),
+            upload_url: format!(
+                "grpc://{}/MediaService/UploadMedia",
+                self.context.public_host
+            ),
             max_file_size: self.context.media_config.max_file_size as i64,
             expires_at,
         }))
@@ -201,7 +205,10 @@ impl MediaService for MediaGrpcService {
 
         Ok(Response::new(proto::UploadMediaResponse {
             media_id: mid,
-            download_url: "grpc://localhost:50056/MediaService/DownloadMedia".to_string(),
+            download_url: format!(
+                "grpc://{}/MediaService/DownloadMedia",
+                self.context.public_host
+            ),
             file_size: total_size as i64,
             file_hash: computed_hash,
             expires_at,
@@ -446,9 +453,13 @@ async fn main() -> Result<()> {
         .run(&*db_pool)
         .await?;
 
+    let public_host =
+        env::var("MEDIA_PUBLIC_HOST").unwrap_or_else(|_| "localhost:50056".to_string());
+
     let context = Arc::new(MediaServiceContext {
         db_pool,
         media_config: media_config.clone(),
+        public_host,
     });
 
     let grpc_context = context.clone();

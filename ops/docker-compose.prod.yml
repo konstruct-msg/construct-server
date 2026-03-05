@@ -188,7 +188,7 @@ services:
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-false}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey.p8}
+      APNS_KEY_PATH: ${APNS_KEY_PATH}
       APNS_KEY_ID: ${APNS_KEY_ID}
       APNS_TEAM_ID: ${APNS_TEAM_ID}
       APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
@@ -267,7 +267,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       APNS_ENABLED: ${APNS_ENABLED:-false}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey.p8}
+      APNS_KEY_PATH: ${APNS_KEY_PATH}
       APNS_KEY_ID: ${APNS_KEY_ID}
       APNS_TEAM_ID: ${APNS_TEAM_ID}
       APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
@@ -325,6 +325,7 @@ services:
     environment:
       PORT: "8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      MEDIA_PUBLIC_HOST: ${MEDIA_PUBLIC_HOST:-localhost:50056}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
