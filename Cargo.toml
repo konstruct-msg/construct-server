@@ -41,6 +41,7 @@ members = [
     "crates/construct-key-management",
     "crates/construct-context",
     "crates/construct-extractors",
+    "crates/construct-user-service",
 ]
 
 # Единая версия для всех пакетов
