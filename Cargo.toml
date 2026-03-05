@@ -25,6 +25,8 @@ members = [
     "crates/construct-queue",
     "crates/construct-auth",
     "crates/construct-auth-service",
+    "crates/construct-messaging-service",
+    "crates/construct-notification-service",
     "crates/construct-apns",
     # Phase 5 - Crypto-Agility
     "crates/crypto-agility", "crates/construct-metrics",
@@ -39,6 +41,7 @@ members = [
     "crates/construct-key-management",
     "crates/construct-context",
     "crates/construct-extractors",
+    "crates/construct-user-service",
 ]
 
 # Единая версия для всех пакетов
