@@ -133,9 +133,14 @@ impl KeyService for KeyGrpcService {
             })
             .collect();
 
-        let count = core::upload_prekeys(&self.context.db, &req.device_id, &prekeys)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let count = core::upload_prekeys(
+            &self.context.db,
+            &req.device_id,
+            &prekeys,
+            req.replace_existing,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         // Handle optional signed prekey update
         if let Some(spk) = req.signed_pre_key {
