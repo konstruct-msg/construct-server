@@ -601,8 +601,8 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
             _ => "apns",
         };
         let environment = match req.environment {
-            1 => "sandbox",
-            2 => "production",
+            1 => "production",
+            2 => "sandbox",
             _ => "sandbox",
         };
 

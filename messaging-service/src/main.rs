@@ -937,6 +937,10 @@ async fn main() -> Result<()> {
         construct_server_shared::apns::ApnsClient::new(config.apns.clone())
             .context("Failed to initialize APNs client")?,
     );
+    apns_client
+        .initialize()
+        .await
+        .context("Failed to connect APNs client")?;
     let token_encryption = Arc::new(
         DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
             .context("Failed to initialize device token encryption")?,

@@ -115,7 +115,8 @@ impl NotificationService for NotificationGrpcService {
                 _ => "apns".to_string(), // default
             },
             push_environment: match req.environment {
-                2 => "production".to_string(),
+                1 => "production".to_string(),
+                2 => "sandbox".to_string(),
                 _ => "sandbox".to_string(), // default
             },
         };
@@ -232,7 +233,15 @@ async fn main() -> Result<()> {
     info!("Initializing APNs client...");
     let apns_client =
         Arc::new(ApnsClient::new(config.apns.clone()).context("Failed to initialize APNs client")?);
-    info!("APNs client initialized");
+    apns_client
+        .initialize()
+        .await
+        .context("Failed to connect APNs client")?;
+    if config.apns.enabled {
+        info!("APNs client initialized and ENABLED");
+    } else {
+        info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");
+    }
 
     // Initialize Device Token Encryption
     let token_encryption = Arc::new(
