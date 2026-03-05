@@ -26,6 +26,7 @@ members = [
     "crates/construct-auth",
     "crates/construct-auth-service",
     "crates/construct-messaging-service",
+    "crates/construct-notification-service",
     "crates/construct-apns",
     # Phase 5 - Crypto-Agility
     "crates/crypto-agility", "crates/construct-metrics",
