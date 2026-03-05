@@ -17,10 +17,8 @@
 //
 // ============================================================================
 
-use crate::auth::AuthManager;
-use crate::gateway::discovery::ServiceDiscovery;
-use crate::gateway::service_client::ServiceClient;
-use crate::queue::MessageQueue;
+use crate::discovery::ServiceDiscovery;
+use crate::service_client::ServiceClient;
 use axum::{
     body::Body,
     extract::{Request, State},
@@ -28,6 +26,8 @@ use axum::{
     response::Response,
 };
 use construct_config::Config;
+use construct_server_shared::auth::AuthManager;
+use construct_server_shared::queue::MessageQueue;
 use std::sync::Arc;
 
 /// Gateway router state
@@ -106,7 +106,7 @@ impl GatewayRouter {
         auth_manager: Arc<AuthManager>,
         queue: Arc<tokio::sync::Mutex<MessageQueue>>,
     ) -> Arc<GatewayState> {
-        use crate::gateway::discovery::create_service_discovery;
+        use crate::discovery::create_service_discovery;
 
         let service_discovery = create_service_discovery(Arc::new(config.microservices.clone()));
         let service_client = ServiceClient::new_with_circuit_breaker(

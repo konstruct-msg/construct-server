@@ -1,3 +1,5 @@
+mod media_routes;
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -1035,9 +1037,6 @@ async fn main() -> Result<()> {
     });
     info!("Messaging gRPC listening on {}", grpc_bind_address);
 
-    // Import media routes
-    use construct_server_shared::routes::media;
-
     // Create router
     let app = Router::new()
         // Health check
@@ -1051,7 +1050,10 @@ async fn main() -> Result<()> {
         // Phase 4.5: Control messages endpoint
         .route("/api/v1/control", post(handlers::send_control_message))
         // Media upload token endpoint
-        .route("/api/v1/media/token", post(media::generate_media_token))
+        .route(
+            "/api/v1/media/token",
+            post(media_routes::generate_media_token),
+        )
         // Apply middleware
         .layer(
             ServiceBuilder::new()

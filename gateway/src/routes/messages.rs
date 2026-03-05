@@ -16,12 +16,12 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::context::AppContext;
-use crate::kafka::types::KafkaMessageEnvelope;
-use crate::messaging_service::core as messaging_core;
 use crate::routes::extractors::TrustedUser;
-use crate::utils::{extract_client_ip, log_safe_id};
 use construct_error::AppError;
+use construct_server_shared::context::AppContext;
+use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+use construct_server_shared::messaging_service::core as messaging_core;
+use construct_server_shared::utils::{extract_client_ip, log_safe_id};
 use construct_types::message::{ChatMessage, EndSessionData};
 
 /// POST /api/v1/control

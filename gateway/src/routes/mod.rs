@@ -41,7 +41,7 @@ use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
-use crate::context::AppContext;
+use construct_server_shared::context::AppContext;
 
 /// Create the main application router with all routes
 pub fn create_router(app_context: Arc<AppContext>) -> Router {

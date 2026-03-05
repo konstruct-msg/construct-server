@@ -775,17 +775,66 @@ async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
-/// Service discovery endpoint (wrapper)
+/// Service discovery endpoint
 async fn well_known_construct_server(
     State(context): State<Arc<AuthServiceContext>>,
 ) -> impl IntoResponse {
-    use construct_server_shared::routes::federation;
+    use axum::http::header;
 
-    // Convert AuthServiceContext to AppContext
     let app_context = Arc::new(context.to_app_context());
 
-    // Call the actual handler
-    federation::well_known_construct_server(axum::extract::State(app_context)).await
+    let public_key = app_context
+        .server_signer
+        .as_ref()
+        .map(|signer| signer.public_key_base64());
+
+    let domain = &app_context.config.instance_domain;
+    let tls_enabled = public_key.is_some();
+
+    let discovery_info = json!({
+        "version": "1.0",
+        "protocol": "grpc",
+        "server": {
+            "domain": domain,
+            "version": env!("CARGO_PKG_VERSION"),
+            "public_key": public_key,
+        },
+        "grpc_endpoint": format!("{}:443", domain),
+        "services": [
+            "auth.AuthService",
+            "user.UserService",
+            "messaging.MessagingService",
+            "notification.NotificationService",
+            "invite.InviteService",
+            "media.MediaService"
+        ],
+        "federation": {
+            "enabled": app_context.config.federation_enabled,
+            "protocol_version": "1.0",
+            "public_key": public_key,
+            "s2s_endpoint": format!("{}:443", domain),
+            "tls": tls_enabled
+        },
+        "capabilities": {
+            "max_message_size_bytes": 100_000,
+            "max_file_size_bytes": 100_000_000,
+            "supports_streaming": true,
+            "supports_grpc_web": true,
+            "supports_pq_crypto": false
+        },
+        "limits": {
+            "max_message_size_bytes": 100_000,
+            "max_media_size_bytes": 100_000_000,
+            "rate_limit_messages_per_hour": app_context.config.security.max_messages_per_hour,
+            "rate_limit_pow_per_hour": 10
+        }
+    });
+
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(discovery_info),
+    )
 }
 
 #[tokio::main]

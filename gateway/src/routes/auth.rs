@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::auth_service::core;
-use crate::context::AppContext;
+use construct_server_shared::auth_service::core;
+use construct_server_shared::context::AppContext;
 use crate::routes::extractors::TrustedUser;
 use construct_error::AppError;
 

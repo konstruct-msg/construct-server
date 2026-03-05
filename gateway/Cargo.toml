@@ -6,6 +6,13 @@ edition.workspace = true
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
 construct-server-shared = { path = "../shared" }
+construct-error = { path = "../crates/construct-error", features = ["full"] }
+construct-crypto = { path = "../crates/construct-crypto", features = ["full"] }
+construct-db = { path = "../crates/construct-db" }
+construct-types = { path = "../crates/construct-types" }
+construct-utils = { path = "../crates/construct-utils" }
+construct-extractors = { path = "../crates/construct-extractors" }
+crypto-agility = { path = "../crates/crypto-agility" }
 
 # Workspace deps
 tokio = {workspace = true}
@@ -32,7 +39,13 @@ hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
 
-# Gateway specific - may need more for federation etc.
+# Gateway specific
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
+bytes = "1.8"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+prost = "0.14.3"

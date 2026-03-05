@@ -12,14 +12,14 @@
 //
 // ============================================================================
 
-use crate::gateway::circuit_breaker::{CircuitBreaker, CircuitState};
-use crate::metrics::{
-    GATEWAY_CIRCUIT_BREAKER_STATE, GATEWAY_REQUEST_DURATION_SECONDS, GATEWAY_REQUESTS_TOTAL,
-};
+use crate::circuit_breaker::{CircuitBreaker, CircuitState};
 use anyhow::Result;
 use axum::body::Body;
 use axum::http::{Request, Response};
 use construct_config::CircuitBreakerConfig;
+use construct_server_shared::metrics::{
+    GATEWAY_CIRCUIT_BREAKER_STATE, GATEWAY_REQUEST_DURATION_SECONDS, GATEWAY_REQUESTS_TOTAL,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -276,7 +276,7 @@ impl ServiceClient {
         };
 
         // Update health metric
-        use crate::metrics::GATEWAY_SERVICE_HEALTH;
+        use construct_server_shared::metrics::GATEWAY_SERVICE_HEALTH;
         GATEWAY_SERVICE_HEALTH
             .with_label_values(&[service_name])
             .set(if is_healthy { 1.0 } else { 0.0 });
