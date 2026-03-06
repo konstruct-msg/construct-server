@@ -72,6 +72,21 @@ service DeviceService {
 
   // GetDeviceInfo - Get specific device details
   rpc GetDeviceInfo(GetDeviceInfoRequest) returns (DeviceInfo);
+
+  // =========================================================================
+  // Device Linking
+  // =========================================================================
+
+  // InitiateDeviceLink - Primary device generates a short-lived QR link token
+  // Authenticated: requires valid JWT from the primary/existing device
+  rpc InitiateDeviceLink(InitiateDeviceLinkRequest) returns (InitiateDeviceLinkResponse);
+}
+
+// DeviceLinkService - Device linking flow (separate service to avoid auth middleware)
+service DeviceLinkService {
+  // ConfirmDeviceLink - New device completes the link using the QR token
+  // NOT authenticated: new device has no JWT yet, uses link_token instead
+  rpc ConfirmDeviceLink(ConfirmDeviceLinkRequest) returns (AuthTokensResponse);
 }
 
 // === AuthService Messages ===
@@ -491,4 +506,36 @@ message GetSenderCertificateResponse {
   // Certificate expiry (Unix seconds, typically now + 24h)
   // Client should re-fetch before this time
   int64 expires_at = 2;
+}
+
+// ============================================================================
+// Device Linking Messages
+// ============================================================================
+
+// InitiateDeviceLinkRequest - Primary device starts the linking flow
+// Identity is taken from the authenticated JWT (no fields needed).
+message InitiateDeviceLinkRequest {
+  // Empty — caller identity comes from authenticated JWT
+}
+
+// InitiateDeviceLinkResponse - Short-lived token to encode in QR code
+message InitiateDeviceLinkResponse {
+  // Opaque link token (32 random bytes, base64url encoded)
+  // Encode this in a QR code for the new device to scan
+  string link_token = 1;
+
+  // Unix timestamp when the token expires (now + 15 minutes)
+  int64 expires_at = 2;
+}
+
+// ConfirmDeviceLinkRequest - New device presents scanned QR token + its public keys
+message ConfirmDeviceLinkRequest {
+  // Link token from QR code (base64url, 32 bytes)
+  string link_token = 1;
+
+  // New device identifier (derived from identity key)
+  string device_id = 2;
+
+  // New device public keys for E2EE and authentication
+  DevicePublicKeys public_keys = 3;
 }

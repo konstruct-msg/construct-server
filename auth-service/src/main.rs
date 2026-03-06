@@ -46,6 +46,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
     auth_service_server::{AuthService, AuthServiceServer},
+    device_link_service_server::DeviceLinkServiceServer,
     device_service_server::DeviceServiceServer,
 };
 
@@ -561,16 +562,102 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
 
     async fn list_devices(
         &self,
-        _request: Request<proto::ListDevicesRequest>,
+        request: Request<proto::ListDevicesRequest>,
     ) -> Result<Response<Self::ListDevicesStream>, Status> {
-        Err(Status::unimplemented("ListDevices not implemented"))
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let devices = construct_db::get_devices_by_user_id(self.context.db_pool.as_ref(), &user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // current device_id lives in the JWT "jti" claim naming convention varies;
+        // we don't store device_id in claims so skip is_current detection for now
+        let items: Vec<Result<proto::DeviceInfo, Status>> = devices
+            .into_iter()
+            .map(|d| {
+                Ok(proto::DeviceInfo {
+                    device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
+                        user: None,
+                        device_id: d.device_id.clone(),
+                        platform: 0,
+                        device_name: None,
+                        registered_at: d.registered_at.timestamp(),
+                        last_seen: 0,
+                        capabilities: 0,
+                    }),
+                    device_name: String::new(),
+                    platform: 0,
+                    last_seen: 0,
+                    created_at: d.registered_at.timestamp(),
+                    push_provider: None,
+                    is_current: false,
+                    capabilities: 0,
+                })
+            })
+            .collect();
+
+        let stream = tokio_stream::iter(items);
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn revoke_device(
         &self,
-        _request: Request<proto::RevokeDeviceRequest>,
+        request: Request<proto::RevokeDeviceRequest>,
     ) -> Result<Response<proto::RevokeDeviceResponse>, Status> {
-        Err(Status::unimplemented("RevokeDevice not implemented"))
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        // Verify the device belongs to this user
+        let device = construct_db::get_device_by_id(self.context.db_pool.as_ref(), &req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("device not found"))?;
+
+        if device.user_id != Some(user_id) {
+            return Err(Status::permission_denied(
+                "device does not belong to this user",
+            ));
+        }
+
+        let deactivated =
+            construct_db::deactivate_device(self.context.db_pool.as_ref(), &req.device_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        if deactivated {
+            // Revoke all sessions for the revoked device
+            let mut queue = self.context.queue.lock().await;
+            let _ = queue.revoke_all_sessions(&req.device_id).await;
+        }
+
+        tracing::info!(
+            caller_user_id = %user_id,
+            revoked_device_id = %req.device_id,
+            "Device revoked"
+        );
+
+        Ok(Response::new(proto::RevokeDeviceResponse {
+            success: deactivated,
+            revoked_device: None,
+        }))
     }
 
     /// UpdatePushToken — upsert APNs/FCM token for the authenticated device.
@@ -703,6 +790,156 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
         _request: Request<proto::GetDeviceInfoRequest>,
     ) -> Result<Response<proto::DeviceInfo>, Status> {
         Err(Status::unimplemented("GetDeviceInfo not implemented"))
+    }
+
+    async fn initiate_device_link(
+        &self,
+        request: Request<proto::InitiateDeviceLinkRequest>,
+    ) -> Result<Response<proto::InitiateDeviceLinkResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+
+        // Generate 32 random bytes encoded as base64url
+        use base64::Engine;
+        let mut raw = [0u8; 32];
+        {
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut raw);
+        }
+        let link_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+
+        let expires_at = chrono::Utc::now().timestamp() + 15 * 60;
+
+        let mut queue = self.context.queue.lock().await;
+        queue
+            .store_device_link_token(&link_token, &claims.sub)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to store link token: {e}")))?;
+
+        tracing::info!(user_id = %claims.sub, "Device link initiated (15 min TTL)");
+
+        Ok(Response::new(proto::InitiateDeviceLinkResponse {
+            link_token,
+            expires_at,
+        }))
+    }
+}
+
+// =============================================================================
+// DeviceLinkService — unauthenticated endpoint for new device to complete link
+// =============================================================================
+
+#[tonic::async_trait]
+impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
+    async fn confirm_device_link(
+        &self,
+        request: Request<proto::ConfirmDeviceLinkRequest>,
+    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.link_token.is_empty() {
+            return Err(Status::invalid_argument("link_token is required"));
+        }
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+        let public_keys = req
+            .public_keys
+            .ok_or_else(|| Status::invalid_argument("public_keys is required"))?;
+
+        // Consume the link token (one-time use)
+        let user_id_str = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .consume_device_link_token(&req.link_token)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+        }
+        .ok_or_else(|| Status::unauthenticated("invalid or expired link token"))?;
+
+        let user_id = uuid::Uuid::parse_str(&user_id_str)
+            .map_err(|_| Status::internal("invalid user id in link token"))?;
+
+        // Check device_id not already registered
+        if construct_db::device_exists(self.context.db_pool.as_ref(), &req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::already_exists("device_id already registered"));
+        }
+
+        // Decode keys
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let decode = |s: &str, field: &str| {
+            b64.decode(s)
+                .map_err(|_| Status::invalid_argument(format!("invalid base64 in {}", field)))
+        };
+
+        let verifying_key = decode(&public_keys.verifying_key, "verifying_key")?;
+        let identity_public = decode(&public_keys.identity_public, "identity_public")?;
+        let signed_prekey_public =
+            decode(&public_keys.signed_prekey_public, "signed_prekey_public")?;
+        let signed_prekey_signature = decode(
+            &public_keys.signed_prekey_signature,
+            "signed_prekey_signature",
+        )?;
+
+        let hostname = self.context.config.instance_domain.clone();
+
+        let device_data = construct_db::CreateDeviceData {
+            device_id: req.device_id.clone(),
+            server_hostname: hostname,
+            verifying_key,
+            identity_public,
+            signed_prekey_public,
+            signed_prekey_signature,
+            crypto_suites: format!("[\"{}\"]", public_keys.crypto_suite),
+        };
+
+        construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create device: {e}")))?;
+
+        // Issue JWT for new device
+        let (access_token, _, exp_timestamp) = self
+            .context
+            .auth_manager
+            .create_token(&user_id)
+            .map_err(|e| Status::internal(format!("Failed to create access token: {e}")))?;
+
+        let (refresh_token, refresh_jti, _) = self
+            .context
+            .auth_manager
+            .create_refresh_token(&user_id)
+            .map_err(|e| Status::internal(format!("Failed to create refresh token: {e}")))?;
+
+        let refresh_ttl =
+            self.context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
+        {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .store_refresh_token(&refresh_jti, &user_id_str, refresh_ttl)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to store refresh token: {e}")))?;
+        }
+
+        tracing::info!(
+            user_id = %user_id_str,
+            device_id = %req.device_id,
+            "Device linked successfully"
+        );
+
+        Ok(Response::new(proto::AuthTokensResponse {
+            user_id: user_id_str,
+            access_token,
+            refresh_token,
+            expires_at: exp_timestamp,
+        }))
     }
 }
 
@@ -965,7 +1202,8 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = construct_server_shared::grpc_server()
             .add_service(AuthServiceServer::new(service.clone()))
-            .add_service(DeviceServiceServer::new(service))
+            .add_service(DeviceServiceServer::new(service.clone()))
+            .add_service(DeviceLinkServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
