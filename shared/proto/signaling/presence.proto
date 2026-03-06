@@ -112,6 +112,10 @@ message DirectReceipt {
 
   // Reserved for future features
   reserved 5 to 10;
+
+  // Original sender's user ID — used by server to route the receipt back to
+  // the correct stream without a Redis/DB lookup.  Always populated by client.
+  string recipient_user_id = 11;
 }
 
 // GroupReceipt - Receipt for group messages
