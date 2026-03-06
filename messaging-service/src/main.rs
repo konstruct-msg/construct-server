@@ -305,16 +305,22 @@ impl MessagingService for MessagingGrpcService {
 
                 let content_type = match env.message_type {
                     MessageType::ControlMessage => match env.encrypted_payload.as_str() {
-                        "SESSION_RESET" => core::ContentType::SessionReset,
+                        "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
                         "KEY_SYNC" => core::ContentType::KeySync,
                         _ => core::ContentType::E2eeSignal,
                     },
                     _ => core::ContentType::E2eeSignal,
                 };
 
-                let payload_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&env.encrypted_payload)
-                    .unwrap_or_else(|_| env.encrypted_payload.into_bytes());
+                // For control messages (SESSION_RESET / END_SESSION / KEY_SYNC), the payload
+                // is the ASCII control-type string — send empty bytes to the client so it
+                // cannot mistake this for encrypted ciphertext it needs to decrypt.
+                let payload_bytes = match content_type {
+                    core::ContentType::SessionReset | core::ContentType::KeySync => vec![],
+                    _ => base64::engine::general_purpose::STANDARD
+                        .decode(&env.encrypted_payload)
+                        .unwrap_or_else(|_| env.encrypted_payload.clone().into_bytes()),
+                };
 
                 Some(proto::PendingMessage {
                     message_id: env.message_id,
@@ -671,20 +677,24 @@ fn convert_kafka_envelope_to_proto(
     }
 
     // Map Kafka MessageType → proto ContentType so clients can detect control messages
-    // (SESSION_RESET, KEY_SYNC) without trying to decrypt them.
+    // (SESSION_RESET, END_SESSION, KEY_SYNC) without trying to decrypt them.
     let content_type = match envelope.message_type {
         MessageType::ControlMessage => match envelope.encrypted_payload.as_str() {
-            "SESSION_RESET" => core::ContentType::SessionReset,
+            "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
             "KEY_SYNC" => core::ContentType::KeySync,
             _ => core::ContentType::E2eeSignal,
         },
         _ => core::ContentType::E2eeSignal,
     };
 
-    // Regular message — decode base64 ciphertext back to raw bytes (forwarded verbatim).
-    let payload_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&envelope.encrypted_payload)
-        .unwrap_or_else(|_| envelope.encrypted_payload.into_bytes());
+    // For control messages, send empty payload — the ASCII type string ("END_SESSION",
+    // "SESSION_RESET") is NOT ciphertext and must not be passed to the decryption layer.
+    let payload_bytes = match content_type {
+        core::ContentType::SessionReset | core::ContentType::KeySync => vec![],
+        _ => base64::engine::general_purpose::STANDARD
+            .decode(&envelope.encrypted_payload)
+            .unwrap_or_else(|_| envelope.encrypted_payload.into_bytes()),
+    };
 
     Ok(core::Envelope {
         sender: Some(core::UserId {
