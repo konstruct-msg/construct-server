@@ -83,7 +83,7 @@ pub async fn get_prekey_bundle(
         None => return Ok(None),
     };
 
-    // Try to consume a one-time pre-key.
+    // Try to consume a one-time pre-key (skip expired ones from a previous replace_existing).
     // FOR UPDATE SKIP LOCKED prevents two concurrent GetPreKeyBundle calls from burning the same key.
     let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
         r#"
@@ -91,6 +91,7 @@ pub async fn get_prekey_bundle(
         WHERE (device_id, key_id) = (
             SELECT device_id, key_id FROM one_time_prekeys
             WHERE device_id = $1
+              AND is_expired = false
             ORDER BY uploaded_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -153,7 +154,7 @@ pub async fn get_prekey_bundles(
     let mut unavailable = Vec::new();
 
     for device in devices {
-        // Try to get one-time pre-key.
+        // Try to get one-time pre-key (skip expired ones from a previous replace_existing).
         // FOR UPDATE SKIP LOCKED prevents two concurrent requests from burning the same key.
         let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
             r#"
@@ -161,6 +162,7 @@ pub async fn get_prekey_bundles(
             WHERE (device_id, key_id) = (
                 SELECT device_id, key_id FROM one_time_prekeys
                 WHERE device_id = $1
+                  AND is_expired = false
                 ORDER BY uploaded_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
@@ -224,13 +226,19 @@ pub async fn upload_prekeys(
         anyhow::bail!("Device not found or inactive");
     }
 
-    // If replace_existing, purge stale keys atomically before inserting fresh ones
+    // If replace_existing, soft-expire all current active keys instead of hard-deleting.
+    // Keys are kept for 48 hours so any in-flight prekey messages can still be delivered.
+    // Hard cleanup happens via cleanup_expired_otpks() on a schedule.
     if replace_existing {
-        sqlx::query("DELETE FROM one_time_prekeys WHERE device_id = $1")
-            .bind(device_id)
-            .execute(db)
-            .await?;
-        tracing::info!(device_id = %device_id, "Cleared stale OTPK pool (replace_existing=true)");
+        sqlx::query(
+            "UPDATE one_time_prekeys
+             SET is_expired = true, expired_at = NOW()
+             WHERE device_id = $1 AND is_expired = false",
+        )
+        .bind(device_id)
+        .execute(db)
+        .await?;
+        tracing::info!(device_id = %device_id, "Soft-expired stale OTPK pool (replace_existing=true)");
     }
 
     // Insert pre-keys
@@ -266,6 +274,7 @@ pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, Date
         SELECT COUNT(*) as count, MAX(uploaded_at) as last_upload
         FROM one_time_prekeys
         WHERE device_id = $1
+          AND is_expired = false
         "#,
     )
     .bind(device_id)
@@ -528,5 +537,21 @@ pub async fn cleanup_expired_archives(db: &PgPool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM signed_prekey_archive WHERE expires_at < NOW()")
         .execute(db)
         .await?;
+    Ok(result.rows_affected())
+}
+
+/// Hard-delete OTPKs that were soft-expired more than 48 hours ago.
+///
+/// Called on a schedule (e.g. every hour). The 48-hour window matches
+/// `signed_prekey_archive` and gives in-flight prekey messages time to arrive.
+#[allow(dead_code)]
+pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM one_time_prekeys
+         WHERE is_expired = true
+           AND expired_at < NOW() - INTERVAL '48 hours'",
+    )
+    .execute(db)
+    .await?;
     Ok(result.rows_affected())
 }
