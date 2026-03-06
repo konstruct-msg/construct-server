@@ -81,10 +81,43 @@ impl MessagingService for MessagingGrpcService {
             // Initialise from auth metadata; may also be set from first Send message
             let mut user_id: Option<uuid::Uuid> = auth_user_id;
 
-            // Poll interval for checking new messages (5 seconds)
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            // Wakeup channel: Redis pub/sub listener signals us when a new message
+            // arrives so we can deliver immediately without waiting for the next poll.
+            let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
+            let mut wakeup_subscribed = false;
+
+            // Fallback poll interval — reduced to 60 s now that pub/sub handles
+            // real-time delivery; this only covers reconnects / missed events.
+            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+
+            // If user_id is already known from auth metadata, subscribe now and
+            // flush any messages that arrived before the stream opened.
+            if let Some(uid) = user_id {
+                spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
+                wakeup_subscribed = true;
+                if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                    tracing::warn!("Initial poll error: {}", e);
+                }
+            }
 
             loop {
+                // Lazy subscribe: subscribe as soon as user_id becomes known
+                // (e.g. from the first Send message if not in auth metadata).
+                if !wakeup_subscribed {
+                    if let Some(uid) = user_id {
+                        spawn_inbox_wakeup(
+                            context.config.redis_url.clone(),
+                            uid,
+                            wakeup_tx.clone(),
+                        );
+                        wakeup_subscribed = true;
+                        if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await
+                        {
+                            tracing::warn!("Initial poll error: {}", e);
+                        }
+                    }
+                }
+
                 tokio::select! {
                     // Handle incoming requests from client
                     Some(result) = in_stream.next() => {
@@ -113,7 +146,16 @@ impl MessagingService for MessagingGrpcService {
                         }
                     }
 
-                    // Poll for new messages periodically
+                    // Push: new message arrived — deliver immediately
+                    Some(()) = wakeup_rx.recv() => {
+                        if let Some(uid) = user_id {
+                            if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                                tracing::warn!("Error polling messages after wakeup: {}", e);
+                            }
+                        }
+                    }
+
+                    // Fallback poll (covers missed pub/sub events and reconnects)
                     _ = poll_interval.tick() => {
                         if let Some(uid) = user_id && let Err(e) = poll_messages(
                                 &context,
@@ -569,6 +611,43 @@ async fn handle_stream_request(
     }
 
     Ok(())
+}
+
+/// Subscribe to `inbox:wakeup:{user_id}` via Redis pub/sub and forward signals
+/// to `tx` so the stream loop can call `poll_messages` immediately on delivery.
+///
+/// Spawns a background task — exits automatically when the receiver is dropped
+/// (i.e. the gRPC stream closes).
+fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
+    tokio::spawn(async move {
+        let channel = format!("inbox:wakeup:{}", user_id);
+        let client = match redis::Client::open(redis_url.as_str()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbox_wakeup: failed to create Redis client");
+                return;
+            }
+        };
+        let mut pubsub = match client.get_async_pubsub().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "inbox_wakeup: failed to open pub/sub connection");
+                return;
+            }
+        };
+        if let Err(e) = pubsub.subscribe(&channel).await {
+            tracing::warn!(error = %e, "inbox_wakeup: failed to subscribe");
+            return;
+        }
+        tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
+        let mut stream = pubsub.into_on_message();
+        while stream.next().await.is_some() {
+            if tx.send(()).await.is_err() {
+                break; // stream closed — receiver dropped
+            }
+        }
+        tracing::debug!(channel = %channel, "inbox_wakeup: subscriber exited");
+    });
 }
 
 /// Poll for new messages from Redis Streams

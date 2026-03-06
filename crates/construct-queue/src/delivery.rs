@@ -630,6 +630,16 @@ impl<'a> DeliveryManager<'a> {
             "Wrote message directly to user stream (test mode)"
         );
 
+        // Wake up any active MessageStream for this user so it delivers immediately
+        // instead of waiting for the next poll tick.  Fire-and-forget: a PUBLISH
+        // failure is non-critical — the poll loop is the fallback.
+        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
+        let _: std::result::Result<i64, _> = self
+            .client
+            .connection_mut()
+            .publish(&wakeup_channel, "1")
+            .await;
+
         Ok(stream_id)
     }
 
