@@ -2,6 +2,7 @@
 // This module re-exports it and keeps the handlers that need shared proto types.
 
 pub use construct_user_service::UserServiceContext;
+pub mod handlers;
 
 pub mod core {
     pub use construct_user_service::core::*;
