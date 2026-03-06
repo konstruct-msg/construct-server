@@ -22,6 +22,7 @@ use std::sync::Arc;
 pub struct MediaTokenRequest {
     /// Optional: specify file size for validation
     #[serde(default)]
+    #[allow(dead_code)]
     pub expected_size: Option<usize>,
 }
 

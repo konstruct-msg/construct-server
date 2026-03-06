@@ -50,6 +50,7 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> hyper::Response
 /// Served at: /.well-known/konstruct
 ///
 /// Returns server capabilities and federation endpoints
+#[allow(dead_code)]
 pub async fn well_known_konstruct(
     ctx: &AppContext,
 ) -> Result<hyper::Response<Full<Bytes>>, AppError> {
@@ -91,6 +92,7 @@ pub async fn well_known_konstruct(
 
 /// Federation health check
 /// Served at: /federation/health
+#[allow(dead_code)]
 pub async fn federation_health(ctx: &AppContext) -> Result<hyper::Response<Full<Bytes>>, AppError> {
     let health = json!({
         "status": "healthy",
@@ -146,6 +148,7 @@ pub async fn receive_federated_message_bytes(
     receive_federated_message_http_impl(ctx, body_bytes).await
 }
 
+#[allow(dead_code)]
 pub async fn receive_federated_message_http(
     ctx: &AppContext,
     body: IncomingBody,
