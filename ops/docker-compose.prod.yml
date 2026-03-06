@@ -186,7 +186,7 @@ services:
       PORT: "8081"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
-      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
       APNS_KEY_ID: ${APNS_KEY_ID}
@@ -265,7 +265,7 @@ services:
     environment:
       PORT: "8084"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
       APNS_KEY_ID: ${APNS_KEY_ID}
