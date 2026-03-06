@@ -24,6 +24,7 @@ use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
     auth_service::{AuthServiceContext, handlers as auth_handlers},
+    health,
     kafka::{
         MessageProducer,
         types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
@@ -31,7 +32,6 @@ use construct_server_shared::{
     messaging_service::{MessagingServiceContext, handlers as messaging_handlers},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
-    routes::health,
     shared::proto::services::v1::{
         self as proto_svc,
         messaging_service_server::{
@@ -300,10 +300,10 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             "/health/ready",
             get(|State(ctx): State<Arc<AuthServiceContext>>| async move {
                 let app_ctx = Arc::new(ctx.to_app_context());
-                health::readiness_check(State(app_ctx)).await
+                health::readiness_check_handler(axum::extract::State(app_ctx)).await
             }),
         )
-        .route("/health/live", get(health::liveness_check))
+        .route("/health/live", get(health::liveness_check_handler))
         // Passwordless device-based authentication endpoints
         .route(
             "/api/v1/auth/challenge",
@@ -354,10 +354,10 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             "/health/ready",
             get(|State(ctx): State<Arc<UserServiceContext>>| async move {
                 let app_ctx = Arc::new(ctx.to_app_context());
-                health::readiness_check(State(app_ctx)).await
+                health::readiness_check_handler(axum::extract::State(app_ctx)).await
             }),
         )
-        .route("/health/live", get(health::liveness_check))
+        .route("/health/live", get(health::liveness_check_handler))
         .route("/api/v1/account", get(user_handlers::get_account))
         .route("/api/v1/account", put(user_handlers::update_account))
         // Note: DELETE /api/v1/account removed - use device-signed deletion
@@ -529,11 +529,11 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             get(
                 |State(ctx): State<Arc<MessagingServiceContext>>| async move {
                     let app_ctx = Arc::new(ctx.to_app_context());
-                    health::readiness_check(State(app_ctx)).await
+                    health::readiness_check_handler(axum::extract::State(app_ctx)).await
                 },
             ),
         )
-        .route("/health/live", get(health::liveness_check))
+        .route("/health/live", get(health::liveness_check_handler))
         .route(
             "/api/v1/messages/confirm",
             post(messaging_handlers::confirm_message),
@@ -603,11 +603,11 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
             get(
                 |State(ctx): State<Arc<NotificationServiceContext>>| async move {
                     let app_ctx = Arc::new(ctx.to_app_context());
-                    health::readiness_check(State(app_ctx)).await
+                    health::readiness_check_handler(axum::extract::State(app_ctx)).await
                 },
             ),
         )
-        .route("/health/live", get(health::liveness_check))
+        .route("/health/live", get(health::liveness_check_handler))
         .route(
             "/api/v1/notifications/register-device",
             post(notification_handlers::register_device),
