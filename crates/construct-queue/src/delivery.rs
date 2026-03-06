@@ -85,10 +85,13 @@ impl<'a> DeliveryManager<'a> {
         count: usize,
     ) -> Result<Vec<(String, HashMap<String, Vec<u8>>)>> {
         // Validate Redis Stream ID format: {timestamp}-{sequence} (e.g., "1707584371151-0")
-        // If client sends invalid format (e.g., UUID), reset to "0" to read from beginning
+        // Bare integer timestamps (e.g., "1772726016") are normalized to "{ts}-0".
+        // If format is completely invalid (e.g., UUID), reset to "0".
+        let normalized;
         let start_id = if let Some(id) = since_id {
-            if Self::is_valid_stream_id(id) {
-                id
+            if let Some(norm) = Self::normalize_stream_id(id) {
+                normalized = norm;
+                normalized.as_str()
             } else {
                 tracing::warn!(
                     stream_key = %stream_key,
@@ -145,6 +148,18 @@ impl<'a> DeliveryManager<'a> {
             // Use XTRIM with MINID to efficiently remove old messages
             // Format: XTRIM stream MINID <id> - keeps messages with ID >= id
             // We want to keep messages AFTER ack_id, so use next ID after ack_id
+
+            // Normalize ack_id: bare timestamps like "1772726016" → "1772726016-0"
+            let ack_id_normalized;
+            let ack_id = if ack_id.contains('-') {
+                ack_id
+            } else if let Ok(ts) = ack_id.parse::<u64>() {
+                ack_id_normalized = format!("{}-0", ts);
+                ack_id_normalized.as_str()
+            } else {
+                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash)");
+                return Ok(messages);
+            };
 
             let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
                 if let (Ok(ts), Ok(_seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
@@ -213,6 +228,19 @@ impl<'a> DeliveryManager<'a> {
 
         // Both parts must be valid numbers
         parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok()
+    }
+
+    /// Normalize a Redis Stream ID. Bare u64 timestamps (e.g., "1772726016") are
+    /// treated as "{timestamp}-0" per Redis convention.
+    fn normalize_stream_id(id: &str) -> Option<String> {
+        if Self::is_valid_stream_id(id) {
+            return Some(id.to_string());
+        }
+        // Accept bare integer timestamps: "1772726016" → "1772726016-0"
+        if id.parse::<u64>().is_ok() {
+            return Some(format!("{}-0", id));
+        }
+        None
     }
 
     /// Parse stream message fields into KafkaMessageEnvelope

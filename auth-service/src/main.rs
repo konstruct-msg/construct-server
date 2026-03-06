@@ -601,10 +601,10 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
             2 => "fcm",
             _ => "apns",
         };
+        // PUSH_ENV_SANDBOX = 1 (debug builds), PUSH_ENV_PRODUCTION = 2 (release builds)
         let environment = match req.environment {
-            1 => "production",
-            2 => "sandbox",
-            _ => "sandbox",
+            2 => "production",
+            _ => "sandbox", // 1 = sandbox, 0 = unspecified → default to sandbox
         };
 
         use construct_server_shared::apns::DeviceTokenEncryption;
@@ -623,7 +623,7 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
                 (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
                  notification_filter, enabled, device_id, push_provider, push_environment)
             VALUES ($1, $2, $3, NULL, 'silent', TRUE, $4, $5, $6)
-            ON CONFLICT (user_id, device_id)
+            ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
             DO UPDATE SET
                 device_token_hash      = EXCLUDED.device_token_hash,
                 device_token_encrypted = EXCLUDED.device_token_encrypted,
