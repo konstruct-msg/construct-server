@@ -103,18 +103,11 @@ impl MessagingService for MessagingGrpcService {
             loop {
                 // Lazy subscribe: subscribe as soon as user_id becomes known
                 // (e.g. from the first Send message if not in auth metadata).
-                if !wakeup_subscribed {
-                    if let Some(uid) = user_id {
-                        spawn_inbox_wakeup(
-                            context.config.redis_url.clone(),
-                            uid,
-                            wakeup_tx.clone(),
-                        );
-                        wakeup_subscribed = true;
-                        if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await
-                        {
-                            tracing::warn!("Initial poll error: {}", e);
-                        }
+                if !wakeup_subscribed && let Some(uid) = user_id {
+                    spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
+                    wakeup_subscribed = true;
+                    if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                        tracing::warn!("Initial poll error: {}", e);
                     }
                 }
 
@@ -148,11 +141,10 @@ impl MessagingService for MessagingGrpcService {
 
                     // Push: new message arrived — deliver immediately
                     Some(()) = wakeup_rx.recv() => {
-                        if let Some(uid) = user_id {
-                            if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                        if let Some(uid) = user_id
+                            && let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
                                 tracing::warn!("Error polling messages after wakeup: {}", e);
                             }
-                        }
                     }
 
                     // Fallback poll (covers missed pub/sub events and reconnects)
