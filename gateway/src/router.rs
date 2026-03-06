@@ -35,7 +35,9 @@ pub struct GatewayState {
     pub config: Arc<Config>,
     pub service_discovery: Box<dyn ServiceDiscovery>,
     pub service_client: ServiceClient,
+    #[allow(dead_code)]
     pub auth_manager: Arc<AuthManager>,
+    #[allow(dead_code)]
     pub queue: Arc<tokio::sync::Mutex<MessageQueue>>,
 }
 
