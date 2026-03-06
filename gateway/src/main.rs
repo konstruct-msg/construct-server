@@ -112,6 +112,48 @@ async fn main() -> Result<()> {
     // Start server
     info!("API Gateway listening on {}", config.bind_address);
 
+    // TODO(construct-ice): Dual-mode transport — accept obfuscated and plain traffic simultaneously.
+    //
+    // When ready, spawn a second listener on ICE_PORT (default 9443) that wraps each accepted
+    // TCP stream with `construct_ice::Obfs4Listener::accept()` before passing it to hyper/Axum.
+    // Both listeners share the same `app` (clone it — Router is Arc internally).
+    //
+    // Rough plan (Variant A — two ports, one router):
+    //
+    //   1. Add to construct-config:
+    //        ice_enabled: bool   (ICE_ENABLED=true)
+    //        ice_port: u16       (ICE_PORT=9443, default)
+    //        ice_server_key: Option<String>  (ICE_SERVER_KEY=<base64 private key>, generated once)
+    //        ice_iat_mode: u8    (ICE_IAT_MODE=0, 0=none/1=enabled/2=paranoid)
+    //
+    //   2. Deserialize key with `construct_ice::ServerConfig::from_keypair(...)` or generate once
+    //      on first launch and persist in secrets (same pattern as APNs key).
+    //
+    //   3. Spawn task:
+    //        let ice_listener = construct_ice::Obfs4Listener::bind(ice_addr, ice_cfg).await?;
+    //        let ice_app = app.clone();
+    //        tokio::spawn(async move {
+    //            loop {
+    //                let (stream, _addr) = ice_listener.accept().await?;
+    //                let svc = ice_app.clone();
+    //                tokio::spawn(async move {
+    //                    hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+    //                        .serve_connection(TokioIo::new(stream), svc)
+    //                        .await
+    //                });
+    //            }
+    //        });
+    //
+    //   4. Log bridge line so ops can distribute it to censored clients:
+    //        info!("construct-ice bridge line: {}", ice_cfg.bridge_line());
+    //
+    // construct-ice library: /Users/maximeliseyev/Code/construct-ice (local crate, not published)
+    // Add to gateway/Cargo.toml:
+    //   construct-ice = { path = "../../construct-ice", features = ["tonic-transport"] }
+    //
+    // DPI resistance analysis → session file: CONSTRUCT_ICE_DPI_ANALYSIS.md
+    // obfs4 audit findings   → session file: OBFS4_AUDIT_FINDINGS.md
+
     let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
