@@ -169,6 +169,7 @@ impl CircuitBreaker {
     }
 
     /// Get failure count (for metrics)
+    #[allow(dead_code)]
     pub async fn failure_count(&self) -> u32 {
         *self.failure_count.read().await
     }
