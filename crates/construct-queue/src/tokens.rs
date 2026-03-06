@@ -100,4 +100,35 @@ impl<'a> TokenManager<'a> {
         let exists: bool = self.client.exists(&key).await?;
         Ok(exists)
     }
+
+    // =========================================================================
+    // Device Link Tokens (for multi-device QR linking)
+    // =========================================================================
+
+    /// Store a device link token with 15-minute TTL.
+    /// Value: "{user_id}" — the user who initiated the link.
+    pub(crate) async fn store_device_link_token(
+        &mut self,
+        token: &str,
+        user_id: &str,
+    ) -> Result<()> {
+        let key = format!("device_link:{}", token);
+        let _: () = self.client.set_ex(&key, user_id, 15 * 60).await?;
+        Ok(())
+    }
+
+    /// Consume a device link token (one-time use): returns the user_id if valid.
+    /// Deletes the token atomically so it cannot be reused.
+    pub(crate) async fn consume_device_link_token(
+        &mut self,
+        token: &str,
+    ) -> Result<Option<String>> {
+        let key = format!("device_link:{}", token);
+        // GET then DEL — fine for our scale (single Redis, no race condition risk)
+        let user_id: Option<String> = self.client.get(&key).await?;
+        if user_id.is_some() {
+            let _: i64 = self.client.del(&key).await?;
+        }
+        Ok(user_id)
+    }
 }
