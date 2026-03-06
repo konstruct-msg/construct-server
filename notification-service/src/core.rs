@@ -298,13 +298,13 @@ pub async fn register_device_token(
     //   - If device_id provided: upsert on (user_id, device_id) — handles token rotation
     //   - Otherwise: upsert on (user_id, device_token_hash) — legacy path
     if let Some(ref device_id) = input.device_id {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO device_tokens
                 (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
                  notification_filter, enabled, device_id, push_provider, push_environment)
             VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8)
-            ON CONFLICT (user_id, device_id)
+            ON CONFLICT (user_id, device_id) WHERE device_id IS NOT NULL
             DO UPDATE SET
                 device_token_hash      = EXCLUDED.device_token_hash,
                 device_token_encrypted = EXCLUDED.device_token_encrypted,
@@ -314,20 +314,20 @@ pub async fn register_device_token(
                 push_environment       = EXCLUDED.push_environment,
                 enabled                = TRUE
             "#,
-            input.user_id,
-            token_hash,
-            token_encrypted,
-            name_encrypted.as_deref(),
-            filter,
-            device_id,
-            input.push_provider,
-            input.push_environment,
         )
+        .bind(input.user_id)
+        .bind(&token_hash)
+        .bind(&token_encrypted)
+        .bind(name_encrypted.as_deref())
+        .bind(&filter)
+        .bind(device_id)
+        .bind(&input.push_provider)
+        .bind(&input.push_environment)
         .execute(&*context.db_pool)
         .await
         .context("Failed to insert/update device token")?;
     } else {
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO device_tokens
                 (user_id, device_token_hash, device_token_encrypted, device_name_encrypted,
@@ -341,14 +341,14 @@ pub async fn register_device_token(
                 push_environment      = EXCLUDED.push_environment,
                 enabled               = TRUE
             "#,
-            input.user_id,
-            token_hash,
-            token_encrypted,
-            name_encrypted.as_deref(),
-            filter,
-            input.push_provider,
-            input.push_environment,
         )
+        .bind(input.user_id)
+        .bind(&token_hash)
+        .bind(&token_encrypted)
+        .bind(name_encrypted.as_deref())
+        .bind(&filter)
+        .bind(&input.push_provider)
+        .bind(&input.push_environment)
         .execute(&*context.db_pool)
         .await
         .context("Failed to insert/update device token")?;
