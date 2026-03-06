@@ -48,12 +48,27 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<tonic::Streaming<proto::MessageStreamRequest>>,
     ) -> Result<Response<Self::MessageStreamStream>, Status> {
-        // Extract authenticated user_id from metadata set by auth interceptor
-        let auth_user_id = request
+        // Extract authenticated user_id: first try x-user-id (set by gateway/proxy),
+        // then fall back to Authorization Bearer JWT (set directly by the client).
+        let auth_user_id: Option<uuid::Uuid> = request
             .metadata()
             .get("x-user-id")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .and_then(|token| {
+                        self.context
+                            .auth_manager
+                            .verify_token(token)
+                            .ok()
+                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
+                    })
+            });
 
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
@@ -245,8 +260,22 @@ impl MessagingService for MessagingGrpcService {
             .metadata()
             .get("x-user-id")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
-            .to_string();
+            .map(|s| s.to_string())
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .and_then(|token| {
+                        self.context
+                            .auth_manager
+                            .verify_token(token)
+                            .ok()
+                            .map(|claims| claims.sub)
+                    })
+            })
+            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
 
         let req = request.into_inner();
         let limit = req.limit.unwrap_or(50).min(100) as usize;
@@ -267,6 +296,12 @@ impl MessagingService for MessagingGrpcService {
                 use base64::Engine;
                 use construct_server_shared::kafka::types::MessageType;
                 use construct_server_shared::shared::proto::core::v1 as core;
+
+                // Receipts are ephemeral and must be delivered via active MessageStream only.
+                // Returning stale receipts here would confuse clients (undecryptable payload).
+                if matches!(env.message_type, MessageType::Receipt) {
+                    return None;
+                }
 
                 let content_type = match env.message_type {
                     MessageType::ControlMessage => match env.encrypted_payload.as_str() {
@@ -314,7 +349,21 @@ impl MessagingService for MessagingGrpcService {
             .get("x-user-id")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?;
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .and_then(|token| {
+                        self.context
+                            .auth_manager
+                            .verify_token(token)
+                            .ok()
+                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
+                    })
+            })
+            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
 
         let recipient_user_id = request.into_inner().recipient_user_id;
         if recipient_user_id.is_empty() {
@@ -489,7 +538,9 @@ async fn handle_stream_request(
         // to avoid leaking the client's contact graph to the server.
         // All messages for this user are already routed to their Redis stream regardless.
         Some(StreamReq::Receipt(receipt)) => {
-            if let Some(direct) = receipt.receipt_type.and_then(|r| {
+            if user_id.is_none() {
+                tracing::warn!("Receipt received but user_id is unknown — receipt dropped (missing auth metadata)");
+            } else if let Some(direct) = receipt.receipt_type.and_then(|r| {
                 if let construct_server_shared::shared::proto::signaling::v1::delivery_receipt::ReceiptType::Direct(d) = r {
                     Some(d)
                 } else {
