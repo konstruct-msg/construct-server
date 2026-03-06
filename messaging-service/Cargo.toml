@@ -34,6 +34,9 @@ prometheus = {workspace = true}
 tonic = "0.14.2"
 prost = "0.14.3"
 construct-crypto = { path = "../crates/construct-crypto" }
+construct-extractors = { path = "../crates/construct-extractors" }
+construct-error = { path = "../crates/construct-error" }
+construct-types = { path = "../crates/construct-types" }
 futures-core = "0.3"
 tokio-stream = "0.1"
 
@@ -41,3 +44,6 @@ tokio-stream = "0.1"
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
 serde_bytes = "0.11"
 rmp-serde = "1.3"
+hmac = "0.12"
+rand = "0.8"
+sha2 = "0.10"

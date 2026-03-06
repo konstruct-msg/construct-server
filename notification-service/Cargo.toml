@@ -32,6 +32,9 @@ hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
 
+construct-error = { path = "../crates/construct-error" }
+construct-extractors = { path = "../crates/construct-extractors" }
+
 # gRPC dependencies
 tonic = "0.14.2"
 prost = "0.14.0"

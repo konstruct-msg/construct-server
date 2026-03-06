@@ -4,6 +4,7 @@
 
 pub use construct_auth_service::context::AuthServiceContext;
 pub use construct_auth_service::devices;
+pub mod handlers;
 
 pub mod core {
     pub use construct_auth_service::core::*;
@@ -26,5 +27,3 @@ pub mod core {
         })
     }
 }
-
-pub mod handlers;

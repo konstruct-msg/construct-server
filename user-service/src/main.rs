@@ -11,6 +11,8 @@
 //
 // ============================================================================
 
+mod handlers;
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -496,8 +498,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
     });
 
-    // Import user service handlers
-    use construct_server_shared::user_service::handlers;
+    // handlers module is local (user-service/src/handlers.rs)
 
     // Start gRPC UserService (SVC-2 scaffold)
     let grpc_context = context.clone();

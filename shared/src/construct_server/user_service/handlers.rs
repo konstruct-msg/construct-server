@@ -1,12 +1,5 @@
 // ============================================================================
-// User Service Handlers - Phase 2.6.3
-// ============================================================================
-//
-// Wrapper handlers that convert UserServiceContext to AppContext
-// for use with existing user-related route handlers.
-//
-// This is a temporary solution until handlers are refactored to use traits.
-//
+// User Service Handlers
 // ============================================================================
 
 use axum::{
@@ -19,22 +12,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::auth_service::devices;
-use crate::user_service::UserServiceContext;
-use crate::user_service::account;
-use crate::user_service::account_deletion;
-use crate::user_service::core as user_core;
-use crate::user_service::invites;
+use super::{UserServiceContext, account, account_deletion, core as user_core, invites};
+use crate::construct_server::auth_service::devices;
+use crate::construct_server::context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
 use construct_types::api::UpdateVerifyingKeyRequest;
 
-fn app_state(context: &Arc<UserServiceContext>) -> State<Arc<crate::context::AppContext>> {
+fn app_state(context: &Arc<UserServiceContext>) -> State<Arc<AppContext>> {
     State(Arc::new(context.to_app_context()))
 }
 
-/// Wrapper for get_account handler
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountInfoResponse {
@@ -49,7 +37,6 @@ pub async fn get_account(
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
     let info = user_core::get_account_info(app_context, user.0).await?;
-
     Ok((
         StatusCode::OK,
         Json(AccountInfoResponse {
@@ -66,8 +53,6 @@ pub struct UpdateAccountRequest {
     pub username: Option<String>,
 }
 
-/// Wrapper for update_account handler
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn update_account(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -75,7 +60,6 @@ pub async fn update_account(
     Json(request): Json<UpdateAccountRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let app_context = Arc::new(context.to_app_context());
-
     user_core::update_account(
         app_context,
         user.0,
@@ -84,7 +68,6 @@ pub async fn update_account(
         },
     )
     .await?;
-
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -94,12 +77,6 @@ pub async fn update_account(
     ))
 }
 
-// Note: Legacy delete_account removed - use device-signed deletion instead
-// (GET /api/v1/users/me/delete-challenge + POST /api/v1/users/me/delete-confirm)
-
-/// Wrapper for get_public_key_bundle handler (GET /api/v1/users/:id/public-key)
-/// Also handles legacy GET /keys/:user_id
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn get_public_key_bundle(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -109,20 +86,14 @@ pub async fn get_public_key_bundle(
     user_core::get_public_key_bundle(app_context, user.0, id).await
 }
 
-/// Wrapper for legacy get_keys handler (GET /keys/:user_id)
-/// This is the same as get_public_key_bundle, but kept for backward compatibility
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn get_keys_legacy(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Legacy endpoint uses same handler as modern API
     get_public_key_bundle(State(context), user, Path(user_id)).await
 }
 
-/// Wrapper for upload_keys handler (POST /api/v1/keys/upload)
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn upload_keys(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -133,7 +104,6 @@ pub async fn upload_keys(
     user_core::upload_keys(app_context, user.0, headers, bundle).await
 }
 
-/// Wrapper for update_verifying_key handler (PATCH /api/v1/users/me/public-key)
 pub async fn update_verifying_key(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -160,9 +130,6 @@ pub async fn get_device_profile(
     devices::get_device_profile(app_state(&context), Path(device_id)).await
 }
 
-/// Wrapper for check_username_availability handler
-/// GET /api/v1/users/username/availability?username=<string>
-/// This endpoint does NOT require authentication
 pub async fn check_username_availability(
     State(context): State<Arc<UserServiceContext>>,
     headers: HeaderMap,
@@ -171,9 +138,6 @@ pub async fn check_username_availability(
     account::check_username_availability(app_state(&context), headers, Query(query)).await
 }
 
-/// Wrapper for generate_invite handler
-/// POST /api/v1/invites/generate
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn generate_invite(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -182,9 +146,6 @@ pub async fn generate_invite(
     invites::generate_invite(app_state(&context), user, Json(request)).await
 }
 
-/// Wrapper for accept_invite handler
-/// POST /api/v1/invites/accept
-/// Note: Uses TrustedUser (Trust Boundary pattern) - Gateway sets X-User-Id header
 pub async fn accept_invite(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -193,13 +154,6 @@ pub async fn accept_invite(
     invites::accept_invite(app_state(&context), user, Json(request)).await
 }
 
-// ============================================================================
-// Device-Signed Account Deletion (Phase 5.0.1)
-// ============================================================================
-
-/// Wrapper for get_delete_challenge handler
-/// GET /api/v1/users/me/delete-challenge
-/// Note: Uses TrustedUser (Trust Boundary pattern)
 pub async fn get_delete_challenge(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
@@ -207,9 +161,6 @@ pub async fn get_delete_challenge(
     account_deletion::get_delete_challenge(app_state(&context), user).await
 }
 
-/// Wrapper for confirm_delete handler
-/// POST /api/v1/users/me/delete-confirm
-/// Note: Uses TrustedUser (Trust Boundary pattern)
 pub async fn confirm_delete(
     State(context): State<Arc<UserServiceContext>>,
     user: TrustedUser,
