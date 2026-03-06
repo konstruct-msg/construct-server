@@ -146,10 +146,13 @@ impl ApnsConfig {
             team_id: std::env::var("APNS_TEAM_ID").unwrap_or_else(|_| "XXXXXXXXXX".to_string()),
             bundle_id: std::env::var("APNS_BUNDLE_ID")
                 .unwrap_or_else(|_| "com.example.construct".to_string()),
-            topic: std::env::var("APNS_TOPIC").unwrap_or_else(|_| {
-                std::env::var("APNS_BUNDLE_ID")
-                    .unwrap_or_else(|_| "com.example.construct".to_string())
-            }),
+            topic: std::env::var("APNS_TOPIC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    std::env::var("APNS_BUNDLE_ID")
+                        .unwrap_or_else(|_| "com.example.construct".to_string())
+                }),
             device_token_encryption_key: key,
         })
     }
