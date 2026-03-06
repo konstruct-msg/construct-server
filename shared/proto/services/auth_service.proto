@@ -302,11 +302,11 @@ enum PushEnvironment {
   // Unspecified environment (must be 0)
   PUSH_ENV_UNSPECIFIED = 0;
 
-  // Production
-  PUSH_ENV_PRODUCTION = 1;
+  // Sandbox (APNS development / debug builds)
+  PUSH_ENV_SANDBOX = 1;
 
-  // Sandbox (APNS development)
-  PUSH_ENV_SANDBOX = 2;
+  // Production (App Store / TestFlight production builds)
+  PUSH_ENV_PRODUCTION = 2;
 }
 
 // ============================================================================

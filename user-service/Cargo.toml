@@ -23,6 +23,11 @@ async-trait = {workspace = true}
 sqlx = {workspace = true}
 redis = {workspace = true}
 axum = {workspace = true}
+construct-error = { path = "../crates/construct-error" }
+construct-extractors = { path = "../crates/construct-extractors" }
+construct-crypto = { path = "../crates/construct-crypto" }
+construct-types = { path = "../crates/construct-types" }
+
 tower = {workspace = true}
 tower-http = {workspace = true}
 reqwest = {workspace = true}

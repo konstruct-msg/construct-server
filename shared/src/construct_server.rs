@@ -23,10 +23,6 @@ pub use construct_context as context;
 pub use construct_db as db;
 pub use construct_delivery_ack as delivery_ack;
 pub use construct_federation as federation;
-pub mod gateway;
-pub mod handlers {
-    pub mod federation; // Used in routes/federation.rs
-}
 pub mod health;
 // Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
 pub use construct_broker as kafka;
@@ -40,14 +36,10 @@ pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;
 pub use construct_rate_limit as rate_limit; // Rate limiting & warmup sandbox
-pub mod csrf; // CSRF utilities (used by gateway/middleware.rs and routes/csrf.rs)
-pub mod routes;
+pub mod csrf; // CSRF utilities
 pub mod server_registry;
 pub mod user_service;
 pub use construct_utils as utils;
-
-// Re-export delivery_worker modules for use in bin/delivery_worker.rs
-pub mod delivery_worker;
 
 use auth::AuthManager;
 use construct_config::Config;
@@ -57,16 +49,19 @@ use queue::MessageQueue;
 
 // Monolithic server - simplified to HTTP-only (WebSocket removed)
 // NOTE: This is kept for development/testing only. Production uses microservices.
+// NOTE: The monolithic router (routes::create_router) was moved to the gateway binary.
 pub async fn run_http_server(app_context: AppContext, listener: TcpListener) {
     use tower::ServiceBuilder;
     use tower_http::trace::TraceLayer;
 
-    // Create Axum router for HTTP routes
-    let app_context_arc = Arc::new(app_context);
-    let app = routes::create_router(app_context_arc)
+    // Routes module was moved to the gateway binary (Phase C refactoring).
+    // The monolithic server now serves only health/metrics endpoints.
+    let _app_context_arc = Arc::new(app_context);
+    let app = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
 
-    tracing::info!("Starting HTTP server (WebSocket support removed)");
+    tracing::info!("Starting HTTP server (monolithic routes moved to gateway binary)");
     axum::serve(listener, app)
         .await
         .expect("HTTP server failed");
