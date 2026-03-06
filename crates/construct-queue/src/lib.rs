@@ -325,6 +325,22 @@ impl MessageQueue {
             .await
     }
 
+    // =========================================================================
+    // Device Link Tokens
+    // =========================================================================
+
+    pub async fn store_device_link_token(&mut self, token: &str, user_id: &str) -> Result<()> {
+        tokens::TokenManager::new(&mut self.client)
+            .store_device_link_token(token, user_id)
+            .await
+    }
+
+    pub async fn consume_device_link_token(&mut self, token: &str) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .consume_device_link_token(token)
+            .await
+    }
+
     // ============================================================================
     // Cache Operations (delegated to cache module)
     // ============================================================================

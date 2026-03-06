@@ -871,6 +871,18 @@ pub async fn update_device_last_active(pool: &DbPool, device_id: &str) -> Result
     Ok(())
 }
 
+/// Deactivate a device (soft-delete). Returns true if a row was updated.
+pub async fn deactivate_device(pool: &DbPool, device_id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE devices SET is_active = FALSE WHERE device_id = $1 AND is_active = TRUE",
+    )
+    .bind(device_id)
+    .execute(pool)
+    .await
+    .context("Failed to deactivate device")?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Get user's primary device (or first active device)
 /// Per INVITE_LINKS_QR_API_SPEC.md - used for updating verifying key
 pub async fn get_user_primary_device(pool: &DbPool, user_id: &Uuid) -> Result<Option<Device>> {
