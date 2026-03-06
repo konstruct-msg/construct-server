@@ -37,6 +37,7 @@ pub struct ServiceClient {
 }
 
 impl ServiceClient {
+    #[allow(dead_code)]
     pub fn new(timeout_secs: u64) -> Self {
         Self::new_with_circuit_breaker(
             timeout_secs,
@@ -259,6 +260,7 @@ impl ServiceClient {
     }
 
     /// Check if a service is healthy
+    #[allow(dead_code)]
     pub async fn check_health(&self, service_url: &str, service_name: &str) -> bool {
         let health_url = format!("{}/health", service_url);
         let is_healthy = match self
