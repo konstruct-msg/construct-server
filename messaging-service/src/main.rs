@@ -1155,11 +1155,17 @@ async fn main() -> Result<()> {
     ));
     info!("Connected to Redis");
 
-    // Initialize Kafka Producer
-    info!("Connecting to Kafka...");
+    // Initialize Kafka Producer (or no-op stub when KAFKA_ENABLED=false)
+    if config.kafka.enabled {
+        info!("Connecting to Kafka/Redpanda...");
+    } else {
+        info!("KAFKA_ENABLED=false — using Redis Streams for direct delivery");
+    }
     let kafka_producer =
-        Arc::new(MessageProducer::new(&config.kafka).context("Failed to create Kafka producer")?);
-    info!("Connected to Kafka");
+        Arc::new(MessageProducer::new(&config.kafka).context("Failed to create message producer")?);
+    if config.kafka.enabled {
+        info!("Connected to Kafka");
+    }
 
     // Initialize Auth Manager
     let auth_manager =

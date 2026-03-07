@@ -166,10 +166,15 @@ async fn main() -> Result<()> {
 
         run_kafka_consumer_mode(state, client, shutdown).await
     } else {
-        error!("Redis-only mode is not supported. Please enable KAFKA_ENABLED=true");
-        Err(anyhow::anyhow!(
-            "Redis-only mode is deprecated. Use Kafka mode instead."
-        ))
+        // KAFKA_ENABLED=false → Redis-only mode.
+        // In this mode messaging-service writes directly to Redis Streams and
+        // uses pub/sub wakeup for real-time delivery. delivery-worker is not
+        // needed and exits cleanly so operators don't have to exclude it from
+        // their compose file.
+        info!("KAFKA_ENABLED=false — running in Redis-only mode.");
+        info!("Messages are delivered directly via Redis Streams by messaging-service.");
+        info!("delivery-worker is not needed in this mode — exiting cleanly.");
+        Ok(())
     }
 }
 

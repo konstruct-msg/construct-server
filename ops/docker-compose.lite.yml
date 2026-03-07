@@ -1,0 +1,308 @@
+# =============================================================================
+# Construct Server — Lite / Self-Hosted Docker Compose
+# =============================================================================
+#
+# Minimal stack for enthusiasts and small communities (< 10k users).
+# NO Redpanda/Kafka, NO Vault, NO delivery-worker required.
+#
+# Included:
+#   PostgreSQL  — user accounts, keys, tokens
+#   Redis       — message streams, pub/sub, rate limiting
+#   All Construct microservices (KAFKA_ENABLED=false → Redis direct delivery)
+#
+# NOT included (compared to docker-compose.prod.yml):
+#   ✗ Redpanda/Kafka      — not needed in Redis-only mode
+#   ✗ delivery-worker     — not needed (messaging-service handles delivery)
+#   ✗ Vault               — secrets passed via .env file directly
+#   ✗ Traefik / Envoy     — bring your own reverse proxy (nginx, caddy, etc.)
+#
+# Delivery model (Redis Streams):
+#   Client → messaging-service → Redis Stream → pub/sub wakeup → Client
+#   Guarantees: at-least-once, MAXLEN=1000 msgs/user, TTL=MESSAGE_TTL_DAYS
+#
+# Quick start:
+#   1. cp ops/.env.lite.example .env.lite && nano .env.lite
+#   2. docker compose -f ops/docker-compose.lite.yml --env-file .env.lite up -d
+#   3. docker compose -f ops/docker-compose.lite.yml --env-file .env.lite logs -f
+#
+# Run from REPO ROOT, not from ops/
+# =============================================================================
+
+name: construct-lite
+
+services:
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-construct}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-construct}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-construct}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ─── Auth Service ────────────────────────────────────────────────────────────
+  auth:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/auth-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_ISSUER: ${JWT_ISSUER:-construct}
+      PORT: "8081"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN:?INSTANCE_DOMAIN is required}
+      KAFKA_ENABLED: "false"
+      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-sandbox}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY:-}
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── User Service ────────────────────────────────────────────────────────────
+  user:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/user-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8082"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      KAFKA_ENABLED: "false"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Messaging Service ───────────────────────────────────────────────────────
+  # Handles real-time message delivery via Redis Streams + pub/sub.
+  # In Redis-only mode this service replaces both the old Kafka producer
+  # AND the delivery-worker consumer — no other component needed.
+  messaging:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/messaging-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8083"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
+      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-sandbox}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY:-}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Notification Service ────────────────────────────────────────────────────
+  notification:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/notification-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8084"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+      APNS_ENABLED: ${APNS_ENABLED:-false}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-sandbox}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY:-}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Key Service ─────────────────────────────────────────────────────────────
+  key:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/key-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Invite Service ──────────────────────────────────────────────────────────
+  invite:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/invite-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8086"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Media Service ───────────────────────────────────────────────────────────
+  media:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/media-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8087"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+      MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── MLS Service ─────────────────────────────────────────────────────────────
+  mls:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/mls-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Sentinel Service ────────────────────────────────────────────────────────
+  sentinel:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/sentinel-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      KAFKA_ENABLED: "false"
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Gateway ─────────────────────────────────────────────────────────────────
+  # Exposes port 3000. Put nginx/caddy/traefik in front for TLS.
+  gateway:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "3000"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      KAFKA_ENABLED: "false"
+      ICE_ENABLED: ${ICE_ENABLED:-false}
+      ICE_PORT: ${ICE_PORT:-9443}
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY:-}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  internal:
+    driver: bridge
