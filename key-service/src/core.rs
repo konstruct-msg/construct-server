@@ -10,6 +10,14 @@ use sqlx::PgPool;
 // Types
 // ============================================================================
 
+/// ML-KEM-1024 public key size in bytes (NIST FIPS 203)
+pub const KYBER_PUBLIC_KEY_SIZE: usize = 1184;
+/// ML-KEM-1024 ciphertext size in bytes (carried in PreKeySignalMessage.kem_ciphertext)
+#[allow(dead_code)]
+pub const KYBER_CIPHERTEXT_SIZE: usize = 1568;
+/// Ed25519 signature size in bytes
+pub const ED25519_SIGNATURE_SIZE: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct PreKeyBundle {
     pub device_id: String,
@@ -22,6 +30,12 @@ pub struct PreKeyBundle {
     pub one_time_prekey_id: Option<u32>,
     pub crypto_suite: String,
     pub registered_at: DateTime<Utc>,
+    // ---- Post-Quantum (ML-KEM-1024) fields — absent when device has no Kyber keys ----
+    pub kyber_pre_key: Option<Vec<u8>>,
+    pub kyber_pre_key_id: Option<u32>,
+    pub kyber_pre_key_signature: Option<Vec<u8>>,
+    pub kyber_one_time_pre_key: Option<Vec<u8>>,
+    pub kyber_one_time_pre_key_id: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +51,42 @@ pub struct SignedPreKey {
     pub signature: Vec<u8>,
 }
 
+/// ML-KEM-1024 one-time pre-key with signature
+#[derive(Debug, Clone)]
+pub struct KyberOneTimePreKey {
+    pub key_id: u32,
+    /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1184) bytes
+    pub public_key: Vec<u8>,
+    /// Ed25519 signature, exactly `ED25519_SIGNATURE_SIZE` (64) bytes
+    pub signature: Vec<u8>,
+}
+
+/// Validate ML-KEM-1024 public key size.
+/// Returns `Err` if the key is not exactly 1184 bytes.
+pub fn validate_kyber_public_key(key: &[u8]) -> Result<()> {
+    if key.len() != KYBER_PUBLIC_KEY_SIZE {
+        anyhow::bail!(
+            "Invalid ML-KEM-1024 public key size: expected {} bytes, got {}",
+            KYBER_PUBLIC_KEY_SIZE,
+            key.len()
+        );
+    }
+    Ok(())
+}
+
+/// Validate Ed25519 signature size (used for Kyber key signatures).
+/// Returns `Err` if the signature is not exactly 64 bytes.
+pub fn validate_ed25519_signature(sig: &[u8]) -> Result<()> {
+    if sig.len() != ED25519_SIGNATURE_SIZE {
+        anyhow::bail!(
+            "Invalid Ed25519 signature size: expected {} bytes, got {}",
+            ED25519_SIGNATURE_SIZE,
+            sig.len()
+        );
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Pre-Key Bundle Operations
 // ============================================================================
@@ -47,12 +97,13 @@ pub async fn get_prekey_bundle(
     user_id: &str,
     device_id: Option<&str>,
 ) -> Result<Option<PreKeyBundle>> {
-    // First, get device info
+    // First, get device info (including Kyber SPK columns added in migration 028)
     let device = if let Some(did) = device_id {
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -66,7 +117,8 @@ pub async fn get_prekey_bundle(
         sqlx::query_as::<_, DeviceRow>(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -103,6 +155,26 @@ pub async fn get_prekey_bundle(
     .fetch_optional(db)
     .await?;
 
+    // Try to consume a Kyber one-time pre-key (soft-delete, same pattern as classic OTPK)
+    let kyber_otp = sqlx::query_as::<_, KyberOneTimePreKeyRow>(
+        r#"
+        UPDATE kyber_one_time_pre_keys
+        SET is_expired = true, expired_at = NOW()
+        WHERE (device_id, key_id) = (
+            SELECT device_id, key_id FROM kyber_one_time_pre_keys
+            WHERE device_id = $1
+              AND is_expired = false
+            ORDER BY uploaded_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING key_id, public_key, signature
+        "#,
+    )
+    .bind(&device.device_id)
+    .fetch_optional(db)
+    .await?;
+
     Ok(Some(PreKeyBundle {
         device_id: device.device_id,
         identity_key: device.identity_public,
@@ -114,6 +186,11 @@ pub async fn get_prekey_bundle(
         one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
         crypto_suite: device.crypto_suite,
         registered_at: device.registered_at,
+        kyber_pre_key: device.kyber_signed_pre_key,
+        kyber_pre_key_id: device.kyber_signed_pre_key_id.map(|id| id as u32),
+        kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
+        kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
+        kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
     }))
 }
 
@@ -127,7 +204,8 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -140,7 +218,8 @@ pub async fn get_prekey_bundles(
         sqlx::query_as(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
-                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at
+                   signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -174,6 +253,26 @@ pub async fn get_prekey_bundles(
         .fetch_optional(db)
         .await?;
 
+        // Try to consume a Kyber OTPK for this device
+        let kyber_otp = sqlx::query_as::<_, KyberOneTimePreKeyRow>(
+            r#"
+            UPDATE kyber_one_time_pre_keys
+            SET is_expired = true, expired_at = NOW()
+            WHERE (device_id, key_id) = (
+                SELECT device_id, key_id FROM kyber_one_time_pre_keys
+                WHERE device_id = $1
+                  AND is_expired = false
+                ORDER BY uploaded_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_id, public_key, signature
+            "#,
+        )
+        .bind(&device.device_id)
+        .fetch_optional(db)
+        .await?;
+
         bundles.push(PreKeyBundle {
             device_id: device.device_id,
             identity_key: device.identity_public,
@@ -185,6 +284,11 @@ pub async fn get_prekey_bundles(
             one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
             crypto_suite: device.crypto_suite,
             registered_at: device.registered_at,
+            kyber_pre_key: device.kyber_signed_pre_key,
+            kyber_pre_key_id: device.kyber_signed_pre_key_id.map(|id| id as u32),
+            kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
+            kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
+            kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
         });
     }
 
@@ -208,12 +312,15 @@ pub async fn get_prekey_bundles(
 /// Upload one-time pre-keys for a device.
 /// If `replace_existing` is true, all existing keys for the device are
 /// atomically deleted before the new batch is inserted (stale pool recovery).
+/// If `kyber_pre_keys` is non-empty, those are also inserted into `kyber_one_time_pre_keys`.
+/// Returns `(classic_count, kyber_count)`.
 pub async fn upload_prekeys(
     db: &PgPool,
     device_id: &str,
     prekeys: &[OneTimePreKey],
     replace_existing: bool,
-) -> Result<u32> {
+    kyber_pre_keys: &[KyberOneTimePreKey],
+) -> Result<(u32, u32)> {
     // Verify device exists
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND is_active = true)",
@@ -224,6 +331,12 @@ pub async fn upload_prekeys(
 
     if !exists {
         anyhow::bail!("Device not found or inactive");
+    }
+
+    // Validate Kyber key sizes before any DB writes
+    for k in kyber_pre_keys {
+        validate_kyber_public_key(&k.public_key)?;
+        validate_ed25519_signature(&k.signature)?;
     }
 
     // If replace_existing, soft-expire all current active keys instead of hard-deleting.
@@ -238,10 +351,18 @@ pub async fn upload_prekeys(
         .bind(device_id)
         .execute(db)
         .await?;
+        sqlx::query(
+            "UPDATE kyber_one_time_pre_keys
+             SET is_expired = true, expired_at = NOW()
+             WHERE device_id = $1 AND is_expired = false",
+        )
+        .bind(device_id)
+        .execute(db)
+        .await?;
         tracing::info!(device_id = %device_id, "Soft-expired stale OTPK pool (replace_existing=true)");
     }
 
-    // Insert pre-keys
+    // Insert classic pre-keys
     for prekey in prekeys {
         sqlx::query(
             r#"
@@ -257,14 +378,39 @@ pub async fn upload_prekeys(
         .await?;
     }
 
-    // Return total count
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1")
-            .bind(device_id)
-            .fetch_one(db)
-            .await?;
+    // Insert Kyber OTPKs
+    for kk in kyber_pre_keys {
+        sqlx::query(
+            r#"
+            INSERT INTO kyber_one_time_pre_keys (device_id, key_id, public_key, signature)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (device_id, key_id) DO NOTHING
+            "#,
+        )
+        .bind(device_id)
+        .bind(kk.key_id as i32)
+        .bind(&kk.public_key)
+        .bind(&kk.signature)
+        .execute(db)
+        .await?;
+    }
 
-    Ok(count as u32)
+    // Return active counts
+    let classic_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    let kyber_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kyber_one_time_pre_keys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    Ok((classic_count as u32, kyber_count as u32))
 }
 
 /// Get count of remaining one-time pre-keys
@@ -285,6 +431,38 @@ pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, Date
         row.count.unwrap_or(0) as u32,
         row.last_upload.unwrap_or_else(Utc::now),
     ))
+}
+
+/// Upload or replace the Kyber signed pre-key for a device.
+/// Validates key size (1184 bytes) and signature size (64 bytes) before writing.
+pub async fn upload_kyber_signed_prekey(
+    db: &PgPool,
+    device_id: &str,
+    key_id: u32,
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    validate_kyber_public_key(public_key)?;
+    validate_ed25519_signature(signature)?;
+
+    sqlx::query(
+        r#"
+        UPDATE devices
+        SET kyber_signed_pre_key           = $2,
+            kyber_signed_pre_key_id        = $3,
+            kyber_signed_pre_key_signature = $4,
+            key_updated_at                 = NOW()
+        WHERE device_id = $1 AND is_active = true
+        "#,
+    )
+    .bind(device_id)
+    .bind(public_key)
+    .bind(key_id as i32)
+    .bind(signature)
+    .execute(db)
+    .await?;
+
+    Ok(())
 }
 
 // ============================================================================
@@ -493,12 +671,24 @@ struct DeviceRow {
     signed_prekey_signature: Option<Vec<u8>>,
     crypto_suite: String,
     registered_at: DateTime<Utc>,
+    // Kyber SPK columns (nullable, added in migration 028)
+    kyber_signed_pre_key: Option<Vec<u8>>,
+    kyber_signed_pre_key_id: Option<i32>,
+    kyber_signed_pre_key_signature: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
 struct OneTimePreKeyRow {
     key_id: i32,
     public_key: Vec<u8>,
+}
+
+#[derive(sqlx::FromRow)]
+struct KyberOneTimePreKeyRow {
+    key_id: i32,
+    public_key: Vec<u8>,
+    #[allow(dead_code)]
+    signature: Vec<u8>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -556,6 +746,20 @@ pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Hard-delete Kyber OTPKs that were soft-expired more than 48 hours ago.
+/// Same retention policy as classic OTPKs.
+#[allow(dead_code)]
+pub async fn cleanup_expired_kyber_otpks(db: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM kyber_one_time_pre_keys
+         WHERE is_expired = true
+           AND expired_at < NOW() - INTERVAL '48 hours'",
+    )
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -604,6 +808,62 @@ mod tests {
         assert_eq!(keys.len(), 10);
         assert_eq!(keys[0].key_id, 1);
         assert_eq!(keys[9].key_id, 10);
+    }
+
+    // ── PQC validation tests (no DB) ─────────────────────────────────────────
+
+    #[test]
+    fn test_validate_kyber_public_key_correct_size_accepted() {
+        let key = vec![0xAB_u8; KYBER_PUBLIC_KEY_SIZE]; // exactly 1184 bytes
+        assert!(validate_kyber_public_key(&key).is_ok());
+    }
+
+    #[test]
+    fn test_validate_kyber_public_key_wrong_size_rejected() {
+        let short = vec![0u8; 32]; // X25519 size — must be rejected
+        let err = validate_kyber_public_key(&short).unwrap_err();
+        assert!(
+            err.to_string().contains("1184"),
+            "error must mention expected size"
+        );
+
+        let long = vec![0u8; 1568]; // ciphertext size — not a valid pubkey
+        assert!(validate_kyber_public_key(&long).is_err());
+
+        assert!(validate_kyber_public_key(&[]).is_err());
+    }
+
+    #[test]
+    fn test_validate_ed25519_signature_correct_size_accepted() {
+        let sig = vec![0xFF_u8; ED25519_SIGNATURE_SIZE]; // exactly 64 bytes
+        assert!(validate_ed25519_signature(&sig).is_ok());
+    }
+
+    #[test]
+    fn test_validate_ed25519_signature_wrong_size_rejected() {
+        assert!(validate_ed25519_signature(&[0u8; 32]).is_err()); // too short
+        assert!(validate_ed25519_signature(&[0u8; 65]).is_err()); // too long
+        assert!(validate_ed25519_signature(&[]).is_err());
+    }
+
+    #[test]
+    fn test_kyber_public_key_size_constant() {
+        // Sanity: ML-KEM-1024 spec mandates 1184 bytes
+        assert_eq!(KYBER_PUBLIC_KEY_SIZE, 1184);
+        assert_eq!(KYBER_CIPHERTEXT_SIZE, 1568);
+        assert_eq!(ED25519_SIGNATURE_SIZE, 64);
+    }
+
+    #[test]
+    fn test_kyber_otpk_construction() {
+        let key = KyberOneTimePreKey {
+            key_id: 42,
+            public_key: vec![0u8; KYBER_PUBLIC_KEY_SIZE],
+            signature: vec![0u8; ED25519_SIGNATURE_SIZE],
+        };
+        assert_eq!(key.key_id, 42);
+        assert_eq!(key.public_key.len(), KYBER_PUBLIC_KEY_SIZE);
+        assert_eq!(key.signature.len(), ED25519_SIGNATURE_SIZE);
     }
 
     // ── Database tests (require PostgreSQL) ──────────────────────────────────
@@ -666,7 +926,7 @@ mod tests {
 
         // Upload initial batch of 10 keys
         let initial_keys = make_prekeys(10);
-        upload_prekeys(&db, &device_id, &initial_keys, false)
+        upload_prekeys(&db, &device_id, &initial_keys, false, &[])
             .await
             .expect("Initial upload failed");
 
@@ -691,7 +951,7 @@ mod tests {
                 public_key: vec![i as u8; 32],
             })
             .collect::<Vec<_>>();
-        upload_prekeys(&db, &device_id, &new_keys, true)
+        upload_prekeys(&db, &device_id, &new_keys, true, &[])
             .await
             .expect("Replace upload failed");
 
@@ -728,7 +988,7 @@ mod tests {
         let device_id = insert_test_device(&db).await;
 
         let initial_keys = make_prekeys(5);
-        upload_prekeys(&db, &device_id, &initial_keys, false)
+        upload_prekeys(&db, &device_id, &initial_keys, false, &[])
             .await
             .unwrap();
 
@@ -739,7 +999,7 @@ mod tests {
                 public_key: vec![i as u8; 32],
             })
             .collect::<Vec<_>>();
-        upload_prekeys(&db, &device_id, &more_keys, false)
+        upload_prekeys(&db, &device_id, &more_keys, false, &[])
             .await
             .unwrap();
 
@@ -775,7 +1035,9 @@ mod tests {
 
         // Upload and immediately soft-expire keys 1-5 with backdated expired_at
         let keys = make_prekeys(5);
-        upload_prekeys(&db, &device_id, &keys, false).await.unwrap();
+        upload_prekeys(&db, &device_id, &keys, false, &[])
+            .await
+            .unwrap();
 
         // Backdate expired_at to 3 days ago to simulate old expired keys
         sqlx::query(

@@ -147,8 +147,27 @@ message PreKeyBundle {
   // Key generation timestamp (for staleness detection)
   int64 generated_at = 9;
 
-  // Reserved for post-quantum keys
-  reserved 10 to 15;
+  // ---- Post-Quantum (ML-KEM-1024) fields — Phase 1 ----
+  // All optional: absent when server has no Kyber keys for this device.
+  // Client MUST NOT require these fields until Phase 2 (client PQC rollout).
+
+  // Kyber signed pre-key public key (ML-KEM-1024, exactly 1184 bytes)
+  optional bytes kyber_pre_key = 10;
+
+  // Kyber signed pre-key ID
+  optional uint32 kyber_pre_key_id = 11;
+
+  // Ed25519 signature over kyber_pre_key (64 bytes)
+  optional bytes kyber_pre_key_signature = 12;
+
+  // Kyber one-time pre-key (ML-KEM-1024, exactly 1184 bytes; single use)
+  optional bytes kyber_one_time_pre_key = 13;
+
+  // Kyber one-time pre-key ID
+  optional uint32 kyber_one_time_pre_key_id = 14;
+
+  // reserved 15 for future PQ fields
+  reserved 15;
 }
 
 // ============================================================================
@@ -206,6 +225,14 @@ message UploadPreKeysRequest {
   // NOTE: field 4 is reserved (was used in a prior version); this field is 11.
   bool replace_existing = 11;
 
+  // ---- Post-Quantum (ML-KEM-1024) fields — Phase 1 ----
+
+  // Kyber one-time pre-keys batch (ML-KEM-1024)
+  repeated KyberOneTimePreKey kyber_pre_keys = 12;
+
+  // Optional: also update Kyber signed pre-key
+  optional KyberSignedPreKeyUpload kyber_signed_pre_key = 13;
+
   // Reserved for future options
   reserved 4 to 10;
 }
@@ -229,15 +256,44 @@ message SignedPreKeyUpload {
   bytes signature = 3;
 }
 
+// ---- Post-Quantum (ML-KEM-1024) key upload types ----
+
+// Single Kyber one-time pre-key upload
+message KyberOneTimePreKey {
+  // Key ID (client-generated, unique per device)
+  uint32 key_id = 1;
+
+  // ML-KEM-1024 public key (exactly 1184 bytes)
+  bytes public_key = 2;
+
+  // Ed25519 signature over public_key (64 bytes)
+  bytes signature = 3;
+}
+
+// Kyber signed pre-key upload (persistent, rotated like X25519 SPK)
+message KyberSignedPreKeyUpload {
+  // Key ID
+  uint32 key_id = 1;
+
+  // ML-KEM-1024 public key (exactly 1184 bytes)
+  bytes public_key = 2;
+
+  // Ed25519 signature over public_key (64 bytes)
+  bytes signature = 3;
+}
+
 message UploadPreKeysResponse {
   // Success
   bool success = 1;
 
-  // Number of pre-keys now on server
+  // Number of classic (X25519) one-time pre-keys now on server
   uint32 pre_key_count = 2;
 
   // Server timestamp
   int64 uploaded_at = 3;
+
+  // Number of Kyber one-time pre-keys now on server (0 if none uploaded)
+  uint32 kyber_pre_key_count = 4;
 }
 
 // ============================================================================
