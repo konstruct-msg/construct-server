@@ -441,3 +441,138 @@ impl SentinelCore {
         })
     }
 }
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+//
+// Pure-logic tests — no Redis or DB required.
+// Test only TrustLevel math and rate-limit threshold constants.
+//
+// Integration tests (with real Redis/DB) are in shared/tests/.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TrustLevel rate limits ────────────────────────────────────────────────
+
+    #[test]
+    fn test_trust_level_msg_limit_order() {
+        // Limits must strictly increase from restricted to trusted
+        assert_eq!(TrustLevel::Banned.msg_limit_hour(), 0);
+        assert!(TrustLevel::Flagged.msg_limit_hour() > TrustLevel::Banned.msg_limit_hour());
+        assert!(TrustLevel::New.msg_limit_hour() > TrustLevel::Flagged.msg_limit_hour());
+        assert!(TrustLevel::Warming.msg_limit_hour() > TrustLevel::New.msg_limit_hour());
+        assert!(TrustLevel::Trusted.msg_limit_hour() > TrustLevel::Warming.msg_limit_hour());
+    }
+
+    #[test]
+    fn test_trust_level_recipient_limit_order() {
+        assert_eq!(TrustLevel::Banned.recipient_limit_day(), 0);
+        assert!(TrustLevel::Flagged.recipient_limit_day() >= 1);
+        assert!(TrustLevel::New.recipient_limit_day() > TrustLevel::Flagged.recipient_limit_day());
+        assert!(TrustLevel::Warming.recipient_limit_day() > TrustLevel::New.recipient_limit_day());
+        assert!(
+            TrustLevel::Trusted.recipient_limit_day() > TrustLevel::Warming.recipient_limit_day()
+        );
+    }
+
+    #[test]
+    fn test_new_device_has_no_group_access() {
+        // Groups are too high-risk for brand-new accounts
+        assert_eq!(
+            TrustLevel::New.group_msg_limit_day(),
+            0,
+            "NEW devices must not send group messages (anti-spam)"
+        );
+        assert_eq!(
+            TrustLevel::Flagged.group_msg_limit_day(),
+            0,
+            "FLAGGED devices must not send group messages"
+        );
+        assert_eq!(
+            TrustLevel::Banned.group_msg_limit_day(),
+            0,
+            "BANNED devices must not send group messages"
+        );
+    }
+
+    #[test]
+    fn test_warming_device_has_group_access() {
+        assert!(
+            TrustLevel::Warming.group_msg_limit_day() > 0,
+            "WARMING devices must have some group access after 48h"
+        );
+        assert!(
+            TrustLevel::Trusted.group_msg_limit_day() > TrustLevel::Warming.group_msg_limit_day(),
+            "TRUSTED devices must have more group access than WARMING"
+        );
+    }
+
+    #[test]
+    fn test_banned_device_has_zero_limits_everywhere() {
+        assert_eq!(TrustLevel::Banned.msg_limit_hour(), 0);
+        assert_eq!(TrustLevel::Banned.recipient_limit_day(), 0);
+        assert_eq!(TrustLevel::Banned.group_msg_limit_day(), 0);
+    }
+
+    // ── Auto-escalation thresholds ────────────────────────────────────────────
+
+    #[test]
+    fn test_auto_flag_threshold_lower_than_auto_ban() {
+        // Must flag before banning to allow appeals
+        const { assert!(AUTO_FLAG_REPORTS < AUTO_BAN_REPORTS) }
+    }
+
+    #[test]
+    fn test_auto_flag_threshold_is_reasonable() {
+        // 1 report must NOT auto-flag (false-positive risk), but >5 must trigger
+        const { assert!(AUTO_FLAG_REPORTS > 1) }
+        const { assert!(AUTO_FLAG_REPORTS <= 5) }
+    }
+
+    #[test]
+    fn test_auto_ban_threshold_is_reasonable() {
+        const { assert!(AUTO_BAN_REPORTS > AUTO_FLAG_REPORTS) }
+        const { assert!(AUTO_BAN_REPORTS <= 10) }
+    }
+
+    // ── Limit arithmetic consistency ──────────────────────────────────────────
+
+    #[test]
+    fn test_trusted_msg_limit_is_sufficient_for_normal_use() {
+        // 200 messages/hour ≈ 3-4 messages/minute — enough for normal chat
+        assert!(
+            TrustLevel::Trusted.msg_limit_hour() >= 100,
+            "trusted devices must support at least 100 msgs/hour for normal chat"
+        );
+    }
+
+    #[test]
+    fn test_new_device_recipient_limit_allows_minimal_contact() {
+        // New device must be able to contact at least 1 person
+        assert!(
+            TrustLevel::New.recipient_limit_day() >= 1,
+            "new device must be able to contact at least 1 recipient"
+        );
+    }
+
+    // ── Trust level equality ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_trust_level_eq() {
+        assert_eq!(TrustLevel::New, TrustLevel::New);
+        assert_ne!(TrustLevel::New, TrustLevel::Trusted);
+        assert_ne!(TrustLevel::Banned, TrustLevel::Flagged);
+    }
+
+    #[test]
+    fn test_trust_level_copy() {
+        // TrustLevel is Copy — must be usable without explicit clone
+        let level = TrustLevel::Trusted;
+        let level2 = level; // implicit copy
+        assert_eq!(level, level2);
+    }
+}

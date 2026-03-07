@@ -750,4 +750,266 @@ mod tests {
             "encrypted_payload must be stored verbatim (base64), not parsed"
         );
     }
+
+    // ── from_edit ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_edit_sets_edits_message_id() {
+        let env = KafkaMessageEnvelope::from_edit(
+            "new-msg-id".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "original-msg-id".to_string(),
+            b"new encrypted content".to_vec(),
+        );
+
+        assert_eq!(
+            env.edits_message_id,
+            Some("original-msg-id".to_string()),
+            "from_edit must set edits_message_id to the original message id"
+        );
+        assert_eq!(env.message_id, "new-msg-id");
+        assert_eq!(env.sender_id, "alice");
+        assert_eq!(env.recipient_id, "bob");
+        assert_eq!(env.message_type, MessageType::DirectMessage);
+        assert!(!env.is_sealed_sender);
+    }
+
+    #[test]
+    fn test_from_edit_payload_is_base64_of_ciphertext() {
+        use base64::Engine;
+        let ciphertext = b"opaque-encrypted-edit-bytes";
+        let env = KafkaMessageEnvelope::from_edit(
+            "e-id".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "orig-id".to_string(),
+            ciphertext.to_vec(),
+        );
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&env.encrypted_payload)
+            .expect("from_edit payload must be valid base64");
+        assert_eq!(decoded, ciphertext, "payload must be base64(ciphertext)");
+    }
+
+    #[test]
+    fn test_from_edit_content_hash_includes_original_id() {
+        // Two edits with different original_message_ids must have different content hashes
+        // even if new_message_id and ciphertext are the same.
+        let env_a = KafkaMessageEnvelope::from_edit(
+            "new-id".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "original-A".to_string(),
+            b"same ciphertext".to_vec(),
+        );
+        let env_b = KafkaMessageEnvelope::from_edit(
+            "new-id".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "original-B".to_string(),
+            b"same ciphertext".to_vec(),
+        );
+
+        assert_ne!(
+            env_a.content_hash, env_b.content_hash,
+            "content hash must include original_message_id to prevent cross-edit collisions"
+        );
+    }
+
+    // ── Serde round-trips ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_serde_edits_message_id_none_is_absent_in_json() {
+        // edits_message_id has skip_serializing_if = "Option::is_none"
+        // Backward compatibility: existing consumers must not break on new field.
+        let env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            message_id: "msg-1".to_string(),
+            encrypted_payload: b"payload".to_vec(),
+        });
+
+        let json = serde_json::to_string(&env).expect("serialize must succeed");
+        assert!(
+            !json.contains("editsMessageId"),
+            "editsMessageId must be absent from JSON when None (backward compat)"
+        );
+    }
+
+    #[test]
+    fn test_serde_edits_message_id_some_is_present_in_json() {
+        let env = KafkaMessageEnvelope::from_edit(
+            "new-id".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            "original-id".to_string(),
+            b"payload".to_vec(),
+        );
+
+        let json = serde_json::to_string(&env).expect("serialize must succeed");
+        assert!(
+            json.contains("editsMessageId"),
+            "editsMessageId must be present in JSON when Some"
+        );
+        assert!(json.contains("original-id"));
+    }
+
+    #[test]
+    fn test_serde_direct_message_round_trip() {
+        let env = KafkaMessageEnvelope::new_direct_message(
+            "msg-rt".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            vec![0xABu8; 32],
+            7,
+            "encrypted-payload".to_string(),
+            "content-hash".to_string(),
+        );
+
+        let json = serde_json::to_string(&env).unwrap();
+        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.message_id, env.message_id);
+        assert_eq!(restored.sender_id, env.sender_id);
+        assert_eq!(restored.recipient_id, env.recipient_id);
+        assert_eq!(restored.message_type, env.message_type);
+        assert_eq!(restored.message_number, env.message_number);
+        assert!(restored.edits_message_id.is_none());
+    }
+
+    #[test]
+    fn test_serde_old_message_without_edits_field_deserializes_as_none() {
+        // Simulate a JSON payload from an older server that doesn't have editsMessageId.
+        // Deserialization must succeed and edits_message_id must be None.
+        let json = r#"{
+            "messageId": "old-msg",
+            "senderId": "alice",
+            "recipientId": "bob",
+            "timestamp": 1700000000,
+            "messageType": "directMessage",
+            "encryptedPayload": "cGF5bG9hZA==",
+            "contentHash": "abc123",
+            "cryptoSuiteId": 0,
+            "federated": false,
+            "isSealedSender": false
+        }"#;
+
+        let env: KafkaMessageEnvelope = serde_json::from_str(json)
+            .expect("old message without editsMessageId must deserialize");
+        assert!(
+            env.edits_message_id.is_none(),
+            "editsMessageId must default to None for old messages"
+        );
+    }
+
+    #[test]
+    fn test_serde_receipt_round_trip() {
+        let env = KafkaMessageEnvelope::from_receipt(
+            "alice".to_string(),
+            "bob".to_string(),
+            vec!["msg-1".to_string(), "msg-2".to_string()],
+            "delivered",
+        );
+
+        let json = serde_json::to_string(&env).unwrap();
+        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.message_type, MessageType::Receipt);
+        assert_eq!(restored.sender_id, "alice");
+        assert_eq!(restored.recipient_id, "bob");
+
+        // The payload must be valid JSON containing message_ids and status
+        let payload: serde_json::Value = serde_json::from_str(&restored.encrypted_payload)
+            .expect("receipt payload must be JSON");
+        assert_eq!(payload["status"], "delivered");
+        let ids = payload["message_ids"].as_array().unwrap();
+        assert_eq!(ids.len(), 2);
+    }
+
+    // ── validate() ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_direct_message_passes() {
+        let env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            message_id: "msg-1".to_string(),
+            encrypted_payload: b"payload".to_vec(),
+        });
+        assert!(env.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_sealed_sender_passes_with_sealed_inner() {
+        let env = KafkaMessageEnvelope::from_sealed_sender(
+            "msg-s".to_string(),
+            "bob".to_string(),
+            b"sealed-inner-bytes".to_vec(),
+        );
+        assert!(env.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_mls_message_requires_mls_payload() {
+        let mut env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "group-1".to_string(),
+            message_id: "mls-1".to_string(),
+            encrypted_payload: b"mls-ciphertext".to_vec(),
+        });
+        env.message_type = MessageType::MLSMessage;
+        env.mls_payload = None; // missing required field
+
+        assert!(
+            env.validate().is_err(),
+            "MLSMessage without mls_payload must fail validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_federated_message_requires_origin_server() {
+        let mut env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            message_id: "fed-1".to_string(),
+            encrypted_payload: b"payload".to_vec(),
+        });
+        env.message_type = MessageType::FederatedMessage;
+        env.server_signature = Some("sig".to_string());
+        // origin_server still None
+
+        assert!(
+            env.validate().is_err(),
+            "FederatedMessage without origin_server must fail validation"
+        );
+    }
+
+    // ── DeliveryAckEvent.validate() ───────────────────────────────────────────
+
+    #[test]
+    fn test_delivery_ack_validate_requires_64_char_hashes() {
+        let good_hash = "a".repeat(64);
+        let short_hash = "a".repeat(32);
+
+        let good = DeliveryAckEvent::new(
+            "msg-id".to_string(),
+            good_hash.clone(),
+            good_hash.clone(),
+            good_hash.clone(),
+        );
+        assert!(good.validate().is_ok());
+
+        let bad = DeliveryAckEvent::new(
+            "msg-id".to_string(),
+            short_hash.clone(),
+            good_hash.clone(),
+            good_hash.clone(),
+        );
+        assert!(
+            bad.validate().is_err(),
+            "hash shorter than 64 chars must fail validation"
+        );
+    }
 }

@@ -155,4 +155,9 @@ impl AuthManager {
     }
 }
 
-// Unit tests are in a separate file to avoid embedding keys in source code
+// Unit tests (includes embedded RSA test keys that are NOT secret)
+#[cfg(test)]
+mod auth_tests;
+
+// Note: test RSA keys in tests.rs are generated solely for testing.
+// They must never be used in any real deployment.
