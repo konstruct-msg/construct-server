@@ -555,3 +555,270 @@ pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
     .await?;
     Ok(result.rows_affected())
 }
+
+// ============================================================================
+// Unit Tests
+// ============================================================================
+//
+// Tests marked #[ignore] require a running PostgreSQL instance.
+// Run all: cargo test --package key-service
+// Run DB tests: cargo test --package key-service -- --ignored
+// Run DB tests with real DB: DATABASE_URL=postgres://... cargo test --package key-service -- --ignored
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    #[derive(Debug, Clone)]
+    struct TestPreKey {
+        key_id: u32,
+        public_key: Vec<u8>,
+    }
+
+    impl From<TestPreKey> for OneTimePreKey {
+        fn from(k: TestPreKey) -> Self {
+            OneTimePreKey {
+                key_id: k.key_id,
+                public_key: k.public_key,
+            }
+        }
+    }
+
+    fn make_prekeys(n: u32) -> Vec<OneTimePreKey> {
+        (1..=n)
+            .map(|i| OneTimePreKey {
+                key_id: i,
+                public_key: vec![i as u8; 32],
+            })
+            .collect()
+    }
+
+    // ── Pure logic tests (no DB) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_prekey_batch_not_empty() {
+        let keys = make_prekeys(10);
+        assert_eq!(keys.len(), 10);
+        assert_eq!(keys[0].key_id, 1);
+        assert_eq!(keys[9].key_id, 10);
+    }
+
+    // ── Database tests (require PostgreSQL) ──────────────────────────────────
+    //
+    // These tests are #[ignore] by default and must be run explicitly.
+    // They require the construct DB schema to be migrated:
+    //   DATABASE_URL=postgres://construct:password@localhost/construct \
+    //   cargo test --package key-service -- --ignored
+
+    async fn get_test_db() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://construct:password@localhost/construct".to_string());
+        sqlx::PgPool::connect(&url)
+            .await
+            .expect("Failed to connect to test DB")
+    }
+
+    async fn insert_test_device(db: &PgPool) -> String {
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (user_id, username, created_at) VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(format!("testuser-{}", &device_id[..8]))
+        .execute(db)
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO devices (device_id, user_id, device_name, is_active, created_at)
+             VALUES ($1::uuid, $2, 'test-device', true, NOW())",
+        )
+        .bind(&device_id)
+        .bind(user_id)
+        .execute(db)
+        .await
+        .expect("Failed to insert test device");
+        device_id
+    }
+
+    async fn cleanup_device(db: &PgPool, device_id: &str) {
+        sqlx::query("DELETE FROM one_time_prekeys WHERE device_id = $1::uuid")
+            .bind(device_id)
+            .execute(db)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM devices WHERE device_id = $1::uuid")
+            .bind(device_id)
+            .execute(db)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_upload_prekeys_replace_existing_soft_expires_old_keys() {
+        let db = get_test_db().await;
+        let device_id = insert_test_device(&db).await;
+
+        // Upload initial batch of 10 keys
+        let initial_keys = make_prekeys(10);
+        upload_prekeys(&db, &device_id, &initial_keys, false)
+            .await
+            .expect("Initial upload failed");
+
+        // Verify 10 active keys exist
+        let active_count: i64 =
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = false",
+            )
+            .bind(&device_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            active_count, 10,
+            "should have 10 active keys after initial upload"
+        );
+
+        // Upload 5 new keys with replace_existing=true
+        let new_keys = (51..=55)
+            .map(|i| OneTimePreKey {
+                key_id: i,
+                public_key: vec![i as u8; 32],
+            })
+            .collect::<Vec<_>>();
+        upload_prekeys(&db, &device_id, &new_keys, true)
+            .await
+            .expect("Replace upload failed");
+
+        // Old keys must be soft-expired (is_expired=true), NOT hard-deleted
+        let still_exist: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = true AND key_id <= 10",
+        )
+        .bind(&device_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            still_exist, 10,
+            "old keys must be soft-expired, not hard-deleted"
+        );
+
+        // New keys must be active
+        let new_active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = false AND key_id >= 51",
+        )
+        .bind(&device_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(new_active, 5, "new keys must be active");
+
+        cleanup_device(&db, &device_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_upload_prekeys_no_replace_keeps_old_keys_active() {
+        let db = get_test_db().await;
+        let device_id = insert_test_device(&db).await;
+
+        let initial_keys = make_prekeys(5);
+        upload_prekeys(&db, &device_id, &initial_keys, false)
+            .await
+            .unwrap();
+
+        // Upload more without replace_existing
+        let more_keys = (6..=8)
+            .map(|i| OneTimePreKey {
+                key_id: i,
+                public_key: vec![i as u8; 32],
+            })
+            .collect::<Vec<_>>();
+        upload_prekeys(&db, &device_id, &more_keys, false)
+            .await
+            .unwrap();
+
+        // All 8 keys should be active (no soft-expiry)
+        let expired_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = true",
+        )
+        .bind(&device_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            expired_count, 0,
+            "replace_existing=false must not expire old keys"
+        );
+
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid")
+                .bind(&device_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(total, 8);
+
+        cleanup_device(&db, &device_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_cleanup_expired_otpks_only_removes_old_expired_keys() {
+        let db = get_test_db().await;
+        let device_id = insert_test_device(&db).await;
+
+        // Upload and immediately soft-expire keys 1-5 with backdated expired_at
+        let keys = make_prekeys(5);
+        upload_prekeys(&db, &device_id, &keys, false).await.unwrap();
+
+        // Backdate expired_at to 3 days ago to simulate old expired keys
+        sqlx::query(
+            "UPDATE one_time_prekeys
+             SET is_expired = true, expired_at = NOW() - INTERVAL '3 days'
+             WHERE device_id = $1::uuid AND key_id <= 3",
+        )
+        .bind(&device_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // Soft-expire keys 4-5 but keep them recent (< 48h ago)
+        sqlx::query(
+            "UPDATE one_time_prekeys
+             SET is_expired = true, expired_at = NOW() - INTERVAL '1 hour'
+             WHERE device_id = $1::uuid AND key_id > 3",
+        )
+        .bind(&device_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // cleanup_expired_otpks must only delete keys older than 48h
+        let deleted = cleanup_expired_otpks(&db).await.unwrap();
+        assert!(
+            deleted >= 3,
+            "should have deleted at least 3 old expired keys"
+        );
+
+        // Keys 4-5 (recent soft-expire) must still be present
+        let recent_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND key_id > 3",
+        )
+        .bind(&device_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            recent_count, 2,
+            "recently expired keys must not be cleaned up yet"
+        );
+
+        cleanup_device(&db, &device_id).await;
+    }
+}
