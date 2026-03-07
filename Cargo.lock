@@ -858,6 +858,7 @@ dependencies = [
 [[package]]
 name = "construct-ice"
 version = "0.1.0"
+source = "git+https://github.com/maximeliseyev/construct-obfs4.git?branch=main#6bbf3e6dc468fac217548cbb140fec725b2c1e68"
 dependencies = [
  "base64 0.22.1",
  "bytes",
