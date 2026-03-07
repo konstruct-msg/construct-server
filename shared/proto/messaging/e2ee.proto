@@ -58,8 +58,24 @@ message PreKeySignalMessage {
   // Embedded Signal message (first message in new session)
   SignalMessage message = 7;
 
-  // Reserved for future X3DH extensions
-  reserved 8 to 15;
+  // ---- Post-Quantum (ML-KEM-1024) fields — Phase 1 ----
+  // Present only when sender used PQXDH (hybrid X25519 + ML-KEM-1024).
+  // Old clients that don't understand these fields will ignore them.
+
+  // KEM ciphertext (ML-KEM-1024 Encaps output, exactly 1568 bytes)
+  optional bytes kem_ciphertext = 8;
+
+  // Kyber signed pre-key ID used (matches PreKeyBundle.kyber_pre_key_id)
+  optional uint32 kyber_pre_key_id = 9;
+
+  // KEM ciphertext from Kyber one-time pre-key (1568 bytes, if OTPK was used)
+  optional bytes kyber_one_time_kem_ciphertext = 10;
+
+  // Kyber one-time pre-key ID used
+  optional uint32 kyber_one_time_pre_key_id = 11;
+
+  // reserved 12 to 15 for future PQ extensions
+  reserved 12 to 15;
 }
 
 // SenderKeyMessage - Group message (Sender Key protocol)

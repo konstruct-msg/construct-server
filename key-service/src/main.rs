@@ -97,6 +97,11 @@ impl KeyService for KeyGrpcService {
                     one_time_pre_key_id: b.one_time_prekey_id,
                     crypto_suite: b.crypto_suite,
                     generated_at: b.registered_at.timestamp(),
+                    kyber_pre_key: b.kyber_pre_key,
+                    kyber_pre_key_id: b.kyber_pre_key_id,
+                    kyber_pre_key_signature: b.kyber_pre_key_signature,
+                    kyber_one_time_pre_key: b.kyber_one_time_pre_key,
+                    kyber_one_time_pre_key_id: b.kyber_one_time_pre_key_id,
                 }),
                 device_id: b.device_id,
                 has_one_time_key: b.one_time_prekey_id.is_some(),
@@ -119,8 +124,10 @@ impl KeyService for KeyGrpcService {
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
         }
-        if req.pre_keys.is_empty() {
-            return Err(Status::invalid_argument("pre_keys cannot be empty"));
+        if req.pre_keys.is_empty() && req.kyber_pre_keys.is_empty() {
+            return Err(Status::invalid_argument(
+                "pre_keys or kyber_pre_keys cannot both be empty",
+            ));
         }
 
         // Convert proto prekeys to core types
@@ -133,16 +140,28 @@ impl KeyService for KeyGrpcService {
             })
             .collect();
 
-        let count = core::upload_prekeys(
+        // Convert proto Kyber prekeys to core types
+        let kyber_prekeys: Vec<core::KyberOneTimePreKey> = req
+            .kyber_pre_keys
+            .into_iter()
+            .map(|k| core::KyberOneTimePreKey {
+                key_id: k.key_id,
+                public_key: k.public_key,
+                signature: k.signature,
+            })
+            .collect();
+
+        let (classic_count, kyber_count) = core::upload_prekeys(
             &self.context.db,
             &req.device_id,
             &prekeys,
             req.replace_existing,
+            &kyber_prekeys,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Handle optional signed prekey update
+        // Handle optional classic signed prekey update
         if let Some(spk) = req.signed_pre_key {
             let signed_key = core::SignedPreKey {
                 key_id: spk.key_id,
@@ -154,10 +173,24 @@ impl KeyService for KeyGrpcService {
                 .map_err(|e| Status::internal(e.to_string()))?;
         }
 
+        // Handle optional Kyber signed prekey update
+        if let Some(kspk) = req.kyber_signed_pre_key {
+            core::upload_kyber_signed_prekey(
+                &self.context.db,
+                &req.device_id,
+                kspk.key_id,
+                &kspk.public_key,
+                &kspk.signature,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        }
+
         Ok(Response::new(proto::UploadPreKeysResponse {
             success: true,
-            pre_key_count: count,
+            pre_key_count: classic_count,
             uploaded_at: chrono::Utc::now().timestamp(),
+            kyber_pre_key_count: kyber_count,
         }))
     }
 
@@ -390,6 +423,11 @@ impl KeyService for KeyGrpcService {
                     one_time_pre_key_id: b.one_time_prekey_id,
                     crypto_suite: b.crypto_suite,
                     generated_at: b.registered_at.timestamp(),
+                    kyber_pre_key: b.kyber_pre_key,
+                    kyber_pre_key_id: b.kyber_pre_key_id,
+                    kyber_pre_key_signature: b.kyber_pre_key_signature,
+                    kyber_one_time_pre_key: b.kyber_one_time_pre_key,
+                    kyber_one_time_pre_key_id: b.kyber_one_time_pre_key_id,
                 }),
                 platform: 0, // Unknown
             })
