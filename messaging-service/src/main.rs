@@ -233,9 +233,92 @@ impl MessagingService for MessagingGrpcService {
 
     async fn edit_message(
         &self,
-        _request: Request<proto::EditMessageRequest>,
+        request: Request<proto::EditMessageRequest>,
     ) -> Result<Response<proto::EditMessageResponse>, Status> {
-        Err(Status::unimplemented("edit_message is not implemented yet"))
+        // Extract authenticated sender_id from x-user-id header or Bearer JWT
+        let sender_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .or_else(|| {
+                request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .and_then(|token| {
+                        self.context
+                            .auth_manager
+                            .verify_token(token)
+                            .ok()
+                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
+                    })
+            })
+            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
+
+        let req = request.into_inner();
+        if req.message_id.is_empty() {
+            return Err(Status::invalid_argument("message_id is required"));
+        }
+        if req.recipient_user_id.is_empty() {
+            return Err(Status::invalid_argument("recipient_user_id is required"));
+        }
+        if req.new_encrypted_content.is_empty() {
+            return Err(Status::invalid_argument(
+                "new_encrypted_content is required",
+            ));
+        }
+
+        // Increment edit count in Redis. Key: edits:{message_id}, TTL 7 days.
+        // This lets the client display "edited N times" and lets the server
+        // enforce a hard cap to prevent edit-spam.
+        const MAX_EDITS: u32 = 20;
+        const EDIT_TTL_SECS: u64 = 7 * 24 * 3600;
+        let edit_count = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .increment_edit_count(&req.message_id, EDIT_TTL_SECS)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+        };
+        if edit_count > MAX_EDITS {
+            return Err(Status::resource_exhausted(format!(
+                "edit limit of {MAX_EDITS} exceeded"
+            )));
+        }
+
+        let edited_at = chrono::Utc::now().timestamp_millis();
+        let new_message_id = uuid::Uuid::new_v4().to_string();
+
+        use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+        let envelope = KafkaMessageEnvelope::from_edit(
+            new_message_id,
+            sender_id.to_string(),
+            req.recipient_user_id.clone(),
+            req.message_id.clone(),
+            req.new_encrypted_content.to_vec(),
+        );
+
+        let mut queue = self.context.queue.lock().await;
+        queue
+            .write_message_to_user_stream(&req.recipient_user_id, &envelope)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to queue edit: {e}")))?;
+
+        tracing::info!(
+            sender = %sender_id,
+            recipient = %req.recipient_user_id,
+            original_message_id = %req.message_id,
+            edit_count = edit_count,
+            "Message edit queued"
+        );
+
+        Ok(Response::new(proto::EditMessageResponse {
+            success: true,
+            edited_at,
+            edit_count,
+        }))
     }
 
     // =========================================================================
@@ -794,7 +877,7 @@ fn convert_kafka_envelope_to_proto(
         forwarding_path: vec![],
         ephemeral_seconds: None,
         reply_to_message_id: None,
-        edits_message_id: None,
+        edits_message_id: envelope.edits_message_id,
         reactions: vec![],
         mentions: vec![],
         sealed_sender: None,
