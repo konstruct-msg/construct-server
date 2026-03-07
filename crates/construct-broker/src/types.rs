@@ -133,6 +133,12 @@ pub struct KafkaMessageEnvelope {
     /// Contains recipient_user_id (plaintext for routing) + E2EE payload (opaque).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sealed_inner_b64: Option<String>,
+
+    // ===== Edit Fields =====
+    /// Original message ID that this envelope replaces (edit flow).
+    /// When set, the recipient client replaces the original message in their local store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits_message_id: Option<String>,
 }
 
 impl KafkaMessageEnvelope {
@@ -167,6 +173,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
+            edits_message_id: None,
         }
     }
 
@@ -206,6 +213,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: true,
             sealed_inner_b64: Some(sealed_b64),
+            edits_message_id: None,
         }
     }
 
@@ -243,6 +251,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
+            edits_message_id: None,
         }
     }
 
@@ -275,6 +284,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
+            edits_message_id: None,
         }
     }
 
@@ -384,6 +394,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
+            edits_message_id: None,
         }
     }
 }
@@ -434,6 +445,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     server_signature: None,
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
+                    edits_message_id: None,
                 }
             }
             ConstructMessageType::EndSession => {
@@ -463,6 +475,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     server_signature: None,
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
+                    edits_message_id: None,
                 }
             }
         }
@@ -525,6 +538,51 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
+            edits_message_id: None,
+        }
+    }
+
+    /// Create a KafkaMessageEnvelope for an edit operation.
+    ///
+    /// Delivers a new encrypted payload to the recipient that replaces
+    /// the original message identified by `original_message_id`.
+    /// The server tracks edit count via Redis externally (`edits:{original_message_id}`).
+    pub fn from_edit(
+        new_message_id: String,
+        sender_id: String,
+        recipient_id: String,
+        original_message_id: String,
+        new_encrypted_payload: Vec<u8>,
+    ) -> Self {
+        use base64::Engine;
+        let ciphertext_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&new_encrypted_payload);
+
+        let mut hasher = Sha256::new();
+        hasher.update(new_message_id.as_bytes());
+        hasher.update(&new_encrypted_payload);
+        hasher.update(original_message_id.as_bytes());
+        let content_hash = format!("{:x}", hasher.finalize());
+
+        Self {
+            message_id: new_message_id,
+            sender_id,
+            recipient_id,
+            timestamp: chrono::Utc::now().timestamp(),
+            message_type: MessageType::DirectMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: ciphertext_b64,
+            content_hash,
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner_b64: None,
+            edits_message_id: Some(original_message_id),
         }
     }
 }

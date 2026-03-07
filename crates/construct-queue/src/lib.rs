@@ -685,4 +685,21 @@ impl MessageQueue {
         .mark_message_dispatched(message_id)
         .await
     }
+
+    /// Atomically increment the edit counter for `message_id` and set TTL on first use.
+    /// Returns the new count (1-based). The caller should check against a max cap.
+    pub async fn increment_edit_count(&mut self, message_id: &str, ttl_secs: u64) -> Result<u32> {
+        use redis::AsyncCommands;
+        let key = format!("edits:{}", message_id);
+        let count: u32 = self.client.connection_mut().incr(&key, 1u32).await?;
+        if count == 1 {
+            // First edit — set TTL so the key expires after the message window
+            let _: () = self
+                .client
+                .connection_mut()
+                .expire(&key, ttl_secs as i64)
+                .await?;
+        }
+        Ok(count)
+    }
 }

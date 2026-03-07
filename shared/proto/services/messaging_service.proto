@@ -246,6 +246,10 @@ message EditMessageRequest {
 
   // Reserved for future features
   reserved 4 to 10;
+
+  // Recipient user ID — required for server-side routing.
+  // The server cannot infer this from the original message (no message DB).
+  string recipient_user_id = 11;
 }
 
 // EditMessageResponse - Edit confirmation
