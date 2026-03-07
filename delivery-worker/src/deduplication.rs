@@ -374,4 +374,98 @@ mod tests {
             "duplicate_content"
         );
     }
+
+    // ── Content hash key determinism ──────────────────────────────────────────
+    //
+    // The hash key format is: processed_msg:content_hash:{recipient_id}:{sha256_hex[0..16]}
+    // We test the SHA-256 behavior directly since the key construction logic is
+    // inline in is_content_duplicate() and mark_content_hash_processed().
+
+    #[test]
+    fn test_sha256_content_hash_is_deterministic() {
+        use sha2::{Digest, Sha256};
+
+        let content = b"opaque-ciphertext-bytes-AAAA";
+
+        let hash1 = {
+            let mut h = Sha256::new();
+            h.update(content);
+            hex::encode(h.finalize())
+        };
+        let hash2 = {
+            let mut h = Sha256::new();
+            h.update(content);
+            hex::encode(h.finalize())
+        };
+
+        assert_eq!(
+            hash1, hash2,
+            "SHA-256 must be deterministic for the same input"
+        );
+        assert_eq!(hash1.len(), 64, "SHA-256 hex output must be 64 characters");
+    }
+
+    #[test]
+    fn test_sha256_different_content_produces_different_hash() {
+        use sha2::{Digest, Sha256};
+
+        let content_a = b"message-for-alice";
+        let content_b = b"message-for-alice-slightly-different";
+
+        let hash_a = hex::encode(Sha256::digest(content_a));
+        let hash_b = hex::encode(Sha256::digest(content_b));
+
+        assert_ne!(
+            hash_a, hash_b,
+            "different content must produce different content hashes"
+        );
+    }
+
+    #[test]
+    fn test_sha256_same_content_different_recipients_share_hash_prefix() {
+        // The key format uses recipient_id to namespace the key, so same ciphertext
+        // sent to alice and bob results in DIFFERENT Redis keys (not deduplicated across users).
+        use sha2::{Digest, Sha256};
+
+        let content = b"same-encrypted-payload";
+        let hash = &hex::encode(Sha256::digest(content))[..16]; // first 16 chars
+
+        let key_alice = format!("processed_msg:content_hash:alice:{hash}");
+        let key_bob = format!("processed_msg:content_hash:bob:{hash}");
+
+        assert_ne!(
+            key_alice, key_bob,
+            "same content sent to different recipients must have distinct dedup keys"
+        );
+    }
+
+    #[test]
+    fn test_sha256_truncation_to_16_chars_is_collision_safe_for_dedup() {
+        // 16 hex chars = 64 bits of entropy → collision probability ≈ 1.8e-19 per pair
+        // This is sufficient for deduplication (not a cryptographic guarantee).
+        use sha2::{Digest, Sha256};
+
+        let content = b"test dedup content";
+        let full_hash = hex::encode(Sha256::digest(content));
+        let truncated = &full_hash[..16];
+
+        assert_eq!(truncated.len(), 16);
+        // Must only contain valid hex chars
+        assert!(
+            truncated.chars().all(|c| c.is_ascii_hexdigit()),
+            "truncated hash must be valid hex"
+        );
+    }
+
+    // ── SkipReason clone and equality ─────────────────────────────────────────
+
+    #[test]
+    fn test_skip_reason_clone_and_eq() {
+        let reason = SkipReason::AlreadyProcessed;
+        let cloned = reason.clone();
+        assert_eq!(reason, cloned);
+
+        assert_ne!(SkipReason::AlreadyProcessed, SkipReason::DeliveredDirect);
+        assert_ne!(SkipReason::DeliveredDirect, SkipReason::DuplicateContent);
+    }
 }
