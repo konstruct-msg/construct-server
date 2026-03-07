@@ -172,6 +172,10 @@ async fn setup_queue() -> (MessageQueue, redis::Connection) {
             cookie_name: "csrf_token".to_string(),
             header_name: "X-CSRF-Token".to_string(),
         },
+        ice_enabled: false,
+        ice_port: 9443,
+        ice_server_key: None,
+        ice_iat_mode: 0,
     };
 
     // Allow overriding redis_url from environment for CI/different setups

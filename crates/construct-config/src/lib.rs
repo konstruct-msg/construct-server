@@ -117,6 +117,24 @@ pub struct Config {
 
     /// Deep link base URL (e.g., "https://konstruct.cc")
     pub deep_link_base_url: String,
+
+    // ── construct-ice (ICE transport obfuscation) ────────────────────────────
+    /// Enable ICE (obfs4) listener in addition to the plain listener.
+    /// Set ICE_ENABLED=true to activate.
+    pub ice_enabled: bool,
+
+    /// Port for the ICE (obfs4) listener (default 9443).
+    pub ice_port: u16,
+
+    /// Base64-encoded 52-byte server identity key (`secret || node_id`).
+    /// Generate once with `ServerConfig::generate().to_bytes()` and persist.
+    /// If unset, a new ephemeral key is generated on each startup (clients
+    /// need a new bridge cert after every restart — not suitable for production).
+    pub ice_server_key: Option<String>,
+
+    /// IAT obfuscation mode for the ICE listener: 0=None, 1=Enabled, 2=Paranoid.
+    /// Paranoid recommended for high-threat environments (China/Iran).
+    pub ice_iat_mode: u8,
 }
 
 impl Config {
@@ -250,6 +268,20 @@ impl Config {
             federation_enabled,
             deep_link_base_url: std::env::var("DEEP_LINK_BASE_URL")
                 .unwrap_or_else(|_| "https://konstruct.cc".to_string()),
+
+            // ICE transport
+            ice_enabled: std::env::var("ICE_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            ice_port: std::env::var("ICE_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(9443),
+            ice_server_key: std::env::var("ICE_SERVER_KEY").ok(),
+            ice_iat_mode: std::env::var("ICE_IAT_MODE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         })
     }
 

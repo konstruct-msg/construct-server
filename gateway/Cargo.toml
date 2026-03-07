@@ -49,3 +49,4 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
 prost = "0.14.3"
+construct-ice = { path = "../../construct-ice" }

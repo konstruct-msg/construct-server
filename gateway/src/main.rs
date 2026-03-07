@@ -109,60 +109,101 @@ async fn main() -> Result<()> {
         )
         .with_state(gateway_state);
 
-    // Start server
+    // Start plain listener
     info!("API Gateway listening on {}", config.bind_address);
-
-    // TODO(construct-ice): Dual-mode transport — accept obfuscated and plain traffic simultaneously.
-    //
-    // When ready, spawn a second listener on ICE_PORT (default 9443) that wraps each accepted
-    // TCP stream with `construct_ice::Obfs4Listener::accept()` before passing it to hyper/Axum.
-    // Both listeners share the same `app` (clone it — Router is Arc internally).
-    //
-    // Rough plan (Variant A — two ports, one router):
-    //
-    //   1. Add to construct-config:
-    //        ice_enabled: bool   (ICE_ENABLED=true)
-    //        ice_port: u16       (ICE_PORT=9443, default)
-    //        ice_server_key: Option<String>  (ICE_SERVER_KEY=<base64 private key>, generated once)
-    //        ice_iat_mode: u8    (ICE_IAT_MODE=0, 0=none/1=enabled/2=paranoid)
-    //
-    //   2. Deserialize key with `construct_ice::ServerConfig::from_keypair(...)` or generate once
-    //      on first launch and persist in secrets (same pattern as APNs key).
-    //
-    //   3. Spawn task:
-    //        let ice_listener = construct_ice::Obfs4Listener::bind(ice_addr, ice_cfg).await?;
-    //        let ice_app = app.clone();
-    //        tokio::spawn(async move {
-    //            loop {
-    //                let (stream, _addr) = ice_listener.accept().await?;
-    //                let svc = ice_app.clone();
-    //                tokio::spawn(async move {
-    //                    hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-    //                        .serve_connection(TokioIo::new(stream), svc)
-    //                        .await
-    //                });
-    //            }
-    //        });
-    //
-    //   4. Log bridge line so ops can distribute it to censored clients:
-    //        info!("construct-ice bridge line: {}", ice_cfg.bridge_line());
-    //
-    // construct-ice library: /Users/maximeliseyev/Code/construct-ice (local crate, not published)
-    // Add to gateway/Cargo.toml:
-    //   construct-ice = { path = "../../construct-ice", features = ["tonic-transport"] }
-    //
-    // DPI resistance analysis → session file: CONSTRUCT_ICE_DPI_ANALYSIS.md
-    // obfs4 audit findings   → session file: OBFS4_AUDIT_FINDINGS.md
 
     let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
+
+    // Start ICE (obfs4) listener if enabled — accepts obfuscated traffic on a
+    // separate port and routes it through the same Axum router.
+    if config.ice_enabled {
+        let ice_server_cfg = ice_load_or_generate(&config)?;
+        let ice_addr = format!("0.0.0.0:{}", config.ice_port);
+        let ice_listener = construct_ice::Obfs4Listener::bind(&ice_addr, ice_server_cfg)
+            .await
+            .context("Failed to bind ICE listener")?;
+        info!(
+            port = config.ice_port,
+            "ICE listener started — obfuscated traffic accepted"
+        );
+        let ice_app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                match ice_listener.accept().await {
+                    Ok((stream, peer)) => {
+                        tracing::debug!(peer = %peer, "ICE connection accepted");
+                        let svc = ice_app.clone();
+                        tokio::spawn(async move {
+                            use hyper_util::rt::{TokioExecutor, TokioIo};
+                            let io = TokioIo::new(stream);
+                            // Bridge Request<Incoming> → Request<axum::body::Body>
+                            let svc = hyper::service::service_fn(
+                                move |req: hyper::Request<hyper::body::Incoming>| {
+                                    let mut router = svc.clone();
+                                    async move {
+                                        use tower::Service;
+                                        let req = req.map(axum::body::Body::new);
+                                        router.call(req).await
+                                    }
+                                },
+                            );
+                            if let Err(e) =
+                                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                                    .serve_connection(io, svc)
+                                    .await
+                            {
+                                tracing::debug!(error = %e, "ICE connection closed");
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!(error = %e, "ICE accept error"),
+                }
+            }
+        });
+    } else {
+        info!("ICE transport disabled (set ICE_ENABLED=true to activate)");
+    }
 
     axum::serve(listener, app)
         .await
         .context("Failed to start server")?;
 
     Ok(())
+}
+
+/// Load `ServerConfig` from `ICE_SERVER_KEY` env var, or generate an ephemeral one.
+///
+/// If the key is ephemeral (not persisted), clients need a new bridge cert after
+/// every gateway restart.  For production: generate once and set `ICE_SERVER_KEY`.
+fn ice_load_or_generate(
+    config: &construct_config::Config,
+) -> anyhow::Result<construct_ice::ServerConfig> {
+    use base64::Engine;
+
+    let server_cfg = if let Some(key_b64) = &config.ice_server_key {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(key_b64)
+            .context("ICE_SERVER_KEY: invalid base64")?;
+        let cfg = construct_ice::ServerConfig::from_bytes(&bytes)
+            .map_err(|e| anyhow::anyhow!("ICE_SERVER_KEY: {}", e))?;
+        let iat = construct_ice::IatMode::from_u8(config.ice_iat_mode).unwrap_or_default();
+        cfg.with_iat(iat)
+    } else {
+        let cfg = construct_ice::ServerConfig::generate();
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(cfg.to_bytes());
+        tracing::warn!(
+            key = %key_b64,
+            "ICE_SERVER_KEY not set — using ephemeral key. \
+             Set ICE_SERVER_KEY={} to persist across restarts.",
+            key_b64
+        );
+        cfg
+    };
+
+    info!(bridge_line = %server_cfg.bridge_line(), "ICE server identity loaded");
+    Ok(server_cfg)
 }
 
 /// Health check endpoint
