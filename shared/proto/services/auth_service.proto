@@ -131,6 +131,11 @@ message AuthTokensResponse {
   string access_token = 2;
   string refresh_token = 3;
   int64 expires_at = 4;
+
+  // ICE (obfs4) bridge cert for transport obfuscation.
+  // Populated only when the server has ICE_ENABLED=true.
+  // Client passes this to ClientConfig::from_bridge_cert() to connect via obfs4.
+  optional string ice_bridge_cert = 5;
 }
 
 // RefreshTokenRequest - Refresh access token
