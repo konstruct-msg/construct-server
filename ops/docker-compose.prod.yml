@@ -202,6 +202,8 @@ services:
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
       OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
       ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
+      ICE_ENABLED: ${ICE_ENABLED:-true}
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -419,6 +421,8 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      ICE_ENABLED: ${ICE_ENABLED:-true}
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
