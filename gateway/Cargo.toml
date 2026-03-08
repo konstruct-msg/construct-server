@@ -3,6 +3,14 @@ name = "gateway"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[[bin]]
+name = "construct-ice-keygen"
+path = "src/bin/keygen.rs"
+
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
 construct-server-shared = { path = "../shared" }
