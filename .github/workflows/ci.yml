@@ -124,6 +124,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/sqlx
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
 
@@ -132,6 +133,14 @@ jobs:
 
       - name: Generate test keys
         run: ./scripts/generate_test_keys.sh
+
+      - name: Install sqlx-cli
+        run: command -v sqlx || cargo install sqlx-cli --no-default-features --features postgres --locked
+
+      - name: Run database migrations
+        run: sqlx migrate run --source shared/migrations
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/construct_test
 
       - name: Build
         run: cargo build --all-targets
