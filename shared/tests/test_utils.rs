@@ -29,7 +29,7 @@ use construct_server_shared::{
         MessageProducer,
         types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
     },
-    messaging_service::{MessagingServiceContext, handlers as messaging_handlers},
+    messaging_service::{MessagingServiceContext, core as messaging_core},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -536,7 +536,17 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
         .route("/health/live", get(health::liveness_check_handler))
         .route(
             "/api/v1/messages/confirm",
-            post(messaging_handlers::confirm_message),
+            post(
+                |State(ctx): State<Arc<MessagingServiceContext>>,
+                 construct_extractors::TrustedUser(uid): construct_extractors::TrustedUser,
+                 axum::Json(data): axum::Json<construct_types::api::ConfirmMessageRequest>| async move {
+                    let user_id = Uuid::parse_str(&uid.to_string())
+                        .map_err(|_| construct_error::AppError::Validation("Invalid user ID".to_string()))?;
+                    let app_ctx = Arc::new(ctx.to_app_context());
+                    let result = messaging_core::confirm_pending_message(app_ctx, user_id, &data.temp_id).await?;
+                    Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, axum::Json(result)))
+                },
+            ),
         )
         .layer(axum_middleware::from_fn_with_state(
             context.auth_manager.clone(),

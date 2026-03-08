@@ -14,7 +14,6 @@ construct-broker = { path = "../crates/construct-broker", features = ["kafka"] }
 construct-queue  = { path = "../crates/construct-queue" }
 construct-auth         = { path = "../crates/construct-auth" }
 construct-auth-service      = { path = "../crates/construct-auth-service" }
-construct-messaging-service      = { path = "../crates/construct-messaging-service" }
 construct-notification-service  = { path = "../crates/construct-notification-service" }
 construct-user-service          = { path = "../crates/construct-user-service" }
 construct-apns   = { path = "../crates/construct-apns" }
