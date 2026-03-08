@@ -3,12 +3,17 @@ name = "construct-broker"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Enable Kafka/Redpanda transport via rdkafka.
+# Without this feature, MessageProducer and MessageConsumer compile as no-op stubs.
+kafka = ["rdkafka"]
+
 [dependencies]
 construct-config = { path = "../construct-config" }
 construct-types = { path = "../construct-types" }
 
-# Kafka
-rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
+# Kafka (optional — only compiled when feature "kafka" is enabled)
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
