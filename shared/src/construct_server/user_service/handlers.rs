@@ -17,7 +17,6 @@ use crate::construct_server::auth_service::devices;
 use crate::construct_server::context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
-use construct_types::api::UpdateVerifyingKeyRequest;
 
 fn app_state(context: &Arc<UserServiceContext>) -> State<Arc<AppContext>> {
     State(Arc::new(context.to_app_context()))
@@ -75,52 +74,6 @@ pub async fn update_account(
             "message": "Account updated successfully"
         })),
     ))
-}
-
-pub async fn get_public_key_bundle(
-    State(context): State<Arc<UserServiceContext>>,
-    user: TrustedUser,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    user_core::get_public_key_bundle(app_context, user.0, id).await
-}
-
-pub async fn get_keys_legacy(
-    State(context): State<Arc<UserServiceContext>>,
-    user: TrustedUser,
-    Path(user_id): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    get_public_key_bundle(State(context), user, Path(user_id)).await
-}
-
-pub async fn upload_keys(
-    State(context): State<Arc<UserServiceContext>>,
-    user: TrustedUser,
-    headers: HeaderMap,
-    Json(bundle): Json<construct_crypto::UploadableKeyBundle>,
-) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    user_core::upload_keys(app_context, user.0, headers, bundle).await
-}
-
-pub async fn update_verifying_key(
-    State(context): State<Arc<UserServiceContext>>,
-    user: TrustedUser,
-    headers: HeaderMap,
-    Json(request): Json<UpdateVerifyingKeyRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let app_context = Arc::new(context.to_app_context());
-    user_core::update_verifying_key(
-        app_context,
-        user.0,
-        headers,
-        user_core::UpdateVerifyingKeyInput {
-            verifying_key: request.verifying_key,
-            reason: request.reason,
-        },
-    )
-    .await
 }
 
 pub async fn get_device_profile(
