@@ -1,3 +1,5 @@
+mod context;
+mod core;
 mod handlers;
 mod media_routes;
 
@@ -13,8 +15,8 @@ use construct_server_shared::apns::DeviceTokenEncryption;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::kafka::MessageProducer;
-use construct_server_shared::messaging_service::MessagingServiceContext;
 use construct_server_shared::queue::MessageQueue;
+use context::MessagingServiceContext;
 use futures_core::Stream;
 use serde_json::json;
 use tokio_stream::StreamExt;
@@ -228,12 +230,9 @@ impl MessagingService for MessagingGrpcService {
         });
 
         let app_context = Arc::new(self.context.to_app_context());
-        construct_server_shared::messaging_service::core::dispatch_envelope(
-            &app_context,
-            kafka_envelope,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        core::dispatch_envelope(&app_context, kafka_envelope)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::SendMessageResponse {
             message_id,
@@ -606,7 +605,7 @@ async fn handle_stream_request(
                     });
 
                 let app_context = Arc::new(context.to_app_context());
-                match construct_server_shared::messaging_service::core::dispatch_envelope(
+                match core::dispatch_envelope(
                     &app_context,
                     kafka_envelope,
                 )
@@ -906,7 +905,7 @@ async fn dispatch_sealed_sender(
 ) -> anyhow::Result<proto::SendMessageResponse> {
     use construct_server_shared::federation::FederationClient;
     use construct_server_shared::kafka::types::KafkaMessageEnvelope;
-    use construct_server_shared::shared::proto::core::v1 as core;
+    use construct_server_shared::shared::proto::core::v1 as proto_core;
     use prost::Message;
 
     let our_domain = &context.config.federation.instance_domain;
@@ -935,7 +934,7 @@ async fn dispatch_sealed_sender(
     }
 
     // Local delivery: decode SealedInner to get recipient_user_id
-    let sealed_inner = core::SealedInner::decode(sealed.sealed_inner.as_ref())
+    let sealed_inner = proto_core::SealedInner::decode(sealed.sealed_inner.as_ref())
         .map_err(|e| anyhow::anyhow!("Failed to decode SealedInner: {}", e))?;
 
     let recipient_id = sealed_inner.recipient_user_id.clone();
@@ -950,11 +949,9 @@ async fn dispatch_sealed_sender(
     );
 
     let app_context = Arc::new(context.to_app_context());
-    construct_server_shared::messaging_service::core::dispatch_envelope(
-        &app_context,
-        kafka_envelope,
-    )
-    .await?;
+    core::dispatch_envelope(&app_context, kafka_envelope)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(proto::SendMessageResponse {
         message_id,
@@ -1019,10 +1016,7 @@ async fn relay_delivery_receipt(
                 Ok(None) => {
                     // Redis miss — fall back to DB
                     let hash_salt = &context.config.logging.hash_salt;
-                    let message_hash =
-                        construct_server_shared::messaging_service::core::receipt_routing_hash(
-                            message_id, hash_salt,
-                        );
+                    let message_hash = core::receipt_routing_hash(message_id, hash_salt);
                     match sqlx::query_scalar::<_, String>(
                         "DELETE FROM delivery_pending WHERE message_hash = $1 RETURNING sender_id",
                     )
