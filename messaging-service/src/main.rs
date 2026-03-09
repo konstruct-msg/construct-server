@@ -204,7 +204,20 @@ impl MessagingService for MessagingGrpcService {
             return Err(Status::invalid_argument("encrypted_payload is required"));
         }
 
-        let message_id = uuid::Uuid::new_v4().to_string();
+        // Use client-provided message_id (echo back per proto contract).
+        // Priority: envelope.message_id → idempotency_key → generated UUID.
+        let message_id = {
+            use construct_server_shared::shared::proto::core::v1 as core;
+            match &envelope.message_id_type {
+                Some(core::envelope::MessageIdType::MessageId(id)) if !id.is_empty() => id.clone(),
+                _ => req
+                    .idempotency_key
+                    .as_deref()
+                    .filter(|k| !k.is_empty())
+                    .map(|k| k.to_string())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            }
+        };
 
         use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
         let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
