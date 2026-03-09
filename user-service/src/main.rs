@@ -541,12 +541,6 @@ async fn main() -> Result<()> {
         .route("/api/v1/account", get(handlers::get_account))
         .route("/api/v1/account", put(handlers::update_account))
         // Note: DELETE /api/v1/account removed - use device-signed deletion instead
-        // Keys management endpoints
-        .route(
-            "/api/v1/users/:id/public-key",
-            get(handlers::get_public_key_bundle),
-        )
-        .route("/api/v1/keys/upload", post(handlers::upload_keys))
         // Username availability check (no auth required)
         .route(
             "/api/v1/users/username/availability",
