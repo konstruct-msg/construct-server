@@ -2357,6 +2357,7 @@ dependencies = [
  "chrono",
  "construct-config",
  "construct-server-shared",
+ "ed25519-dalek",
  "hex",
  "prost 0.13.5",
  "serde",
