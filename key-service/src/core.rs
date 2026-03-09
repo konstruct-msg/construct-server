@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 
 // ============================================================================
@@ -87,9 +88,36 @@ pub fn validate_ed25519_signature(sig: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
-// Pre-Key Bundle Operations
-// ============================================================================
+/// Cryptographically verify a prekey signature.
+///
+/// Message = `"KonstruktX3DH-v1" || [0x00, suite_id] || public_key`
+///
+/// `suite_id`: 0x01 = ClassicX25519, 0x10 = HybridKyber1024X25519
+pub fn verify_prekey_signature(
+    verifying_key_bytes: &[u8],
+    suite_id: u8,
+    public_key: &[u8],
+    signature_bytes: &[u8],
+) -> Result<()> {
+    let vk_array: [u8; 32] = verifying_key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("verifying_key must be 32 bytes"))?;
+    let vk = VerifyingKey::from_bytes(&vk_array)
+        .map_err(|e| anyhow::anyhow!("Invalid verifying key: {}", e))?;
+
+    let sig_array: [u8; 64] = signature_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
+    let sig = Signature::from_bytes(&sig_array);
+
+    let mut message = Vec::with_capacity(18 + public_key.len());
+    message.extend_from_slice(b"KonstruktX3DH-v1");
+    message.extend_from_slice(&[0x00, suite_id]);
+    message.extend_from_slice(public_key);
+
+    vk.verify(&message, &sig)
+        .map_err(|_| anyhow::anyhow!("Prekey signature verification failed"))
+}
 
 /// Get pre-key bundle for a device (consumes one-time pre-key if available)
 pub async fn get_prekey_bundle(
@@ -333,10 +361,22 @@ pub async fn upload_prekeys(
         anyhow::bail!("Device not found or inactive");
     }
 
-    // Validate Kyber key sizes before any DB writes
-    for k in kyber_pre_keys {
-        validate_kyber_public_key(&k.public_key)?;
-        validate_ed25519_signature(&k.signature)?;
+    // Validate Kyber key sizes and verify signatures before any DB writes
+    if !kyber_pre_keys.is_empty() {
+        let verifying_key: Vec<u8> = sqlx::query_scalar(
+            "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+        )
+        .bind(device_id)
+        .fetch_one(db)
+        .await
+        .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
+
+        for k in kyber_pre_keys {
+            validate_kyber_public_key(&k.public_key)?;
+            validate_ed25519_signature(&k.signature)?;
+            // Suite 0x10 = HybridKyber1024X25519
+            verify_prekey_signature(&verifying_key, 0x10, &k.public_key, &k.signature)?;
+        }
     }
 
     // If replace_existing, soft-expire all current active keys instead of hard-deleting.
@@ -444,6 +484,17 @@ pub async fn upload_kyber_signed_prekey(
 ) -> Result<()> {
     validate_kyber_public_key(public_key)?;
     validate_ed25519_signature(signature)?;
+
+    let verifying_key: Vec<u8> = sqlx::query_scalar(
+        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await
+    .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
+
+    // Suite 0x10 = HybridKyber1024X25519
+    verify_prekey_signature(&verifying_key, 0x10, public_key, signature)?;
 
     sqlx::query(
         r#"

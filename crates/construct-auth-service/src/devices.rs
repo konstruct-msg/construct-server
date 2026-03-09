@@ -22,6 +22,7 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
@@ -333,6 +334,27 @@ pub async fn register_device_v2(
         return Err(AppError::Validation(
             "signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)".to_string(),
         ));
+    }
+
+    // Cryptographically verify signed_prekey_signature.
+    // Message = "KonstruktX3DH-v1" || [0x00, 0x01] (ClassicX25519) || signed_prekey_public
+    {
+        let vk_bytes: [u8; 32] = verifying_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| AppError::Validation("verifying_key must be 32 bytes".to_string()))?;
+        let vk = VerifyingKey::from_bytes(&vk_bytes).map_err(|_| {
+            AppError::Validation("verifying_key is not a valid Ed25519 key".to_string())
+        })?;
+        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().unwrap(); // already checked len == 64
+        let sig = Ed25519Signature::from_bytes(&sig_bytes);
+        let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
+        msg.extend_from_slice(b"KonstruktX3DH-v1");
+        msg.extend_from_slice(&[0x00, 0x01]); // ClassicX25519
+        msg.extend_from_slice(&signed_prekey_public);
+        vk.verify(&msg, &sig).map_err(|_| {
+            AppError::Validation("signed_prekey_signature verification failed".to_string())
+        })?;
     }
 
     // 4. Verify device_id matches identity_public (SHA256 first 16 bytes = 32 hex chars)
