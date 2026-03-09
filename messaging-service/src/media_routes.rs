@@ -10,9 +10,9 @@
 //
 // ============================================================================
 
+use crate::context::MessagingServiceContext;
 use axum::{Json, extract::State, http::StatusCode};
 use construct_extractors::TrustedUser;
-use construct_server_shared::messaging_service::MessagingServiceContext;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
