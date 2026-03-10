@@ -1,4 +1,13 @@
 // Media Service - gRPC Implementation
+//
+// SCALING NOTE: Currently shares the main PostgreSQL instance.
+// When user growth justifies it, move media-service to a dedicated VPS with:
+//   - SQLite (WAL mode) as the metadata store — single table, UUID lookups, TTL cleanup
+//   - A large fast NVMe disk for file storage (replace local filesystem or MinIO)
+//   - sqlx supports SQLite with minimal code changes (update PgPool → SqlitePool,
+//     rewrite EXTRACT(EPOCH...) → strftime('%s',...), change UUID columns to TEXT)
+// Multi-instance (load balancer) is only needed at ~10k+ concurrent uploads;
+// until then a single dedicated instance with SQLite is sufficient.
 
 use anyhow::Result;
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
