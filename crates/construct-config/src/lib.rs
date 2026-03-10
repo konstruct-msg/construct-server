@@ -139,6 +139,16 @@ pub struct Config {
     /// Upstream address that ICE connections are proxied to after de-obfuscation.
     /// Defaults to `envoy:8080` (the gRPC routing proxy inside Docker).
     pub ice_upstream: String,
+
+    /// Path to TLS certificate PEM file for ICE-over-TLS listener.
+    /// When set together with `ice_tls_key_path`, the ICE listener wraps
+    /// obfs4 inside TLS — traffic looks like HTTPS to DPI.
+    /// Example: `/secrets/tls/ice-cert.pem`
+    pub ice_tls_cert_path: Option<String>,
+
+    /// Path to TLS private key PEM file for ICE-over-TLS listener.
+    /// Must match the certificate in `ice_tls_cert_path`.
+    pub ice_tls_key_path: Option<String>,
 }
 
 impl Config {
@@ -288,6 +298,8 @@ impl Config {
                 .unwrap_or(0),
             ice_upstream: std::env::var("ICE_UPSTREAM")
                 .unwrap_or_else(|_| "envoy:8080".to_string()),
+            ice_tls_cert_path: std::env::var("ICE_TLS_CERT_PATH").ok(),
+            ice_tls_key_path: std::env::var("ICE_TLS_KEY_PATH").ok(),
         })
     }
 
