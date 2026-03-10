@@ -137,6 +137,7 @@ pub(crate) fn build_receipt_response(
 
     let status = match payload.status.as_str() {
         "read" => 2i32,
+        "failed" => 3i32,
         _ => 1i32, // delivered
     };
 
