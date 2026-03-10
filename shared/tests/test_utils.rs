@@ -361,15 +361,7 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         .route("/api/v1/account", get(user_handlers::get_account))
         .route("/api/v1/account", put(user_handlers::update_account))
         // Note: DELETE /api/v1/account removed - use device-signed deletion
-        .route("/api/v1/keys/upload", post(user_handlers::upload_keys))
-        .route(
-            "/api/v1/users/:user_id/public-key",
-            get(user_handlers::get_public_key_bundle),
-        )
-        .route(
-            "/api/v1/users/me/public-key",
-            patch(user_handlers::update_verifying_key),
-        )
+        // Note: /api/v1/keys/upload and /api/v1/users/:id/public-key removed — gRPC only (KeyService)
         .layer(axum_middleware::from_fn_with_state(
             context.auth_manager.clone(),
             jwt_to_user_id_middleware,

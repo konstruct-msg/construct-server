@@ -120,4 +120,3 @@ pub async fn update_account(
 
     Ok(())
 }
-
