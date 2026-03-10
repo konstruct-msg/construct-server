@@ -568,8 +568,7 @@ pub async fn rotate_signed_prekey(
         SET signed_prekey_public = $2,
             signed_prekey_id = $3,
             signed_prekey_signature = $4,
-            key_updated_at = NOW(),
-            key_update_reason = $5
+            key_updated_at = NOW()
         WHERE device_id = $1
         "#,
     )
@@ -577,7 +576,6 @@ pub async fn rotate_signed_prekey(
     .bind(&new_key.public_key)
     .bind(new_key.key_id as i32)
     .bind(&new_key.signature)
-    .bind(reason)
     .execute(db)
     .await?;
 
@@ -945,8 +943,8 @@ mod tests {
         .await
         .ok();
         sqlx::query(
-            "INSERT INTO devices (device_id, user_id, device_name, is_active, created_at)
-             VALUES ($1::uuid, $2, 'test-device', true, NOW())",
+            "INSERT INTO devices (device_id, user_id, is_active, created_at)
+             VALUES ($1::uuid, $2, true, NOW())",
         )
         .bind(&device_id)
         .bind(user_id)
