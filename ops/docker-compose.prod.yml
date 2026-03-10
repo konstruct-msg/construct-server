@@ -412,7 +412,11 @@ services:
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
       ICE_UPSTREAM: "envoy:8080"
+      # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Traefik terminates TLS.
+      # Set these only for deployments where gateway is exposed directly without Traefik.
     ports:
+      # Port 9443 still exposed for legacy plain-obfs4 clients (no TLS wrapper).
+      # New clients use port 443 via Traefik TCP router below.
       - "9443:9443"
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -421,6 +425,17 @@ services:
     depends_on:
       vault-agent:
         condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      # ── ICE transport: TLS 1.3 over obfs4 for DPI bypass (Russia/censored regions) ──
+      # Traefik terminates TLS (ACME cert for ice.INSTANCE_DOMAIN), passes plaintext
+      # TCP to gateway:9443. Gateway does obfs4 handshake on the plaintext stream.
+      # DNS prerequisite: ice.INSTANCE_DOMAIN A record → same server IP as INSTANCE_DOMAIN.
+      - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
+      - "traefik.tcp.routers.ice.entrypoints=websecure"
+      - "traefik.tcp.routers.ice.tls=true"
+      - "traefik.tcp.routers.ice.tls.certresolver=letsencrypt"
+      - "traefik.tcp.services.ice.loadbalancer.server.port=9443"
 
   # ─── Monitoring ──────────────────────────────────────────────────────────
 
