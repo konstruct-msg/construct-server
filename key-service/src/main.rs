@@ -258,11 +258,29 @@ impl KeyService for KeyGrpcService {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
 
+        // Atomically rotate Kyber SPK if provided (same request keeps both keys in sync)
+        let new_kyber_key_id = if let Some(kspk) = req.new_kyber_signed_pre_key {
+            let key_id = kspk.key_id;
+            core::upload_kyber_signed_prekey(
+                &self.context.db,
+                &req.device_id,
+                key_id,
+                &kspk.public_key,
+                &kspk.signature,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("Kyber SPK rotation failed: {e}")))?;
+            Some(key_id)
+        } else {
+            None
+        };
+
         Ok(Response::new(proto::RotateSignedPreKeyResponse {
             success: true,
             new_key_id: signed_key.key_id,
             old_key_valid_until: old_valid_until.timestamp(),
             rotated_at: chrono::Utc::now().timestamp(),
+            new_kyber_key_id,
         }))
     }
 
