@@ -53,44 +53,85 @@ async fn main() -> Result<()> {
     // separate port, strips obfuscation, and TCP-proxies to the gRPC upstream
     // (Envoy by default). This makes ICE a transparent tunnel: the client's
     // H2/gRPC frames reach the upstream unchanged.
+    //
+    // If ICE_TLS_CERT_PATH + ICE_TLS_KEY_PATH are set, obfs4 runs inside TLS
+    // (ICE-over-TLS mode): DPI sees standard HTTPS on port 443, inside is obfs4.
     if config.ice_enabled {
         let ice_server_cfg = ice_load_or_generate(&config)?;
         let ice_addr = format!("0.0.0.0:{}", config.ice_port);
-        let ice_listener = construct_ice::Obfs4Listener::bind(&ice_addr, ice_server_cfg)
+
+        // Try to load TLS config — enables ICE-over-TLS mode
+        let tls_acceptor = match (&config.ice_tls_cert_path, &config.ice_tls_key_path) {
+            (Some(cert_path), Some(key_path)) => {
+                let acceptor = ice_tls_acceptor(cert_path, key_path)
+                    .context("Failed to load ICE TLS certificate")?;
+                info!(cert = %cert_path, "ICE-over-TLS enabled — obfs4 wrapped in TLS");
+                Some(Arc::new(acceptor))
+            }
+            _ => {
+                info!(
+                    "ICE TLS not configured (set ICE_TLS_CERT_PATH + ICE_TLS_KEY_PATH to enable)"
+                );
+                None
+            }
+        };
+
+        let tcp_listener = tokio::net::TcpListener::bind(&ice_addr)
             .await
             .context("Failed to bind ICE listener")?;
+        let ice_listener = Arc::new(construct_ice::Obfs4Listener::from_listener(
+            tcp_listener,
+            ice_server_cfg,
+        ));
+
         info!(
             port = config.ice_port,
             upstream = %config.ice_upstream,
+            tls = tls_acceptor.is_some(),
             "ICE listener started — obfuscated traffic accepted"
         );
         let upstream = config.ice_upstream.clone();
         tokio::spawn(async move {
             loop {
-                match ice_listener.accept().await {
-                    Ok((ice_stream, peer)) => {
+                match ice_listener.accept_tcp().await {
+                    Ok((tcp, peer)) => {
                         let upstream = upstream.clone();
+                        let ice_listener = Arc::clone(&ice_listener);
+                        let tls_acceptor = tls_acceptor.clone();
                         tokio::spawn(async move {
-                            match tokio::net::TcpStream::connect(&upstream).await {
-                                Ok(mut envoy_stream) => {
-                                    tracing::info!(peer = %peer, upstream = %upstream, "ICE connection proxying");
-                                    // Pin the obfs4 stream so copy_bidirectional can use it
-                                    let mut ice_pinned = Box::pin(ice_stream);
-                                    if let Err(e) = tokio::io::copy_bidirectional(
-                                        &mut ice_pinned,
-                                        &mut envoy_stream,
-                                    )
-                                    .await
-                                    {
-                                        tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
+                            // If TLS configured: wrap TCP in TLS first, then obfs4
+                            // If no TLS: plain obfs4 over TCP (legacy mode)
+                            let proxy_result = if let Some(acceptor) = tls_acceptor {
+                                match acceptor.accept(tcp).await {
+                                    Ok(tls_stream) => {
+                                        match ice_listener.accept_stream(tls_stream).await {
+                                            Ok(ice_stream) => {
+                                                proxy_to_upstream(ice_stream, &upstream, peer).await
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(peer = %peer, error = %e, "ICE-over-TLS: obfs4 handshake failed");
+                                                Ok(())
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(peer = %peer, error = %e, "ICE-over-TLS: TLS handshake failed");
+                                        Ok(())
                                     }
                                 }
-                                Err(e) => tracing::warn!(
-                                    peer = %peer,
-                                    upstream = %upstream,
-                                    error = %e,
-                                    "ICE: failed to connect to upstream"
-                                ),
+                            } else {
+                                match ice_listener.accept_stream(tcp).await {
+                                    Ok(ice_stream) => {
+                                        proxy_to_upstream(ice_stream, &upstream, peer).await
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(peer = %peer, error = %e, "ICE: obfs4 handshake failed");
+                                        Ok(())
+                                    }
+                                }
+                            };
+                            if let Err(e) = proxy_result {
+                                tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
                             }
                         });
                     }
@@ -140,6 +181,58 @@ fn ice_load_or_generate(
 
     info!(bridge_line = %server_cfg.bridge_line(), "ICE server identity loaded");
     Ok(server_cfg)
+}
+
+/// Build a `TlsAcceptor` from PEM cert + key files.
+fn ice_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    use rustls::ServerConfig as TlsServerConfig;
+    use rustls_pemfile::{certs, private_key};
+    use std::{fs::File, io::BufReader};
+
+    let cert_file = File::open(cert_path)
+        .with_context(|| format!("Failed to open ICE TLS cert: {cert_path}"))?;
+    let key_file =
+        File::open(key_path).with_context(|| format!("Failed to open ICE TLS key: {key_path}"))?;
+
+    let certs: Vec<_> = certs(&mut BufReader::new(cert_file))
+        .collect::<std::result::Result<_, _>>()
+        .context("Failed to parse ICE TLS certificate")?;
+
+    let key = private_key(&mut BufReader::new(key_file))
+        .context("Failed to read ICE TLS private key")?
+        .context("No private key found in ICE TLS key file")?;
+
+    let tls_config = TlsServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("Failed to build TLS server config")?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(tls_config)))
+}
+
+/// Proxy an obfs4 stream bidirectionally to the upstream (Envoy/gRPC).
+async fn proxy_to_upstream<S>(
+    ice_stream: construct_ice::Obfs4Stream<S>,
+    upstream: &str,
+    peer: std::net::SocketAddr,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match tokio::net::TcpStream::connect(upstream).await {
+        Ok(mut envoy_stream) => {
+            tracing::info!(peer = %peer, upstream = %upstream, "ICE connection proxying");
+            let mut ice_pinned = Box::pin(ice_stream);
+            tokio::io::copy_bidirectional(&mut ice_pinned, &mut envoy_stream).await?;
+        }
+        Err(e) => tracing::warn!(
+            peer = %peer,
+            upstream = %upstream,
+            error = %e,
+            "ICE: failed to connect to upstream"
+        ),
+    }
+    Ok(())
 }
 
 /// Health check endpoint
