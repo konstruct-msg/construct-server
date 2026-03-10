@@ -14,12 +14,14 @@ use argon2::{
     Argon2, ParamsBuilder, Version,
     password_hash::{PasswordHasher, SaltString},
 };
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::middleware::{self as axum_middleware, Next};
 use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::Config;
+use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
@@ -29,7 +31,7 @@ use construct_server_shared::{
         MessageProducer,
         types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
     },
-    messaging_service::{MessagingServiceContext, handlers as messaging_handlers},
+    messaging_service::MessagingServiceContext,
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -528,7 +530,26 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
         .route("/health/live", get(health::liveness_check_handler))
         .route(
             "/api/v1/messages/confirm",
-            post(messaging_handlers::confirm_message),
+            post(
+                |State(ctx): State<Arc<MessagingServiceContext>>,
+                 TrustedUser(user_id): TrustedUser,
+                 Json(data): Json<construct_types::api::ConfirmMessageRequest>| async move {
+                    let app_ctx = Arc::new(ctx.to_app_context());
+                    let uid = uuid::Uuid::parse_str(&user_id.to_string()).map_err(|_| {
+                        construct_error::AppError::Validation(
+                            "Invalid authenticated user ID".to_string(),
+                        )
+                    })?;
+                    let result =
+                        construct_server_shared::messaging_service::core::confirm_pending_message(
+                            app_ctx,
+                            uid,
+                            &data.temp_id,
+                        )
+                        .await?;
+                    Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, Json(result)))
+                },
+            ),
         )
         .layer(axum_middleware::from_fn_with_state(
             context.auth_manager.clone(),
