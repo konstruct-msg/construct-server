@@ -17,7 +17,7 @@ use argon2::{
 use axum::Router;
 use axum::extract::State;
 use axum::middleware::{self as axum_middleware, Next};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::Config;
 use construct_server_shared::{
