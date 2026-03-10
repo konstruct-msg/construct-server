@@ -229,7 +229,9 @@ jobs:
             docker pull ghcr.io/maximeliseyev/construct-server:latest
 
             echo "=== Starting services ==="
-            IMAGE_TAG=$VERSION docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
+            # Update IMAGE_TAG in .env to avoid stale tag on manual restarts
+            sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$VERSION/" .env || echo "IMAGE_TAG=$VERSION" >> .env
+            docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
 
             echo "=== Waiting for health checks ==="
             sleep 15
