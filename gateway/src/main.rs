@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
                         tokio::spawn(async move {
                             match tokio::net::TcpStream::connect(&upstream).await {
                                 Ok(mut envoy_stream) => {
-                                    tracing::debug!(peer = %peer, upstream = %upstream, "ICE → upstream");
+                                    tracing::info!(peer = %peer, upstream = %upstream, "ICE connection proxying");
                                     // Pin the obfs4 stream so copy_bidirectional can use it
                                     let mut ice_pinned = Box::pin(ice_stream);
                                     if let Err(e) = tokio::io::copy_bidirectional(
