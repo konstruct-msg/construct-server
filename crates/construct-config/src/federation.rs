@@ -89,7 +89,13 @@ impl ApnsConfig {
         // that store or read encrypted tokens (notification-service, messaging-service,
         // auth-service). An ephemeral per-process key causes cross-service AEAD failures.
         // Fail fast if APNS is enabled and the key is missing.
-        let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY") {
+        //
+        // Strip surrounding quotes: Docker env_file passes them literally when the
+        // Vault agent template writes values as KEY="value". Shell strips quotes but
+        // env_file does not.
+        let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY")
+            .map(|k| k.trim_matches('"').trim_matches('\'').to_string())
+        {
             Ok(k) if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) => k,
             Ok(_) if apns_enabled => {
                 anyhow::bail!(
