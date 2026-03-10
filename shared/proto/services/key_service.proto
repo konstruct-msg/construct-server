@@ -329,6 +329,11 @@ message RotateSignedPreKeyRequest {
 
   // Reason for rotation (for audit log)
   SignedPreKeyRotationReason reason = 3;
+
+  // Optional: also rotate the Kyber signed pre-key atomically.
+  // When present, the server MUST update both keys in a single transaction
+  // so they cannot desynchronize. If absent, only the classic SPK is rotated.
+  optional KyberSignedPreKeyUpload new_kyber_signed_pre_key = 4;
 }
 
 enum SignedPreKeyRotationReason {
@@ -363,6 +368,9 @@ message RotateSignedPreKeyResponse {
 
   // Rotation timestamp
   int64 rotated_at = 4;
+
+  // Echo of the new Kyber signed pre-key ID (when new_kyber_signed_pre_key was provided)
+  optional uint32 new_kyber_key_id = 5;
 }
 
 // ============================================================================
