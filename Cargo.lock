@@ -859,7 +859,7 @@ dependencies = [
 [[package]]
 name = "construct-ice"
 version = "0.2.1"
-source = "git+https://github.com/maximeliseyev/construct-obfs4.git?branch=main#704013a375e5ddb8aecf2f4b838ce5532e4278f7"
+source = "git+https://github.com/maximeliseyev/construct-ice.git?branch=main#704013a375e5ddb8aecf2f4b838ce5532e4278f7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
