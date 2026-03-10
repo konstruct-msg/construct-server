@@ -423,6 +423,9 @@ services:
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
+      ICE_UPSTREAM: "envoy:8080"
+    ports:
+      - "9443:9443"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:

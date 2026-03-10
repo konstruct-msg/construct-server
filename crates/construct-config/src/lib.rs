@@ -135,6 +135,10 @@ pub struct Config {
     /// IAT obfuscation mode for the ICE listener: 0=None, 1=Enabled, 2=Paranoid.
     /// Paranoid recommended for high-threat environments (China/Iran).
     pub ice_iat_mode: u8,
+
+    /// Upstream address that ICE connections are proxied to after de-obfuscation.
+    /// Defaults to `envoy:8080` (the gRPC routing proxy inside Docker).
+    pub ice_upstream: String,
 }
 
 impl Config {
@@ -282,6 +286,8 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            ice_upstream: std::env::var("ICE_UPSTREAM")
+                .unwrap_or_else(|_| "envoy:8080".to_string()),
         })
     }
 

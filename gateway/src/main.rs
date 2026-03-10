@@ -50,7 +50,9 @@ async fn main() -> Result<()> {
         .context("Failed to bind to address")?;
 
     // Start ICE (obfs4) listener if enabled — accepts obfuscated traffic on a
-    // separate port and routes it through the same Axum router.
+    // separate port, strips obfuscation, and TCP-proxies to the gRPC upstream
+    // (Envoy by default). This makes ICE a transparent tunnel: the client's
+    // H2/gRPC frames reach the upstream unchanged.
     if config.ice_enabled {
         let ice_server_cfg = ice_load_or_generate(&config)?;
         let ice_addr = format!("0.0.0.0:{}", config.ice_port);
@@ -59,35 +61,36 @@ async fn main() -> Result<()> {
             .context("Failed to bind ICE listener")?;
         info!(
             port = config.ice_port,
+            upstream = %config.ice_upstream,
             "ICE listener started — obfuscated traffic accepted"
         );
-        let ice_app = app.clone();
+        let upstream = config.ice_upstream.clone();
         tokio::spawn(async move {
             loop {
                 match ice_listener.accept().await {
-                    Ok((stream, peer)) => {
-                        tracing::debug!(peer = %peer, "ICE connection accepted");
-                        let svc = ice_app.clone();
+                    Ok((ice_stream, peer)) => {
+                        let upstream = upstream.clone();
                         tokio::spawn(async move {
-                            use hyper_util::rt::{TokioExecutor, TokioIo};
-                            let io = TokioIo::new(stream);
-                            // Bridge Request<Incoming> → Request<axum::body::Body>
-                            let svc = hyper::service::service_fn(
-                                move |req: hyper::Request<hyper::body::Incoming>| {
-                                    let mut router = svc.clone();
-                                    async move {
-                                        use tower::Service;
-                                        let req = req.map(axum::body::Body::new);
-                                        router.call(req).await
-                                    }
-                                },
-                            );
-                            if let Err(e) =
-                                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                                    .serve_connection(io, svc)
+                            match tokio::net::TcpStream::connect(&upstream).await {
+                                Ok(mut envoy_stream) => {
+                                    tracing::debug!(peer = %peer, upstream = %upstream, "ICE → upstream");
+                                    // Pin the obfs4 stream so copy_bidirectional can use it
+                                    let mut ice_pinned = Box::pin(ice_stream);
+                                    if let Err(e) = tokio::io::copy_bidirectional(
+                                        &mut ice_pinned,
+                                        &mut envoy_stream,
+                                    )
                                     .await
-                            {
-                                tracing::debug!(error = %e, "ICE connection closed");
+                                    {
+                                        tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    peer = %peer,
+                                    upstream = %upstream,
+                                    error = %e,
+                                    "ICE: failed to connect to upstream"
+                                ),
                             }
                         });
                     }

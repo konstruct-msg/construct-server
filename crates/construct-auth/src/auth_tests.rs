@@ -234,6 +234,7 @@ XQIDAQAB
             ice_port: 9443,
             ice_server_key: None,
             ice_iat_mode: 0,
+            ice_upstream: "envoy:8080".to_string(),
         }
     }
 
