@@ -91,7 +91,7 @@ impl ApnsConfig {
         // Fail fast if APNS is enabled and the key is missing.
         let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY") {
             Ok(k) if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) => k,
-            Ok(_) => {
+            Ok(_) if apns_enabled => {
                 anyhow::bail!(
                     "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be 64 hex characters (32 bytes). \
                     Generate with: openssl rand -hex 32"
@@ -108,6 +108,14 @@ impl ApnsConfig {
             }
             Err(_) => {
                 // APNS disabled: use a fixed dev placeholder (never used to encrypt real tokens)
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+            }
+            Ok(_) => {
+                // Invalid format, APNS disabled: use placeholder with warning
+                tracing::warn!(
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY is set but not valid 64 hex chars — \
+                    ignored (APNS_ENABLED=false). Fix with: openssl rand -hex 32"
+                );
                 "0000000000000000000000000000000000000000000000000000000000000000".to_string()
             }
         };
