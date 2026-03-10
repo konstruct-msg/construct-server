@@ -189,10 +189,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
@@ -252,10 +248,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -277,10 +269,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
