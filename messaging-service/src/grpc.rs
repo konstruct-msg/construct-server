@@ -206,6 +206,7 @@ impl MessagingService for MessagingGrpcService {
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
+            content_type: envelope.content_type,
         });
 
         let app_context = Arc::new(self.context.to_app_context());

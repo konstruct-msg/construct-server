@@ -430,6 +430,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
+            content_type: envelope.content_type,
         });
         let app_context = Arc::new(self.context.to_app_context());
         construct_server_shared::messaging_service::core::dispatch_envelope(
