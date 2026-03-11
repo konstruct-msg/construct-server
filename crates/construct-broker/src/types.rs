@@ -503,6 +503,9 @@ pub struct ProtoEnvelopeContext {
     pub recipient_id: String,
     pub message_id: String,
     pub encrypted_payload: Vec<u8>, // opaque ciphertext bytes — NOT parsed
+    /// Proto ContentType value (from Envelope.content_type).
+    /// Used to classify control messages (SESSION_RESET=21, KEY_SYNC=22).
+    pub content_type: i32,
 }
 
 impl KafkaMessageEnvelope {
@@ -512,8 +515,23 @@ impl KafkaMessageEnvelope {
     /// message to the recipient. It never inspects the payload contents.
     pub fn from_proto_envelope(ctx: &ProtoEnvelopeContext) -> Self {
         use base64::Engine;
-        let ciphertext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&ctx.encrypted_payload);
+
+        // Map proto ContentType to Kafka MessageType + payload representation.
+        // SESSION_RESET=21 and KEY_SYNC=22 are control messages — store their type
+        // as the payload string so convert_kafka_envelope_to_proto can recover it.
+        const CONTENT_TYPE_SESSION_RESET: i32 = 21;
+        const CONTENT_TYPE_KEY_SYNC: i32 = 22;
+
+        let (message_type, encoded_payload) = match ctx.content_type {
+            CONTENT_TYPE_SESSION_RESET => {
+                (MessageType::ControlMessage, "SESSION_RESET".to_string())
+            }
+            CONTENT_TYPE_KEY_SYNC => (MessageType::ControlMessage, "KEY_SYNC".to_string()),
+            _ => {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&ctx.encrypted_payload);
+                (MessageType::DirectMessage, b64)
+            }
+        };
 
         let mut hasher = Sha256::new();
         hasher.update(ctx.message_id.as_bytes());
@@ -525,12 +543,12 @@ impl KafkaMessageEnvelope {
             sender_id: ctx.sender_id.clone(),
             recipient_id: ctx.recipient_id.clone(),
             timestamp: chrono::Utc::now().timestamp(),
-            message_type: MessageType::DirectMessage,
+            message_type,
             ephemeral_public_key: None, // inside encrypted_payload
             message_number: None,       // inside encrypted_payload
             mls_payload: None,
             group_id: None,
-            encrypted_payload: ciphertext_b64,
+            encrypted_payload: encoded_payload,
             content_hash,
             crypto_suite_id: 0, // unknown — inside encrypted_payload
             origin_server: None,
@@ -720,6 +738,7 @@ mod tests {
             recipient_id: "recipient-uuid".to_string(),
             message_id: "msg-uuid".to_string(),
             encrypted_payload: fake_ciphertext.to_vec(),
+            content_type: 0,
         };
 
         let envelope = KafkaMessageEnvelope::from_proto_envelope(&ctx);
@@ -829,6 +848,7 @@ mod tests {
             recipient_id: "bob".to_string(),
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
+            content_type: 0,
         });
 
         let json = serde_json::to_string(&env).expect("serialize must succeed");
@@ -937,6 +957,7 @@ mod tests {
             recipient_id: "bob".to_string(),
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
+            content_type: 0,
         });
         assert!(env.validate().is_ok());
     }
@@ -958,6 +979,7 @@ mod tests {
             recipient_id: "group-1".to_string(),
             message_id: "mls-1".to_string(),
             encrypted_payload: b"mls-ciphertext".to_vec(),
+            content_type: 0,
         });
         env.message_type = MessageType::MLSMessage;
         env.mls_payload = None; // missing required field
@@ -975,6 +997,7 @@ mod tests {
             recipient_id: "bob".to_string(),
             message_id: "fed-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
+            content_type: 0,
         });
         env.message_type = MessageType::FederatedMessage;
         env.server_signature = Some("sig".to_string());
