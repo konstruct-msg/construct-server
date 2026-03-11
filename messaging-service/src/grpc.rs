@@ -185,6 +185,17 @@ impl MessagingService for MessagingGrpcService {
             return Err(Status::invalid_argument("encrypted_payload is required"));
         }
 
+        // Reject oversized payloads before any DB work.
+        // 64 KB matches client-side WirePayload limit (~6 KB typical + 100× headroom).
+        const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+        if envelope.encrypted_payload.len() > MAX_PAYLOAD_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "encrypted_payload exceeds maximum size ({} > {} bytes)",
+                envelope.encrypted_payload.len(),
+                MAX_PAYLOAD_BYTES
+            )));
+        }
+
         // Use client-provided message_id (echo back per proto contract).
         // Priority: envelope.message_id → idempotency_key → generated UUID.
         let message_id = {

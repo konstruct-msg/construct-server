@@ -188,7 +188,9 @@ async fn main() -> Result<()> {
             context: grpc_context,
         };
         if let Err(e) = construct_server_shared::grpc_server()
-            .add_service(MessagingServiceServer::new(service))
+            .add_service(
+                MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
+            )
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
         {
