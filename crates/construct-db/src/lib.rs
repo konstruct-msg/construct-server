@@ -222,9 +222,20 @@ pub async fn get_blocked_users(pool: &DbPool, blocker_user_id: &Uuid) -> Result<
     Ok(rows)
 }
 
-// ============================================================================
-// Key Bundle Functions for Crypto-Agility
-// ============================================================================
+/// Check if `recipient_id` has blocked `sender_id`.
+/// Used by SendMessage to return ErrorCode::Blocked without leaking privacy details.
+pub async fn is_blocked_by(pool: &DbPool, recipient_id: &Uuid, sender_id: &Uuid) -> Result<bool> {
+    let blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_user_id = $1 AND blocked_user_id = $2)",
+    )
+    .bind(recipient_id)
+    .bind(sender_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check block status")?;
+
+    Ok(blocked)
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
