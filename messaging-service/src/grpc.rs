@@ -212,6 +212,33 @@ impl MessagingService for MessagingGrpcService {
         };
 
         use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
+
+        // Block check: if recipient has blocked sender → return BLOCKED (not an error status).
+        let recipient_id_uuid = uuid::Uuid::parse_str(&recipient.user_id)
+            .map_err(|_| Status::invalid_argument("invalid recipient.user_id"))?;
+        let blocked = construct_server_shared::db::is_blocked_by(
+            &self.context.db_pool,
+            &recipient_id_uuid,
+            &sender_id,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        if blocked {
+            return Ok(Response::new(proto::SendMessageResponse {
+                message_id: message_id.clone(),
+                message_number: 0,
+                server_timestamp: chrono::Utc::now().timestamp_millis(),
+                success: false,
+                error: Some(proto::MessageError {
+                    message_id,
+                    error_code: proto::ErrorCode::Blocked.into(),
+                    error_message: "Recipient has blocked you".to_string(),
+                    retryable: false,
+                }),
+            }));
+        }
+
         let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
