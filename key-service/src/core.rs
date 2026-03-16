@@ -37,6 +37,11 @@ pub struct PreKeyBundle {
     pub kyber_pre_key_signature: Option<Vec<u8>>,
     pub kyber_one_time_pre_key: Option<Vec<u8>>,
     pub kyber_one_time_pre_key_id: Option<u32>,
+    // ---- SPK timestamps and rotation epochs (migration 031) ----
+    pub spk_uploaded_at: Option<DateTime<Utc>>,
+    pub spk_rotation_epoch: u32,
+    pub kyber_spk_uploaded_at: Option<DateTime<Utc>>,
+    pub kyber_spk_rotation_epoch: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +136,8 @@ pub async fn get_prekey_bundle(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
-                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -146,7 +152,8 @@ pub async fn get_prekey_bundle(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
-                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -219,6 +226,10 @@ pub async fn get_prekey_bundle(
         kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
         kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
         kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
+        spk_uploaded_at: device.spk_uploaded_at,
+        spk_rotation_epoch: device.spk_rotation_epoch as u32,
+        kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
+        kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
     }))
 }
 
@@ -233,7 +244,8 @@ pub async fn get_prekey_bundles(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
-                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -247,7 +259,8 @@ pub async fn get_prekey_bundles(
             r#"
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
-                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature
+                   kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -317,6 +330,10 @@ pub async fn get_prekey_bundles(
             kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
             kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
             kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
+            spk_uploaded_at: device.spk_uploaded_at,
+            spk_rotation_epoch: device.spk_rotation_epoch as u32,
+            kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
+            kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
         });
     }
 
@@ -481,7 +498,7 @@ pub async fn upload_kyber_signed_prekey(
     key_id: u32,
     public_key: &[u8],
     signature: &[u8],
-) -> Result<()> {
+) -> Result<u32> {
     validate_kyber_public_key(public_key)?;
     validate_ed25519_signature(signature)?;
 
@@ -496,24 +513,27 @@ pub async fn upload_kyber_signed_prekey(
     // Suite 0x10 = HybridKyber1024X25519
     verify_prekey_signature(&verifying_key, 0x10, public_key, signature)?;
 
-    sqlx::query(
+    let new_epoch: i32 = sqlx::query_scalar(
         r#"
         UPDATE devices
         SET kyber_signed_pre_key           = $2,
             kyber_signed_pre_key_id        = $3,
             kyber_signed_pre_key_signature = $4,
-            key_updated_at                 = NOW()
+            key_updated_at                 = NOW(),
+            kyber_spk_uploaded_at          = NOW(),
+            kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
         WHERE device_id = $1 AND is_active = true
+        RETURNING kyber_spk_rotation_epoch
         "#,
     )
     .bind(device_id)
     .bind(public_key)
     .bind(key_id as i32)
     .bind(signature)
-    .execute(db)
+    .fetch_one(db)
     .await?;
 
-    Ok(())
+    Ok(new_epoch as u32)
 }
 
 // ============================================================================
@@ -526,7 +546,7 @@ pub async fn rotate_signed_prekey(
     device_id: &str,
     new_key: &SignedPreKey,
     reason: &str,
-) -> Result<DateTime<Utc>> {
+) -> Result<(DateTime<Utc>, u32)> {
     // Get current signed prekey (including its ID) before updating
     let current = sqlx::query_as::<_, SignedPreKeyRow>(
         r#"
@@ -561,27 +581,30 @@ pub async fn rotate_signed_prekey(
         }
     }
 
-    // Update device with new signed prekey and its ID
-    sqlx::query(
+    // Update device with new signed prekey, upload timestamp, and incremented epoch
+    let new_epoch: i32 = sqlx::query_scalar(
         r#"
         UPDATE devices
         SET signed_prekey_public = $2,
             signed_prekey_id = $3,
             signed_prekey_signature = $4,
-            key_updated_at = NOW()
+            key_updated_at = NOW(),
+            spk_uploaded_at = NOW(),
+            spk_rotation_epoch = COALESCE(spk_rotation_epoch, 0) + 1
         WHERE device_id = $1
+        RETURNING spk_rotation_epoch
         "#,
     )
     .bind(device_id)
     .bind(&new_key.public_key)
     .bind(new_key.key_id as i32)
     .bind(&new_key.signature)
-    .execute(db)
+    .fetch_one(db)
     .await?;
 
     // Old key valid until (48 hours — aligns with signed_prekey_archive expires_at)
     let expires_at = Utc::now() + chrono::Duration::hours(48);
-    Ok(expires_at)
+    Ok((expires_at, new_epoch as u32))
 }
 
 /// Get signed pre-key age
@@ -724,6 +747,11 @@ struct DeviceRow {
     kyber_signed_pre_key: Option<Vec<u8>>,
     kyber_signed_pre_key_id: Option<i32>,
     kyber_signed_pre_key_signature: Option<Vec<u8>>,
+    // SPK timestamp and epoch columns (nullable, added in migration 031)
+    spk_uploaded_at: Option<DateTime<Utc>>,
+    spk_rotation_epoch: i32,
+    kyber_spk_uploaded_at: Option<DateTime<Utc>>,
+    kyber_spk_rotation_epoch: i32,
 }
 
 #[derive(sqlx::FromRow)]
