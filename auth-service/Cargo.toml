@@ -37,6 +37,7 @@ prost = "0.14.3"
 construct-error = { path = "../crates/construct-error" }
 construct-extractors = { path = "../crates/construct-extractors" }
 construct-db = { path = "../crates/construct-db" }
+construct-ice = { git = "https://github.com/maximeliseyev/construct-obfs4.git", branch = "main" }
 tokio-stream = "0.1"
 
 # Auth specific
