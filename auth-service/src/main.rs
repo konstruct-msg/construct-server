@@ -29,6 +29,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose as b64};
 use construct_config::Config;
 use construct_server_shared::auth_service::AuthServiceContext;
 use construct_server_shared::db::DbPool;
@@ -53,6 +54,8 @@ use construct_server_shared::shared::proto::services::v1::{
 #[derive(Clone)]
 struct AuthGrpcService {
     context: Arc<AuthServiceContext>,
+    /// Pre-computed obfs4 bridge cert (None when ICE_ENABLED=false or key not set).
+    ice_bridge_cert: Option<String>,
 }
 
 #[tonic::async_trait]
@@ -118,6 +121,7 @@ impl AuthService for AuthGrpcService {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
             expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+            ice_bridge_cert: self.ice_bridge_cert.clone(),
         }))
     }
 
@@ -180,6 +184,7 @@ impl AuthService for AuthGrpcService {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
             expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+            ice_bridge_cert: self.ice_bridge_cert.clone(),
         }))
     }
 
@@ -443,6 +448,7 @@ impl AuthService for AuthGrpcService {
                 access_token,
                 refresh_token,
                 expires_at: exp_timestamp,
+                ice_bridge_cert: self.ice_bridge_cert.clone(),
             }),
             devices_revoked,
             recovered_at: now,
@@ -939,6 +945,7 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
             access_token,
             refresh_token,
             expires_at: exp_timestamp,
+            ice_bridge_cert: self.ice_bridge_cert.clone(),
         }))
     }
 }
@@ -1189,8 +1196,27 @@ async fn main() -> Result<()> {
 
     // handlers module is local (auth-service/src/handlers.rs)
 
+    // Compute ICE bridge cert once at startup (shared across all gRPC connections).
+    // Requires ICE_ENABLED=true and ICE_SERVER_KEY to be set (same as gateway).
+    let ice_bridge_cert: Option<String> = if config.ice_enabled {
+        config.ice_server_key.as_ref().and_then(|key_b64| {
+            let bytes = b64::STANDARD.decode(key_b64)
+                .map_err(|e| tracing::warn!(error = %e, "ICE_SERVER_KEY: invalid base64 — bridge cert will not be included in auth responses"))
+                .ok()?;
+            let server_cfg = construct_ice::ServerConfig::from_bytes(&bytes)
+                .map_err(|e| tracing::warn!(error = %e, "ICE_SERVER_KEY: failed to parse — bridge cert will not be included in auth responses"))
+                .ok()?;
+            let cert = server_cfg.bridge_cert();
+            info!(cert = %cert, "ICE bridge cert ready — will be included in auth responses");
+            Some(cert)
+        })
+    } else {
+        None
+    };
+
     // Start gRPC AuthService (hard-cut target transport)
     let grpc_context = context.clone();
+    let grpc_ice_bridge_cert = ice_bridge_cert.clone();
     let grpc_bind_address =
         env::var("AUTH_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
     let grpc_addr = grpc_bind_address
@@ -1199,6 +1225,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let service = AuthGrpcService {
             context: grpc_context,
+            ice_bridge_cert: grpc_ice_bridge_cert,
         };
         if let Err(e) = construct_server_shared::grpc_server()
             .add_service(AuthServiceServer::new(service.clone()))
