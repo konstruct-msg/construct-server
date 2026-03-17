@@ -643,6 +643,97 @@ impl<'a> DeliveryManager<'a> {
         Ok(stream_id)
     }
 
+    /// Write a message to a per-device Redis stream (multi-device fan-out).
+    ///
+    /// Stream format: {delivery_queue_prefix}:offline:{user_id}:{device_id}
+    /// Clients that send `x-device-id` read from this stream instead of the
+    /// user-level stream, enabling true per-device message isolation.
+    pub(crate) async fn write_message_to_device_stream(
+        &mut self,
+        user_id: &str,
+        device_id: &str,
+        envelope: &construct_broker::types::KafkaMessageEnvelope,
+    ) -> Result<()> {
+        let stream_key = format!(
+            "{}:offline:{}:{}",
+            self.delivery_queue_prefix, user_id, device_id
+        );
+
+        let payload = rmp_serde::to_vec(envelope)
+            .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
+
+        let max_len = 10000_i64;
+        let stream_id: String = redis::cmd("XADD")
+            .arg(&stream_key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(max_len)
+            .arg("*")
+            .arg("message_id")
+            .arg(&envelope.message_id)
+            .arg("payload")
+            .arg(&payload)
+            .query_async(self.client.connection_mut())
+            .await
+            .context("Failed to write message to per-device stream")?;
+
+        tracing::debug!(
+            stream_key = %stream_key,
+            message_id = %envelope.message_id,
+            stream_id = %stream_id,
+            device_id = %device_id,
+            "Wrote message to per-device stream"
+        );
+
+        Ok(())
+    }
+
+    /// Read messages from a per-device Redis stream.
+    ///
+    /// Reads from: {delivery_queue_prefix}:offline:{user_id}:{device_id}
+    /// Used by multi-device-aware clients that pass `x-device-id`.
+    pub(crate) async fn read_device_messages_from_stream(
+        &mut self,
+        user_id: &str,
+        device_id: &str,
+        since_id: Option<&str>,
+        count: usize,
+    ) -> Result<
+        Vec<(
+            String,
+            Option<construct_broker::types::KafkaMessageEnvelope>,
+        )>,
+    > {
+        let stream_key = format!(
+            "{}:offline:{}:{}",
+            self.delivery_queue_prefix, user_id, device_id
+        );
+
+        let messages = self
+            .read_stream_messages(&stream_key, since_id, count)
+            .await?;
+
+        let mut result = Vec::new();
+        for (stream_id, fields) in messages {
+            match self.parse_stream_message(fields, user_id) {
+                Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
+                Ok(None) => result.push((stream_id, None)),
+                Err(e) => {
+                    tracing::debug!(
+                        stream_id = %stream_id,
+                        user_id = %user_id,
+                        device_id = %device_id,
+                        error = %e,
+                        "Skipping unparseable entry in device stream"
+                    );
+                    result.push((stream_id, None));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     // ── Message deduplication ────────────────────────────────────────────────
 
     /// Returns true if `message_id` was already dispatched (duplicate).

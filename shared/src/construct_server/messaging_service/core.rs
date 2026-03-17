@@ -15,6 +15,24 @@ use construct_extractors::TrustedUser;
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
 
+/// Look up active device IDs for a recipient.
+/// Returns an empty Vec on error so callers fall back to the user-level stream.
+async fn fetch_recipient_device_ids(
+    app_context: &Arc<AppContext>,
+    recipient_id: &str,
+) -> Vec<String> {
+    let Ok(uid) = Uuid::parse_str(recipient_id) else {
+        return vec![];
+    };
+    match construct_db::get_devices_by_user_id(&app_context.db_pool, &uid).await {
+        Ok(devices) => devices.into_iter().map(|d| d.device_id).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, recipient = %recipient_id, "Failed to fetch recipient devices for fan-out");
+            vec![]
+        }
+    }
+}
+
 /// Dispatch a pre-built KafkaMessageEnvelope to Kafka (or Redis fallback).
 ///
 /// Used by the gRPC path where the envelope is constructed without going
@@ -63,9 +81,10 @@ pub async fn dispatch_envelope(
                         message_id = %message_id,
                         "Kafka unavailable — falling back to Redis direct delivery"
                     );
+                    let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
                     let mut queue = app_context.queue.lock().await;
                     queue
-                        .write_message_to_user_stream(recipient_id, &envelope)
+                        .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
                         .await
                         .map_err(|re| {
                             AppError::Internal(format!(
@@ -76,9 +95,10 @@ pub async fn dispatch_envelope(
             }
         } else {
             // Kafka disabled (test mode) — write directly to Redis
+            let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
             let mut queue = app_context.queue.lock().await;
             queue
-                .write_message_to_user_stream(recipient_id, &envelope)
+                .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
                 .await
                 .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
         }

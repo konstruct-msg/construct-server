@@ -641,6 +641,77 @@ impl MessageQueue {
         .await
     }
 
+    /// Fan-out a message to per-device Redis streams (multi-device support).
+    ///
+    /// Writes to `{prefix}:offline:{user_id}:{device_id}` for each `device_id` in the slice.
+    /// Also keeps the legacy user-level stream (`{prefix}:offline:{user_id}`) so old clients
+    /// that don't send `x-device-id` continue to receive messages unchanged.
+    ///
+    /// The single `inbox:wakeup:{user_id}` wakeup publish is sufficient — all connected
+    /// devices for a user subscribe to the same channel and wake up together.
+    pub async fn write_message_to_device_streams(
+        &mut self,
+        user_id: &str,
+        device_ids: &[String],
+        envelope: &construct_broker::types::KafkaMessageEnvelope,
+    ) -> Result<()> {
+        // Always write to the legacy user stream for backward compatibility.
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .write_message_to_user_stream(user_id, envelope)
+        .await?;
+
+        // Additionally write to each per-device stream.
+        for device_id in device_ids {
+            if let Err(e) = delivery::DeliveryManager::new(
+                &mut self.client,
+                &self.config,
+                self.delivery_queue_prefix.clone(),
+            )
+            .write_message_to_device_stream(user_id, device_id, envelope)
+            .await
+            {
+                // Non-fatal: log and continue for remaining devices.
+                tracing::warn!(
+                    user_id = %user_id,
+                    device_id = %device_id,
+                    error = %e,
+                    "Failed to write to per-device stream (non-fatal)"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read messages from a per-device Redis stream.
+    ///
+    /// Used by multi-device-aware clients that pass `x-device-id` in stream metadata.
+    /// Falls back gracefully: if the device stream is empty or doesn't exist, returns [].
+    pub async fn read_device_messages_from_stream(
+        &mut self,
+        user_id: &str,
+        device_id: &str,
+        since_id: Option<&str>,
+        count: usize,
+    ) -> Result<
+        Vec<(
+            String,
+            Option<construct_broker::types::KafkaMessageEnvelope>,
+        )>,
+    > {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .read_device_messages_from_stream(user_id, device_id, since_id, count)
+        .await
+    }
+
     /// Store the sender_id of a message for receipt routing.
     /// Called when dispatching a message so receipts can be relayed back to the sender.
     pub async fn store_message_sender(&mut self, message_id: &str, sender_id: &str) -> Result<()> {

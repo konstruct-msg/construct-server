@@ -70,6 +70,14 @@ impl MessagingService for MessagingGrpcService {
                     })
             });
 
+        // Multi-device: clients send `x-device-id` to get their own per-device queue.
+        // Old clients that don't send this header continue reading from the user-level stream.
+        let device_id: Option<String> = request
+            .metadata()
+            .get("x-device-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
 
@@ -95,7 +103,15 @@ impl MessagingService for MessagingGrpcService {
             if let Some(uid) = user_id {
                 spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                 wakeup_subscribed = true;
-                if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                if let Err(e) = poll_messages(
+                    &context,
+                    uid,
+                    device_id.as_deref(),
+                    &mut last_stream_id,
+                    &tx,
+                )
+                .await
+                {
                     tracing::warn!("Initial poll error: {}", e);
                 }
             }
@@ -106,7 +122,15 @@ impl MessagingService for MessagingGrpcService {
                 if !wakeup_subscribed && let Some(uid) = user_id {
                     spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                     wakeup_subscribed = true;
-                    if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                    if let Err(e) = poll_messages(
+                        &context,
+                        uid,
+                        device_id.as_deref(),
+                        &mut last_stream_id,
+                        &tx,
+                    )
+                    .await
+                    {
                         tracing::warn!("Initial poll error: {}", e);
                     }
                 }
@@ -142,7 +166,7 @@ impl MessagingService for MessagingGrpcService {
                     // Push: new message arrived — deliver immediately
                     Some(()) = wakeup_rx.recv() => {
                         if let Some(uid) = user_id
-                            && let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                            && let Err(e) = poll_messages(&context, uid, device_id.as_deref(), &mut last_stream_id, &tx).await {
                                 tracing::warn!("Error polling messages after wakeup: {}", e);
                             }
                     }
@@ -152,6 +176,7 @@ impl MessagingService for MessagingGrpcService {
                         if let Some(uid) = user_id && let Err(e) = poll_messages(
                                 &context,
                                 uid,
+                                device_id.as_deref(),
                                 &mut last_stream_id,
                                 &tx,
                             ).await {
@@ -726,9 +751,13 @@ fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<(
 }
 
 /// Poll for new messages from Redis Streams
+///
+/// If `device_id` is Some, reads from the per-device stream (multi-device-aware clients).
+/// If `device_id` is None, reads from the legacy user-level stream (backward compat).
 async fn poll_messages(
     context: &Arc<MessagingServiceContext>,
     user_id: uuid::Uuid,
+    device_id: Option<&str>,
     last_stream_id: &mut Option<String>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
@@ -736,9 +765,15 @@ async fn poll_messages(
     let limit = 50;
 
     let mut queue = context.queue.lock().await;
-    let messages = queue
-        .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
-        .await?;
+    let messages = if let Some(did) = device_id {
+        queue
+            .read_device_messages_from_stream(&user_id_str, did, last_stream_id.as_deref(), limit)
+            .await?
+    } else {
+        queue
+            .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
+            .await?
+    };
 
     drop(queue);
 
