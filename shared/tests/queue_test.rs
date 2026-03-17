@@ -176,6 +176,7 @@ async fn setup_queue() -> (MessageQueue, redis::Connection) {
         ice_port: 9443,
         ice_server_key: None,
         ice_iat_mode: 0,
+        ice_relay_addresses: vec![],
     };
 
     // Allow overriding redis_url from environment for CI/different setups

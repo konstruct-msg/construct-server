@@ -135,6 +135,12 @@ pub struct Config {
     /// IAT obfuscation mode for the ICE listener: 0=None, 1=Enabled, 2=Paranoid.
     /// Paranoid recommended for high-threat environments (China/Iran).
     pub ice_iat_mode: u8,
+
+    /// Optional fallback relay addresses for clients that cannot reach the primary ICE endpoint.
+    /// Comma-separated list of `host:port` pairs.
+    /// Example: `ice-msk.konstruct.cc:9443,1.2.3.4:9443`
+    /// Advertised in /.well-known/construct-server so clients try these when primary is unreachable.
+    pub ice_relay_addresses: Vec<String>,
 }
 
 impl Config {
@@ -282,6 +288,12 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            ice_relay_addresses: std::env::var("ICE_RELAY_ADDRESSES")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         })
     }
 
