@@ -231,13 +231,24 @@ impl MessagingService for MessagingGrpcService {
 
         let message_id = uuid::Uuid::new_v4().to_string();
 
-        use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
-        let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        use construct_server_shared::kafka::types::{
+            KafkaMessageEnvelope, MessageType, ProtoEnvelopeContext,
+        };
+        let mut kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
         });
+
+        // Preserve SENDER_SYNC content type so receiving devices can distinguish it
+        // from a regular incoming message and display it as a sent bubble.
+        {
+            use construct_server_shared::shared::proto::core::v1::ContentType;
+            if envelope.content_type == i32::from(ContentType::SenderSync) {
+                kafka_envelope.message_type = MessageType::SenderSync;
+            }
+        }
 
         let app_context = Arc::new(self.context.to_app_context());
         construct_server_shared::messaging_service::core::dispatch_envelope(
@@ -873,6 +884,7 @@ fn convert_kafka_envelope_to_proto(
             "KEY_SYNC" => core::ContentType::KeySync,
             _ => core::ContentType::E2eeSignal,
         },
+        MessageType::SenderSync => core::ContentType::SenderSync,
         _ => core::ContentType::E2eeSignal,
     };
 

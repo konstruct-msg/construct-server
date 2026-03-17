@@ -51,7 +51,7 @@ pub async fn dispatch_envelope(
     use construct_broker::MessageType;
     let is_user_message = matches!(
         envelope.message_type,
-        MessageType::DirectMessage | MessageType::MLSMessage
+        MessageType::DirectMessage | MessageType::MLSMessage | MessageType::SenderSync
     );
     if is_user_message {
         let mut queue = app_context.queue.lock().await;
