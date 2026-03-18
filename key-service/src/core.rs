@@ -469,14 +469,30 @@ pub async fn upload_kyber_signed_prekey(
 // Signed Pre-Key Operations
 // ============================================================================
 
-/// Rotate signed pre-key (archive old one)
-pub async fn rotate_signed_prekey(
+/// Kyber SPK payload for atomic rotation
+pub struct KyberSignedPreKey {
+    pub key_id: u32,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+/// Atomically rotate classic SPK and optionally Kyber SPK in a single transaction.
+/// Returns (old_key_valid_until, new_kyber_key_id).
+pub async fn rotate_signed_prekey_atomic(
     db: &PgPool,
     device_id: &str,
-    new_key: &SignedPreKey,
+    new_classic: &SignedPreKey,
+    new_kyber: Option<&KyberSignedPreKey>,
     reason: &str,
-) -> Result<DateTime<Utc>> {
-    // Get current signed prekey (including its ID) before updating
+) -> Result<(DateTime<Utc>, Option<u32>)> {
+    if let Some(k) = new_kyber {
+        validate_kyber_public_key(&k.public_key)?;
+        validate_ed25519_signature(&k.signature)?;
+    }
+
+    let mut tx = db.begin().await?;
+
+    // Archive old classic SPK
     let current = sqlx::query_as::<_, SignedPreKeyRow>(
         r#"
         SELECT signed_prekey_id, signed_prekey_public, signed_prekey_signature
@@ -485,10 +501,9 @@ pub async fn rotate_signed_prekey(
         "#,
     )
     .bind(device_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    // Archive old key with its real key_id
     if let Some(old) = current {
         if let Some(sig) = old.signed_prekey_signature {
             sqlx::query(
@@ -505,34 +520,65 @@ pub async fn rotate_signed_prekey(
             .bind(&old.signed_prekey_public)
             .bind(&sig)
             .bind(reason)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
         }
     }
 
-    // Update device with new signed prekey and its ID
-    sqlx::query(
-        r#"
-        UPDATE devices
-        SET signed_prekey_public = $2,
-            signed_prekey_id = $3,
-            signed_prekey_signature = $4,
-            key_updated_at = NOW(),
-            key_update_reason = $5
-        WHERE device_id = $1
-        "#,
-    )
-    .bind(device_id)
-    .bind(&new_key.public_key)
-    .bind(new_key.key_id as i32)
-    .bind(&new_key.signature)
-    .bind(reason)
-    .execute(db)
-    .await?;
+    // Update classic SPK (and optionally Kyber SPK) in one UPDATE
+    match new_kyber {
+        Some(k) => {
+            sqlx::query(
+                r#"
+                UPDATE devices
+                SET signed_prekey_public           = $2,
+                    signed_prekey_id               = $3,
+                    signed_prekey_signature        = $4,
+                    kyber_signed_pre_key           = $5,
+                    kyber_signed_pre_key_id        = $6,
+                    kyber_signed_pre_key_signature = $7,
+                    key_updated_at                 = NOW(),
+                    key_update_reason              = $8
+                WHERE device_id = $1
+                "#,
+            )
+            .bind(device_id)
+            .bind(&new_classic.public_key)
+            .bind(new_classic.key_id as i32)
+            .bind(&new_classic.signature)
+            .bind(&k.public_key)
+            .bind(k.key_id as i32)
+            .bind(&k.signature)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                r#"
+                UPDATE devices
+                SET signed_prekey_public    = $2,
+                    signed_prekey_id        = $3,
+                    signed_prekey_signature = $4,
+                    key_updated_at          = NOW(),
+                    key_update_reason       = $5
+                WHERE device_id = $1
+                "#,
+            )
+            .bind(device_id)
+            .bind(&new_classic.public_key)
+            .bind(new_classic.key_id as i32)
+            .bind(&new_classic.signature)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
 
-    // Old key valid until (48 hours — aligns with signed_prekey_archive expires_at)
+    tx.commit().await?;
+
     let expires_at = Utc::now() + chrono::Duration::hours(48);
-    Ok(expires_at)
+    Ok((expires_at, new_kyber.map(|k| k.key_id)))
 }
 
 /// Get signed pre-key age
