@@ -185,6 +185,7 @@ dependencies = [
  "construct-db",
  "construct-error",
  "construct-extractors",
+ "construct-ice",
  "construct-server-shared",
  "dotenvy",
  "ed25519-dalek",

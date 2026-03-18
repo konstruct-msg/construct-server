@@ -229,6 +229,23 @@ impl MessagingService for MessagingGrpcService {
             return Err(Status::invalid_argument("encrypted_payload is required"));
         }
 
+        // Ban check: reject messages from suspended/banned users
+        {
+            let mut queue = self.context.queue.lock().await;
+            if let Ok(Some(reason)) = queue.is_user_blocked(&sender_id.to_string()).await {
+                drop(queue);
+                tracing::warn!(
+                    sender_id = %sender_id,
+                    reason = %reason,
+                    "Banned user attempted to send message via gRPC"
+                );
+                return Err(Status::permission_denied(format!(
+                    "Account suspended: {}",
+                    reason
+                )));
+            }
+        }
+
         let message_id = uuid::Uuid::new_v4().to_string();
 
         use construct_server_shared::kafka::types::{
