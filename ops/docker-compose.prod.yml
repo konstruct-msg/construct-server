@@ -419,6 +419,10 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      # ICE transport (obfs4 obfuscation) — set ICE_ENABLED=true in app.env to activate
+      # ICE_ENABLED: "true"           # uncomment or set in app.env
+      # ICE_SERVER_KEY: "<base64>"    # generate once: construct-ice ServerConfig::generate().to_bytes()
+      # ICE_IAT_MODE: "1"             # 0=None, 1=Enabled (Russia), 2=Paranoid (China/Iran)
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -426,6 +430,16 @@ services:
     depends_on:
       vault-agent:
         condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      # ── ICE: TCP router — Traefik terminates TLS, passes plaintext TCP to obfs4 listener
+      # DNS prerequisite: ice.${INSTANCE_DOMAIN} A record → server IP (Cloudflare: DNS-only, grey cloud)
+      - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
+      - "traefik.tcp.routers.ice.entrypoints=websecure"
+      - "traefik.tcp.routers.ice.tls=true"
+      - "traefik.tcp.routers.ice.tls.certresolver=letsencrypt"
+      # Forward plaintext TCP to gateway's ICE (obfs4) port
+      - "traefik.tcp.services.ice.loadbalancer.server.port=9443"
 
   # ─── Monitoring ──────────────────────────────────────────────────────────
 
