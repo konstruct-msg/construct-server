@@ -199,7 +199,8 @@ fn ice_load_or_generate(
              Set ICE_SERVER_KEY={} to persist across restarts.",
             key_b64
         );
-        cfg
+        let iat = construct_ice::IatMode::from_u8(config.ice_iat_mode).unwrap_or_default();
+        cfg.with_iat(iat)
     };
 
     info!(bridge_line = %server_cfg.bridge_line(), "ICE server identity loaded");
