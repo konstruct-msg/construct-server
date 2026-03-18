@@ -161,29 +161,42 @@ impl KeyService for KeyGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Handle optional classic signed prekey update
-        if let Some(spk) = req.signed_pre_key {
-            let signed_key = core::SignedPreKey {
-                key_id: spk.key_id,
-                public_key: spk.public_key,
-                signature: spk.signature,
-            };
-            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, "upload")
+        // Handle optional SPK updates (classic + Kyber) atomically when both present
+        match (req.signed_pre_key, req.kyber_signed_pre_key) {
+            (Some(spk), kspk_opt) => {
+                let signed_key = core::SignedPreKey {
+                    key_id: spk.key_id,
+                    public_key: spk.public_key,
+                    signature: spk.signature,
+                };
+                let kyber_key = kspk_opt.map(|k| core::KyberSignedPreKey {
+                    key_id: k.key_id,
+                    public_key: k.public_key,
+                    signature: k.signature,
+                });
+                core::rotate_signed_prekey_atomic(
+                    &self.context.db,
+                    &req.device_id,
+                    &signed_key,
+                    kyber_key.as_ref(),
+                    "upload",
+                )
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-        }
-
-        // Handle optional Kyber signed prekey update
-        if let Some(kspk) = req.kyber_signed_pre_key {
-            core::upload_kyber_signed_prekey(
-                &self.context.db,
-                &req.device_id,
-                kspk.key_id,
-                &kspk.public_key,
-                &kspk.signature,
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            }
+            (None, Some(kspk)) => {
+                // Kyber-only update (no classic SPK rotation)
+                core::upload_kyber_signed_prekey(
+                    &self.context.db,
+                    &req.device_id,
+                    kspk.key_id,
+                    &kspk.public_key,
+                    &kspk.signature,
+                )
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            }
+            (None, None) => {}
         }
 
         Ok(Response::new(proto::UploadPreKeysResponse {
@@ -253,16 +266,28 @@ impl KeyService for KeyGrpcService {
             signature: new_key.signature,
         };
 
-        let old_valid_until =
-            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, reason)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        let kyber_key = req.kyber_signed_pre_key.map(|k| core::KyberSignedPreKey {
+            key_id: k.key_id,
+            public_key: k.public_key,
+            signature: k.signature,
+        });
+
+        let (old_valid_until, new_kyber_key_id) = core::rotate_signed_prekey_atomic(
+            &self.context.db,
+            &req.device_id,
+            &signed_key,
+            kyber_key.as_ref(),
+            reason,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::RotateSignedPreKeyResponse {
             success: true,
             new_key_id: signed_key.key_id,
             old_key_valid_until: old_valid_until.timestamp(),
             rotated_at: chrono::Utc::now().timestamp(),
+            new_kyber_key_id,
         }))
     }
 
