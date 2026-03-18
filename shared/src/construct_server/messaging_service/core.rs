@@ -67,6 +67,29 @@ pub async fn dispatch_envelope(
                 tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
             }
         }
+
+        // Block enforcement: silently drop if recipient has blocked sender.
+        // Returns Ok(()) to avoid leaking block status to the sender.
+        if let (Ok(sender_uuid), Ok(recipient_uuid)) =
+            (Uuid::parse_str(sender_id), Uuid::parse_str(recipient_id))
+        {
+            match construct_db::is_blocked_by(&app_context.db_pool, &recipient_uuid, &sender_uuid)
+                .await
+            {
+                Ok(true) => {
+                    tracing::debug!(
+                        sender_hash = %log_safe_id(sender_id, salt),
+                        recipient_hash = %log_safe_id(recipient_id, salt),
+                        "Message silently dropped — sender is blocked by recipient"
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to check user_blocks — proceeding with delivery");
+                }
+            }
+        }
     }
 
     if let Some(kafka_producer) = &app_context.kafka_producer {
