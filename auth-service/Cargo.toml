@@ -37,9 +37,7 @@ prost = "0.14.3"
 construct-error = { path = "../crates/construct-error" }
 construct-extractors = { path = "../crates/construct-extractors" }
 construct-db = { path = "../crates/construct-db" }
-construct-ice = { git = "https://github.com/maximeliseyev/construct-obfs4.git", branch = "main" }
 tokio-stream = "0.1"
-
 # Auth specific
 rand = "0.8"
 hkdf = "0.12"
@@ -49,3 +47,6 @@ chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 subtle = "2.6"
+
+# ICE transport — bridge cert computation for login response
+construct-ice = { git = "https://github.com/maximeliseyev/construct-ice.git", branch = "main" }

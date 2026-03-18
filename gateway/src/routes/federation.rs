@@ -52,9 +52,8 @@ pub async fn well_known_construct_server(
     // TLS enabled in production (when public key is configured)
     let tls_enabled = public_key.is_some();
 
-    // Primary ICE endpoint + fallback relay addresses
+    // Primary ICE endpoint
     let ice_primary = format!("ice.{}:443", domain);
-    let ice_relays = &app_context.config.ice_relay_addresses;
 
     let discovery_info = json!({
         "version": "1.0",
@@ -82,7 +81,7 @@ pub async fn well_known_construct_server(
         },
         "ice": {
             "primary": ice_primary,
-            "relays": ice_relays,
+            "relays": [],
         },
         "capabilities": {
             "max_message_size_bytes": 100_000,

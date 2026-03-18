@@ -2,6 +2,15 @@
 name = "gateway"
 version.workspace = true
 edition.workspace = true
+default-run = "gateway"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[[bin]]
+name = "construct-ice-keygen"
+path = "src/bin/keygen.rs"
 
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
@@ -49,4 +58,9 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6"
 prost = "0.14.3"
-construct-ice = { git = "https://github.com/maximeliseyev/construct-obfs4.git", branch = "main" }
+construct-ice = { git = "https://github.com/maximeliseyev/construct-ice.git", branch = "main" }
+
+# TLS for ICE-over-TLS (obfs4 inside TLS to defeat TSPU DPI)
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"

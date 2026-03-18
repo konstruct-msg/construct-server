@@ -17,6 +17,13 @@ ignore = [
     # Mitigation: We use specific version pinned by dependencies
     # Action: Monitor for maintained alternative or upstream fix
     "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2025-0134: rustls-pemfile unmaintained
+    # Status: Replacement is rustls-pki-types with pem feature
+    # Risk: NONE - no vulnerability, crate still functional
+    # Blocker: rustls-pki-types 1.14 (pinned by rustls 0.23) lacks pem feature
+    # Action: Remove when upgrading rustls stack to version that includes pem support
+    "RUSTSEC-2025-0134",
 ]
 
 # Don't fail on unmaintained crates (just warn)

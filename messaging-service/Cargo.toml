@@ -6,8 +6,20 @@ edition.workspace = true
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
 construct-server-shared = { path = "../shared" }
+construct-apns = { path = "../crates/construct-apns" }
+construct-auth = { path = "../crates/construct-auth" }
+construct-broker = { path = "../crates/construct-broker" }
+construct-context = { path = "../crates/construct-context" }
+construct-db = { path = "../crates/construct-db" }
+construct-federation = { path = "../crates/construct-federation" }
+construct-key-management = { path = "../crates/construct-key-management" }
+construct-queue = { path = "../crates/construct-queue" }
+construct-utils = { path = "../crates/construct-utils" }
+construct-crypto = { path = "../crates/construct-crypto" }
+construct-extractors = { path = "../crates/construct-extractors" }
+construct-error = { path = "../crates/construct-error" }
+construct-types = { path = "../crates/construct-types" }
 
-# Workspace deps (add as needed)
 tokio = {workspace = true}
 anyhow = {workspace = true}
 serde = {workspace = true}
@@ -33,10 +45,6 @@ zeroize = {workspace = true}
 prometheus = {workspace = true}
 tonic = "0.14.2"
 prost = "0.14.3"
-construct-crypto = { path = "../crates/construct-crypto" }
-construct-extractors = { path = "../crates/construct-extractors" }
-construct-error = { path = "../crates/construct-error" }
-construct-types = { path = "../crates/construct-types" }
 futures-core = "0.3"
 tokio-stream = "0.1"
 

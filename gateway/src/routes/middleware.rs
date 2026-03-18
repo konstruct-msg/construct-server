@@ -5,8 +5,11 @@
 // Middleware for request processing:
 // - request_logging: Log all incoming requests
 // - add_security_headers: Add security headers to responses
-// - csrf_protection: CSRF protection for state-changing requests
-// - error_handler: Convert AppError to HTTP responses
+// - metrics_auth: Protect /metrics endpoint
+//
+// Note: CSRF protection removed — all core functionality is gRPC only.
+// Remaining REST endpoints (health, metrics, federation) are read-only or
+// use server-side signatures.
 //
 // ============================================================================
 
@@ -19,9 +22,6 @@ use axum::{
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::routes::csrf::{
-    extract_csrf_token, has_custom_header, is_browser_request, validate_csrf_token, validate_origin,
-};
 use crate::routes::extractors::TrustedUser;
 use construct_error::AppError;
 use construct_server_shared::context::AppContext;
@@ -94,155 +94,6 @@ pub async fn add_security_headers(req: Request, next: Next) -> Response {
     }
 
     response
-}
-
-/// CSRF Protection Middleware
-///
-/// Validates CSRF tokens for state-changing requests (POST, PUT, DELETE, PATCH).
-/// Implements a hybrid approach to support both web and mobile clients:
-///
-/// 1. For safe methods (GET, HEAD, OPTIONS): Pass through
-/// 2. For browser requests: Require valid CSRF token (Double Submit Cookie)
-/// 3. For mobile/API clients: Require X-Requested-With header
-/// 4. Always validate Origin/Referer when present
-///
-/// Skip CSRF for:
-/// - Health check endpoints
-/// - Metrics endpoint
-/// - WebSocket upgrade requests
-pub async fn csrf_protection(
-    State(ctx): State<Arc<AppContext>>,
-    req: Request,
-    next: Next,
-) -> Result<Response, AppError> {
-    // Skip if CSRF protection is disabled
-    if !ctx.config.csrf.enabled {
-        return Ok(next.run(req).await);
-    }
-
-    // Skip for safe methods (GET, HEAD, OPTIONS)
-    if matches!(
-        req.method(),
-        &Method::GET | &Method::HEAD | &Method::OPTIONS
-    ) {
-        return Ok(next.run(req).await);
-    }
-
-    // Skip for health/metrics endpoints
-    let path = req.uri().path();
-    if path == "/health" || path == "/metrics" || path.starts_with("/federation/health") {
-        return Ok(next.run(req).await);
-    }
-
-    // Skip for WebSocket upgrade requests
-    if req
-        .headers()
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false)
-    {
-        return Ok(next.run(req).await);
-    }
-
-    let headers = req.headers().clone();
-
-    // Check 1: Validate Origin/Referer header if present
-    let origin_valid = validate_origin(
-        &headers,
-        &ctx.config.instance_domain,
-        &ctx.config.csrf.allowed_origins,
-    );
-
-    // If Origin header is present but doesn't match, reject immediately
-    if headers.contains_key("origin") && !origin_valid {
-        tracing::warn!(
-            path = %path,
-            origin = ?headers.get("origin"),
-            "CSRF: Origin header validation failed"
-        );
-        return Err(AppError::csrf("Invalid origin"));
-    }
-
-    // Check 2: For browser requests, require CSRF token
-    if is_browser_request(&headers) {
-        // Extract CSRF token from header or cookie
-        let token = extract_csrf_token(
-            &headers,
-            &ctx.config.csrf.header_name,
-            &ctx.config.csrf.cookie_name,
-        );
-
-        match token {
-            Some(ref t) => {
-                // We need user ID to validate the token
-                // For now, we'll validate the token structure
-                // Full validation happens in the handler with AuthenticatedUser
-
-                // Extract user ID from Authorization header if present
-                if let Some(auth_header) =
-                    headers.get("authorization").and_then(|v| v.to_str().ok())
-                    && let Some(token_str) = auth_header.strip_prefix("Bearer ")
-                {
-                    // Try to decode JWT to get user ID (without full validation)
-                    // This is a lightweight check - full auth happens in extractor
-                    if let Ok(user_id) = extract_user_id_from_jwt_lightweight(token_str)
-                        && let Err(e) = validate_csrf_token(&ctx.config.csrf, t, &user_id)
-                    {
-                        tracing::warn!(
-                            path = %path,
-                            error = %e,
-                            "CSRF: Token validation failed"
-                        );
-                        return Err(AppError::csrf("Invalid CSRF token"));
-                    }
-                }
-            }
-            None => {
-                tracing::warn!(
-                    path = %path,
-                    "CSRF: Missing CSRF token for browser request"
-                );
-                return Err(AppError::csrf("Missing CSRF token"));
-            }
-        }
-    } else {
-        // Check 3: For non-browser requests (mobile/API), require custom header
-        // This prevents CSRF because browsers can't set custom headers in cross-origin requests
-        if !has_custom_header(&headers) && !headers.contains_key("authorization") {
-            tracing::warn!(
-                path = %path,
-                "CSRF: Missing X-Requested-With header for API request"
-            );
-            return Err(AppError::csrf("Missing required header"));
-        }
-    }
-
-    // CSRF validation passed
-    Ok(next.run(req).await)
-}
-
-/// Extract user ID from JWT token without full validation
-/// Used for CSRF token binding - full auth validation happens in AuthenticatedUser extractor
-fn extract_user_id_from_jwt_lightweight(token: &str) -> Result<String, ()> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    // JWT format: header.payload.signature
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return Err(());
-    }
-
-    // Decode payload (second part)
-    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).map_err(|_| ())?;
-    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).map_err(|_| ())?;
-
-    // Extract "sub" claim (user ID)
-    payload
-        .get("sub")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or(())
 }
 
 /// IP-based Rate Limiting Middleware

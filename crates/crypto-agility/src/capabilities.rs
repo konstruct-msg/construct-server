@@ -1,5 +1,4 @@
 use crate::{CryptoSuite, ProtocolVersion};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -46,15 +45,4 @@ impl Default for UserCapabilities {
             crypto_suites: vec![CryptoSuite::default()],
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PQPrekeys {
-    pub user_id: Uuid,
-    pub pq_identity_key: Vec<u8>,
-    pub pq_kem_key: Vec<u8>,
-    pub pq_signature: Vec<u8>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
 }

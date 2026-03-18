@@ -85,54 +85,46 @@ impl ApnsConfig {
             .parse()
             .unwrap_or(false);
 
-        // SECURITY: Device token encryption key is ALWAYS required in production
-        // Even if APNS is disabled, tokens might be stored for later use
-        let is_production = std::env::var("ENVIRONMENT")
-            .or_else(|_| std::env::var("FLY_APP_NAME")) // Fly.io sets this
-            .or_else(|_| std::env::var("RAILWAY_ENVIRONMENT")) // Railway sets this
-            .map(|v| v != "development" && v != "dev" && v != "local")
-            .unwrap_or(false);
-
-        let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY") {
+        // SECURITY: Device token encryption key must be the same across all services
+        // that store or read encrypted tokens (notification-service, messaging-service,
+        // auth-service). An ephemeral per-process key causes cross-service AEAD failures.
+        // Fail fast if APNS is enabled and the key is missing.
+        //
+        // Strip surrounding quotes: Docker env_file passes them literally when the
+        // Vault agent template writes values as KEY="value". Shell strips quotes but
+        // env_file does not.
+        let key = match std::env::var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY")
+            .map(|k| k.trim_matches('"').trim_matches('\'').to_string())
+        {
             Ok(k) if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) => k,
-            Ok(_) if is_production => {
+            Ok(_) if apns_enabled => {
                 anyhow::bail!(
                     "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be 64 hex characters (32 bytes). \
                     Generate with: openssl rand -hex 32"
                 );
             }
-            Err(_) if is_production => {
+            Err(_) if apns_enabled => {
+                // Key missing and APNS enabled: always fatal regardless of environment,
+                // because all services must share the exact same key.
                 anyhow::bail!(
-                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY is REQUIRED in production. \
-                    Generate with: openssl rand -hex 32"
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY is required when APNS_ENABLED=true. \
+                    Each service generates a different ephemeral key causing cross-service \
+                    decryption failures. Generate once and persist: openssl rand -hex 32"
                 );
             }
-            _ => {
-                // Dev/test: generate a random ephemeral key so tests never fail on this
-                use rand::RngCore;
-                let mut bytes = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut bytes);
-                let generated = bytes.map(|b| format!("{b:02x}")).concat();
+            Err(_) => {
+                // APNS disabled: use a fixed dev placeholder (never used to encrypt real tokens)
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string()
+            }
+            Ok(_) => {
+                // Invalid format, APNS disabled: use placeholder with warning
                 tracing::warn!(
-                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY not set or invalid — \
-                    using ephemeral key (dev/test only). \
-                    Set it with: openssl rand -hex 32"
+                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY is set but not valid 64 hex chars — \
+                    ignored (APNS_ENABLED=false). Fix with: openssl rand -hex 32"
                 );
-                generated
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string()
             }
         };
-
-        // In production, require APNS_ENABLED=true to have a real (non-test) key already validated above.
-        // If APNS is enabled in non-production, still require a valid key.
-        if apns_enabled && !is_production {
-            let is_zero = key == "0000000000000000000000000000000000000000000000000000000000000000";
-            if is_zero {
-                anyhow::bail!(
-                    "APNS_DEVICE_TOKEN_ENCRYPTION_KEY must be set when APNS_ENABLED=true. \
-                    Generate with: openssl rand -hex 32"
-                );
-            }
-        }
 
         Ok(Self {
             enabled: apns_enabled,

@@ -166,8 +166,20 @@ message PreKeyBundle {
   // Kyber one-time pre-key ID
   optional uint32 kyber_one_time_pre_key_id = 14;
 
-  // reserved 15 for future PQ fields
-  reserved 15;
+  // Unix timestamp (seconds) when the current signed_pre_key was uploaded to the server.
+  // Zero means legacy device (no server-recorded timestamp); client falls back to generated_at.
+  int64 spk_uploaded_at = 15;
+
+  // Monotonically increasing counter for classic SPK rotations on this device.
+  // Client caches this per-contact and rejects bundles where epoch has not increased (replay).
+  uint32 spk_rotation_epoch = 16;
+
+  // Unix timestamp (seconds) when the current Kyber SPK was uploaded. Absent when device
+  // has no Kyber keys.
+  optional int64 kyber_spk_uploaded_at = 17;
+
+  // Monotonically increasing counter for Kyber SPK rotations.
+  optional uint32 kyber_spk_rotation_epoch = 18;
 }
 
 // ============================================================================
@@ -330,9 +342,10 @@ message RotateSignedPreKeyRequest {
   // Reason for rotation (for audit log)
   SignedPreKeyRotationReason reason = 3;
 
-  // Optional: simultaneously rotate Kyber signed pre-key (ML-KEM-1024).
-  // When present, both classic and Kyber SPK are replaced atomically.
-  optional KyberSignedPreKeyUpload kyber_signed_pre_key = 4;
+  // Optional: also rotate the Kyber signed pre-key atomically.
+  // When present, the server MUST update both keys in a single transaction
+  // so they cannot desynchronize. If absent, only the classic SPK is rotated.
+  optional KyberSignedPreKeyUpload new_kyber_signed_pre_key = 4;
 }
 
 enum SignedPreKeyRotationReason {
@@ -368,8 +381,14 @@ message RotateSignedPreKeyResponse {
   // Rotation timestamp
   int64 rotated_at = 4;
 
-  // New Kyber signed pre-key ID (present when kyber_signed_pre_key was supplied in request)
+  // Echo of the new Kyber signed pre-key ID (when new_kyber_signed_pre_key was provided)
   optional uint32 new_kyber_key_id = 5;
+
+  // New SPK rotation epoch after this rotation (incremented atomically by server).
+  uint32 new_spk_rotation_epoch = 6;
+
+  // New Kyber SPK rotation epoch (when new_kyber_signed_pre_key was provided).
+  optional uint32 new_kyber_spk_rotation_epoch = 7;
 }
 
 // ============================================================================

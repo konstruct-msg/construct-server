@@ -7,7 +7,7 @@ mod negotiation;
 mod protocol;
 mod suites;
 
-pub use capabilities::{PQPrekeys, UserCapabilities};
+pub use capabilities::UserCapabilities;
 pub use error::{CryptoAgilityError, Result};
 pub use invites::{InviteToken, InviteTokenRecord, InviteValidationError};
 pub use negotiation::{negotiate_protocol, NegotiatedCapabilities};

@@ -116,9 +116,8 @@ impl NotificationService for NotificationGrpcService {
                 _ => "apns".to_string(), // default
             },
             push_environment: match req.environment {
-                1 => "production".to_string(),
-                2 => "sandbox".to_string(),
-                _ => "sandbox".to_string(), // default
+                2 => "production".to_string(), // PUSH_ENV_PRODUCTION = 2
+                _ => "sandbox".to_string(),    // PUSH_ENV_SANDBOX = 1, default
             },
         };
 

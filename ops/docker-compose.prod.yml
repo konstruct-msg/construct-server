@@ -176,7 +176,7 @@ services:
   #   - Depend on vault-agent to ensure secrets are ready before starting
 
   auth:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -189,10 +189,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
@@ -202,6 +198,8 @@ services:
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
       OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
       ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
+      ICE_ENABLED: ${ICE_ENABLED:-true}
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -211,7 +209,7 @@ services:
         condition: service_completed_successfully
 
   user:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -229,7 +227,7 @@ services:
         condition: service_completed_successfully
 
   messaging:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -250,10 +248,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -263,7 +257,7 @@ services:
         condition: service_completed_successfully
 
   notification:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
@@ -275,10 +269,6 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      APNS_KEY_ID: ${APNS_KEY_ID}
-      APNS_TEAM_ID: ${APNS_TEAM_ID}
-      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
-      APNS_DEVICE_TOKEN_ENCRYPTION_KEY: ${APNS_DEVICE_TOKEN_ENCRYPTION_KEY}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -288,7 +278,7 @@ services:
         condition: service_completed_successfully
 
   invite:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
@@ -306,7 +296,7 @@ services:
         condition: service_completed_successfully
 
   key:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -323,7 +313,7 @@ services:
         condition: service_completed_successfully
 
   media:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -342,7 +332,7 @@ services:
         condition: service_completed_successfully
 
   mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -360,7 +350,7 @@ services:
         condition: service_completed_successfully
 
   sentinel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -378,7 +368,7 @@ services:
         condition: service_completed_successfully
 
   delivery:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
@@ -409,7 +399,7 @@ services:
         condition: service_completed_successfully
 
   gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.8.0}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:
@@ -419,10 +409,15 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
-      # ICE transport (obfs4 obfuscation) — set ICE_ENABLED=true in app.env to activate
-      # ICE_ENABLED: "true"           # uncomment or set in app.env
-      # ICE_SERVER_KEY: "<base64>"    # generate once: construct-ice ServerConfig::generate().to_bytes()
-      # ICE_IAT_MODE: "1"             # 0=None, 1=Enabled (Russia), 2=Paranoid (China/Iran)
+      ICE_ENABLED: ${ICE_ENABLED:-true}
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
+      ICE_UPSTREAM: "envoy:8080"
+      # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Traefik terminates TLS.
+      # Set these only for deployments where gateway is exposed directly without Traefik.
+    ports:
+      # Port 9443 still exposed for legacy plain-obfs4 clients (no TLS wrapper).
+      # New clients use port 443 via Traefik TCP router below.
+      - "9443:9443"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -432,13 +427,14 @@ services:
         condition: service_completed_successfully
     labels:
       - "traefik.enable=true"
-      # ── ICE: TCP router — Traefik terminates TLS, passes plaintext TCP to obfs4 listener
-      # DNS prerequisite: ice.${INSTANCE_DOMAIN} A record → server IP (Cloudflare: DNS-only, grey cloud)
+      # ── ICE transport: TLS 1.3 over obfs4 for DPI bypass (Russia/censored regions) ──
+      # Traefik terminates TLS (ACME cert for ice.INSTANCE_DOMAIN), passes plaintext
+      # TCP to gateway:9443. Gateway does obfs4 handshake on the plaintext stream.
+      # DNS prerequisite: ice.INSTANCE_DOMAIN A record → same server IP as INSTANCE_DOMAIN.
       - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
       - "traefik.tcp.routers.ice.entrypoints=websecure"
       - "traefik.tcp.routers.ice.tls=true"
       - "traefik.tcp.routers.ice.tls.certresolver=letsencrypt"
-      # Forward plaintext TCP to gateway's ICE (obfs4) port
       - "traefik.tcp.services.ice.loadbalancer.server.port=9443"
 
   # ─── Monitoring ──────────────────────────────────────────────────────────
