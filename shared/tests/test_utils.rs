@@ -14,12 +14,14 @@ use argon2::{
     Argon2, ParamsBuilder, Version,
     password_hash::{PasswordHasher, SaltString},
 };
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::middleware::{self as axum_middleware, Next};
-use axum::routing::{get, patch, post, put};
+use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::Config;
+use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
@@ -29,7 +31,7 @@ use construct_server_shared::{
         MessageProducer,
         types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
     },
-    messaging_service::{MessagingServiceContext, core as messaging_core},
+    messaging_service::MessagingServiceContext,
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -361,15 +363,7 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         .route("/api/v1/account", get(user_handlers::get_account))
         .route("/api/v1/account", put(user_handlers::update_account))
         // Note: DELETE /api/v1/account removed - use device-signed deletion
-        .route("/api/v1/keys/upload", post(user_handlers::upload_keys))
-        .route(
-            "/api/v1/users/:user_id/public-key",
-            get(user_handlers::get_public_key_bundle),
-        )
-        .route(
-            "/api/v1/users/me/public-key",
-            patch(user_handlers::update_verifying_key),
-        )
+        // Note: /api/v1/keys/upload and /api/v1/users/:id/public-key removed — gRPC only (KeyService)
         .layer(axum_middleware::from_fn_with_state(
             context.auth_manager.clone(),
             jwt_to_user_id_middleware,
@@ -436,6 +430,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
+            content_type: envelope.content_type,
         });
         let app_context = Arc::new(self.context.to_app_context());
         construct_server_shared::messaging_service::core::dispatch_envelope(
@@ -538,13 +533,22 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             "/api/v1/messages/confirm",
             post(
                 |State(ctx): State<Arc<MessagingServiceContext>>,
-                 construct_extractors::TrustedUser(uid): construct_extractors::TrustedUser,
-                 axum::Json(data): axum::Json<construct_types::api::ConfirmMessageRequest>| async move {
-                    let user_id = Uuid::parse_str(&uid.to_string())
-                        .map_err(|_| construct_error::AppError::Validation("Invalid user ID".to_string()))?;
+                 TrustedUser(user_id): TrustedUser,
+                 Json(data): Json<construct_types::api::ConfirmMessageRequest>| async move {
                     let app_ctx = Arc::new(ctx.to_app_context());
-                    let result = messaging_core::confirm_pending_message(app_ctx, user_id, &data.temp_id).await?;
-                    Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, axum::Json(result)))
+                    let uid = uuid::Uuid::parse_str(&user_id.to_string()).map_err(|_| {
+                        construct_error::AppError::Validation(
+                            "Invalid authenticated user ID".to_string(),
+                        )
+                    })?;
+                    let result =
+                        construct_server_shared::messaging_service::core::confirm_pending_message(
+                            app_ctx,
+                            uid,
+                            &data.temp_id,
+                        )
+                        .await?;
+                    Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, Json(result)))
                 },
             ),
         )

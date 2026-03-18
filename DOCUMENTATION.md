@@ -1,928 +1,529 @@
-# Construct Server: Protocol Documentation
+# Construct Server: Developer Documentation
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-02-15  
+**Last Updated:** 2026-06  
 **Status:** Living Document
 
 ---
 
 ## Table of Contents
 
-1. [Executive Summary](#executive-summary)
-2. [Protocol Stack](#protocol-stack)
-3. [Complete System Flow](#complete-system-flow)
-4. [X3DH Key Agreement](#x3dh-key-agreement)
-5. [Double Ratchet Encryption](#double-ratchet-encryption)
-6. [Message Delivery](#message-delivery)
-7. [Authentication & Security](#authentication--security)
-8. [API Reference](#api-reference)
+1. [Architecture Overview](#architecture-overview)
+2. [Service Map & Entry Points](#service-map--entry-points)
+3. [Key Call Chains](#key-call-chains)
+4. [Message Delivery Flow](#message-delivery-flow)
+5. [Cryptography Reference](#cryptography-reference)
+6. [Database Schema](#database-schema)
+7. [Testing](#testing)
+8. [Debugging](#debugging)
 9. [Implementation Status](#implementation-status)
 
 ---
 
-## Executive Summary
+## Architecture Overview
 
-Construct is an end-to-end encrypted messaging system based on the **Signal Protocol** (X3DH + Double Ratchet) with extensions for **crypto-agility**, **post-quantum cryptography (PQC)**, and **multi-protocol support**.
-
-### Grand Vision
+Construct is an end-to-end encrypted messenger with a fully gRPC-first backend. All client traffic enters through an **Envoy proxy** (port 8080) which routes to individual microservices by gRPC service path prefix. There are no REST endpoints for core functionality — authentication, messaging, and key management are all gRPC.
 
 ```
-Foundation:     Signal Protocol + Noise Framework
-Extensions:     Crypto Agility + PQC (ML-KEM-768)
-Future:         Encrypted Voice/Video Calls + MLS Group Messaging
+Client
+  │
+  ▼
+Envoy :8080  (routes by /shared.proto.services.v1.<ServiceName>/*)
+  │
+  ├─► auth-service       :50051  (AuthService, DeviceService)
+  ├─► user-service        :50052  (UserService)
+  ├─► messaging-service   :50053  (MessagingService)
+  ├─► notification-service :50054  (NotificationService)
+  ├─► invite-service      :50055  (InviteService)
+  ├─► media-service       :50056  (MediaService)
+  ├─► key-service         :50057  (KeyService)
+  ├─► mls-service         :50058  (MlsService)
+  ├─► sentinel-service    :50059  (SentinelService)
+  └─► gateway             :3000   (HTTP: /health, /.well-known, /federation)
 ```
 
-### Current State (2026-02-15)
-
-✅ **Implemented:**
-- X3DH key agreement (Ed25519 + X25519)
-- Double Ratchet encryption (ChaCha20-Poly1305)
-- Device-based authentication (passwordless)
-- Redis Streams delivery queue
-- Kafka as single source of truth
-- State management with skipped message keys
-- nextSince pagination (fixed 2026-02-15)
-
-⚠️ **In Progress:**
-- E2E integration tests with real cryptography
-- Protocol compliance testing framework
-
-❌ **Not Yet Implemented:**
-- Crypto-agility framework
-- Post-quantum cryptography (ML-KEM-768, Dilithium)
-- MLS group messaging
-- Encrypted voice/video calls
+**Shared infrastructure:**
+- **Kafka (Redpanda)** — primary message delivery (topic `messages`); Redis is the fallback if Kafka is unavailable
+- **Redis Streams** — message inbox per device (`inbox:{user_id}`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`)
+- **PostgreSQL** — device registration, keys, `delivery_pending` (receipt routing hashes only — **message content is never stored in PostgreSQL**)
+- **Proto definitions** — `shared/proto/services/*.proto`
 
 ---
 
-## Protocol Stack
+## Service Map & Entry Points
 
-### Cryptographic Foundation
+### Binary entry points
+
+Each service is an independent Rust binary. `main()` in each service:
+1. Loads `Config::from_env()` (crate `construct-config`)
+2. Creates a DB pool (`construct-db`) and Redis connection
+3. Builds a tonic gRPC server and binds to its port
+
+| Service | Binary entry | Default gRPC port | Env var override |
+|---------|-------------|-------------------|-----------------|
+| auth-service | `auth-service/src/main.rs` | 50051 | `AUTH_GRPC_BIND_ADDRESS` |
+| user-service | `user-service/src/main.rs` | 50052 | `USER_GRPC_BIND_ADDRESS` |
+| messaging-service | `messaging-service/src/main.rs` | 50053 | `MESSAGING_GRPC_BIND_ADDRESS` |
+| notification-service | `notification-service/src/main.rs` | 50054 | `NOTIFICATION_GRPC_BIND_ADDRESS` |
+| invite-service | `invite-service/src/main.rs` | 50055 | `INVITE_GRPC_BIND_ADDRESS` |
+| media-service | `media-service/src/main.rs` | 50056 | `MEDIA_GRPC_BIND_ADDRESS` |
+| key-service | `key-service/src/main.rs` | 50057 | `KEY_GRPC_BIND_ADDRESS` |
+| mls-service | `mls-service/src/main.rs` | 50058 | `MLS_GRPC_BIND_ADDRESS` |
+| sentinel-service | `sentinel-service/src/main.rs` | 50059 | *(PORT env var)* |
+| gateway | `gateway/src/main.rs` | 3000 (HTTP) | `PORT` |
+| delivery-worker | `delivery-worker/src/main.rs` | *(no server)* | — |
+
+### Required environment variables (all services)
 
 ```
-Layer 4: Application (E2EE Messages, Media, Calls)
-         ↓
-Layer 3: Double Ratchet (Message Encryption)
-         ↓
-Layer 2: X3DH (Session Initialization)
-         ↓
-Layer 1: Primitive Operations (Ed25519, X25519, ChaCha20-Poly1305)
+DATABASE_URL=postgres://user:pass@localhost:5432/construct_test
+REDIS_URL=redis://localhost:6379
 ```
 
-### Protocol Suite Identifier
+Additional per-service vars: `JWT_SECRET`, `RS256_PRIVATE_KEY`, `KAFKA_BROKERS`, etc.  
+See `crates/construct-config/src/lib.rs` for the full list and defaults.
 
-```rust
-pub enum CryptoSuite {
-    /// Suite 0x01: Ed25519 + X25519 + ChaCha20-Poly1305
-    /// - Identity Key: Ed25519
-    /// - Ephemeral Keys: X25519
-    /// - Encryption: ChaCha20-Poly1305
-    Classic = 0x01,
-    
-    /// Suite 0x10: Hybrid PQ (FUTURE)
-    /// - Identity Key: Ed25519 + Dilithium3
-    /// - Ephemeral Keys: X25519 + ML-KEM-768
-    /// - Encryption: ChaCha20-Poly1305
-    HybridPQ = 0x10,
-}
-```
+### gRPC services per binary
 
-**Current Implementation:** Suite 0x01 only  
-**Roadmap:** Suite 0x10 by Q2 2026
+| Binary | gRPC services exposed |
+|--------|----------------------|
+| auth-service | `AuthService`, `DeviceService` |
+| user-service | `UserService` |
+| messaging-service | `MessagingService`, `MessageGateway` |
+| notification-service | `NotificationService` |
+| invite-service | `InviteService` |
+| media-service | `MediaService` |
+| key-service | `KeyService` |
+| mls-service | `MlsService` |
+| sentinel-service | `SentinelService` |
+
+Proto package: `shared.proto.services.v1`  
+Proto sources: `shared/proto/services/`
 
 ---
 
-## Complete System Flow
+## Key Call Chains
 
-### The Two IDs Problem
-
-| ID Type | Generated By | Format | Purpose |
-|---------|--------------|--------|---------|
-| **Message ID** | Server (UUID v4) | `c78b9bf2-715c-4621-...` | Deduplication, logging |
-| **Stream ID** | Redis (auto) | `1707584371151-0` | Pagination (`nextSince`) |
-
-**Critical Bug (FIXED 2026-02-15):** `nextSince` field was omitted when `None`, causing infinite client polling loops.
-
-**Fix:** Always return `Some(stream_id)` - echo client's `since` when no new messages.
-
----
-
-### Phase 0: Device Registration
-
-Client generates keys **on device** (never sent to server):
-- Identity Key Pair (Ed25519) - long-term
-- Signed PreKey Pair (X25519) - rotated every 7 days
-- One-Time PreKeys (100+) - consumed on use
-- Device Key Pair - for authentication
-
-```http
-POST /api/v1/auth/register-device
-Content-Type: application/json
-
-{
-  "deviceId": "alice-iphone",
-  "password": "device-secret",  // Only for PoW challenge
-  "identityKey": "base64(Ed25519_public)",
-  "signedPreKey": "base64(X25519_public)",
-  "signedPreKeySignature": "base64(Ed25519_signature)",
-  "oneTimePreKeys": ["base64...", "base64...", ...],
-  "suiteId": 1
-}
-```
-
-**Response:**
-```json
-{
-  "userId": "767c4759-...",
-  "accessToken": "jwt...",
-  "refreshToken": "jwt..."
-}
-```
-
-**Security Notes:**
-- ✅ Password only used for PoW challenge (anti-spam)
-- ✅ Device IS the identity (no username/password auth)
-- ✅ All cryptographic keys generated client-side
-- ✅ Server never sees private keys
-
----
-
-### Phase 1: Key Exchange (X3DH Initialization)
-
-Alice wants to send a message to Bob. First, she fetches Bob's public key bundle:
-
-```http
-GET /api/v1/keys/{bob_user_id}
-Authorization: Bearer <alice_jwt>
-```
-
-**Response:**
-```json
-{
-  "identityPublicKey": "base64(Bob_IK_public)",
-  "signedPrekey": "base64(Bob_SPK_public)",
-  "signedPrekeySignature": "base64(signature)",
-  "oneTimePrekey": "base64(Bob_OPK_public)" | null,
-  "suiteId": 1
-}
-```
-
-**Client MUST verify:** `Ed25519.verify(identityPublicKey, signedPrekey, signature) == true`
-
-If signature verification fails → **ABORT** (potential MITM attack)
-
----
-
-### Phase 2: X3DH Key Agreement (Client-Side)
-
-Alice performs X3DH to establish shared secret with Bob:
+### 1. Device Registration
 
 ```
-1. Generate ephemeral key pair: EK_A (X25519)
-
-2. Perform 4 Diffie-Hellman operations:
-   DH1 = ECDH(IK_A_private, SPK_B_public)
-   DH2 = ECDH(EK_A_private, IK_B_public)
-   DH3 = ECDH(EK_A_private, SPK_B_public)
-   DH4 = ECDH(EK_A_private, OPK_B_public)  // if OPK present
-
-3. Derive shared secret:
-   SK = HKDF-SHA256(
-       salt = 0xFF...FF (32 bytes),
-       ikm = DH1 || DH2 || DH3 || DH4,
-       info = "ConstructX3DH"
-   )
-
-4. Initialize Double Ratchet:
-   - Root Key = SK
-   - Chain Key = HKDF(SK, "chain-key")
-   - Message Number = 0
+Client → AuthService::RegisterDevice
+  └─► auth-service/src/main.rs  (tonic handler dispatch)
+      └─► crates/construct-auth-service/src/devices.rs
+          pub async fn register_device_v2(...)
+            ├─ verify PoW challenge (construct-pow)
+            ├─ verify prekey signatures (Ed25519, construct-crypto)
+            ├─ INSERT INTO devices (construct-db)
+            ├─ INSERT otpks + signed prekey (construct-db)
+            └─ issue JWT access + refresh tokens (construct-auth)
 ```
 
-**Reference:** Signal Protocol X3DHv3 Specification
-
----
-
-### Phase 3: Message Encryption (Double Ratchet)
-
-Alice encrypts her message using Double Ratchet:
+### 2. Pre-Key Upload (after registration)
 
 ```
-1. Derive message key:
-   message_key = HMAC-SHA256(chain_key, 0x01)
-   chain_key = HMAC-SHA256(chain_key, 0x02)
-
-2. Encrypt plaintext:
-   ciphertext = ChaCha20-Poly1305.encrypt(
-       key = message_key,
-       nonce = random(12 bytes),
-       plaintext = "Hello Bob!",
-       associated_data = header
-   )
-
-3. Build message header:
-   {
-     "ratchetPublicKey": "base64(EK_A_public)",
-     "previousChainLength": 0,
-     "messageNumber": 0
-   }
+Client → KeyService::UploadPreKeys
+  └─► key-service/src/main.rs
+      └─► key-service/src/core.rs
+          pub async fn upload_prekeys(...)
+            ├─ verify Ed25519 signatures on each key
+            │   formula: sign("KonstruktX3DH-v1" || [0x00, suite_id] || pubkey_bytes)
+            ├─ INSERT INTO one_time_prekeys (suite 0x01 = X25519 OTPKs)
+            └─ INSERT kyber prekeys (suite 0x10 = ML-KEM-1024+X25519 hybrid)
 ```
 
-**Message Format:**
-```json
-{
-  "recipientId": "bob_uuid",
-  "ciphertext": "base64(encrypted_data)",
-  "nonce": "base64(12_bytes)",
-  "header": {
-    "ratchetPublicKey": "base64(ephemeral_key)",
-    "previousChainLength": 0,
-    "messageNumber": 0
-  },
-  "suiteId": 1,
-  "timestamp": 1707584371151
-}
+### 3. Fetch Pre-Key Bundle (X3DH initiation)
+
+```
+Client → KeyService::GetPreKeyBundle
+  └─► key-service/src/core.rs
+      pub async fn get_prekey_bundle(...)
+        ├─ SELECT identity_key, signed_prekey, spk_signature FROM devices
+        ├─ SELECT + DELETE one one_time_prekey (soft-delete via deleted_at)
+        └─ return KeyBundle proto
+```
+
+### 4. Send Message
+
+```
+Client → MessagingService::SendMessage
+  └─► messaging-service/src/grpc.rs
+      async fn send_message(...)
+        ├─ extract message_id from envelope.message_id (echo back to client)
+        ├─ idempotency check: SETNX Redis key
+        └─► messaging-service/src/core.rs
+            pub async fn dispatch_envelope(...)
+              ├─ check recipient domain (local vs federated)
+              ├─ send to Kafka producer (primary path)
+              │   Kafka disabled → write directly to Redis Stream
+              └─ store receipt routing hash in delivery_pending (PostgreSQL, async, non-critical)
+                  NOTE: message content is NEVER written to PostgreSQL
+```
+
+**message_id contract:** The server echoes back the client's `envelope.message_id`.  
+Priority: `envelope.message_id` → `idempotency_key` → server-generated UUID.
+
+### 5. Message Stream (receive messages)
+
+```
+Client → MessagingService::MessageStream
+  └─► messaging-service/src/grpc.rs
+      async fn message_stream(...)
+        └─► messaging-service/src/stream.rs
+            pub(crate) async fn poll_messages(...)
+              ├─ XREAD inbox:{device_id} (Redis Stream)
+              ├─► messaging-service/src/envelope.rs
+              │   pub(crate) fn convert_kafka_envelope_to_proto(...)
+              └─► spawn_inbox_wakeup(...)  (subscribes Redis pub/sub for real-time push)
+                  channel: inbox:wakeup:{user_id}
+```
+
+### 6. Delivery Receipt
+
+```
+Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY_RECEIPT)
+  └─► messaging-service/src/receipts.rs
+      pub(crate) async fn relay_delivery_receipt(...)
+        ├─ compute routing hash (recipient → original sender)
+        ├─ XADD receipt:{sender_device_id}
+        └─ original sender's stream picks it up → green checkmark
+```
+
+### 7. Sealed Sender Dispatch
+
+```
+Client sends SealedSenderEnvelope
+  └─► messaging-service/src/envelope.rs
+      pub(crate) async fn dispatch_sealed_sender(...)
+        ├─ [local recipient] → dispatch_envelope (same server)
+        └─ [remote recipient] → crates/construct-federation
+            forward sealed_inner opaquely to recipient's home server
 ```
 
 ---
 
-### Phase 4: Message Transmission
-
-```http
-POST /api/v1/messages
-Authorization: Bearer <alice_jwt>
-Content-Type: application/json
-
-{
-  "recipientId": "bob_uuid",
-  "ciphertext": "base64...",
-  "nonce": "base64...",
-  "header": { ... },
-  "suiteId": 1
-}
-```
-
-**Server-Side Processing:**
+## Message Delivery Flow
 
 ```
-1. Validate JWT → extract sender_id
-2. Generate message_id (UUID v4)
-3. Store in PostgreSQL:
-   INSERT INTO messages (id, sender_id, recipient_id, ciphertext, ...)
+Alice (sender)                  Server                         Bob (recipient)
+─────────────                ─────────────                   ──────────────────
+SendMessage RPC ──────────► grpc.rs::send_message
+                                  │
+                             dispatch_envelope
+                                  │
+                    ┌─────────────┴──────────────┐
+                    │                            │
+              Kafka producer              Redis fallback
+              (primary path)             (Kafka unavailable)
+                    │                            │
+                    └──────────┬─────────────────┘
+                               │
+                     Delivery Worker reads Kafka
+                     and writes to Redis:
+                     XADD inbox:{bob_device}
+                               │
+                     PUBLISH inbox:wakeup:{bob_user}
+                               │
+                    └──────────────────────────────────► stream.rs::poll_messages
+                                                              │
+                                                    read_user_messages_from_stream
+                                                    (XREAD inbox:{bob_device})
+                                                              │
+                                                    convert_kafka_envelope_to_proto
+                                                              │
+                                                    stream.send(Envelope) ──────► Bob client
+                                                                                       │
+                                                        relay_delivery_receipt ◄───────┘
+                                                              │
+                                                    XADD inbox:{alice_device}
+                                                              │
+                                          Alice stream receives receipt ──────► ✅ delivered
+```
 
-4. Publish to Kafka:
-   Topic: "construct-messages"
-   Key: recipient_id
-   Value: { message_id, sender_id, ciphertext, ... }
+**Offline delivery:** If Bob is not connected, messages accumulate in the Redis Stream (`inbox:{device_id}`) until consumed. The Stream acts as the durable queue — Redis persistence (AOF/RDB) is the offline guarantee, not PostgreSQL.
 
-5. Check recipient online status (Redis):
-   IF online:
-     XADD messages:{recipient_id} * { message_id, ... }
-     PUBLISH user:online:{recipient_id} "new_message"
-   ELSE:
-     XADD offline:{recipient_id} * { message_id, ... }
+---
 
-6. Return response:
-   {
-     "id": "message_uuid",
-     "status": "sent",
-     "timestamp": 1707584371151
-   }
+## Cryptography Reference
+
+### Crypto Suites
+
+| Suite ID | Name | Keys | Status |
+|----------|------|------|--------|
+| `0x01` | ClassicX25519 | Ed25519 identity + X25519 prekeys | ✅ Active |
+| `0x10` | HybridKyber1024X25519 | Ed25519 identity + ML-KEM-1024⊕X25519 prekeys | ✅ Active |
+
+Clients negotiate the suite during registration. Hybrid PQC (`0x10`) is available and used when both parties support it.
+
+### Prekey Signature Scheme
+
+All prekeys (SPK, OTPKs) are signed with the device's Ed25519 signing key:
+
+```
+signature = Ed25519.sign(
+    device_signing_key,
+    "KonstruktX3DH-v1" || [0x00, suite_id] || public_key_bytes
+)
+```
+
+- Suite `0x01` = Classical X25519 SPK
+- Suite `0x10` = Hybrid ML-KEM-1024+X25519
+
+Verification uses `ed25519-dalek v2.1` (RFC 8032 strict mode).
+
+### X3DH Key Agreement (client-side)
+
+```
+Alice initiates with Bob's key bundle:
+
+DH1 = ECDH(IK_A_priv,  SPK_B_pub)
+DH2 = ECDH(EK_A_priv,  IK_B_pub)
+DH3 = ECDH(EK_A_priv,  SPK_B_pub)
+DH4 = ECDH(EK_A_priv,  OPK_B_pub)  // if one-time prekey available
+
+SK = HKDF-SHA256(salt=0xFF×32, ikm=DH1||DH2||DH3||DH4, info="ConstructX3DH")
+```
+
+### JWT / Auth
+
+- Access tokens: RS256, TTL 168 hours (1 week)
+- Refresh tokens: RS256, TTL 90 days
+- Claims: `{ sub: user_id, device_id, iss: "construct-server" }`
+
+### Sender Certificate (sealed sender)
+
+Issued by `AuthService::GetSenderCertificate`:
+- Ed25519 signed, 24-hour TTL
+- Contains: sender user_id, device_id, expiry
+- Used for cross-server anonymous message routing
+
+---
+
+## Database Schema
+
+Migrations live in `shared/migrations/`. Current latest: `030_restore_key_updated_at.sql`.
+
+Key tables:
+
+| Table | Purpose |
+|-------|---------|
+| `devices` | Device records: `user_id`, `identity_key`, `signed_prekey`, `verifying_key`, push tokens |
+| `one_time_prekeys` | X25519 OTPKs; soft-deleted (`deleted_at`) on consumption |
+| `kyber_prekeys` | ML-KEM-1024 OTPKs; same soft-delete pattern |
+| `delivery_pending` | Receipt routing: `message_hash → sender_id` (30-day TTL). **Not message storage** — only used to route delivery receipts back to the original sender. |
+| `media_files` | Upload metadata (actual bytes on CDN/local storage) |
+| `user_blocks` | Block list entries |
+| `invites` | Invite tokens (used for invite-only onboarding) |
+| `mls_groups` | MLS group state (stub) |
+
+> **Message content is never stored in PostgreSQL.** Messages travel Kafka → Delivery Worker → Redis Stream → client. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
+
+Run migrations:
+```bash
+DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test \
+  sqlx migrate run --source shared/migrations
 ```
 
 ---
 
-### Phase 5: Message Delivery (Long Polling)
+## Testing
 
-Bob's device polls for new messages:
+### Start local dependencies
 
-```http
-GET /api/v1/messages?since=1707584371151-0&timeout=25
-Authorization: Bearer <bob_jwt>
+```bash
+docker compose -f ops/docker-compose.dev.yml up -d
+# Starts: PostgreSQL :5432, Redis :6379
 ```
 
-**Server Response:**
+### Run unit tests (no DB required)
 
-**Case 1: New messages available immediately**
-```json
-{
-  "messages": [
-    {
-      "id": "c78b9bf2-...",
-      "senderId": "alice_uuid",
-      "ciphertext": "base64...",
-      "nonce": "base64...",
-      "header": { ... },
-      "timestamp": 1707584371151,
-      "streamId": "1707584371151-0"
-    }
-  ],
-  "nextSince": "1707584371151-0",
-  "hasMore": false
-}
+```bash
+cargo test --lib                            # all unit tests
+cargo test -p messaging-service             # single service (11 tests)
+cargo test -p construct-auth-service        # auth crate unit tests
+cargo test -p construct-key-management      # key management unit tests
 ```
 
-**Case 2: No messages (after timeout)**
-```json
-{
-  "messages": [],
-  "nextSince": "1707584371151-0",  // ✅ ECHOED BACK (fixed bug)
-  "hasMore": false
-}
+### Run integration tests (require DB + Redis)
+
+```bash
+export DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test
+export REDIS_URL=redis://localhost:6379
+
+cargo test -p construct-server-shared                         # all shared integration tests
+cargo test -p construct-server-shared --test delivery_ack_test
+cargo test -p construct-server-shared --test e2e_crypto_test
 ```
 
-**Case 3: No messages, invalid since**
-```json
-{
-  "messages": [],
-  "nextSince": "0-0",  // Reset to start
-  "hasMore": false
-}
+Most integration tests are gated with `#[ignore]` and skipped in CI unless the full stack is up:
+```bash
+cargo test -p construct-server-shared -- --ignored   # run skipped integration tests
 ```
 
-**Critical:** `nextSince` field is **ALWAYS present** to prevent infinite polling loops.
+### Pre-deploy check
 
----
-
-### Phase 6: Message Decryption (Client-Side)
-
-Bob decrypts received message:
-
-```
-1. Extract header:
-   ratchet_key = header.ratchetPublicKey
-   message_number = header.messageNumber
-
-2. Check if ratchet_key is new:
-   IF ratchet_key != current_ratchet_key:
-     perform_dh_ratchet(ratchet_key)
-
-3. Derive message key:
-   message_key = HMAC-SHA256(chain_key, 0x01)
-   chain_key = HMAC-SHA256(chain_key, 0x02)
-
-4. Decrypt:
-   plaintext = ChaCha20-Poly1305.decrypt(
-       key = message_key,
-       nonce = nonce,
-       ciphertext = ciphertext,
-       associated_data = header
-   )
-
-5. Verify MAC → if fails: InvalidCiphertext error
-
-6. Display plaintext to user
+```bash
+./scripts/pre_deploy_check.sh
+# Runs: cargo check, cargo test --lib
 ```
 
-**Out-of-Order Message Handling:**
+### cargo check / clippy
 
-If message N+5 arrives before N+1:
-- Store message_key for N+5 in `skipped_message_keys` map
-- Wait for messages N+1 through N+4
-- Apply cleanup after 7 days (prevent DoS)
-
-**Reference:** Double Ratchet Specification (Signal)
-
----
-
-## X3DH Key Agreement
-
-### Specification Conformance
-
-Our X3DH implementation conforms to **Signal Protocol Specification v3**.
-
-**Reference:** https://signal.org/docs/specifications/x3dh/
-
-### Key Bundle Format
-
-```rust
-pub struct KeyBundle {
-    /// Long-term identity key (IK) - Ed25519 public key
-    /// Used for: Signature verification, long-term authentication
-    pub identity_public_key: Vec<u8>,
-    
-    /// Medium-term signed prekey (SPK) - X25519 public key
-    /// Rotated: Every 7 days
-    /// Signed by: IK private key
-    pub signed_prekey: Vec<u8>,
-    
-    /// Signature over SPK - Ed25519 signature
-    pub signed_prekey_signature: Vec<u8>,
-    
-    /// One-time prekey (OPK) - X25519 public key
-    /// Optional: Consumed after first use
-    pub one_time_prekey: Option<Vec<u8>>,
-    
-    /// Suite identifier
-    pub suite_id: u8,
-}
+```bash
+cargo check --workspace
+cargo clippy --workspace -- -D warnings
 ```
 
-### Security Properties
-
-1. **Forward Secrecy:** OPKs deleted after use
-2. **Deniability:** No long-term signature in message
-3. **Authentication:** SPK signature proves identity
-4. **MITM Protection:** Client verifies SPK signature
-
----
-
-## Double Ratchet Encryption
-
-### Ratchet State
-
-```rust
-pub struct DoubleRatchetSession {
-    /// Current sending/receiving chain key
-    pub chain_key: [u8; 32],
-    
-    /// Root key for deriving new chain keys
-    pub root_key: [u8; 32],
-    
-    /// Current DH ratchet key pair
-    pub dh_ratchet: X25519KeyPair,
-    
-    /// Message number in current chain
-    pub message_number: u32,
-    
-    /// Skipped message keys (for out-of-order)
-    pub skipped_message_keys: HashMap<u32, [u8; 32]>,
-    
-    /// Max skipped messages (DoS protection)
-    pub max_skip: usize,  // Default: 1000
-}
-```
-
-### Symmetric Ratchet
-
-```
-Message Key Derivation:
-  KDF_CK(CK) = (CK_new, MK)
-  
-  CK_new = HMAC-SHA256(CK, 0x02)
-  MK     = HMAC-SHA256(CK, 0x01)
-```
-
-### DH Ratchet
-
-```
-When new ratchet key received:
-  1. DH_out = ECDH(our_private, their_public)
-  2. (RK_new, CK_send) = HKDF(RK, DH_out)
-  3. Generate new ephemeral key pair
-  4. DH_in = ECDH(new_private, their_public)
-  5. (RK_new, CK_recv) = HKDF(RK_new, DH_in)
-```
-
-### Security Properties
-
-1. **Forward Secrecy:** Old keys deleted after ratchet
-2. **Break-in Recovery:** New DH ratchet = new security
-3. **Out-of-Order:** Buffered keys for delayed messages
-4. **DoS Protection:** Max 1000 skipped keys, 7-day timeout
-
----
-
-## Message Delivery
-
-### Delivery Architecture
-
-```
-┌─────────────┐
-│  PostgreSQL │ ← Persistent storage (source of truth)
-└──────┬──────┘
-       │
-       ↓ (Kafka)
-┌─────────────┐
-│    Kafka    │ ← Event stream (durability)
-└──────┬──────┘
-       │
-       ↓ (Delivery Worker)
-┌─────────────┐
-│    Redis    │ ← Fast delivery queue
-│   Streams   │   (online: messages:{user_id})
-│             │   (offline: offline:{user_id})
-└─────────────┘
-```
-
-### Redis Streams Format
-
-**Stream ID:** `{timestamp}-{sequence}` (e.g., `1707584371151-0`)
-
-**Entry:**
-```json
-{
-  "message_id": "c78b9bf2-...",
-  "sender_id": "alice_uuid",
-  "ciphertext": "base64...",
-  "nonce": "base64...",
-  "header": "{...}",
-  "timestamp": "1707584371151"
-}
-```
-
-### Pagination (nextSince)
-
-**Critical Contract:**
-
-1. `nextSince` field **MUST** always be present in response
-2. When no messages: echo client's `since` parameter
-3. When messages: return last message's `stream_id`
-4. Special values:
-   - `"0-0"` - start of stream
-   - `"$"` - end of stream (live tail)
-
-**Bug (FIXED 2026-02-15):**
-- Before: `#[serde(skip_serializing_if = "Option::is_none")]` caused field omission
-- After: Always return `Some(stream_id)`, field always serialized
-
-### Delivery Guarantees
-
-- **At-Least-Once:** Messages may be delivered multiple times
-- **Idempotency:** Client MUST deduplicate by `message_id`
-- **Ordering:** Redis Streams guarantee FIFO per recipient
-- **Durability:** Kafka + PostgreSQL ensure no message loss
-
----
-
-## Authentication & Security
-
-### Device-Based Authentication
-
-**Philosophy:** Device IS the identity. No passwords, no usernames.
-
-**Registration:**
-1. Device generates Ed25519 identity key pair
-2. Device creates PoW challenge solution (anti-spam)
-3. Server issues JWT tied to device public key
-
-**Authentication:**
-```
-JWT Claims:
-{
-  "sub": "user_uuid",
-  "device_id": "device_uuid",
-  "iat": 1707584371,
-  "exp": 1707670771,  // 24 hours
-  "iss": "construct-server"
-}
-```
-
-**Token Refresh:**
-```http
-POST /api/v1/auth/refresh
-Content-Type: application/json
-
-{
-  "refreshToken": "jwt..."
-}
-```
-
-**Security Properties:**
-- ✅ No password brute-force attacks
-- ✅ No password reuse across services
-- ✅ Server never sees authentication secrets
-- ✅ Device compromise = revoke device only (not account)
-
-### Proof-of-Work (Anti-Spam)
-
-**Rate Limits:**
-- PoW challenges: 10 per hour per IP
-- Registrations: 5 per hour per IP
-
-**Challenge Format:**
-```json
-{
-  "challengeId": "uuid",
-  "difficulty": 1,  // Number of leading zero bits
-  "expires": 1707584671
-}
-```
-
-**Solution:**
-```
-Find nonce such that:
-  SHA256(challenge_id || nonce) has <difficulty> leading zero bits
+A `pre-commit` hook runs `cargo fmt` automatically. If it fails, run:
+```bash
+cargo fmt --all
 ```
 
 ---
 
-## API Reference
+## Debugging
 
-### Authentication Endpoints
+### Run a single service locally
 
-#### POST /api/v1/auth/challenge
-Get PoW challenge for registration.
-
-**Request:** `{}`
-
-**Response:**
-```json
-{
-  "challengeId": "uuid",
-  "difficulty": 1,
-  "expiresAt": 1707584671
-}
+```bash
+DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test \
+REDIS_URL=redis://localhost:6379 \
+RUST_LOG=debug \
+cargo run -p auth-service
 ```
 
-#### POST /api/v1/auth/register-device
-Register new device.
+### Inspect gRPC services with grpcurl
 
-**Request:**
-```json
-{
-  "deviceId": "alice-iphone",
-  "password": "device-secret",
-  "identityKey": "base64...",
-  "signedPreKey": "base64...",
-  "signedPreKeySignature": "base64...",
-  "oneTimePreKeys": ["base64...", ...],
-  "powChallengeId": "uuid",
-  "powSolution": 12345,
-  "suiteId": 1
-}
+```bash
+# List all services on a port
+grpcurl -plaintext localhost:50051 list
+
+# List methods of a service
+grpcurl -plaintext localhost:50051 list shared.proto.services.v1.AuthService
+
+# Get a PoW challenge
+grpcurl -plaintext localhost:50051 \
+  shared.proto.services.v1.AuthService/GetPowChallenge '{}'
+
+# Get pre-key bundle for a user (requires JWT)
+grpcurl -plaintext \
+  -H 'authorization: Bearer <jwt>' \
+  -d '{"user_id": "<uuid>"}' \
+  localhost:50057 \
+  shared.proto.services.v1.KeyService/GetPreKeyBundle
 ```
 
-**Response:**
-```json
-{
-  "userId": "uuid",
-  "accessToken": "jwt",
-  "refreshToken": "jwt"
-}
+### Inspect Redis delivery queues
+
+```bash
+redis-cli
+
+# List active inbox streams
+KEYS inbox:*
+
+# Read messages from a stream
+XRANGE inbox:<device_id> - +
+
+# Watch for wakeup signals
+SUBSCRIBE inbox:wakeup:<user_id>
+
+# Inspect receipt stream
+XRANGE receipt:<device_id> - +
 ```
 
-#### POST /api/v1/auth/refresh
-Refresh access token.
+### Inspect PostgreSQL
 
-**Request:**
-```json
-{
-  "refreshToken": "jwt"
-}
+```bash
+psql postgres://postgres:password@localhost:5432/construct_test
+
+-- Active devices
+SELECT device_id, user_id, created_at FROM devices ORDER BY created_at DESC LIMIT 10;
+
+-- Receipt routing table (NOT message storage)
+SELECT message_hash, sender_id, expires_at FROM delivery_pending ORDER BY expires_at DESC LIMIT 20;
+
+-- One-time prekey counts per device
+SELECT device_id, COUNT(*) as available
+FROM one_time_prekeys
+WHERE deleted_at IS NULL
+GROUP BY device_id;
+
+-- Kyber prekey counts
+SELECT device_id, COUNT(*) as available
+FROM kyber_prekeys
+WHERE deleted_at IS NULL
+GROUP BY device_id;
 ```
 
-**Response:**
-```json
-{
-  "accessToken": "jwt",
-  "refreshToken": "jwt"
-}
+### Inspect Envoy routing (production/Docker)
+
+```bash
+# Envoy admin UI
+curl http://localhost:9901/clusters
+curl http://localhost:9901/stats | grep upstream_rq
 ```
 
----
+### Trace a message end-to-end
 
-### Key Management Endpoints
+1. **Send** — add `RUST_LOG=debug` to messaging-service, watch `dispatch_envelope` logs
+2. **Kafka** — check Redpanda topic `messages` for the envelope
+3. **Redis** — `XRANGE inbox:<recipient_device_id> - +` confirms delivery to stream
+4. **Receipt** — `XRANGE receipt:<sender_device_id> - +` confirms delivery receipt arrived
 
-#### GET /api/v1/keys/{user_id}
-Get user's public key bundle.
-
-**Headers:** `Authorization: Bearer <jwt>`
-
-**Response:**
-```json
-{
-  "identityPublicKey": "base64...",
-  "signedPrekey": "base64...",
-  "signedPrekeySignature": "base64...",
-  "oneTimePrekey": "base64..." | null,
-  "suiteId": 1
-}
-```
-
-#### POST /api/v1/keys/prekeys
-Upload new one-time prekeys.
-
-**Request:**
-```json
-{
-  "oneTimePrekeys": ["base64...", "base64...", ...]
-}
-```
-
-**Response:** `{ "uploaded": 100 }`
-
----
-
-### Messaging Endpoints
-
-#### POST /api/v1/messages
-Send encrypted message.
-
-**Request:**
-```json
-{
-  "recipientId": "uuid",
-  "ciphertext": "base64...",
-  "nonce": "base64...",
-  "header": {
-    "ratchetPublicKey": "base64...",
-    "previousChainLength": 0,
-    "messageNumber": 0
-  },
-  "suiteId": 1
-}
-```
-
-**Response:**
-```json
-{
-  "id": "message_uuid",
-  "status": "sent",
-  "timestamp": 1707584371151
-}
-```
-
-#### GET /api/v1/messages
-Poll for new messages (long polling).
-
-**Query Parameters:**
-- `since` (optional): Stream ID to start from (default: "0-0")
-- `timeout` (optional): Max wait time in seconds (default: 25, max: 30)
-
-**Response:**
-```json
-{
-  "messages": [
-    {
-      "id": "uuid",
-      "senderId": "uuid",
-      "ciphertext": "base64...",
-      "nonce": "base64...",
-      "header": { ... },
-      "timestamp": 1707584371151,
-      "streamId": "1707584371151-0"
-    }
-  ],
-  "nextSince": "1707584371151-0",
-  "hasMore": false
-}
-```
-
-**Critical:** `nextSince` is **ALWAYS** present in response.
+> Messages are **never** in PostgreSQL. If a message is missing, check Kafka first, then Redis Stream.
 
 ---
 
 ## Implementation Status
 
-### ✅ Completed
+### ✅ Fully implemented
 
-**Core Protocol:**
-- [x] X3DH key agreement (Ed25519 + X25519)
-- [x] Double Ratchet encryption (ChaCha20-Poly1305)
-- [x] Message number tracking
-- [x] Out-of-order message handling
-- [x] Skipped message keys with cleanup (7 days)
+**Transport & Auth:**
+- gRPC-only architecture (REST removed from all core paths)
+- Envoy proxy routing by proto path prefix
+- Passwordless device auth (Ed25519 + JWT RS256)
+- Proof-of-Work anti-spam on registration
+- Invite-code-only onboarding
 
-**Infrastructure:**
-- [x] Device-based authentication (passwordless)
-- [x] JWT-based access tokens
-- [x] PoW anti-spam system
-- [x] Redis Streams delivery queue
-- [x] Kafka as source of truth
-- [x] PostgreSQL persistent storage
-- [x] Long polling with timeout
-- [x] nextSince pagination (bug fixed 2026-02-15)
+**Key Management:**
+- X3DH key bundles (identity key, signed prekey, OTPKs)
+- Ed25519 prekey signatures (scheme: `KonstruktX3DH-v1` prefix)
+- One-time prekey soft-delete (consumed atomically)
+- Kyber (ML-KEM-1024) hybrid prekeys (suite 0x10)
+- SPK rotation with age tracking
 
-**Testing:**
-- [x] Unit tests for crypto primitives
-- [x] Integration tests for auth flow
-- [x] Contract tests for nextSince pagination
-- [x] Protocol compliance test framework
+**Messaging:**
+- SendMessage, MessageStream, GetPendingMessages RPCs
+- message_id echo-back (client ID preserved end-to-end)
+- Idempotency via Redis SETNX
+- Offline queue (PostgreSQL pending_messages, 7-day TTL)
+- Delivery receipts routed back to sender
+- EditMessage RPC
 
-### ⚠️ In Progress
+**Notifications:**
+- APNs push notifications for iOS
+- FCM for Android (stub)
 
-- [ ] E2E integration tests with real crypto
-- [ ] Performance benchmarks
-- [ ] Formal security audit
+**Media:**
+- Upload/download via MediaService gRPC
+- Local file storage + CDN-ready design
 
-### ❌ Not Started
+**Federation:**
+- `.well-known/konstruct` server discovery
+- `gateway/src/routes/federation.rs` — server-to-server key bundle proxy
 
-**Future Roadmap:**
+### ⚠️ Stub / partial
 
-**Q2 2026:**
-- [ ] Crypto-agility framework
-- [ ] Post-quantum crypto (ML-KEM-768 + Dilithium)
-- [ ] Encrypted voice calls (WebRTC)
+- MLS group messaging (`mls-service` — stubs only)
+- Sentinel service (rate-limit sentinel — partial)
+- Multi-device message fan-out (single device delivery only)
 
-**Q3 2026:**
-- [ ] MLS group messaging
-- [ ] Multi-device sync
-- [ ] Encrypted video calls
+### ❌ Not started
 
-**Q4 2026:**
-- [ ] Federation protocol
-- [ ] End-to-end encrypted backups
-
----
-
-## References
-
-### Signal Protocol
-- [Signal Protocol Specification](https://signal.org/docs/)
-- [X3DH Key Agreement](https://signal.org/docs/specifications/x3dh/)
-- [Double Ratchet Algorithm](https://signal.org/docs/specifications/doubleratchet/)
-
-### Cryptography
-- [RFC 7748: Elliptic Curves for Security](https://datatracker.ietf.org/doc/html/rfc7748)
-- [RFC 8439: ChaCha20-Poly1305 AEAD](https://datatracker.ietf.org/doc/html/rfc8439)
-- [RFC 8032: Edwards-Curve Digital Signatures](https://datatracker.ietf.org/doc/html/rfc8032)
-
-### Post-Quantum
-- [ML-KEM (FIPS 203)](https://csrc.nist.gov/pubs/fips/203/final)
-- [ML-DSA Dilithium (FIPS 204)](https://csrc.nist.gov/pubs/fips/204/final)
+- Device linking (QR-based secondary device add)
+- Cross-server sealed sender routing
+- TCP relay / DPI resistance
+- gRPC-over-WebSocket (Cloudflare ECH)
 
 ---
 
-## Additional Documentation
-
-**Full documentation vault:** `~/Documents/Konstruct/`
-
-### Key Documents
-- **Architecture:** `03_Server_Backend/00_Server_Architecture/`
-- **Complete Flow:** `03_Server_Backend/Documentation/COMPLETE_SYSTEM_FLOW.md`
-- **Formal Spec:** `03_Server_Backend/FORMAL_PROTOCOL_SPECIFICATION.md`
-- **nextSince Contract:** `03_Server_Backend/Documentation/NEXT_SINCE_CONTRACT.md`
-- **State Management:** `03_Server_Backend/STATE_MANAGEMENT_ANALYSIS.md`
-
-### Development
-
-```bash
-# Start development environment
-make dev-up
-
-# Run tests
-make test
-
-# Run specific test suite
-cargo test -p construct-server-shared --test rest_api_auth_test
-
-# Deploy to staging
-make deploy
-```
-
-See `make help` for all available commands.
-
----
-
-**Last Updated:** 2026-02-15  
 **Maintainer:** Construct Team  
 **License:** Proprietary
-
----
-
-## Protocol Buffers / gRPC Migration
-
-**Status:** In progress (hard-cut from legacy REST-first architecture)  
-**Detailed Plan:** See `/Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Refactoring/MASTER_PLAN.md`
-
-### Why Migrating to Protobuf?
-
-1. **Current Issue:** Double serialization (JSON → MessagePack) is wasteful
-2. **PQC Readiness:** ML-KEM-768 keys are 1184 bytes, need efficient encoding
-3. **WebSocket Native:** Protobuf is designed for binary streaming protocols
-4. **Signal Standard:** Official Signal Protocol uses Protobuf format
-
-### Expected Benefits
-
-| Metric | Current (JSON) | After (Protobuf) | Improvement |
-|--------|----------------|------------------|-------------|
-| Message size | ~200 bytes | ~100 bytes | -50% |
-| CPU overhead | Double parsing | Single decode | -30% |
-| Battery impact | Baseline | Better | +10% |
-| Traffic (100K users) | ~94 GB/day | ~47 GB/day | -50% |
-
-### Timeline
-
-**Phase 1 (Week 1):** Protocol definitions (.proto files)  
-**Phase 2 (Week 2):** Server implementation (WebSocket + Protobuf)  
-**Phase 3 (Week 3):** Client implementation (Swift Protobuf)  
-**Phase 4 (Week 4):** Gradual rollout with A/B testing  
-
-**Backwards Compatibility:** No legacy REST compatibility guarantee; contracts are being narrowed to passwordless + invite/QR discovery model.
-
-### Example Protobuf Schema
-
-```protobuf
-// construct.proto
-syntax = "proto3";
-
-message EncryptedMessage {
-  string recipient_id = 1;
-  enum SuiteId {
-    CLASSIC_X25519 = 1;
-    PQ_HYBRID_KYBER = 2;
-  }
-  SuiteId suite_id = 2;
-  bytes ephemeral_public_key = 3;    // 32 bytes (classic) or 1216 bytes (PQC)
-  uint32 message_number = 4;
-  uint32 previous_chain_length = 5;
-  bytes ciphertext = 6;
-}
-```
-
-**Size comparison:**
-- JSON: `{"recipientId":"uuid","suiteId":2,"ephemeralPublicKey":"base64..."}`
-- Protobuf: Binary encoding, ~40% smaller with PQC keys
-
----

@@ -222,33 +222,20 @@ pub async fn get_blocked_users(pool: &DbPool, blocker_user_id: &Uuid) -> Result<
     Ok(rows)
 }
 
-/// Check if `blocker_user_id` has blocked `blocked_user_id`.
-/// Used at message delivery to silently drop messages to users who have blocked the sender.
-pub async fn is_blocked_by(
-    pool: &DbPool,
-    blocker_user_id: &Uuid,
-    blocked_user_id: &Uuid,
-) -> Result<bool> {
-    let exists = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM user_blocks
-            WHERE blocker_user_id = $1 AND blocked_user_id = $2
-        )
-        "#,
+/// Check if `recipient_id` has blocked `sender_id`.
+/// Used by SendMessage to return ErrorCode::Blocked without leaking privacy details.
+pub async fn is_blocked_by(pool: &DbPool, recipient_id: &Uuid, sender_id: &Uuid) -> Result<bool> {
+    let blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_user_id = $1 AND blocked_user_id = $2)",
     )
-    .bind(blocker_user_id)
-    .bind(blocked_user_id)
+    .bind(recipient_id)
+    .bind(sender_id)
     .fetch_one(pool)
     .await
-    .context("Failed to check user block")?;
+    .context("Failed to check block status")?;
 
-    Ok(exists)
+    Ok(blocked)
 }
-
-// ============================================================================
-// Key Bundle Functions for Crypto-Agility
-// ============================================================================
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1120,9 +1107,7 @@ pub async fn count_registrations_by_ip(pool: &DbPool, ip: &str, minutes: i32) ->
 // Crypto-Agility Functions (from legacy construct-db)
 // ============================================================================
 
-use crypto_agility::{
-    CryptoSuite, InviteTokenRecord, PQPrekeys, ProtocolVersion, UserCapabilities,
-};
+use crypto_agility::{CryptoSuite, InviteTokenRecord, ProtocolVersion, UserCapabilities};
 
 /// Get user capabilities (protocol version and supported crypto suites)
 pub async fn get_user_capabilities(
@@ -1202,75 +1187,6 @@ pub async fn update_user_protocol(
     .bind(version_int)
     .bind(suites_json)
     .bind(user_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Get PQ prekeys for a user
-pub async fn get_pq_prekeys(pool: &DbPool, user_id: &Uuid) -> Result<Option<PQPrekeys>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        user_id: Uuid,
-        pq_identity_key: Vec<u8>,
-        pq_kem_key: Vec<u8>,
-        pq_signature: Vec<u8>,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-        expires_at: Option<DateTime<Utc>>,
-    }
-
-    let row = sqlx::query_as::<_, Row>(
-        r#"
-        SELECT user_id, pq_identity_key, pq_kem_key, pq_signature,
-               created_at, updated_at, expires_at
-        FROM pq_prekeys
-        WHERE user_id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(r) => Ok(Some(PQPrekeys {
-            user_id: r.user_id,
-            pq_identity_key: r.pq_identity_key,
-            pq_kem_key: r.pq_kem_key,
-            pq_signature: r.pq_signature,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            expires_at: r.expires_at,
-        })),
-        None => Ok(None),
-    }
-}
-
-/// Upsert PQ prekeys for a user
-pub async fn upsert_pq_prekeys(
-    pool: &DbPool,
-    user_id: &Uuid,
-    pq_identity_key: &[u8],
-    pq_kem_key: &[u8],
-    pq_signature: &[u8],
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO pq_prekeys (user_id, pq_identity_key, pq_kem_key, pq_signature)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (user_id)
-        DO UPDATE SET
-            pq_identity_key = EXCLUDED.pq_identity_key,
-            pq_kem_key = EXCLUDED.pq_kem_key,
-            pq_signature = EXCLUDED.pq_signature,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(user_id)
-    .bind(pq_identity_key)
-    .bind(pq_kem_key)
-    .bind(pq_signature)
     .execute(pool)
     .await?;
 
