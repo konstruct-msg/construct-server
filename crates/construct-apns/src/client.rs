@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use apns_h2::{
     Client, ClientConfig, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
-    NotificationOptions, Priority,
+    NotificationOptions, Priority, PushType as ApnsPushType,
 };
 use hex;
 use std::fs::File;
@@ -108,24 +108,53 @@ impl ApnsClient {
         debug!("APNs payload: {}", payload_json);
 
         // Create notification options
-        let mut options = NotificationOptions {
+        // apns-push-type is REQUIRED since iOS 13 — missing it causes silent drops
+        let options = NotificationOptions {
             apns_topic: Some(&self.config.topic),
+            apns_push_type: Some(match push_type {
+                PushType::Silent => ApnsPushType::Background,
+                PushType::Visible => ApnsPushType::Alert,
+            }),
+            apns_priority: Some(match priority {
+                NotificationPriority::High => Priority::High,
+                NotificationPriority::Low => Priority::Normal,
+            }),
             ..Default::default()
         };
 
-        // Set priority if high
-        if matches!(priority, NotificationPriority::High) {
-            options.apns_priority = Some(Priority::High);
+        // Build notification based on push type.
+        // BUG FIX: previously the `payload` parameter was ignored entirely and
+        // a hardcoded DefaultNotificationBuilder was used for all cases.
+        let mut built = match push_type {
+            PushType::Silent => {
+                // Background push: content-available = 1, no alert, no sound
+                DefaultNotificationBuilder::new()
+                    .content_available()
+                    .build(device_token, options)
+            }
+            PushType::Visible => {
+                // Visible alert: generic title/body (never include message content — privacy)
+                let mut builder = DefaultNotificationBuilder::new()
+                    .title("New Message")
+                    .body("You have a new message")
+                    .sound("default")
+                    .mutable_content(); // lets iOS notification extension enrich it later
+                if let Some(badge) = payload.aps.badge {
+                    builder = builder.badge(badge);
+                }
+                builder.build(device_token, options)
+            }
+        };
+
+        // Attach our custom `construct` metadata so the iOS app knows message type / conversation
+        if let Some(ref construct_data) = payload.construct
+            && let Err(e) = built.add_custom_data("construct", construct_data)
+        {
+            warn!("Failed to attach custom APNs data: {}", e);
         }
 
-        // Build notification
-        let builder = DefaultNotificationBuilder::new()
-            .title("New Message")
-            .body("You have a new message")
-            .build(device_token, options);
-
         // Send notification
-        match client.send(builder).await {
+        match client.send(built).await {
             Ok(_response) => {
                 debug!("APNs notification sent successfully");
                 Ok(())
