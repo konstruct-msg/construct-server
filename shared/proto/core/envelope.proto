@@ -152,8 +152,15 @@ enum ContentType {
   // No UI shown to user. Triggered when sender detects a broken session.
   CONTENT_TYPE_KEY_SYNC = 22;
 
+  // SENDER_SYNC — copy of an outgoing message sent to the sender's own other devices.
+  // Client-encrypted: sender device A encrypts a separate Signal session with
+  // device B (same user), wraps the same plaintext, and sends it as SENDER_SYNC.
+  // Receiving device B displays it in the chat as a sent bubble (not incoming).
+  // Server is opaque to payload — E2EE is fully preserved.
+  CONTENT_TYPE_SENDER_SYNC = 23;
+
   // Reserved for future types
-  reserved 3 to 9, 12 to 19, 23 to 100;
+  reserved 3 to 9, 12 to 19, 24 to 100;
 }
 
 // MessagePriority - Delivery priority

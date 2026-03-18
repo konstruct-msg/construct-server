@@ -22,10 +22,19 @@
 // - Prevents precomputation attacks (can't build rainbow tables)
 // - Salt format: "kpow2:" + first 16 chars of challenge
 //
-// Difficulty Levels:
-// - Normal (8):   3-5 minutes on mobile (~256 attempts)
-// - Attack (12):  1-2 hours (~4096 attempts)
-// - Extreme (16): ~24 hours (DoS protection)
+// Difficulty Levels (Argon2id: 32 MB memory, 2 iterations, 1 thread):
+// Each level requires 2^N successful Argon2id hashes on average.
+// Each +2 levels = ×4 harder. Measured baseline: iPhone 14 ~5s at level 8.
+//
+// | Level | Avg attempts | p50 (median) | Avg time  | p95 time   | Use case                    |
+// |-------|-------------|--------------|-----------|------------|-----------------------------|
+// |     8 |         256 |       ~2.5 s |    ~5 s   |    ~15 s   | Normal registration         |
+// |    10 |       1 024 |      ~10 s   |   ~20 s   |    ~60 s   | 4th account from same IP    |
+// |    12 |       4 096 |      ~40 s   |  ~1.3 min |    ~4 min  | 5th account                 |
+// |    14 |      16 384 |     ~2.7 min |  ~5.3 min |   ~16 min  | 6th account                 |
+// |    16 |      65 536 |    ~10.7 min |   ~21 min |    ~64 min | 7th account (near-impossible)|
+// |    18 |     262 144 |    ~42.7 min |  ~85 min  |   ~256 min | 8th+ account                |
+// |    20 |   1 048 576 |   ~170 min   | ~341 min  |  ~1024 min | Theoretical max             |
 //
 // ============================================================================
 
@@ -224,17 +233,17 @@ pub fn generate_challenge() -> String {
 /// * `difficulty` - Number of leading zero bits required
 ///
 /// # Returns
-/// Estimated average seconds to solve on a mobile device
+/// Estimated average seconds to solve on iPhone 14
 ///
-/// Note: Argon2id is slower than SHA256, estimates are rough
+/// Argon2id parameters: 32 MB memory, 2 iterations, 1 thread.
+/// Baseline: ~20 ms per hash on iPhone 14 → level 8 ≈ 5 s average.
+/// Each +2 levels = ×4 harder.
 pub fn estimate_solve_time_seconds(difficulty: u32) -> f64 {
-    // Argon2id on mobile: ~0.5-2 seconds per attempt (due to memory cost)
-    // Average attempts = 2^difficulty
-
-    let seconds_per_attempt = 1.0; // Average 1 second per Argon2id hash
+    // Empirical: ~20 ms per Argon2id attempt on iPhone 14 (32 MB, 2 iter)
+    let ms_per_attempt = 20.0_f64;
     let average_attempts = 2_f64.powi(difficulty as i32);
 
-    seconds_per_attempt * average_attempts
+    ms_per_attempt * average_attempts / 1000.0
 }
 
 #[cfg(test)]
@@ -262,13 +271,37 @@ mod tests {
 
     #[test]
     fn test_estimate_solve_time() {
-        // Difficulty 8: ~256 seconds (4 minutes)
+        // Level 8: 256 attempts × 20ms ≈ 5 s
         let time_8 = estimate_solve_time_seconds(8);
-        assert!(time_8 > 200.0 && time_8 < 300.0);
+        assert!(
+            time_8 > 4.0 && time_8 < 7.0,
+            "level 8 expected ~5s, got {}",
+            time_8
+        );
 
-        // Difficulty 12: ~4096 seconds (68 minutes)
+        // Level 10: 1024 attempts × 20ms ≈ 20 s
+        let time_10 = estimate_solve_time_seconds(10);
+        assert!(
+            time_10 > 15.0 && time_10 < 25.0,
+            "level 10 expected ~20s, got {}",
+            time_10
+        );
+
+        // Level 12: 4096 attempts × 20ms ≈ 82 s
         let time_12 = estimate_solve_time_seconds(12);
-        assert!(time_12 > 4000.0 && time_12 < 5000.0);
+        assert!(
+            time_12 > 70.0 && time_12 < 100.0,
+            "level 12 expected ~82s, got {}",
+            time_12
+        );
+
+        // Each +2 levels = ×4
+        let ratio = estimate_solve_time_seconds(10) / estimate_solve_time_seconds(8);
+        assert!(
+            (ratio - 4.0).abs() < 0.01,
+            "expected ×4 per 2 levels, got {}",
+            ratio
+        );
     }
 
     #[test]

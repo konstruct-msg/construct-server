@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
-construct-broker  = { path = "../crates/construct-broker" }
+construct-broker  = { path = "../crates/construct-broker", features = ["kafka"] }
 construct-server-shared = { path = "../shared" }
 
 # Workspace deps

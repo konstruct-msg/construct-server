@@ -1,39 +1,39 @@
-use anyhow::{Context, Result};
+// ============================================================================
+// MessageConsumer — Kafka/Redpanda implementation
+// Compiled only when the "kafka" feature is enabled.
+// Without the feature, the no-op stub below is used instead.
+// ============================================================================
+
+#[cfg(feature = "kafka")]
+use anyhow::Context;
+#[cfg(feature = "kafka")]
 use rdkafka::Message;
+#[cfg(feature = "kafka")]
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use std::time::Duration;
+#[cfg(feature = "kafka")]
 use tracing::{error, info};
 
+#[cfg(feature = "kafka")]
 use super::config::create_client_config;
 use super::types::KafkaMessageEnvelope;
 use construct_config::KafkaConfig;
 
+// ============================================================================
+// Kafka implementation (feature = "kafka")
+// ============================================================================
+
+#[cfg(feature = "kafka")]
 /// Kafka message consumer for delivery worker
-///
-/// This consumer is configured for:
-/// - Manual offset commits (after successful delivery)
-/// - Consumer group coordination (multiple delivery workers)
-/// - Auto-rebalancing on worker addition/removal
 pub struct MessageConsumer {
     consumer: StreamConsumer,
     #[allow(dead_code)]
     topic: String,
 }
 
+#[cfg(feature = "kafka")]
 impl MessageConsumer {
-    /// Create a new Kafka consumer from the application configuration.
-    ///
-    /// The consumer will not be created if `config.enabled` is false.
-    ///
-    /// # Arguments
-    /// * `config` - The Kafka configuration struct.
-    ///
-    /// # Configuration
-    /// - `enable.auto.commit=false`: Manual offset management.
-    /// - `auto.offset.reset=earliest`: Read from beginning on first start.
-    /// - `session.timeout.ms=30000`: 30s session timeout.
-    /// - `heartbeat.interval.ms=3000`: 3s heartbeat interval.
-    pub fn new(config: &KafkaConfig) -> Result<Self> {
+    pub fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
         if !config.enabled {
             anyhow::bail!("Cannot create Kafka consumer when Kafka is disabled");
         }
@@ -43,23 +43,18 @@ impl MessageConsumer {
 
         let consumer: StreamConsumer = client_config
             .set("group.id", &config.consumer_group)
-            // Offset management
-            .set("enable.auto.commit", "false") // Manual commit after delivery
-            .set("auto.offset.reset", "earliest") // Read from beginning
-            // Allow broker to auto-create topic on first subscription
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "earliest")
             .set("allow.auto.create.topics", "true")
-            // Performance
             .set("fetch.min.bytes", "1")
-            .set("fetch.wait.max.ms", "500") // Max wait for fetch
-            .set("max.partition.fetch.bytes", "1048576") // 1MB
-            // Session management
-            .set("session.timeout.ms", "30000") // 30s timeout
-            .set("heartbeat.interval.ms", "3000") // 3s heartbeat
-            .set("max.poll.interval.ms", "300000") // 5min max processing time
+            .set("fetch.wait.max.ms", "500")
+            .set("max.partition.fetch.bytes", "1048576")
+            .set("session.timeout.ms", "30000")
+            .set("heartbeat.interval.ms", "3000")
+            .set("max.poll.interval.ms", "300000")
             .create()
             .context("Failed to create Kafka consumer")?;
 
-        // Subscribe to topic
         consumer
             .subscribe(&[&config.topic])
             .context("Failed to subscribe to Kafka topic")?;
@@ -75,18 +70,12 @@ impl MessageConsumer {
         })
     }
 
-    /// Poll for next message
-    ///
-    /// Returns `None` if timeout expires without message.
-    pub async fn poll(&self, _timeout: Duration) -> Result<Option<KafkaMessageEnvelope>> {
+    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<KafkaMessageEnvelope>> {
         match self.consumer.recv().await {
             Ok(message) => {
-                // Parse payload
                 let payload = message.payload().context("Message payload is empty")?;
-
                 let envelope: KafkaMessageEnvelope = serde_json::from_slice(payload)
                     .context("Failed to deserialize message envelope")?;
-
                 Ok(Some(envelope))
             }
             Err(e) => {
@@ -96,16 +85,10 @@ impl MessageConsumer {
         }
     }
 
-    /// Poll for next message (raw bytes)
-    ///
-    /// Returns raw payload bytes without deserialization.
-    /// Useful for consuming messages with different schemas (e.g., DeliveryAckEvent).
-    pub async fn poll_raw(&self, _timeout: Duration) -> Result<Option<Vec<u8>>> {
+    pub async fn poll_raw(&self, _timeout: Duration) -> anyhow::Result<Option<Vec<u8>>> {
         match self.consumer.recv().await {
             Ok(message) => {
-                // Get raw payload
                 let payload = message.payload().context("Message payload is empty")?;
-
                 Ok(Some(payload.to_vec()))
             }
             Err(e) => {
@@ -115,22 +98,48 @@ impl MessageConsumer {
         }
     }
 
-    /// Commit current offset (after successful delivery)
-    ///
-    /// This tells Kafka "I've successfully processed all messages up to this point".
-    /// If the consumer crashes before committing, messages will be redelivered.
-    pub fn commit(&self) -> Result<()> {
+    pub fn commit(&self) -> anyhow::Result<()> {
         self.consumer
             .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
             .context("Failed to commit offset")?;
         Ok(())
     }
 
-    /// Get consumer reference (for advanced usage)
     pub fn inner(&self) -> &StreamConsumer {
         &self.consumer
     }
 }
+
+// ============================================================================
+// No-op stub (no "kafka" feature) — compiles without rdkafka
+// ============================================================================
+
+#[cfg(not(feature = "kafka"))]
+/// No-op MessageConsumer stub — cannot poll, always errors on construction.
+pub struct MessageConsumer;
+
+#[cfg(not(feature = "kafka"))]
+impl MessageConsumer {
+    pub fn new(_config: &KafkaConfig) -> anyhow::Result<Self> {
+        anyhow::bail!("Kafka feature not compiled in — rebuild with --features kafka")
+    }
+
+    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<KafkaMessageEnvelope>> {
+        anyhow::bail!("Kafka feature not compiled in")
+    }
+
+    pub async fn poll_raw(&self, _timeout: Duration) -> anyhow::Result<Option<Vec<u8>>> {
+        anyhow::bail!("Kafka feature not compiled in")
+    }
+
+    pub fn commit(&self) -> anyhow::Result<()> {
+        anyhow::bail!("Kafka feature not compiled in")
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -161,11 +170,5 @@ mod tests {
 
         let result = MessageConsumer::new(&config);
         assert!(result.is_err());
-        if let Err(e) = result {
-            assert_eq!(
-                e.to_string(),
-                "Cannot create Kafka consumer when Kafka is disabled"
-            );
-        }
     }
 }

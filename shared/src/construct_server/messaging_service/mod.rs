@@ -1,8 +1,6 @@
-// Messaging service business logic is in crates/construct-messaging-service.
-// This module re-exports it and keeps the handlers that need shared proto types.
+// Messaging service business logic inlined from crates/construct-messaging-service.
 
-pub use construct_messaging_service::context::MessagingServiceContext;
+pub mod context;
+pub use context::MessagingServiceContext;
 
-pub mod core {
-    pub use construct_messaging_service::core::*;
-}
+pub mod core;

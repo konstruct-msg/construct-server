@@ -10,11 +10,10 @@ construct-error = { path = "../crates/construct-error", features = ["full"] }
 construct-crypto = { path = "../crates/construct-crypto", features = ["full"] }
 construct-config = { path = "../crates/construct-config" }
 construct-redis = { path = "../crates/construct-redis" }
-construct-broker = { path = "../crates/construct-broker" }
+construct-broker = { path = "../crates/construct-broker", features = ["kafka"] }
 construct-queue  = { path = "../crates/construct-queue" }
 construct-auth         = { path = "../crates/construct-auth" }
 construct-auth-service      = { path = "../crates/construct-auth-service" }
-construct-messaging-service      = { path = "../crates/construct-messaging-service" }
 construct-notification-service  = { path = "../crates/construct-notification-service" }
 construct-user-service          = { path = "../crates/construct-user-service" }
 construct-apns   = { path = "../crates/construct-apns" }
@@ -87,9 +86,6 @@ bb8-tonic = "0.4.0"
 # Message formats
 serde_bytes = "0.11"
 rmp-serde = "1.3"
-
-# Kafka
-rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
 
 # APNs
 apns-h2 = "0.11.0-alpha.1"

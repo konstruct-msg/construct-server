@@ -38,7 +38,6 @@ construct-error = { path = "../crates/construct-error" }
 construct-extractors = { path = "../crates/construct-extractors" }
 construct-db = { path = "../crates/construct-db" }
 tokio-stream = "0.1"
-
 # Auth specific
 rand = "0.8"
 hkdf = "0.12"

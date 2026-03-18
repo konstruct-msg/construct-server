@@ -52,6 +52,9 @@ pub async fn well_known_construct_server(
     // TLS enabled in production (when public key is configured)
     let tls_enabled = public_key.is_some();
 
+    // Primary ICE endpoint
+    let ice_primary = format!("ice.{}:443", domain);
+
     let discovery_info = json!({
         "version": "1.0",
         "protocol": "grpc",
@@ -75,6 +78,10 @@ pub async fn well_known_construct_server(
             "public_key": public_key,
             "s2s_endpoint": format!("{}:443", domain),
             "tls": tls_enabled
+        },
+        "ice": {
+            "primary": ice_primary,
+            "relays": [],
         },
         "capabilities": {
             "max_message_size_bytes": 100_000,
