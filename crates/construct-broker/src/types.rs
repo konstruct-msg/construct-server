@@ -45,6 +45,12 @@ pub enum MessageType {
     /// `recipient_id` = receipt sender (who acknowledged the message).
     /// `encrypted_payload` = JSON-serialized receipt info.
     Receipt,
+
+    /// Sender sync copy delivered to the sender's own other devices.
+    /// Same encrypted payload structure as DirectMessage but sent to a device
+    /// belonging to the sender (same user_id, different device_id).
+    /// Client displays it as a sent bubble, not an incoming message.
+    SenderSync,
 }
 
 /// Kafka message envelope containing all message types
@@ -345,6 +351,9 @@ impl KafkaMessageEnvelope {
             }
             MessageType::Receipt => {
                 // encrypted_payload contains receipt JSON — already checked above
+            }
+            MessageType::SenderSync => {
+                // Treated identically to DirectMessage — opaque ciphertext bytes.
             }
         }
 
