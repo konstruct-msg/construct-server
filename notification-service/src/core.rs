@@ -155,14 +155,16 @@ pub async fn send_blind_notification(
         // Check notification filter - only send if user allows it
         let filter = token_row.notification_filter.as_str();
 
-        // For blind notifications, we respect the filter but don't show content
-        let should_send = match (filter, input.activity_type.as_deref()) {
-            ("silent", _) => true, // Silent notifications always allowed
-            ("visible_all", _) => true,
-            ("visible_dm", Some("new_message")) => true,
-            ("visible_mentions", Some("mention")) => true,
-            ("visible_contacts", Some("new_message" | "mention")) => true,
-            _ => false,
+        // Determine push type based on user's filter preference:
+        // - "silent" → background wake-up only (content-available: 1, no alert)
+        // - any "visible_*" that matches activity → show visible alert notification
+        let (should_send, use_visible) = match (filter, input.activity_type.as_deref()) {
+            ("silent", _) => (true, false),
+            ("visible_all", _) => (true, true),
+            ("visible_dm", Some("new_message")) => (true, true),
+            ("visible_mentions", Some("mention")) => (true, true),
+            ("visible_contacts", Some("new_message" | "mention")) => (true, true),
+            _ => (false, false),
         };
 
         if !should_send {
@@ -175,18 +177,29 @@ pub async fn send_blind_notification(
             continue;
         }
 
-        // Send blind notification via APNs
+        // Send notification via APNs
         // Note: FCM support can be added here with similar logic
         use construct_server_shared::apns::types::{
             ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
         };
 
-        // Create blind notification payload with badge
+        let (push_type, priority, content_available, alert) = if use_visible {
+            // Visible alert: high priority, no content-available (payload has alert)
+            (PushType::Visible, NotificationPriority::High, None, None)
+        } else {
+            // Silent background push: low priority, content-available = 1
+            (PushType::Silent, NotificationPriority::Low, Some(1u8), None)
+        };
+
         let payload = ApnsPayload {
             aps: ApsData {
-                content_available: Some(1),
-                alert: None,
-                sound: None,
+                content_available,
+                alert,
+                sound: if use_visible {
+                    Some("default".to_string())
+                } else {
+                    None
+                },
                 badge: input.badge_count.map(|b| b as u32),
             },
             construct: input.activity_type.as_ref().map(|activity| ConstructData {
@@ -197,12 +210,7 @@ pub async fn send_blind_notification(
 
         if let Err(e) = context
             .apns_client
-            .send_notification(
-                &device_token,
-                payload,
-                PushType::Silent,
-                NotificationPriority::Low,
-            )
+            .send_notification(&device_token, payload, push_type, priority)
             .await
         {
             tracing::error!(
