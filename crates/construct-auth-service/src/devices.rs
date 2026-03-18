@@ -94,6 +94,48 @@ pub fn adaptive_pow_params(base_difficulty: u32, count: i64) -> AdaptivePowParam
     }
 }
 
+/// Adaptive PoW params specifically for account registration per IP.
+///
+/// Much more aggressive than the generic `adaptive_pow_params`:
+/// - Tier size = 1 account (every new registration from same IP = escalation)
+/// - Exponential delay starts from the 3rd account (tier ≥ 2)
+/// - Delay doubles with each additional account
+///
+/// | Registrations (1h) | PoW level | Delay before next attempt |
+/// |--------------------|-----------|---------------------------|
+/// | 1-2                | base (8)  | none                      |
+/// | 3                  | 8         | 60 s                      |
+/// | 4                  | 10        | 120 s                     |
+/// | 5                  | 12        | 240 s                     |
+/// | 6                  | 14        | 480 s (~8 min)            |
+/// | 7                  | 16        | 960 s (~16 min)           |
+/// | 8+                 | 18+       | up to 3600 s (1 h)        |
+pub fn adaptive_pow_params_registration(base_difficulty: u32, reg_count: i64) -> AdaptivePowParams {
+    const DIFFICULTY_STEP: u32 = 2;
+    const MAX_DIFFICULTY: u32 = 20;
+    // Delay starts at 3rd account (reg_count=2), doubles with each additional
+    const BASE_RETRY_SECS: u64 = 60;
+    const MAX_RETRY_SECS: u64 = 3600;
+
+    let count = reg_count as u32;
+
+    // Difficulty escalates starting from the 4th account (count >= 3)
+    let extra = count.saturating_sub(2);
+    let difficulty = (base_difficulty + extra * DIFFICULTY_STEP).min(MAX_DIFFICULTY);
+
+    // Exponential delay starts at 3rd account (count >= 2): 60s, 120s, 240s, 480s…
+    let retry_after_secs = if count >= 2 {
+        (BASE_RETRY_SECS * (1u64 << (count - 2).min(6))).min(MAX_RETRY_SECS)
+    } else {
+        0
+    };
+
+    AdaptivePowParams {
+        difficulty,
+        retry_after_secs,
+    }
+}
+
 // ============================================================================
 // Request/Response Types
 // ============================================================================
@@ -804,9 +846,41 @@ pub async fn get_pow_challenge(
         )));
     }
 
-    // 2. Compute adaptive difficulty + retry-after based on IP request volume
+    // 2. Compute adaptive difficulty — take the stricter of:
+    //    (a) challenge-request volume from this IP (generic throttling)
+    //    (b) successful registrations from this IP (registration-specific escalation)
     let base_difficulty = app_context.config.security.pow_difficulty;
-    let params = adaptive_pow_params(base_difficulty, count);
+    let reg_count = if client_ip != "unknown" {
+        construct_db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let params_challenge = adaptive_pow_params(base_difficulty, count);
+    let params_reg = adaptive_pow_params_registration(base_difficulty, reg_count);
+    // Use whichever gives the higher difficulty + longer delay
+    let params = if params_reg.difficulty >= params_challenge.difficulty {
+        AdaptivePowParams {
+            difficulty: params_reg.difficulty,
+            retry_after_secs: params_reg
+                .retry_after_secs
+                .max(params_challenge.retry_after_secs),
+        }
+    } else {
+        params_challenge
+    };
+    if reg_count >= 2 {
+        tracing::info!(
+            target: "audit",
+            event_type = "POW_REG_ESCALATION",
+            client_ip = %client_ip,
+            reg_count = reg_count,
+            difficulty = params.difficulty,
+            retry_after_secs = params.retry_after_secs,
+            "PoW difficulty escalated due to registration count"
+        );
+    }
 
     // 3. Generate and store challenge with adaptive difficulty
     // Only pass IP when it's a valid address — PostgreSQL inet cast rejects "unknown"
@@ -856,7 +930,7 @@ pub async fn get_pow_challenge(
 
 #[cfg(test)]
 mod adaptive_pow_tests {
-    use super::adaptive_pow_params;
+    use super::{adaptive_pow_params, adaptive_pow_params_registration};
 
     #[test]
     fn test_base_tier_no_throttle() {
@@ -904,5 +978,58 @@ mod adaptive_pow_tests {
         let p = adaptive_pow_params(8, 1000);
         assert!(p.retry_after_secs <= 3600);
         assert!(p.retry_after_secs > 0);
+    }
+
+    // ── Registration-specific escalation tests ───────────────────────────────
+
+    #[test]
+    fn test_reg_first_two_accounts_no_delay() {
+        // 1st account (count=0): no escalation
+        let p = adaptive_pow_params_registration(8, 0);
+        assert_eq!(p.difficulty, 8);
+        assert_eq!(p.retry_after_secs, 0);
+
+        // 2nd account (count=1): still no delay
+        let p = adaptive_pow_params_registration(8, 1);
+        assert_eq!(p.difficulty, 8);
+        assert_eq!(p.retry_after_secs, 0);
+    }
+
+    #[test]
+    fn test_reg_third_account_delay_starts() {
+        // 3rd account (count=2): 60s delay, level still 8
+        let p = adaptive_pow_params_registration(8, 2);
+        assert_eq!(p.difficulty, 8);
+        assert_eq!(p.retry_after_secs, 60);
+    }
+
+    #[test]
+    fn test_reg_escalation_table() {
+        // 4th account: level 10, 120s
+        let p = adaptive_pow_params_registration(8, 3);
+        assert_eq!(p.difficulty, 10);
+        assert_eq!(p.retry_after_secs, 120);
+
+        // 5th account: level 12, 240s
+        let p = adaptive_pow_params_registration(8, 4);
+        assert_eq!(p.difficulty, 12);
+        assert_eq!(p.retry_after_secs, 240);
+
+        // 6th account: level 14, 480s
+        let p = adaptive_pow_params_registration(8, 5);
+        assert_eq!(p.difficulty, 14);
+        assert_eq!(p.retry_after_secs, 480);
+    }
+
+    #[test]
+    fn test_reg_difficulty_capped_at_20() {
+        let p = adaptive_pow_params_registration(8, 100);
+        assert_eq!(p.difficulty, 20);
+    }
+
+    #[test]
+    fn test_reg_retry_capped_at_3600() {
+        let p = adaptive_pow_params_registration(8, 1000);
+        assert_eq!(p.retry_after_secs, 3600);
     }
 }
