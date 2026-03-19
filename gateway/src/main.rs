@@ -76,6 +76,26 @@ async fn main() -> Result<()> {
             }
         };
 
+        // Cover proxy config — only active when no gateway-managed TLS (i.e. Traefik terminates
+        // TLS before us).  When set, connections that look like TLS ClientHello or HTTP are
+        // transparently forwarded to the upstream site; real obfs4 clients are unaffected.
+        let cover_cfg: Option<construct_ice::transport::cover::CoverProxyConfig> = if tls_acceptor
+            .is_none()
+        {
+            config.ice_cover_upstream.as_deref().map(|addr| {
+                    info!(upstream = %addr, "ICE cover proxy enabled — active probers forwarded to cover site");
+                    construct_ice::transport::cover::CoverProxyConfig::new(addr)
+                })
+        } else {
+            if config.ice_cover_upstream.is_some() {
+                tracing::warn!(
+                    "ICE_COVER_UPSTREAM is set but ICE-over-TLS is also active — \
+                        cover proxy disabled (peek happens before gateway TLS, not after)"
+                );
+            }
+            None
+        };
+
         let tcp_listener = tokio::net::TcpListener::bind(&ice_addr)
             .await
             .context("Failed to bind ICE listener")?;
@@ -88,11 +108,50 @@ async fn main() -> Result<()> {
             port = config.ice_port,
             upstream = %config.ice_upstream,
             tls = tls_acceptor.is_some(),
+            cover = config.ice_cover_upstream.as_deref().unwrap_or("disabled"),
             "ICE listener started — obfuscated traffic accepted"
         );
         let upstream = config.ice_upstream.clone();
         tokio::spawn(async move {
             loop {
+                // ── Cover proxy path (no gateway TLS) ────────────────────────────────
+                // peek() classifies the first bytes as TLS/HTTP → forward to cover site,
+                // or as obfs4 noise → proceed with normal handshake below.
+                if let Some(ref ccfg) = cover_cfg {
+                    match ice_listener.accept_obfs4_or_proxy(ccfg.clone()).await {
+                        Ok((
+                            construct_ice::transport::cover::MixedAccept::Proxied(handle),
+                            peer,
+                        )) => {
+                            tracing::debug!(peer = %peer, "ICE cover: TLS/HTTP probe forwarded to cover upstream");
+                            tokio::spawn(async move {
+                                if let Err(e) = handle.await {
+                                    tracing::debug!(peer = %peer, error = %e, "ICE cover proxy task error");
+                                }
+                            });
+                            continue;
+                        }
+                        Ok((
+                            construct_ice::transport::cover::MixedAccept::Obfs4(ice_stream),
+                            peer,
+                        )) => {
+                            let upstream = upstream.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = proxy_to_upstream(ice_stream, &upstream, peer).await
+                                {
+                                    tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
+                                }
+                            });
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ICE accept error (cover path)");
+                            continue;
+                        }
+                    }
+                }
+
+                // ── Standard path (no cover proxy) ───────────────────────────────────
                 match ice_listener.accept_tcp().await {
                     Ok((tcp, peer)) => {
                         let upstream = upstream.clone();
@@ -100,7 +159,7 @@ async fn main() -> Result<()> {
                         let tls_acceptor = tls_acceptor.clone();
                         tokio::spawn(async move {
                             // If TLS configured: wrap TCP in TLS first, then obfs4
-                            // If no TLS: plain obfs4 over TCP (legacy mode)
+                            // If no TLS: plain obfs4 over TCP (Traefik terminates TLS upstream)
                             let proxy_result = if let Some(acceptor) = tls_acceptor {
                                 match acceptor.accept(tcp).await {
                                     Ok(tls_stream) => {
