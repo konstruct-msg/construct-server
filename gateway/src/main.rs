@@ -109,13 +109,13 @@ async fn main() -> Result<()> {
                                                 proxy_to_upstream(ice_stream, &upstream, peer).await
                                             }
                                             Err(e) => {
-                                                tracing::debug!(peer = %peer, error = %e, "ICE-over-TLS: obfs4 handshake failed");
+                                                tracing::warn!(peer = %peer, error = %e, "ICE-over-TLS: obfs4 handshake failed");
                                                 Ok(())
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::debug!(peer = %peer, error = %e, "ICE-over-TLS: TLS handshake failed");
+                                        tracing::warn!(peer = %peer, error = %e, "ICE-over-TLS: TLS handshake failed");
                                         Ok(())
                                     }
                                 }
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
                                         proxy_to_upstream(ice_stream, &upstream, peer).await
                                     }
                                     Err(e) => {
-                                        tracing::debug!(peer = %peer, error = %e, "ICE: obfs4 handshake failed");
+                                        tracing::warn!(peer = %peer, error = %e, "ICE: obfs4 handshake failed");
                                         Ok(())
                                     }
                                 }

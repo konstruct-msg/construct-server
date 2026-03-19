@@ -433,8 +433,12 @@ services:
       # DNS prerequisite: ice.INSTANCE_DOMAIN A record → same server IP as INSTANCE_DOMAIN.
       - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
       - "traefik.tcp.routers.ice.entrypoints=websecure"
+      - "traefik.tcp.routers.ice.service=ice"
       - "traefik.tcp.routers.ice.tls=true"
       - "traefik.tcp.routers.ice.tls.certresolver=letsencrypt"
+      # Explicit domain required for Traefik v3 TCP ACME — unlike HTTP routers,
+      # TCP routers do NOT auto-infer the domain from HostSNI rule.
+      - "traefik.tcp.routers.ice.tls.domains[0].main=ice.${INSTANCE_DOMAIN}"
       - "traefik.tcp.services.ice.loadbalancer.server.port=9443"
 
   # ─── Monitoring ──────────────────────────────────────────────────────────
