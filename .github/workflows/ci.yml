@@ -179,29 +179,47 @@ jobs:
       - name: Pull latest image
         run: docker pull ghcr.io/${{ github.repository_owner }}/construct-server:latest
 
-      - name: Run migrations (via auth-service init)
+      - name: Start services
         run: |
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
           sleep 5
-          # auth-service runs migrations on startup
-          IMAGE_TAG=latest docker compose -f ops/docker-compose.smoke.yml up -d auth-service messaging-service gateway
+          IMAGE_TAG=latest docker compose -f ops/docker-compose.smoke.yml up -d \
+            auth-service messaging-service key-service gateway
 
       - name: Wait for services to be healthy
         run: |
-          echo "Waiting for gateway health..."
+          # Wait for gateway HTTP (simple, no DB dependency)
+          echo "Waiting for gateway /health..."
           for i in $(seq 1 30); do
-            curl -sf http://localhost:8080/health && break
-            sleep 2
+            curl -sf http://localhost:8080/health && { echo "✅ gateway ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
           done
-          echo "Waiting for auth-service gRPC..."
-          for i in $(seq 1 20); do
-            grpcurl -plaintext localhost:50051 list 2>/dev/null && break || true
-            sleep 2
+
+          # Wait for auth-service to be truly ready (GetPowChallenge requires DB).
+          # Uses the actual RPC — grpcurl exits 0 only if the call succeeds.
+          echo "Waiting for auth-service (GetPowChallenge)..."
+          for i in $(seq 1 40); do
+            grpcurl -plaintext -connect-timeout 2 \
+              -import-path shared/proto \
+              -proto services/auth_service.proto \
+              -d '{}' localhost:50051 \
+              construct.auth.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
+              && { echo "✅ auth-service ready"; break; }
+            echo "  attempt $i/40..."; sleep 2
           done
-          echo "Waiting for messaging-service gRPC..."
-          for i in $(seq 1 20); do
-            grpcurl -plaintext localhost:50052 list 2>/dev/null && break || true
-            sleep 2
+
+          # Wait for messaging-service port (TCP open = gRPC stack is up).
+          echo "Waiting for messaging-service port..."
+          for i in $(seq 1 30); do
+            nc -z localhost 50052 && { echo "✅ messaging-service ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
+          done
+
+          # Wait for key-service port
+          echo "Waiting for key-service port..."
+          for i in $(seq 1 30); do
+            nc -z localhost 50057 && { echo "✅ key-service ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
           done
 
       - name: Run smoke tests
@@ -214,8 +232,12 @@ jobs:
           docker compose -f ops/docker-compose.smoke.yml logs auth-service
           echo "=== messaging-service logs ==="
           docker compose -f ops/docker-compose.smoke.yml logs messaging-service
+          echo "=== key-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs key-service
           echo "=== gateway logs ==="
           docker compose -f ops/docker-compose.smoke.yml logs gateway
+          echo "=== postgres logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs postgres
 
       - name: Tear down
         if: always()
