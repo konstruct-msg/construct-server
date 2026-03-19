@@ -436,9 +436,17 @@ impl MessagingService for MessagingGrpcService {
 
         // encrypted_payload is opaque — server never reads crypto params from it.
         // Sort is by server timestamp (already chronological from Redis stream).
+        // Track the last Redis stream ID so the cursor advances correctly.
+        // NOTE: we must use the Redis stream ID (millisecond timestamp) as cursor,
+        // not env.timestamp (Unix seconds) — using seconds caused all messages to
+        // be re-delivered on every GetPendingMessages call.
+        let mut last_stream_id: Option<String> = None;
         let messages: Vec<proto::PendingMessage> = stream_messages
             .into_iter()
-            .filter_map(|(_stream_id, env)| {
+            .filter_map(|(stream_id, env)| {
+                // Always advance the cursor past this entry, even if we skip it.
+                last_stream_id = Some(stream_id);
+
                 let env = env?; // skip corrupt / wrong-recipient entries
                 use base64::Engine;
                 use construct_server_shared::kafka::types::MessageType;
@@ -479,10 +487,7 @@ impl MessagingService for MessagingGrpcService {
             })
             .collect();
 
-        let next_cursor = messages
-            .last()
-            .map(|m| format!("{}", m.timestamp))
-            .unwrap_or_else(|| since.unwrap_or("0-0").to_string());
+        let next_cursor = last_stream_id.unwrap_or_else(|| since.unwrap_or("0-0").to_string());
 
         let has_more = messages.len() == limit;
 
