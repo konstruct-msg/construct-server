@@ -39,9 +39,10 @@ pub(crate) async fn relay_delivery_receipt(
 
     if !direct.recipient_user_id.is_empty() {
         // Fast path: all message_ids in this receipt share the same original sender.
-        tracing::debug!(
+        tracing::info!(
             sender = %direct.recipient_user_id,
             msg_count = direct.message_ids.len(),
+            status,
             "Receipt routing via recipient_user_id (fast path)"
         );
         sender_map.insert(direct.recipient_user_id.clone(), direct.message_ids.clone());
@@ -112,7 +113,7 @@ pub(crate) async fn relay_delivery_receipt(
         {
             tracing::warn!(error = %e, sender_id = %sender_id, "Failed to relay receipt to sender stream (non-critical)");
         } else {
-            tracing::debug!(sender_id = %sender_id, status, "Relayed delivery receipt to sender stream");
+            tracing::info!(sender_id = %sender_id, status, msg_count = receipt_envelope.encrypted_payload.len(), "Relayed delivery receipt to sender stream");
         }
     }
 
@@ -146,7 +147,10 @@ pub(crate) fn build_receipt_response(
         status,
         timestamp: payload.timestamp,
         sender_device_id: String::new(),
-        recipient_user_id: String::new(), // server-generated receipt; field used client→server only
+        // envelope.recipient_id holds the user_id of who sent this receipt
+        // (stored as receipt_sender_id in from_receipt). Device 1 needs this
+        // to know which contact delivered their message.
+        recipient_user_id: envelope.recipient_id.clone(),
     };
 
     let receipt = signaling::DeliveryReceipt {
