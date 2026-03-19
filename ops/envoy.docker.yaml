@@ -24,6 +24,12 @@ static_resources:
                 stat_prefix: ingress_grpc
                 # Disable stream idle timeout — gRPC streams can be long-lived
                 stream_idle_timeout: 0s
+                # HTTP/2 keepalive: send PING frames every 30s so mobile clients
+                # (iOS/Android) don't close the connection after 5 min idle.
+                http2_protocol_options:
+                  connection_keepalive:
+                    interval: 30s
+                    timeout: 10s
                 route_config:
                   name: grpc_routes
                   virtual_hosts:
