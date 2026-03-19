@@ -19,7 +19,7 @@ use construct_config::Config;
 use construct_server_shared::metrics;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -69,8 +69,8 @@ async fn main() -> Result<()> {
                 Some(Arc::new(acceptor))
             }
             _ => {
-                info!(
-                    "ICE TLS not configured (set ICE_TLS_CERT_PATH + ICE_TLS_KEY_PATH to enable)"
+                debug!(
+                    "ICE TLS not configured — Traefik handles TLS termination (set ICE_TLS_CERT_PATH + ICE_TLS_KEY_PATH for standalone mode)"
                 );
                 None
             }
