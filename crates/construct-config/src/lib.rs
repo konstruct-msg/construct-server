@@ -149,6 +149,17 @@ pub struct Config {
     /// Path to TLS private key PEM file for ICE-over-TLS listener.
     /// Must match the certificate in `ice_tls_cert_path`.
     pub ice_tls_key_path: Option<String>,
+
+    /// Upstream address for cover-traffic proxying (Telemt-style active-probe resistance).
+    ///
+    /// When set, connections whose first bytes look like TLS ClientHello or HTTP are
+    /// transparently proxied to this address instead of going through the obfs4 handshake.
+    /// Active probers see a real server response; legitimate obfs4 clients are unaffected.
+    ///
+    /// Example: `"93.184.216.34:443"` (example.com) or `"real-site.com:443"`.
+    /// Only effective when not using gateway-managed TLS (`ICE_TLS_CERT_PATH` unset),
+    /// i.e. when Traefik handles TLS termination.
+    pub ice_cover_upstream: Option<String>,
 }
 
 impl Config {
@@ -300,6 +311,7 @@ impl Config {
                 .unwrap_or_else(|_| "envoy:8080".to_string()),
             ice_tls_cert_path: std::env::var("ICE_TLS_CERT_PATH").ok(),
             ice_tls_key_path: std::env::var("ICE_TLS_KEY_PATH").ok(),
+            ice_cover_upstream: std::env::var("ICE_COVER_UPSTREAM").ok(),
         })
     }
 

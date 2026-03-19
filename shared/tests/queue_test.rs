@@ -179,6 +179,7 @@ async fn setup_queue() -> (MessageQueue, redis::Connection) {
         ice_upstream: "envoy:8080".to_string(),
         ice_tls_cert_path: None,
         ice_tls_key_path: None,
+        ice_cover_upstream: None,
     };
 
     // Allow overriding redis_url from environment for CI/different setups
