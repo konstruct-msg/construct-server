@@ -1,5 +1,36 @@
 # =============================================================================
-# Construct Server — Production Docker Compose (DigitalOcean VPS)
+# Construct Server — Production Docker Compose
+# =============================================================================
+# Architecture:
+#   Traefik — TLS termination (Let's Encrypt ACME) + routing
+#     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
+#     ├→ vault.ams.konstruct.cc    → Vault (:8200, UI only)
+#     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
+#     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
+#   Envoy — gRPC-web routing to Rust microservices
+#   Vault — secrets store (UI/reference only, NOT in deploy critical path)
+#
+# Secrets management:
+#   /opt/construct/secrets/app.env — manually maintained on the server.
+#   Template: ops/secrets.example.env
+#   Services read secrets directly from this file (no vault-agent).
+#
+# DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
+# TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
+#
+# External services (not in this compose):
+#   Database : Supabase (DATABASE_URL in app.env)
+#   Redis    : Upstash  (REDIS_URL in app.env)
+#
+# First-time setup (run from REPO ROOT):
+#   1. cp ops/secrets.example.env /opt/construct/secrets/app.env
+#   2. nano /opt/construct/secrets/app.env   # fill in all values
+#   3. chmod 600 /opt/construct/secrets/app.env
+#   4. cp ops/.env.example .env && nano .env
+#   5. docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
+#
+# Redeploy after code changes:
+#   git pull && docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
 # =============================================================================
 # Architecture:
 #   Traefik — TLS termination (Let's Encrypt ACME) + routing
@@ -9,7 +40,7 @@
 #     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
 #   Envoy — gRPC-web routing to Rust microservices
 #   Vault — secrets store
-#   vault-agent — init container: fetches secrets → /secrets/app.env
+
 #
 # DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
 # TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
@@ -125,22 +156,6 @@ services:
 
   # ─── Vault Agent (init: fetches secrets → /secrets/app.env) ──────────────
 
-  vault-agent:
-    image: hashicorp/vault:1.19
-    restart: "no" # runs once, exits after writing secrets
-    volumes:
-      - vault-auth:/vault/auth:ro
-      - /opt/construct/secrets:/secrets
-      - ./vault/agent.hcl:/vault/config/agent.hcl:ro
-    command: vault agent -config=/vault/config/agent.hcl
-    environment:
-      VAULT_ADDR: http://vault:8200
-    networks:
-      - internal
-    depends_on:
-      vault:
-        condition: service_healthy
-
   # ─── Envoy (gRPC-web routing) ─────────────────────────────────────────────
 
   envoy:
@@ -173,14 +188,14 @@ services:
   # All services:
   #   - Use env_file from Vault-populated /secrets/app.env (via volume mount)
   #   - Only non-secret env vars (PORT, RUST_LOG, INSTANCE_DOMAIN) set here
-  #   - Depend on vault-agent to ensure secrets are ready before starting
+  #   - Read secrets from /opt/construct/secrets/app.env (managed manually on server)
 
   auth:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
-      - path: /opt/construct/secrets/app.env # populated by vault-agent at startup
+      - path: /opt/construct/secrets/app.env # managed manually: see ops/secrets.example.env
         required: true
     environment:
       PORT: "8081"
@@ -204,9 +219,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   user:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -222,9 +234,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   messaging:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -252,9 +261,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   notification:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -273,9 +279,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   invite:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -291,9 +294,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   key:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -308,9 +308,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   media:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -327,9 +324,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   mls:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -345,9 +339,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   sentinel:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -363,9 +354,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   delivery:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -394,9 +382,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   gateway:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
@@ -422,9 +407,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
     labels:
       - "traefik.enable=true"
       # ── ICE transport: TLS 1.3 over obfs4 for DPI bypass (Russia/censored regions) ──
