@@ -43,6 +43,9 @@ APNS_KEY_PATH="/secrets/AuthKey_{{ .Data.data.APNS_KEY_ID }}.p8"
 APNS_TEAM_ID="{{ .Data.data.APNS_TEAM_ID }}"
 APNS_TOPIC="{{ .Data.data.APNS_TOPIC }}"
 APNS_DEVICE_TOKEN_ENCRYPTION_KEY={{ .Data.data.APNS_DEVICE_TOKEN_ENCRYPTION_KEY }}
+{{- if .Data.data.ICE_SERVER_KEY }}
+ICE_SERVER_KEY="{{ .Data.data.ICE_SERVER_KEY }}"
+{{- end }}
 {{- end }}
 EOT
   destination = "/secrets/app.env"
