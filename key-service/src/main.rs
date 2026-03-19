@@ -264,7 +264,7 @@ impl KeyService for KeyGrpcService {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Atomically rotate Kyber SPK if provided (same request keeps both keys in sync)
+        // Rotate Kyber SPK if provided in the same request (keeps both keys in sync)
         let (new_kyber_key_id, new_kyber_spk_rotation_epoch) =
             if let Some(kspk) = req.new_kyber_signed_pre_key {
                 let key_id = kspk.key_id;
