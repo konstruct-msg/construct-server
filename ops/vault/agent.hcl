@@ -46,6 +46,9 @@ APNS_DEVICE_TOKEN_ENCRYPTION_KEY={{ .Data.data.APNS_DEVICE_TOKEN_ENCRYPTION_KEY 
 {{- if .Data.data.ICE_SERVER_KEY }}
 ICE_SERVER_KEY="{{ .Data.data.ICE_SERVER_KEY }}"
 {{- end }}
+{{- if .Data.data.ICE_IAT_MODE }}
+ICE_IAT_MODE="{{ .Data.data.ICE_IAT_MODE }}"
+{{- end }}
 {{- end }}
 EOT
   destination = "/secrets/app.env"
