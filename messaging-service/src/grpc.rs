@@ -67,10 +67,11 @@ impl MessagingService for MessagingGrpcService {
             let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
             let mut wakeup_subscribed = false;
 
-            // Fallback poll interval — 5 s safety net for any missed pub/sub wakeup.
+            // Fallback poll interval — 30 s safety net for any missed pub/sub wakeup.
             // Real-time delivery is handled by spawn_inbox_wakeup (Redis pub/sub with
-            // auto-reconnect). This fallback ensures at most 5s lag if wakeup is lost.
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            // auto-reconnect). This fallback ensures at most 30s lag if wakeup is lost,
+            // without flooding the shared queue Mutex with frequent polls.
+            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
 
             // If user_id is already known from auth metadata, subscribe now and
             // flush any messages that arrived before the stream opened.
@@ -429,11 +430,16 @@ impl MessagingService for MessagingGrpcService {
         let limit = req.limit.unwrap_or(50).min(100) as usize;
         let since = req.since_cursor.as_deref();
 
-        let mut queue = self.context.queue.lock().await;
-        let stream_messages = queue
-            .read_user_messages_from_stream(&user_id, None, since, limit)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?;
+        // Hold the lock only for the XREAD operation — release immediately after so other
+        // handlers (other getPendingMessages calls, send_message) are not blocked during
+        // the message-building loop below.
+        let stream_messages = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .read_user_messages_from_stream(&user_id, None, since, limit)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
+        };
 
         // encrypted_payload is opaque — server never reads crypto params from it.
         // Sort is by server timestamp (already chronological from Redis stream).
