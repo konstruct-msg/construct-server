@@ -67,9 +67,10 @@ impl MessagingService for MessagingGrpcService {
             let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
             let mut wakeup_subscribed = false;
 
-            // Fallback poll interval — reduced to 60 s now that pub/sub handles
-            // real-time delivery; this only covers reconnects / missed events.
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            // Fallback poll interval — 5 s safety net for any missed pub/sub wakeup.
+            // Real-time delivery is handled by spawn_inbox_wakeup (Redis pub/sub with
+            // auto-reconnect). This fallback ensures at most 5s lag if wakeup is lost.
+            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
             // If user_id is already known from auth metadata, subscribe now and
             // flush any messages that arrived before the stream opened.

@@ -190,7 +190,8 @@ pub(crate) async fn handle_stream_request(
 /// to `tx` so the stream loop can call `poll_messages` immediately on delivery.
 ///
 /// Spawns a background task — exits automatically when the receiver is dropped
-/// (i.e. the gRPC stream closes).
+/// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
+/// so the fallback 60s poll is never triggered in normal operation.
 pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
     tokio::spawn(async move {
         let channel = format!("inbox:wakeup:{}", user_id);
@@ -201,25 +202,42 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
                 return;
             }
         };
-        let mut pubsub = match client.get_async_pubsub().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "inbox_wakeup: failed to open pub/sub connection");
-                return;
+
+        // Reconnect loop: on any connection/subscribe failure, wait briefly and retry.
+        // Exits only when the gRPC stream closes (tx.send fails → receiver dropped).
+        loop {
+            let pubsub = match client.get_async_pubsub().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, channel = %channel, "inbox_wakeup: pub/sub connect failed, retrying in 2s");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            let mut pubsub = pubsub;
+            if let Err(e) = pubsub.subscribe(&channel).await {
+                tracing::warn!(error = %e, channel = %channel, "inbox_wakeup: subscribe failed, retrying in 2s");
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                continue;
             }
-        };
-        if let Err(e) = pubsub.subscribe(&channel).await {
-            tracing::warn!(error = %e, "inbox_wakeup: failed to subscribe");
-            return;
-        }
-        tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
-        let mut stream = pubsub.into_on_message();
-        while stream.next().await.is_some() {
-            if tx.send(()).await.is_err() {
-                break; // stream closed — receiver dropped
+            tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
+            let mut stream = pubsub.into_on_message();
+            loop {
+                match stream.next().await {
+                    Some(_) => {
+                        if tx.send(()).await.is_err() {
+                            // gRPC stream closed — receiver dropped, stop wakeup task
+                            return;
+                        }
+                    }
+                    None => {
+                        // pub/sub connection dropped — break inner loop to reconnect
+                        tracing::debug!(channel = %channel, "inbox_wakeup: connection lost, reconnecting");
+                        break;
+                    }
+                }
             }
         }
-        tracing::debug!(channel = %channel, "inbox_wakeup: subscriber exited");
     });
 }
 
