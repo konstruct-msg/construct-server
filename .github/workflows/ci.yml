@@ -179,6 +179,22 @@ jobs:
       - name: Pull latest image
         run: docker pull ghcr.io/${{ github.repository_owner }}/construct-server:latest
 
+      - name: Generate smoke test JWT keypair
+        run: |
+          # Generate a fresh RSA-2048 keypair for this CI run only.
+          # Keys are never committed — generated fresh each run and passed via env.
+          openssl genrsa -out /tmp/smoke_private.pem 2048 2>/dev/null
+          openssl rsa -in /tmp/smoke_private.pem -pubout -out /tmp/smoke_public.pem 2>/dev/null
+          # Use GitHub Actions heredoc format so env vars contain real newlines.
+          # Docker Compose substitutes ${SMOKE_JWT_*} after YAML parsing, so
+          # multiline values are safe and the PEM parser receives actual newlines.
+          echo "SMOKE_JWT_PRIVATE_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/smoke_private.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+          echo "SMOKE_JWT_PUBLIC_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/smoke_public.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+
       - name: Start services
         run: |
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
