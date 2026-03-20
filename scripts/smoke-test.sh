@@ -176,6 +176,9 @@ CONC_START=$(date +%s%3N)
 
 for i in $(seq 1 8); do
   (
+    # Subshells inherit the parent EXIT trap — reset it so the first subshell to
+    # finish doesn't delete $TMPDIR_SMOKE before others can write their rc files.
+    trap - EXIT
     # timeout inside the subshell ensures grpcurl is killed and rc is always written.
     timeout "$TIMEOUT_S" grpcurl \
       -plaintext \
