@@ -219,7 +219,7 @@ jobs:
               -import-path shared/proto \
               -proto services/auth_service.proto \
               -d '{}' localhost:50051 \
-              construct.auth.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
+              shared.proto.services.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
               && { echo "✅ auth-service ready"; break; }
             echo "  attempt $i/40..."; sleep 2
           done

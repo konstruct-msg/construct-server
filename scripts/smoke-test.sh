@@ -100,7 +100,7 @@ _timed "GetPowChallenge (liveness)" grpcurl \
   -proto services/auth_service.proto \
   -d '{}' \
   "$AUTH_HOST" \
-  construct.auth.v1.AuthService/GetPowChallenge
+  shared.proto.services.v1.AuthService/GetPowChallenge
 
 # VerifyToken with a fake JWT: tests JWT validation path, not just missing-auth.
 # A real deadlock or blocking middleware would hang here too.
@@ -111,7 +111,7 @@ _timed_err "VerifyToken (invalid JWT → rejected fast)" grpcurl \
   -proto services/auth_service.proto \
   -d "{\"access_token\": \"$FAKE_JWT\"}" \
   "$AUTH_HOST" \
-  construct.auth.v1.AuthService/VerifyToken
+  shared.proto.services.v1.AuthService/VerifyToken
 
 # ── 3. Messaging service ──────────────────────────────────────────────────────
 echo ""
@@ -125,7 +125,7 @@ _timed_err "GetPendingMessages (no auth → rejected fast)" grpcurl \
   -proto services/messaging_service.proto \
   -d '{}' \
   "$MSG_HOST" \
-  construct.messaging.v1.MessagingService/GetPendingMessages
+  shared.proto.services.v1.MessagingService/GetPendingMessages
 
 # With a fake Bearer token → JWT middleware runs, must reject quickly.
 # Catches hangs in auth middleware that only trigger when Authorization header is present.
@@ -136,7 +136,7 @@ _timed_err "GetPendingMessages (fake JWT → rejected fast)" grpcurl \
   -H "Authorization: Bearer $FAKE_JWT" \
   -d '{}' \
   "$MSG_HOST" \
-  construct.messaging.v1.MessagingService/GetPendingMessages
+  shared.proto.services.v1.MessagingService/GetPendingMessages
 
 # ── 4. Key service ────────────────────────────────────────────────────────────
 echo ""
@@ -150,7 +150,7 @@ _timed_err "GetPreKeyBundle (no auth → rejected fast)" grpcurl \
   -proto services/key_service.proto \
   -d '{"user_id": "00000000-0000-0000-0000-000000000000"}' \
   "$KEY_HOST" \
-  construct.key.v1.KeyService/GetPreKeyBundle
+  shared.proto.services.v1.KeyService/GetPreKeyBundle
 
 # GetPreKeyBundle with fake JWT → tests auth middleware under the key service.
 _timed_err "GetPreKeyBundle (fake JWT → rejected fast)" grpcurl \
@@ -160,7 +160,7 @@ _timed_err "GetPreKeyBundle (fake JWT → rejected fast)" grpcurl \
   -H "Authorization: Bearer $FAKE_JWT" \
   -d '{"user_id": "00000000-0000-0000-0000-000000000000"}' \
   "$KEY_HOST" \
-  construct.key.v1.KeyService/GetPreKeyBundle
+  shared.proto.services.v1.KeyService/GetPreKeyBundle
 
 # ── 5. Concurrency: deadlock regression test ──────────────────────────────────
 # 8 parallel GetPendingMessages calls — ALL must complete within TIMEOUT_S seconds.
@@ -182,7 +182,7 @@ for i in $(seq 1 8); do
       -proto services/messaging_service.proto \
       -d '{}' \
       "$MSG_HOST" \
-      construct.messaging.v1.MessagingService/GetPendingMessages \
+      shared.proto.services.v1.MessagingService/GetPendingMessages \
       > "$TMPDIR_SMOKE/out_$i" 2>&1
     echo $? > "$TMPDIR_SMOKE/rc_$i"
   ) &
@@ -209,16 +209,19 @@ elif [ "$CONC_ELAPSED" -gt $(( TIMEOUT_S * 1000 )) ]; then
 else
   # Verify each call got a proper gRPC error (not connection refused or garbled output)
   CONC_OK=true
+  CONC_FAIL_REASON=""
   for i in $(seq 1 8); do
     rc=$(cat "$TMPDIR_SMOKE/rc_$i" 2>/dev/null || echo "missing")
     out=$(cat "$TMPDIR_SMOKE/out_$i" 2>/dev/null || echo "")
     if [ "$rc" = "missing" ]; then
       CONC_OK=false
+      CONC_FAIL_REASON="call $i: rc file missing (subshell may have been killed)"
       break
     fi
     # Connection refused = server crashed under load
     if echo "$out" | grep -qi "connection refused\|no such host"; then
       CONC_OK=false
+      CONC_FAIL_REASON="call $i: $(echo "$out" | grep -i 'connection refused\|no such host' | head -1)"
       break
     fi
   done
@@ -228,7 +231,7 @@ else
       _warn "Concurrency test — slow: ${CONC_ELAPSED}ms > ${WARN_MS}ms"
     fi
   else
-    _fail "Concurrency test — a call hit connection refused (server crashed under load?)"
+    _fail "Concurrency test — $CONC_FAIL_REASON"
   fi
 fi
 
