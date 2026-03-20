@@ -46,7 +46,7 @@ services:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: auth-service
     environment:
-      PORT: "50051"
+      PORT: "8081"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
@@ -94,7 +94,8 @@ services:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: messaging-service
     environment:
-      PORT: "50052"
+      PORT: "8082"
+      MESSAGING_GRPC_BIND_ADDRESS: "0.0.0.0:50052"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
