@@ -27,7 +27,7 @@ services:
       POSTGRES_DB: construct_smoke
     networks: [smoke]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U construct"]
+      test: ["CMD-SHELL", "pg_isready -U construct -d construct_smoke"]
       interval: 3s
       timeout: 3s
       retries: 15
@@ -53,6 +53,7 @@ services:
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
       KAFKA_ENABLED: "false"
+      LOG_HASH_SALT: smoke-test-log-salt-not-secret
       APNS_DEVICE_TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       APNS_KEY_ID: ""
       APNS_BUNDLE_ID: ""
@@ -81,6 +82,7 @@ services:
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       KAFKA_ENABLED: "false"
+      LOG_HASH_SALT: smoke-test-log-salt-not-secret
     ports:
       - "50057:50057"
     networks: [smoke]
@@ -99,6 +101,7 @@ services:
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
       KAFKA_ENABLED: "false"
+      LOG_HASH_SALT: smoke-test-log-salt-not-secret
       APNS_DEVICE_TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       APNS_KEY_ID: ""
       APNS_BUNDLE_ID: ""
@@ -122,6 +125,7 @@ services:
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
       ICE_ENABLED: "false"
+      LOG_HASH_SALT: smoke-test-log-salt-not-secret
     ports:
       - "8080:8080"
     networks: [smoke]
