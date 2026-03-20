@@ -12,7 +12,8 @@
 # Run from REPO ROOT: docker compose -f ops/docker-compose.smoke.yml up -d
 #
 # NO: Traefik, Vault, Kafka, Envoy, ICE, media-service, mls-service,
-#     sentinel-service, delivery-worker, notification-service, invite-service
+#     sentinel-service, delivery-worker, notification-service, invite-service,
+#     user-service, invite-service
 # =============================================================================
 
 name: construct-smoke
@@ -68,6 +69,22 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+
+  key-service:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: key-service
+    environment:
+      KEY_SERVICE_GRPC_ADDR: "0.0.0.0:50057"
+      DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: smoke-test-jwt-secret-must-be-at-least-32-chars
+      KAFKA_ENABLED: "false"
+    ports:
+      - "50057:50057"
+    networks: [smoke]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   messaging-service:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
