@@ -102,10 +102,11 @@ _timed "GetPowChallenge (liveness)" grpcurl \
   "$AUTH_HOST" \
   shared.proto.services.v1.AuthService/GetPowChallenge
 
-# VerifyToken with a fake JWT: tests JWT validation path, not just missing-auth.
-# A real deadlock or blocking middleware would hang here too.
+# VerifyToken with a fake JWT: VerifyToken always returns gRPC OK — it responds
+# with {valid: false} for bad tokens rather than an error status.
+# Test that it responds quickly (liveness + non-hanging, not rejection).
 FAKE_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzbW9rZS10ZXN0IiwiZXhwIjoxfQ.ZmFrZXNpZ25hdHVyZQ"
-_timed_err "VerifyToken (invalid JWT → rejected fast)" grpcurl \
+_timed "VerifyToken (invalid JWT → valid:false fast)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/auth_service.proto \
@@ -171,12 +172,12 @@ echo "--- Concurrency test (8 × GetPendingMessages in parallel) ---"
 TMPDIR_SMOKE=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_SMOKE"' EXIT
 
-PIDS=()
 CONC_START=$(date +%s%3N)
 
 for i in $(seq 1 8); do
   (
-    grpcurl \
+    # timeout inside the subshell ensures grpcurl is killed and rc is always written.
+    timeout "$TIMEOUT_S" grpcurl \
       -plaintext \
       -import-path "$PROTO_DIR" \
       -proto services/messaging_service.proto \
@@ -186,53 +187,48 @@ for i in $(seq 1 8); do
       > "$TMPDIR_SMOKE/out_$i" 2>&1
     echo $? > "$TMPDIR_SMOKE/rc_$i"
   ) &
-  PIDS+=($!)
 done
 
-TIMED_OUT=false
-for pid in "${PIDS[@]}"; do
-  if ! timeout "$TIMEOUT_S" tail --pid="$pid" -f /dev/null 2>/dev/null; then
-    TIMED_OUT=true
-    kill "$pid" 2>/dev/null || true
-  fi
-done
+# wait for all 8 background subshells; each has its own timeout so this is bounded.
+wait
 
 CONC_ELAPSED=$(( $(date +%s%3N) - CONC_START ))
 
-# Wait for any remaining subshells to settle
-wait 2>/dev/null || true
-
-if $TIMED_OUT; then
-  _fail "Concurrency test — at least one call hung (total: ${CONC_ELAPSED}ms)"
-elif [ "$CONC_ELAPSED" -gt $(( TIMEOUT_S * 1000 )) ]; then
-  _fail "Concurrency test — total wall time exceeded ${TIMEOUT_S}s (${CONC_ELAPSED}ms)"
-else
-  # Verify each call got a proper gRPC error (not connection refused or garbled output)
-  CONC_OK=true
-  CONC_FAIL_REASON=""
-  for i in $(seq 1 8); do
-    rc=$(cat "$TMPDIR_SMOKE/rc_$i" 2>/dev/null || echo "missing")
-    out=$(cat "$TMPDIR_SMOKE/out_$i" 2>/dev/null || echo "")
-    if [ "$rc" = "missing" ]; then
-      CONC_OK=false
-      CONC_FAIL_REASON="call $i: rc file missing (subshell may have been killed)"
-      break
-    fi
-    # Connection refused = server crashed under load
-    if echo "$out" | grep -qi "connection refused\|no such host"; then
-      CONC_OK=false
-      CONC_FAIL_REASON="call $i: $(echo "$out" | grep -i 'connection refused\|no such host' | head -1)"
-      break
-    fi
-  done
-  if $CONC_OK; then
-    _ok "8 concurrent calls all returned in ${CONC_ELAPSED}ms"
-    if [ "$CONC_ELAPSED" -gt "$WARN_MS" ]; then
-      _warn "Concurrency test — slow: ${CONC_ELAPSED}ms > ${WARN_MS}ms"
-    fi
-  else
-    _fail "Concurrency test — $CONC_FAIL_REASON"
+# Verify each call completed (rc file exists), didn't time out, and didn't see
+# connection refused (server crashed under load).
+CONC_OK=true
+CONC_FAIL_REASON=""
+for i in $(seq 1 8); do
+  rc=$(cat "$TMPDIR_SMOKE/rc_$i" 2>/dev/null || echo "missing")
+  out=$(cat "$TMPDIR_SMOKE/out_$i" 2>/dev/null || echo "")
+  if [ "$rc" = "missing" ]; then
+    CONC_OK=false
+    CONC_FAIL_REASON="call $i: rc file missing"
+    break
   fi
+  # rc=124 means grpcurl was killed by timeout → hung call = deadlock regression
+  if [ "$rc" = "124" ]; then
+    CONC_OK=false
+    CONC_FAIL_REASON="call $i: timed out after ${TIMEOUT_S}s (possible deadlock regression)"
+    break
+  fi
+  # Connection refused = server crashed under load
+  if echo "$out" | grep -qi "connection refused\|no such host"; then
+    CONC_OK=false
+    CONC_FAIL_REASON="call $i: $(echo "$out" | grep -i 'connection refused\|no such host' | head -1)"
+    break
+  fi
+done
+
+if [ "$CONC_ELAPSED" -gt $(( TIMEOUT_S * 1000 )) ]; then
+  _fail "Concurrency test — total wall time exceeded ${TIMEOUT_S}s (${CONC_ELAPSED}ms)"
+elif $CONC_OK; then
+  _ok "8 concurrent calls all returned in ${CONC_ELAPSED}ms"
+  if [ "$CONC_ELAPSED" -gt "$WARN_MS" ]; then
+    _warn "Concurrency test — slow: ${CONC_ELAPSED}ms > ${WARN_MS}ms"
+  fi
+else
+  _fail "Concurrency test — $CONC_FAIL_REASON"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
