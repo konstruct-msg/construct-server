@@ -137,7 +137,8 @@ async fn main() -> Result<()> {
                         )) => {
                             let upstream = upstream.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = proxy_to_upstream(ice_stream, &upstream, peer).await
+                                if let Err(e) =
+                                    proxy_to_upstream(*ice_stream, &upstream, peer).await
                                 {
                                     tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
                                 }
