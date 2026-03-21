@@ -180,14 +180,22 @@ pub async fn send_blind_notification(
         // Send notification via APNs
         // Note: FCM support can be added here with similar logic
         use construct_server_shared::apns::types::{
-            ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
+            AlertData, ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
         };
 
         let (push_type, priority, content_available, alert) = if use_visible {
-            // Visible alert: high priority, no content-available (payload has alert)
-            (PushType::Visible, NotificationPriority::High, None, None)
+            // Visible alert: high priority, alert text + content-available to wake app in background
+            (
+                PushType::Visible,
+                NotificationPriority::High,
+                Some(1u8),
+                Some(AlertData {
+                    title: "Construct".to_string(),
+                    body: "New message".to_string(),
+                }),
+            )
         } else {
-            // Silent background push: low priority, content-available = 1
+            // Silent background push: low priority, content-available = 1, no alert
             (PushType::Silent, NotificationPriority::Low, Some(1u8), None)
         };
 
