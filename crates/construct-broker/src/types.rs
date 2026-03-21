@@ -955,8 +955,10 @@ mod tests {
         let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.message_type, MessageType::Receipt);
-        assert_eq!(restored.sender_id, "alice");
-        assert_eq!(restored.recipient_id, "bob");
+        // After the receipt routing fix: sender_id = who sent the receipt (bob),
+        // recipient_id = original sender who gets notified (alice).
+        assert_eq!(restored.sender_id, "bob");
+        assert_eq!(restored.recipient_id, "alice");
 
         // The payload must be valid JSON containing message_ids and status
         let payload: serde_json::Value = serde_json::from_str(&restored.encrypted_payload)
