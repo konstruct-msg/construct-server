@@ -88,6 +88,7 @@ pub(crate) async fn handle_stream_request(
                         message_id: message_id.clone(),
                         encrypted_payload: envelope.encrypted_payload.to_vec(),
                         content_type: envelope.content_type,
+                        edits_message_id: envelope.edits_message_id.clone(),
                     });
 
                 let app_context = Arc::new(context.to_app_context());
