@@ -88,7 +88,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: auth_service
         endpoints:
@@ -104,7 +107,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: user_service
         endpoints:
@@ -139,7 +145,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: notification_service
         endpoints:
@@ -155,7 +164,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: invite_service
         endpoints:
@@ -171,7 +183,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: media_service
         endpoints:
@@ -187,7 +202,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: key_service
         endpoints:
@@ -203,7 +221,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: mls_service
         endpoints:
@@ -219,7 +240,10 @@ static_resources:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: sentinel_service
         endpoints:

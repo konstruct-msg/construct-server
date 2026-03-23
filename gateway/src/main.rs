@@ -8,15 +8,21 @@
 // All gRPC traffic is routed through Envoy → tonic services directly.
 // This gateway no longer performs REST proxying.
 //
+// IMPORTANT: The /.well-known/construct-server endpoint MUST return 200 for
+// the client DPI detector to work correctly. If it returns 404 (not found),
+// clients falsely detect DPI interference and switch to ICE unnecessarily,
+// adding 5-8 seconds to every connection attempt.
+//
 // ============================================================================
 
 mod handlers;
 pub mod routes;
 
 use anyhow::{Context, Result};
-use axum::{Router, http::StatusCode, response::Response};
+use axum::{Json, Router, extract::State, http::StatusCode, response::Response};
 use construct_config::Config;
 use construct_server_shared::metrics;
+use serde_json::json;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
@@ -35,12 +41,23 @@ async fn main() -> Result<()> {
     info!("=== API Gateway Service Starting ===");
     info!("Port: {}", config.port);
 
-    // Create router — health + metrics only (all API routes are gRPC via Envoy)
+    // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
+    // NOTE: .well-known MUST return 200 — clients use it to detect DPI interference.
+    // A 404 here causes false-positive DPI detection → unnecessary ICE auto-start → 5-8s delay.
     let app = Router::new()
         .route("/health", axum::routing::get(health_check))
         .route("/health/ready", axum::routing::get(health_check))
         .route("/health/live", axum::routing::get(health_check))
         .route("/metrics", axum::routing::get(metrics_endpoint))
+        .route(
+            "/.well-known/construct-server",
+            axum::routing::get(well_known_construct_server),
+        )
+        .route(
+            "/.well-known/konstruct",
+            axum::routing::get(well_known_construct_server),
+        )
+        .with_state(config.clone())
         .layer(TraceLayer::new_for_http());
 
     // Start plain listener
@@ -294,6 +311,54 @@ where
         ),
     }
     Ok(())
+}
+
+/// GET /.well-known/construct-server
+/// GET /.well-known/konstruct
+///
+/// Server discovery endpoint for DPI detection and ICE endpoint configuration.
+/// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
+/// DPI detection, triggering ICE auto-start and adding 5-8 seconds to every connection.
+async fn well_known_construct_server(
+    State(config): State<Arc<Config>>,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<serde_json::Value>,
+) {
+    let domain = &config.instance_domain;
+    let body = json!({
+        "version": "1.0",
+        "protocol": "grpc",
+        "server": {
+            "domain": domain,
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "grpc_endpoint": format!("{}:443", domain),
+        "services": [
+            "auth.AuthService",
+            "user.UserService",
+            "messaging.MessagingService",
+            "notification.NotificationService",
+            "invite.InviteService",
+            "media.MediaService"
+        ],
+        "ice": {
+            "primary": format!("ice.{}:443", domain),
+            "relays": [],
+        },
+        "capabilities": {
+            "max_message_size_bytes": 100_000,
+            "max_file_size_bytes": 100_000_000,
+            "supports_streaming": true,
+            "supports_grpc_web": true,
+        },
+    });
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(body),
+    )
 }
 
 /// Health check endpoint
