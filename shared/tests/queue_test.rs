@@ -108,6 +108,7 @@ async fn setup_queue() -> (MessageQueue, redis::Connection) {
         },
         db: construct_config::DbConfig {
             max_connections: 10,
+            min_connections: 0,
             acquire_timeout_secs: 30,
             idle_timeout_secs: 600,
         },
