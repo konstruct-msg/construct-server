@@ -241,6 +241,7 @@ impl MessagingService for MessagingGrpcService {
             }));
         }
 
+        let t_dispatch = std::time::Instant::now();
         let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
@@ -254,6 +255,13 @@ impl MessagingService for MessagingGrpcService {
         core::dispatch_envelope(&app_context, kafka_envelope)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        let total_ms = t_dispatch.elapsed().as_millis();
+        tracing::info!(
+            dispatch_ms = total_ms,
+            message_id = %message_id,
+            "send_message dispatch complete"
+        );
 
         Ok(Response::new(proto::SendMessageResponse {
             message_id,

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, device_id, restriction_type, status, evidence_text,\n                      created_at AS \"created_at: chrono::DateTime<chrono::Utc>\"\n               FROM disputes\n               WHERE device_id = $1\n               ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "restriction_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "evidence_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at: chrono::DateTime<chrono::Utc>",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "81312bdad84f3e44ebab5ba9919d7382c1caa713b856d87e3cab339286369617"
+}

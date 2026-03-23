@@ -58,3 +58,4 @@ DEPLOY_*.md
 
 # Local test environment
 .env.test
+.aider*

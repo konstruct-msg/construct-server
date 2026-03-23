@@ -252,12 +252,27 @@ pub(crate) async fn poll_messages(
     let user_id_str = user_id.to_string();
     let limit = 50;
 
+    let t_lock = std::time::Instant::now();
     let mut queue = context.queue.lock().await;
+    let lock_wait_ms = t_lock.elapsed().as_millis();
+
+    let t_xread = std::time::Instant::now();
     let messages = queue
         .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
         .await?;
+    let xread_ms = t_xread.elapsed().as_millis();
 
     drop(queue);
+
+    let msg_count = messages.len();
+    if lock_wait_ms > 20 || xread_ms > 20 {
+        tracing::info!(
+            lock_wait_ms,
+            xread_ms,
+            msg_count,
+            "poll_messages timing (slow)"
+        );
+    }
 
     for (stream_id, envelope) in messages {
         // Convert KafkaMessageEnvelope to the appropriate stream response
