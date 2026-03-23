@@ -26,8 +26,7 @@ use construct_server_shared::sentinel::{
 use core::SentinelCore;
 
 // ============================================================================
-// Helper: extract caller device_id from request metadata
-// (populated by Envoy JWT auth filter)
+// Helpers
 // ============================================================================
 
 fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
@@ -36,6 +35,22 @@ fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))
+}
+
+fn require_admin<T>(req: &Request<T>) -> Result<(), Status> {
+    let expected = env::var("ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        return Err(Status::internal("Admin token not configured"));
+    }
+    let provided = req
+        .metadata()
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided != expected {
+        return Err(Status::permission_denied("Invalid admin token"));
+    }
+    Ok(())
 }
 
 fn restriction_type_str(rt: i32) -> &'static str {
@@ -93,7 +108,13 @@ impl SentinelService for SentinelServiceImpl {
             .core
             .report_spam(&reporter, &req.reported_device_id, category)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                if e.to_string().contains("Report rate limit") {
+                    Status::resource_exhausted("Report rate limit exceeded")
+                } else {
+                    Status::internal(e.to_string())
+                }
+            })?;
 
         Ok(Response::new(proto::ReportSpamResponse {
             accepted: true,
@@ -189,7 +210,6 @@ impl SentinelService for SentinelServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Map internal enum to proto enum value
         let trust_level_val = match trust {
             core::TrustLevel::New => 1,
             core::TrustLevel::Warming => 2,
@@ -248,7 +268,15 @@ impl SentinelService for SentinelServiceImpl {
             .core
             .submit_appeal(&device_id, restriction, &req.context)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                if e.to_string().contains("already pending") {
+                    Status::already_exists(e.to_string())
+                } else if e.to_string().contains("No active") {
+                    Status::failed_precondition(e.to_string())
+                } else {
+                    Status::internal(e.to_string())
+                }
+            })?;
 
         Ok(Response::new(proto::AppealRestrictionResponse {
             submitted: true,
@@ -257,13 +285,166 @@ impl SentinelService for SentinelServiceImpl {
         }))
     }
 
-    // ── GetProtectionStats ────────────────────────────────────────────────────
+    // ── GetAppeals ────────────────────────────────────────────────────────────
+
+    async fn get_appeals(
+        &self,
+        request: Request<proto::GetAppealsRequest>,
+    ) -> Result<Response<proto::GetAppealsResponse>, Status> {
+        let device_id = caller_device_id(&request)?;
+
+        let appeals = self
+            .core
+            .get_appeals(&device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let proto_appeals: Vec<proto::AppealInfo> = appeals
+            .into_iter()
+            .map(|a| {
+                let restriction_type = match a.restriction_type.as_str() {
+                    "rate_limited" => 1,
+                    "flagged" => 2,
+                    "banned" => 3,
+                    _ => 0,
+                };
+                proto::AppealInfo {
+                    id: a.id,
+                    restriction_type,
+                    context: a.context,
+                    status: a.status,
+                    created_at: Some(prost_types::Timestamp {
+                        seconds: chrono::DateTime::parse_from_rfc3339(&a.created_at)
+                            .map(|dt| dt.timestamp())
+                            .unwrap_or(0),
+                        nanos: 0,
+                    }),
+                    reviewed_at: a.reviewed_at.and_then(|rt| {
+                        chrono::DateTime::parse_from_rfc3339(&rt).ok().map(|dt| {
+                            prost_types::Timestamp {
+                                seconds: dt.timestamp(),
+                                nanos: 0,
+                            }
+                        })
+                    }),
+                }
+            })
+            .collect();
+
+        Ok(Response::new(proto::GetAppealsResponse {
+            appeals: proto_appeals,
+        }))
+    }
+
+    // ── SubmitDispute ─────────────────────────────────────────────────────────
+
+    async fn submit_dispute(
+        &self,
+        request: Request<proto::SubmitDisputeRequest>,
+    ) -> Result<Response<proto::SubmitDisputeResponse>, Status> {
+        let device_id = caller_device_id(&request)?;
+        let req = request.into_inner();
+        let restriction = restriction_type_str(req.restriction_type);
+
+        if restriction == "unspecified" {
+            return Err(Status::invalid_argument("restriction_type is required"));
+        }
+
+        let dispute_id = self
+            .core
+            .submit_dispute(&device_id, restriction, &req.evidence_text)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("Too many pending") {
+                    Status::resource_exhausted(e.to_string())
+                } else if e.to_string().contains("not banned")
+                    || e.to_string().contains("not flagged")
+                {
+                    Status::failed_precondition(e.to_string())
+                } else {
+                    Status::internal(e.to_string())
+                }
+            })?;
+
+        // Check if auto-resolved (device was unbanned during dispute)
+        let trust = self
+            .core
+            .trust_level(&device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let auto_resolved = match restriction {
+            "banned" => trust != core::TrustLevel::Banned,
+            "flagged" => trust != core::TrustLevel::Flagged,
+            _ => false,
+        };
+
+        let status = if auto_resolved {
+            "approved"
+        } else {
+            "pending_review"
+        };
+
+        Ok(Response::new(proto::SubmitDisputeResponse {
+            submitted: true,
+            dispute_id,
+            status: status.to_string(),
+            auto_resolved,
+        }))
+    }
+
+    // ── GetDisputes ───────────────────────────────────────────────────────────
+
+    async fn get_disputes(
+        &self,
+        request: Request<proto::GetDisputesRequest>,
+    ) -> Result<Response<proto::GetDisputesResponse>, Status> {
+        let device_id = caller_device_id(&request)?;
+
+        let disputes = self
+            .core
+            .get_disputes(&device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let proto_disputes: Vec<proto::DisputeInfo> = disputes
+            .into_iter()
+            .map(|d| {
+                let restriction_type = match d.restriction_type.as_str() {
+                    "rate_limited" => 1,
+                    "flagged" => 2,
+                    "banned" => 3,
+                    _ => 0,
+                };
+                proto::DisputeInfo {
+                    id: d.id,
+                    restriction_type,
+                    evidence_text: d.evidence_text,
+                    auto_evidence: String::new(), // not exposed to client
+                    status: d.status,
+                    created_at: Some(prost_types::Timestamp {
+                        seconds: chrono::DateTime::parse_from_rfc3339(&d.created_at)
+                            .map(|dt| dt.timestamp())
+                            .unwrap_or(0),
+                        nanos: 0,
+                    }),
+                }
+            })
+            .collect();
+
+        Ok(Response::new(proto::GetDisputesResponse {
+            disputes: proto_disputes,
+        }))
+    }
+
+    // ── GetProtectionStats (admin) ────────────────────────────────────────────
 
     async fn get_protection_stats(
         &self,
-        _request: Request<proto::GetProtectionStatsRequest>,
+        request: Request<proto::GetProtectionStatsRequest>,
     ) -> Result<Response<proto::GetProtectionStatsResponse>, Status> {
-        // TODO: add admin auth check
+        require_admin(&request)?;
+
         let stats = self
             .core
             .protection_stats()
@@ -277,6 +458,81 @@ impl SentinelService for SentinelServiceImpl {
             rate_limit_violations_24h: stats.rate_limit_violations_24h,
             blocks_created_24h: stats.blocks_created_24h,
             appeals_pending: stats.appeals_pending,
+        }))
+    }
+
+    // ── AdminBanDevice ────────────────────────────────────────────────────────
+
+    async fn admin_ban_device(
+        &self,
+        request: Request<proto::AdminBanDeviceRequest>,
+    ) -> Result<Response<proto::AdminBanDeviceResponse>, Status> {
+        require_admin(&request)?;
+        let req = request.into_inner();
+
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        self.core
+            .set_banned(&req.device_id, &req.reason)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(device_id = %req.device_id, reason = %req.reason, "admin banned device");
+
+        Ok(Response::new(proto::AdminBanDeviceResponse {
+            success: true,
+        }))
+    }
+
+    // ── AdminUnbanDevice ──────────────────────────────────────────────────────
+
+    async fn admin_unban_device(
+        &self,
+        request: Request<proto::AdminUnbanDeviceRequest>,
+    ) -> Result<Response<proto::AdminUnbanDeviceResponse>, Status> {
+        require_admin(&request)?;
+        let req = request.into_inner();
+
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        self.core
+            .clear_ban(&req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(device_id = %req.device_id, "admin unbanned device");
+
+        Ok(Response::new(proto::AdminUnbanDeviceResponse {
+            success: true,
+        }))
+    }
+
+    // ── AdminClearFlag ────────────────────────────────────────────────────────
+
+    async fn admin_clear_flag(
+        &self,
+        request: Request<proto::AdminClearFlagRequest>,
+    ) -> Result<Response<proto::AdminClearFlagResponse>, Status> {
+        require_admin(&request)?;
+        let req = request.into_inner();
+
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        self.core
+            .clear_flag(&req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(device_id = %req.device_id, "admin cleared flag");
+
+        Ok(Response::new(proto::AdminClearFlagResponse {
+            success: true,
         }))
     }
 }

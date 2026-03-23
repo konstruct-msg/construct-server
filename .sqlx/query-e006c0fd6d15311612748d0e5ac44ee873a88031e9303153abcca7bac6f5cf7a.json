@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FROM restriction_appeals\n             WHERE device_id = $1 AND restriction_type = $2 AND status = 'pending_review'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e006c0fd6d15311612748d0e5ac44ee873a88031e9303153abcca7bac6f5cf7a"
+}
