@@ -192,7 +192,12 @@ pub(crate) async fn handle_stream_request(
 ///
 /// Spawns a background task — exits automatically when the receiver is dropped
 /// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
-/// so the fallback 60s poll is never triggered in normal operation.
+/// so the fallback 5s poll is never triggered in normal operation.
+///
+/// **Race-condition protection**: sends a synthetic wakeup signal immediately after
+/// each successful SUBSCRIBE. This triggers an extra `poll_messages` call that catches
+/// any messages that were XADD'd to the stream between stream-open and subscribe
+/// completion (~50 ms window), preventing up to 5 s delivery delay on reconnect.
 pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
     tokio::spawn(async move {
         let channel = format!("inbox:wakeup:{}", user_id);
@@ -222,6 +227,14 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
                 continue;
             }
             tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
+
+            // Synthetic wakeup immediately after subscribe: polls for any messages
+            // that were dispatched during the TCP-connect + SUBSCRIBE window (~50 ms).
+            // Without this, those messages would wait for the next fallback poll (5s).
+            if tx.send(()).await.is_err() {
+                return; // stream closed
+            }
+
             let mut stream = pubsub.into_on_message();
             loop {
                 match stream.next().await {
