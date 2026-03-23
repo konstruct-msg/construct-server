@@ -3,12 +3,10 @@
 # =============================================================================
 # Architecture:
 #   Traefik — TLS termination (Let's Encrypt ACME) + routing
-#     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
-#     ├→ vault.ams.konstruct.cc    → Vault (:8200, UI only)
-#     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
-#     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
+#     ├→ ams.konstruct.cc              → Envoy (:8080, gRPC API)
+#     ├→ grafana.ams.konstruct.cc      → Grafana (:3000)
+#     └→ prometheus.ams.konstruct.cc   → Prometheus (:9090)
 #   Envoy — gRPC-web routing to Rust microservices
-#   Vault — secrets store (UI/reference only, NOT in deploy critical path)
 #
 # Secrets management:
 #   /opt/construct/secrets/app.env — manually maintained on the server.
@@ -31,37 +29,6 @@
 #
 # Redeploy after code changes:
 #   git pull && docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
-# =============================================================================
-# Architecture:
-#   Traefik — TLS termination (Let's Encrypt ACME) + routing
-#     ├→ ams.konstruct.cc          → Envoy (:8080, gRPC API)
-#     ├→ vault.ams.konstruct.cc    → Vault (:8200)
-#     ├→ grafana.ams.konstruct.cc  → Grafana (:3000)
-#     └→ prometheus.ams.konstruct.cc → Prometheus (:9090)
-#   Envoy — gRPC-web routing to Rust microservices
-#   Vault — secrets store
-
-#
-# DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
-# TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
-#
-# External services (not in this compose):
-#   Database : Supabase (DATABASE_URL in Vault)
-#   Redis    : Upstash  (REDIS_URL in Vault)
-#
-# First-time setup (run from REPO ROOT, not from ops/):
-#   1. cp ops/.env.example .env && nano .env
-#   2. docker compose -f ops/docker-compose.prod.yml --env-file .env up -d vault traefik
-#   3. docker exec construct-vault vault operator init  # save unseal keys!
-#   4. docker exec construct-vault vault operator unseal  # x3
-#   5. docker exec construct-vault sh /vault/scripts/vault-setup.sh
-#   6. docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
-#
-# Redeploy after code changes:
-#   docker compose -f ops/docker-compose.prod.yml --env-file .env up -d --build --no-deps <service>
-#
-# NOTE: Always run with --env-file .env from repo root, or create a symlink:
-#   ln -s $(pwd)/.env ops/.env
 # =============================================================================
 
 name: construct
@@ -114,47 +81,6 @@ services:
       - "traefik.http.routers.traefik.service=api@internal"
       - "traefik.http.routers.traefik.middlewares=auth-basic"
       - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
-
-  # ─── Vault (secrets store) ───────────────────────────────────────────────
-
-  vault:
-    image: hashicorp/vault:1.19
-    container_name: construct-vault
-    restart: unless-stopped
-    cap_add:
-      - IPC_LOCK # prevents secrets from being swapped to disk
-    environment:
-      VAULT_ADDR: http://0.0.0.0:8200
-    volumes:
-      - vault-data:/vault/data
-      - vault-auth:/vault/auth # AppRole credentials (role_id, secret_id)
-      - ./vault/vault.hcl:/vault/config/vault.hcl:ro
-      - ./vault/vault-setup.sh:/vault/scripts/vault-setup.sh:ro
-    command: vault server -config=/vault/config/vault.hcl
-    networks:
-      - internal
-    healthcheck:
-      # exit 0=unsealed, exit 2=sealed/uninitialized — both mean Vault is running
-      test:
-        [
-          "CMD",
-          "sh",
-          "-c",
-          "vault status -address=http://127.0.0.1:8200; r=$$?; [ $$r -eq 0 ] || [ $$r -eq 2 ]",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    labels:
-      - "traefik.enable=true"
-      # Vault UI only accessible via a separate subdomain, not the main API
-      - "traefik.http.routers.vault.rule=Host(`vault.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.vault.entrypoints=websecure"
-      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
-      - "traefik.http.services.vault.loadbalancer.server.port=8200"
-
-  # ─── Vault Agent (init: fetches secrets → /secrets/app.env) ──────────────
 
   # ─── Envoy (gRPC-web routing) ─────────────────────────────────────────────
 
@@ -474,8 +400,6 @@ services:
 
 volumes:
   traefik-certs:
-  vault-data: # Vault encrypted storage
-  vault-auth: # AppRole credentials (role_id, secret_id)
   prometheus-data:
   grafana-data:
 
