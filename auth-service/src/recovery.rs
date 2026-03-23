@@ -177,9 +177,9 @@ pub async fn verify_recovery_signature(
         .fetch_optional(db)
         .await?
     } else {
-        // identifier is a username → hash and look up by hash; fall back to plaintext for legacy rows
+        // identifier is a username → hash and look up by hash
         let hash = hash_username(hmac_secret, identifier);
-        let by_hash = sqlx::query_as::<_, RecoveryKeyRow>(
+        sqlx::query_as::<_, RecoveryKeyRow>(
             r#"
             SELECT id, recovery_public_key, last_recovery_at
             FROM users
@@ -188,22 +188,7 @@ pub async fn verify_recovery_signature(
         )
         .bind(&hash)
         .fetch_optional(db)
-        .await?;
-        if by_hash.is_some() {
-            by_hash
-        } else {
-            // Legacy fallback: pre-034 rows that still have plaintext username
-            sqlx::query_as::<_, RecoveryKeyRow>(
-                r#"
-                SELECT id, recovery_public_key, last_recovery_at
-                FROM users
-                WHERE username = $1
-                "#,
-            )
-            .bind(identifier)
-            .fetch_optional(db)
-            .await?
-        }
+        .await?
     };
 
     let row = row.ok_or_else(|| anyhow::anyhow!("Account not found"))?;

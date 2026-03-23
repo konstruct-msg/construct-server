@@ -63,7 +63,7 @@ impl UserService for UserGrpcService {
 
         Ok(Response::new(proto::UserProfile {
             user_id: user.id.to_string(),
-            username: user.username,
+            username: None, // server no longer stores plaintext username
             display_name: None,
             bio: None,
             profile_picture_url: None,
@@ -134,7 +134,7 @@ impl UserService for UserGrpcService {
 
         Ok(Response::new(proto::UserProfile {
             user_id: updated.id.to_string(),
-            username: updated.username,
+            username: None, // server no longer stores plaintext username
             display_name: None,
             bio: None,
             profile_picture_url: None,
@@ -265,7 +265,7 @@ impl UserService for UserGrpcService {
             .into_iter()
             .map(|u| proto::BlockedUser {
                 user_id: u.user_id.to_string(),
-                username: u.username.unwrap_or_default(),
+                username: String::new(), // server no longer stores plaintext username
                 blocked_at: u.blocked_at.timestamp_millis(),
                 reason: u.reason,
             })
@@ -387,7 +387,7 @@ impl UserService for UserGrpcService {
             "data_notice": "Construct is a privacy-first messenger. Message content is never stored on the server. This export contains only your account metadata.",
             "profile": {
                 "user_id": user.id.to_string(),
-                "username": user.username,
+                "username": null, // server no longer stores plaintext username
                 "account_created": null,
             },
             "devices": device_list,
@@ -434,7 +434,9 @@ impl UserService for UserGrpcService {
         }
 
         use construct_server_shared::db;
-        match db::get_user_by_username(&self.context.db_pool, &normalized).await {
+        let secret = &self.context.config.security.username_hmac_secret;
+        let hash = hash_username(secret, &normalized);
+        match db::get_user_by_username_hash(&self.context.db_pool, &hash).await {
             Ok(None) => Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
                 available: true,
                 reason: None,
@@ -484,23 +486,6 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to apply database migrations")?;
     info!("Database migrations applied successfully");
-
-    // Backfill username_hash for legacy rows (one-time, idempotent)
-    {
-        let secret = config.security.username_hmac_secret.clone();
-        let backfilled =
-            construct_server_shared::db::backfill_username_hashes(&db_pool, |username| {
-                hash_username(&secret, username)
-            })
-            .await
-            .context("Failed to backfill username hashes")?;
-        if backfilled > 0 {
-            info!(
-                count = backfilled,
-                "Backfilled username_hash for legacy users"
-            );
-        }
-    }
 
     // Initialize Redis
     info!("Connecting to Redis...");
