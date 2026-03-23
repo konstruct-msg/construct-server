@@ -12,7 +12,12 @@ pub type DbPool = Pool<Postgres>;
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
+    /// Plaintext username — NULL for all users created after migration 034.
+    /// Kept temporarily for backward-compat; will be dropped in migration 035.
     pub username: Option<String>,
+    /// HMAC-SHA256(server_secret, normalised_username) — 32 bytes.
+    /// NULL for anonymous accounts or legacy rows not yet migrated.
+    pub username_hash: Option<Vec<u8>>,
     pub recovery_public_key: Option<Vec<u8>>,
     pub last_recovery_at: Option<DateTime<Utc>>,
     pub primary_device_id: Option<String>,
@@ -55,7 +60,7 @@ pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbP
 pub async fn get_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         FROM users
         WHERE id = $1
         "#,
@@ -67,11 +72,32 @@ pub async fn get_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<User
     Ok(user)
 }
 
-/// Get user by username (passwordless, optional field)
+/// Look up a user by their HMAC username hash (migration 034+).
+pub async fn get_user_by_username_hash(
+    pool: &DbPool,
+    username_hash: &[u8],
+) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        FROM users
+        WHERE username_hash = $1
+        "#,
+    )
+    .bind(username_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Legacy lookup by plaintext username — used only for account recovery of rows
+/// that pre-date migration 034 and have not yet been re-hashed.
+/// New code should use `get_user_by_username_hash`.
 pub async fn get_user_by_username(pool: &DbPool, username: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         FROM users
         WHERE username = $1
         "#,
@@ -83,52 +109,54 @@ pub async fn get_user_by_username(pool: &DbPool, username: &str) -> Result<Optio
     Ok(user)
 }
 
-/// Set or clear username for a passwordless user account.
-/// `username = Some(value)` sets username, `None` clears it.
+/// Set or clear the username hash for a user account.
+///
+/// Pass `Some(hash)` to set a new username (computed by the caller via
+/// `construct_crypto::hash_username`).  Pass `None` to make the account anonymous.
+///
+/// The plaintext `username` column is always set to NULL — the server must not
+/// retain the plaintext value after this call.
 pub async fn update_user_username(
     pool: &DbPool,
     user_id: &Uuid,
-    username: Option<&str>,
+    username_hash: Option<&[u8]>,
 ) -> Result<User> {
     let user = sqlx::query_as::<_, User>(
         r#"
         UPDATE users
-        SET username = $1
+        SET username      = NULL,
+            username_hash = $1
         WHERE id = $2
-        RETURNING id, username, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
-    .bind(username)
+    .bind(username_hash)
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .context("Failed to update username")?;
+    .context("Failed to update username hash")?;
 
     Ok(user)
 }
 
-/// Create a new user (passwordless, device-based)
+/// Create a new user (passwordless, device-based).
 ///
-/// # Arguments
-/// * `pool` - Database pool
-/// * `username` - Optional username (NULL = Signal-like privacy)
-/// * `primary_device_id` - First device registered for this user
-///
-/// # Returns
-/// The created user record with generated UUID
+/// `username_hash` — pass the output of `construct_crypto::hash_username` for users
+/// that want a searchable handle, or `None` for anonymous accounts.
+/// The plaintext username is never stored.
 pub async fn create_user_passwordless(
     pool: &DbPool,
-    username: Option<&str>,
+    username_hash: Option<&[u8]>,
     primary_device_id: &str,
 ) -> Result<User> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username, primary_device_id)
+        INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, $2)
-        RETURNING id, username, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
-    .bind(username)
+    .bind(username_hash)
     .bind(primary_device_id)
     .fetch_one(pool)
     .await
@@ -792,27 +820,27 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
 /// Tuple of (User, Device)
 pub async fn create_user_with_first_device(
     pool: &DbPool,
-    username: Option<&str>,
+    username_hash: Option<&[u8]>,
     device_data: CreateDeviceData,
 ) -> Result<(User, Device)> {
     // Start transaction
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    // 1. Create user WITHOUT primary_device_id (to avoid FK constraint violation)
+    // 1. Create user WITHOUT primary_device_id (to avoid FK constraint violation).
+    //    Plaintext username is never stored — only the HMAC hash.
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username, primary_device_id)
+        INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, NULL)
-        RETURNING id, username, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
-    .bind(username)
+    .bind(username_hash)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(
             error = %e,
-            username = ?username,
             "Failed to create user in database"
         );
         anyhow::anyhow!("Failed to create user: {}", e)
@@ -849,7 +877,7 @@ pub async fn create_user_with_first_device(
     tracing::info!(
         user_id = %user.id,
         device_id = %device.device_id,
-        username = ?username,
+        has_username = username_hash.is_some(),
         "Created user with first device"
     );
 

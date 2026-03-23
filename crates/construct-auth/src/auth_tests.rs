@@ -123,6 +123,7 @@ XQIDAQAB
                 max_pow_challenges_per_hour: 5,
                 max_registrations_per_hour: 3,
                 pow_difficulty: 1,
+                username_hmac_secret: vec![0u8; 32],
             },
             kafka: KafkaConfig {
                 enabled: false,
