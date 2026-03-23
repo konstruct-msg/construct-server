@@ -109,6 +109,52 @@ pub async fn get_user_by_username(pool: &DbPool, username: &str) -> Result<Optio
     Ok(user)
 }
 
+/// One-time backfill: compute `username_hash` for all legacy rows that still
+/// have a plaintext `username` but no `username_hash`.
+///
+/// Returns the number of rows updated.
+pub async fn backfill_username_hashes<F>(pool: &DbPool, hash_fn: F) -> Result<u64>
+where
+    F: Fn(&str) -> Vec<u8>,
+{
+    // Fetch all rows that need migration
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, username
+        FROM users
+        WHERE username IS NOT NULL
+          AND username_hash IS NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = rows.len() as u64;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    for (id, username) in &rows {
+        let hash = hash_fn(username);
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET username_hash = $1,
+                username      = NULL
+            WHERE id = $2
+              AND username_hash IS NULL
+            "#,
+        )
+        .bind(&hash)
+        .bind(id)
+        .execute(pool)
+        .await
+        .with_context(|| format!("backfill username_hash for user {id}"))?;
+    }
+
+    Ok(count)
+}
+
 /// Set or clear the username hash for a user account.
 ///
 /// Pass `Some(hash)` to set a new username (computed by the caller via

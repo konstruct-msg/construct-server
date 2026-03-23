@@ -485,6 +485,23 @@ async fn main() -> Result<()> {
         .context("Failed to apply database migrations")?;
     info!("Database migrations applied successfully");
 
+    // Backfill username_hash for legacy rows (one-time, idempotent)
+    {
+        let secret = config.security.username_hmac_secret.clone();
+        let backfilled =
+            construct_server_shared::db::backfill_username_hashes(&db_pool, |username| {
+                hash_username(&secret, username)
+            })
+            .await
+            .context("Failed to backfill username hashes")?;
+        if backfilled > 0 {
+            info!(
+                count = backfilled,
+                "Backfilled username_hash for legacy users"
+            );
+        }
+    }
+
     // Initialize Redis
     info!("Connecting to Redis...");
     let queue = Arc::new(Mutex::new(
