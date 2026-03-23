@@ -23,4 +23,8 @@ BEGIN
 END;
 $$;
 
+-- Drop trigger and function that guarded the now-removed username column.
+DROP TRIGGER IF EXISTS users_username_not_reserved ON users;
+DROP FUNCTION IF EXISTS check_username_not_reserved();
+
 ALTER TABLE users DROP COLUMN IF EXISTS username;
