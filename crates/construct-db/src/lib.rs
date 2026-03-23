@@ -29,17 +29,18 @@ pub struct BlockedUser {
 use construct_config::DbConfig;
 
 pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbPool> {
-    // sqlx 0.8 API - используем доступные методы
-    // connect_timeout недоступен в 0.8, используем acquire_timeout и idle_timeout
     let pool = PgPoolOptions::new()
         .max_connections(db_config.max_connections)
+        .min_connections(db_config.min_connections)
         .acquire_timeout(std::time::Duration::from_secs(
             db_config.acquire_timeout_secs,
         ))
         .idle_timeout(Some(std::time::Duration::from_secs(
             db_config.idle_timeout_secs,
         )))
-        .test_before_acquire(true) // Test connections before returning from pool
+        // Proactively verify connections before use. On Docker networks this costs ~1 ms but
+        // prevents silent failures when Postgres restarted and the pool holds stale sockets.
+        .test_before_acquire(true)
         .connect(database_url)
         .await?;
 

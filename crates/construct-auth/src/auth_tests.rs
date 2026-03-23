@@ -169,6 +169,7 @@ XQIDAQAB
             },
             db: DbConfig {
                 max_connections: 1,
+                min_connections: 0,
                 acquire_timeout_secs: 5,
                 idle_timeout_secs: 60,
             },
