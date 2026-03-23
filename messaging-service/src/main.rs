@@ -94,8 +94,8 @@ async fn main() -> Result<()> {
     let auth_manager =
         Arc::new(AuthManager::new(&config).context("Failed to initialize auth manager")?);
 
-    // ✅ NEW: Initialize APNs Client for push notifications
-    info!("Initializing APNs client...");
+    // Initialize APNs production client
+    info!("Initializing APNs production client...");
     let apns_client = Arc::new(
         construct_server_shared::apns::ApnsClient::new(config.apns.clone())
             .context("Failed to initialize APNs client")?,
@@ -105,14 +105,34 @@ async fn main() -> Result<()> {
             tracing::error!(
                 error = %e,
                 key_path = %config.apns.key_path,
-                "APNs initialization failed — push notifications DISABLED until key is deployed"
+                "APNs production client init failed — production push DISABLED"
             );
         }
     } else if config.apns.enabled {
-        info!("APNs client initialized and ENABLED");
+        info!("APNs production client initialized and ENABLED");
     } else {
-        info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");
+        info!("APNs production client initialized but DISABLED (APNS_ENABLED=false)");
     }
+
+    // Initialize APNs sandbox client (for development/TestFlight builds)
+    info!("Initializing APNs sandbox client...");
+    let mut sandbox_config = config.apns.clone();
+    sandbox_config.environment = construct_config::ApnsEnvironment::Development;
+    let apns_sandbox_client = Arc::new(
+        construct_server_shared::apns::ApnsClient::new(sandbox_config)
+            .context("Failed to initialize APNs sandbox client")?,
+    );
+    if let Err(e) = apns_sandbox_client.initialize().await {
+        if config.apns.enabled {
+            tracing::warn!(
+                error = %e,
+                "APNs sandbox client init failed — sandbox push DISABLED"
+            );
+        }
+    } else if config.apns.enabled {
+        info!("APNs sandbox client initialized and ENABLED");
+    }
+
     let token_encryption = Arc::new(
         DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
             .context("Failed to initialize device token encryption")?,
@@ -167,6 +187,7 @@ async fn main() -> Result<()> {
         auth_manager,
         kafka_producer,
         apns_client,
+        apns_sandbox_client,
         token_encryption,
         config: config.clone(),
         key_management,

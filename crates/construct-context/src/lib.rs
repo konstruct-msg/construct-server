@@ -48,8 +48,10 @@ pub struct AppContext {
     /// Kafka producer for reliable message delivery (Phase 1+)
     /// Optional: some services (like auth) don't need Kafka
     pub kafka_producer: Option<Arc<MessageProducer>>,
-    /// APNs client for push notifications
+    /// APNs client for push notifications (production tokens)
     pub apns_client: Arc<ApnsClient>,
+    /// APNs sandbox client for development/TestFlight tokens
+    pub apns_sandbox_client: Arc<ApnsClient>,
     /// Device token encryption for privacy
     pub token_encryption: Arc<DeviceTokenEncryption>,
     /// Unique identifier for this server instance (for delivery worker coordination)
@@ -89,6 +91,7 @@ impl AppContext {
         config: Arc<Config>,
         kafka_producer: Option<Arc<MessageProducer>>,
         apns_client: Arc<ApnsClient>,
+        apns_sandbox_client: Arc<ApnsClient>,
         token_encryption: Arc<DeviceTokenEncryption>,
         server_instance_id: String,
     ) -> Self {
@@ -102,6 +105,7 @@ impl AppContext {
             config,
             kafka_producer,
             apns_client,
+            apns_sandbox_client,
             token_encryption,
             server_instance_id,
             // gateway_client removed
@@ -199,6 +203,7 @@ impl AppContext {
     pub fn notifications(&self) -> NotificationContextRef<'_> {
         NotificationContextRef {
             apns_client: &self.apns_client,
+            apns_sandbox_client: &self.apns_sandbox_client,
             token_encryption: &self.token_encryption,
         }
     }
@@ -251,6 +256,7 @@ pub struct AuthContextRef<'a> {
 /// Notification context reference (Phase 2.7)
 pub struct NotificationContextRef<'a> {
     pub apns_client: &'a Arc<ApnsClient>,
+    pub apns_sandbox_client: &'a Arc<ApnsClient>,
     pub token_encryption: &'a Arc<DeviceTokenEncryption>,
 }
 
@@ -283,6 +289,7 @@ pub struct AppContextBuilder {
     config: Option<Arc<Config>>,
     kafka_producer: Option<Arc<MessageProducer>>,
     apns_client: Option<Arc<ApnsClient>>,
+    apns_sandbox_client: Option<Arc<ApnsClient>>,
     token_encryption: Option<Arc<DeviceTokenEncryption>>,
     server_instance_id: Option<String>,
     // gateway_client removed
@@ -301,6 +308,7 @@ impl AppContextBuilder {
             config: None,
             kafka_producer: None,
             apns_client: None,
+            apns_sandbox_client: None,
             token_encryption: None,
             server_instance_id: None,
             // gateway_client removed
@@ -338,6 +346,11 @@ impl AppContextBuilder {
 
     pub fn with_apns_client(mut self, apns_client: Arc<ApnsClient>) -> Self {
         self.apns_client = Some(apns_client);
+        self
+    }
+
+    pub fn with_apns_sandbox_client(mut self, apns_sandbox_client: Arc<ApnsClient>) -> Self {
+        self.apns_sandbox_client = Some(apns_sandbox_client);
         self
     }
 
@@ -389,6 +402,13 @@ impl AppContextBuilder {
             .server_signer_override
             .or_else(|| AppContext::init_server_signer(&config));
 
+        let apns_client: Arc<ApnsClient> = self
+            .apns_client
+            .ok_or_else(|| "apns_client is required".to_string())?;
+        let apns_sandbox_client: Arc<ApnsClient> = self
+            .apns_sandbox_client
+            .unwrap_or_else(|| apns_client.clone());
+
         Ok(AppContext {
             db_pool: self
                 .db_pool
@@ -399,9 +419,8 @@ impl AppContextBuilder {
                 .ok_or_else(|| "auth_manager is required".to_string())?,
             config,
             kafka_producer: self.kafka_producer,
-            apns_client: self
-                .apns_client
-                .ok_or_else(|| "apns_client is required".to_string())?,
+            apns_client,
+            apns_sandbox_client,
             token_encryption: self
                 .token_encryption
                 .ok_or_else(|| "token_encryption is required".to_string())?,

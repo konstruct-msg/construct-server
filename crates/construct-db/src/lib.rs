@@ -12,11 +12,8 @@ pub type DbPool = Pool<Postgres>;
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
-    /// Plaintext username — NULL for all users created after migration 034.
-    /// Kept temporarily for backward-compat; will be dropped in migration 035.
-    pub username: Option<String>,
     /// HMAC-SHA256(server_secret, normalised_username) — 32 bytes.
-    /// NULL for anonymous accounts or legacy rows not yet migrated.
+    /// NULL for anonymous accounts.
     pub username_hash: Option<Vec<u8>>,
     pub recovery_public_key: Option<Vec<u8>>,
     pub last_recovery_at: Option<DateTime<Utc>>,
@@ -26,7 +23,6 @@ pub struct User {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct BlockedUser {
     pub user_id: Uuid,
-    pub username: Option<String>,
     pub blocked_at: DateTime<Utc>,
     pub reason: Option<String>,
 }
@@ -60,7 +56,7 @@ pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbP
 pub async fn get_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         FROM users
         WHERE id = $1
         "#,
@@ -79,7 +75,7 @@ pub async fn get_user_by_username_hash(
 ) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         FROM users
         WHERE username_hash = $1
         "#,
@@ -91,77 +87,10 @@ pub async fn get_user_by_username_hash(
     Ok(user)
 }
 
-/// Legacy lookup by plaintext username — used only for account recovery of rows
-/// that pre-date migration 034 and have not yet been re-hashed.
-/// New code should use `get_user_by_username_hash`.
-pub async fn get_user_by_username(pool: &DbPool, username: &str) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, User>(
-        r#"
-        SELECT id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
-        FROM users
-        WHERE username = $1
-        "#,
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user)
-}
-
-/// One-time backfill: compute `username_hash` for all legacy rows that still
-/// have a plaintext `username` but no `username_hash`.
-///
-/// Returns the number of rows updated.
-pub async fn backfill_username_hashes<F>(pool: &DbPool, hash_fn: F) -> Result<u64>
-where
-    F: Fn(&str) -> Vec<u8>,
-{
-    // Fetch all rows that need migration
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        r#"
-        SELECT id, username
-        FROM users
-        WHERE username IS NOT NULL
-          AND username_hash IS NULL
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let count = rows.len() as u64;
-    if count == 0 {
-        return Ok(0);
-    }
-
-    for (id, username) in &rows {
-        let hash = hash_fn(username);
-        sqlx::query(
-            r#"
-            UPDATE users
-            SET username_hash = $1,
-                username      = NULL
-            WHERE id = $2
-              AND username_hash IS NULL
-            "#,
-        )
-        .bind(&hash)
-        .bind(id)
-        .execute(pool)
-        .await
-        .with_context(|| format!("backfill username_hash for user {id}"))?;
-    }
-
-    Ok(count)
-}
-
 /// Set or clear the username hash for a user account.
 ///
 /// Pass `Some(hash)` to set a new username (computed by the caller via
 /// `construct_crypto::hash_username`).  Pass `None` to make the account anonymous.
-///
-/// The plaintext `username` column is always set to NULL — the server must not
-/// retain the plaintext value after this call.
 pub async fn update_user_username(
     pool: &DbPool,
     user_id: &Uuid,
@@ -170,10 +99,9 @@ pub async fn update_user_username(
     let user = sqlx::query_as::<_, User>(
         r#"
         UPDATE users
-        SET username      = NULL,
-            username_hash = $1
+        SET username_hash = $1
         WHERE id = $2
-        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -199,7 +127,7 @@ pub async fn create_user_passwordless(
         r#"
         INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, $2)
-        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -280,11 +208,9 @@ pub async fn get_blocked_users(pool: &DbPool, blocker_user_id: &Uuid) -> Result<
         r#"
         SELECT
             ub.blocked_user_id AS user_id,
-            u.username,
             ub.blocked_at,
             ub.reason
         FROM user_blocks ub
-        JOIN users u ON u.id = ub.blocked_user_id
         WHERE ub.blocker_user_id = $1
         ORDER BY ub.blocked_at DESC
         "#,
@@ -374,13 +300,12 @@ pub async fn store_key_bundle(
     Ok(())
 }
 
-// Record for key bundle with username
+// Record for key bundle (username removed — server no longer stores plaintext)
 #[derive(sqlx::FromRow)]
 struct KeyBundleWithUsername {
     pub master_identity_key: Vec<u8>,
     pub bundle_data: Vec<u8>,
     pub signature: Vec<u8>,
-    pub username: String,
 }
 
 /// Retrieves a key bundle in the crypto-agile format along with username
@@ -399,10 +324,8 @@ pub async fn get_key_bundle(
         SELECT
             kb.master_identity_key,
             kb.bundle_data,
-            kb.signature,
-            u.username
+            kb.signature
         FROM key_bundles kb
-        JOIN users u ON kb.user_id = u.id
         WHERE kb.user_id = $1
         "#,
     )
@@ -419,7 +342,7 @@ pub async fn get_key_bundle(
                 nonce: None,
                 timestamp: None,
             },
-            r.username,
+            String::new(),
         )));
     }
 
@@ -437,7 +360,6 @@ struct DeviceKeyBundle {
     /// May be None for legacy devices
     pub signed_prekey_signature: Option<Vec<u8>>,
     pub crypto_suites: serde_json::Value,
-    pub username: Option<String>,
 }
 
 /// Extended key bundle data including separate verifying key
@@ -446,7 +368,8 @@ struct DeviceKeyBundle {
 pub struct ExtendedKeyBundle {
     /// The key bundle (bundleData, masterIdentityKey as X25519)
     pub bundle: UploadableKeyBundle,
-    /// Username
+    /// Always empty — server no longer stores plaintext username.
+    /// Kept for API compatibility; client generates display name locally.
     pub username: String,
     /// Ed25519 verifying key (base64-encoded)
     pub verifying_key: String,
@@ -462,15 +385,13 @@ async fn get_key_bundle_from_device(
 ) -> Result<Option<(UploadableKeyBundle, String)>> {
     use construct_crypto::{BundleData, SuiteKeyMaterial};
 
-    // Get the user's primary device or first active device
     let device = sqlx::query_as::<_, DeviceKeyBundle>(
         r#"
         SELECT
             d.verifying_key,
             d.identity_public,
             d.signed_prekey_public,
-            d.crypto_suites,
-            u.username
+            d.crypto_suites
         FROM devices d
         JOIN users u ON d.user_id = u.id
         WHERE d.user_id = $1 AND d.is_active = true
@@ -533,11 +454,7 @@ async fn get_key_bundle_from_device(
         timestamp: None,
     };
 
-    // Return empty string for users without username (privacy-focused)
-    // Client will generate friendly display name (e.g., "Blue Penguin")
-    let username = d.username.unwrap_or_default();
-
-    Ok(Some((bundle, username)))
+    Ok(Some((bundle, String::new())))
 }
 
 /// Retrieves extended key bundle with separate verifying_key and identity_key
@@ -556,8 +473,7 @@ pub async fn get_extended_key_bundle(
             d.identity_public,
             d.signed_prekey_public,
             d.signed_prekey_signature,
-            d.crypto_suites,
-            u.username
+            d.crypto_suites
         FROM devices d
         JOIN users u ON d.user_id = u.id
         WHERE d.user_id = $1 AND d.is_active = true
@@ -579,10 +495,8 @@ pub async fn get_extended_key_bundle(
             SELECT
                 kb.master_identity_key,
                 kb.bundle_data,
-                kb.signature,
-                u.username
+                kb.signature
             FROM key_bundles kb
-            JOIN users u ON kb.user_id = u.id
             WHERE kb.user_id = $1
             "#,
         )
@@ -601,7 +515,7 @@ pub async fn get_extended_key_bundle(
                     nonce: None,
                     timestamp: None,
                 },
-                username: r.username,
+                username: String::new(),
                 verifying_key: verifying_key.clone(),
                 identity_key: verifying_key, // Legacy: same key for both
             }));
@@ -680,13 +594,11 @@ pub async fn get_extended_key_bundle(
         timestamp: None,
     };
 
-    // Return empty string for users without username (privacy-focused)
+    // Return empty string for username (privacy-focused — server has no plaintext)
     // Client will generate friendly display name (e.g., "Blue Penguin")
-    let username = d.username.unwrap_or_default();
-
     Ok(Some(ExtendedKeyBundle {
         bundle,
-        username,
+        username: String::new(),
         verifying_key,
         identity_key,
     }))
@@ -878,7 +790,7 @@ pub async fn create_user_with_first_device(
         r#"
         INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, NULL)
-        RETURNING id, username, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)

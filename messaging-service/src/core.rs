@@ -191,26 +191,17 @@ async fn send_push_notification(
     app_context: &Arc<AppContext>,
     recipient_id: &str,
 ) -> anyhow::Result<()> {
-    // Only send to devices matching the server's configured APNs environment.
-    // dev server (APNS_ENVIRONMENT=development) → sandbox tokens only
-    // prod server (APNS_ENVIRONMENT=production) → production tokens only
-    let env_str = match app_context.config.apns.environment {
-        construct_config::ApnsEnvironment::Production => "production",
-        _ => "sandbox",
-    };
-
     #[derive(sqlx::FromRow)]
     struct DeviceTokenRow {
         device_token_encrypted: Vec<u8>,
+        push_environment: String,
     }
 
     let rows = sqlx::query_as::<_, DeviceTokenRow>(
-        "SELECT device_token_encrypted FROM device_tokens \
-         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns' \
-         AND push_environment = $2",
+        "SELECT device_token_encrypted, push_environment FROM device_tokens \
+         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns'",
     )
     .bind(recipient_id)
-    .bind(env_str)
     .fetch_all(&*app_context.db_pool)
     .await?;
 
@@ -222,19 +213,38 @@ async fn send_push_notification(
         return Ok(());
     }
 
+    tracing::info!(
+        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+        token_count = rows.len(),
+        "Sending silent push to recipient devices"
+    );
+
     let mut success = 0u32;
     let mut failed = 0u32;
     for row in &rows {
+        let client = if row.push_environment == "sandbox" {
+            &app_context.apns_sandbox_client
+        } else {
+            &app_context.apns_client
+        };
         match app_context
             .token_encryption
             .decrypt(&row.device_token_encrypted)
         {
-            Ok(token) => match app_context.apns_client.send_silent_push(&token, None).await {
-                Ok(_) => success += 1,
+            Ok(token) => match client.send_silent_push(&token, None).await {
+                Ok(_) => {
+                    success += 1;
+                    tracing::info!(
+                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        push_environment = %row.push_environment,
+                        "Silent push sent successfully"
+                    );
+                }
                 Err(e) => {
                     failed += 1;
                     tracing::warn!(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        push_environment = %row.push_environment,
                         error = %e,
                         "Silent push failed for device"
                     );
@@ -251,7 +261,7 @@ async fn send_push_notification(
         }
     }
 
-    tracing::debug!(
+    tracing::info!(
         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
         success,
         failed,
