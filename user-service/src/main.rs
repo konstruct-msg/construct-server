@@ -21,6 +21,7 @@ use axum::{
     routing::{get, post, put},
 };
 use construct_config::Config;
+use construct_crypto::hash_username;
 use construct_db as db_agility;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
@@ -106,8 +107,10 @@ impl UserService for UserGrpcService {
                 ));
             }
 
+            let secret = &self.context.config.security.username_hmac_secret;
+            let hash = hash_username(secret, username);
             if let Some(existing) =
-                construct_server_shared::db::get_user_by_username(&self.context.db_pool, username)
+                construct_server_shared::db::get_user_by_username_hash(&self.context.db_pool, &hash)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?
                 && existing.id != user_id
@@ -116,10 +119,15 @@ impl UserService for UserGrpcService {
             }
         }
 
+        let username_hash_opt: Option<Vec<u8>> = normalized_username.as_ref().map(|u| {
+            let secret = &self.context.config.security.username_hmac_secret;
+            hash_username(secret, u)
+        });
+
         let updated = construct_server_shared::db::update_user_username(
             &self.context.db_pool,
             &user_id,
-            normalized_username.as_deref(),
+            username_hash_opt.as_deref(),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;

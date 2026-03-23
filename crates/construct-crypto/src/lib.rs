@@ -19,6 +19,10 @@
 
 pub mod key_sizes;
 
+/// Username hashing for privacy-preserving storage (always available, no feature flag)
+pub mod username;
+pub use username::hash_username;
+
 /// End-to-end encryption primitives (Signal Protocol)
 #[cfg(feature = "e2ee")]
 pub mod e2e;

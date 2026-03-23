@@ -336,6 +336,7 @@ impl AuthService for AuthGrpcService {
             &req.identifier,
             &req.challenge,
             &req.recovery_signature,
+            &self.context.config.security.username_hmac_secret,
         )
         .await
         .map_err(|e| {

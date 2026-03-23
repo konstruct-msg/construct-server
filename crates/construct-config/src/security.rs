@@ -56,6 +56,12 @@ pub struct SecurityConfig {
     /// PoW difficulty (number of leading zero bits required)
     /// Default: 8 (production), set to 1-2 for fast tests
     pub pow_difficulty: u32,
+    /// HMAC-SHA256 secret for username hashing (hex-encoded, 32 bytes = 64 hex chars).
+    /// Set via `USERNAME_HMAC_SECRET` env var.
+    /// If absent in dev, a fixed insecure default is used with a warning.
+    /// In production this must be set — keep it secret, back it up, never rotate
+    /// (rotating invalidates all stored username hashes and breaks lookup).
+    pub username_hmac_secret: Vec<u8>,
 }
 
 impl SecurityConfig {
@@ -169,6 +175,21 @@ impl SecurityConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8), // 8 leading zeros by default (3-5 seconds to solve)
+            username_hmac_secret: {
+                match std::env::var("USERNAME_HMAC_SECRET") {
+                    Ok(hex) => hex::decode(&hex).unwrap_or_else(|_| {
+                        tracing::warn!("USERNAME_HMAC_SECRET is not valid hex — falling back to insecure default");
+                        b"construct-insecure-username-hmac".to_vec()
+                    }),
+                    Err(_) => {
+                        tracing::warn!(
+                            "USERNAME_HMAC_SECRET not set — using insecure default. \
+                            Set it in production: openssl rand -hex 32"
+                        );
+                        b"construct-insecure-username-hmac".to_vec()
+                    }
+                }
+            },
         }
     }
 }
