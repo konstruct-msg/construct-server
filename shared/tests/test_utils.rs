@@ -20,7 +20,7 @@ use axum::extract::State;
 use axum::middleware::{self as axum_middleware, Next};
 use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use construct_config::Config;
+use construct_config::{ApnsEnvironment, Config};
 use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
@@ -596,6 +596,10 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
     let auth_manager = Arc::new(AuthManager::new(&config).expect("Failed to create auth manager"));
     let apns_client =
         Arc::new(ApnsClient::new(config.apns.clone()).expect("Failed to create APNs client"));
+    let mut sandbox_config = config.apns.clone();
+    sandbox_config.environment = ApnsEnvironment::Development;
+    let apns_sandbox_client =
+        Arc::new(ApnsClient::new(sandbox_config).expect("Failed to create APNs sandbox client"));
     let token_encryption = Arc::new(
         DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
             .expect("Failed to create token encryption"),
@@ -606,6 +610,7 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
         queue,
         auth_manager,
         apns_client,
+        apns_sandbox_client,
         token_encryption,
         config: config.clone(),
         key_management: None,

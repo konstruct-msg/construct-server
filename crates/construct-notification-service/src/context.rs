@@ -23,7 +23,10 @@ pub struct NotificationServiceContext {
     pub db_pool: Arc<DbPool>,
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
+    /// APNS client for production tokens (api.push.apple.com)
     pub apns_client: Arc<ApnsClient>,
+    /// APNS client for sandbox tokens (api.sandbox.push.apple.com)
+    pub apns_sandbox_client: Arc<ApnsClient>,
     pub token_encryption: Arc<DeviceTokenEncryption>,
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
