@@ -176,7 +176,7 @@ services:
   #   - Depend on vault-agent to ensure secrets are ready before starting
 
   auth:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -209,7 +209,7 @@ services:
         condition: service_completed_successfully
 
   user:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -227,7 +227,7 @@ services:
         condition: service_completed_successfully
 
   messaging:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -257,7 +257,7 @@ services:
         condition: service_completed_successfully
 
   notification:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
@@ -278,7 +278,7 @@ services:
         condition: service_completed_successfully
 
   invite:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
@@ -296,7 +296,7 @@ services:
         condition: service_completed_successfully
 
   key:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -313,7 +313,7 @@ services:
         condition: service_completed_successfully
 
   media:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -332,7 +332,7 @@ services:
         condition: service_completed_successfully
 
   mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -350,7 +350,7 @@ services:
         condition: service_completed_successfully
 
   sentinel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -367,8 +367,27 @@ services:
       vault-agent:
         condition: service_completed_successfully
 
+  signaling:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
+    command: /usr/local/bin/signaling-service
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      PORT: "50060"
+      METRICS_PORT: "8091"
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      vault-agent:
+        condition: service_completed_successfully
+
   delivery:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
@@ -399,7 +418,7 @@ services:
         condition: service_completed_successfully
 
   gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.9.3}
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:

@@ -20,10 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/services/key_service.proto",
         "proto/services/mls_service.proto",
         "proto/services/sentinel_service.proto",
+        "proto/services/signaling_service.proto",
     ];
 
     tonic_prost_build::configure()
-        // .build_server(true)  // Включи, если нужны серверные stubs
+        .build_server(true)
         // .build_client(true)  // Включи, если нужны клиентские stubs (по умолчанию true)
         // .out_dir("src/generated")  // Если хочешь генерировать в отдельную папку
         .compile_protos(&proto_files, &["proto/"])?;
