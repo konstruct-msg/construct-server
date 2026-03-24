@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package shared.proto.signaling.v1;
+
+import "signaling/webrtc.proto";
+
+// ─────────────────────────────────────────────────
+// SignalingService — WebRTC call signaling relay
+//
+// Architecture: server is relay-only.
+// It does NOT participate in media, only forwards
+// signals between peers and manages active call state.
+//
+//     Call history is NOT stored on server.
+//     Only active sessions in Redis with auto-expiry.
+//     See: 07_WebRTC_Calls_Server_Spec.md §0-A
+//
+// Port: 50060
+// ─────────────────────────────────────────────────
+service SignalingService {
+  // Main bidirectional stream for signals.
+  // Client keeps it open for the duration of a call.
+  // Server forwards incoming signals from other participants.
+  rpc Signal(stream SignalRequest) returns (stream SignalResponse);
+
+  // TURN credentials for the current user.
+  // Lifetime: 86400 seconds. Client requests
+  // immediately before initiating a call.
+  rpc GetTurnCredentials(GetTurnCredentialsRequest) returns (GetTurnCredentialsResponse);
+}
+
+// ─────────── Signal stream ───────────
+
+message SignalRequest {
+  oneof request {
+    // Send a routed WebRTC signal (explicit routing envelope).
+    //
+    // Design note:
+    // - Server derives sender (user_id/device_id) from auth metadata.
+    // - Client MUST NOT rely on server trusting any `*_user_id` fields inside WebRTC payload.
+    // - Routing lives outside the WebRTC payload so the same payload types can be reused
+    //   for 1:1, multi-device, and (future) group calls without redefining webrtc.proto.
+    RoutedWebRtcSignal routed_signal = 1;
+    // Keepalive ping (every 25 sec)
+    SignalPing ping = 2;
+  }
+}
+
+message RoutedWebRtcSignal {
+  // Raw WebRTC signaling payload (SDP/ICE/hangup/etc).
+  WebRTCSignal signal = 1;
+
+  // Where to deliver this signal.
+  //
+  // Required for initial Offer (the server otherwise cannot find the callee(s)).
+  // Optional for subsequent signals when server can route via call registry.
+  SignalRoute route = 2;
+}
+
+message SignalRoute {
+  oneof target {
+    // Send to a specific user (one or many devices).
+    UserTarget user = 1;
+
+    // Send to a specific device (multi-device precision routing).
+    DeviceTarget device = 2;
+
+    // Send to a group of users (future group call fanout).
+    GroupTarget group = 3;
+  }
+}
+
+message UserTarget {
+  string user_id = 1;
+
+  // If true: deliver to all currently connected devices for that user.
+  // If false: server may deliver to an arbitrary active device.
+  bool all_devices = 2;
+}
+
+message DeviceTarget {
+  string user_id = 1;
+  string device_id = 2;
+}
+
+message GroupTarget {
+  repeated string user_ids = 1;
+
+  // If true: deliver to all currently connected devices for each user.
+  bool all_devices = 2;
+}
+
+message SignalResponse {
+  oneof response {
+    // Incoming signal from another participant
+    WebRTCSignal signal = 1;
+    // Incoming call notification (trigger for VoIP push / CallKit)
+    IncomingCallNotification incoming_call = 2;
+    // Error (call rejected by server, rate limited, etc.)
+    SignalError error = 3;
+    // Pong response to ping
+    SignalPong pong = 4;
+  }
+}
+
+message SignalPing {
+  int64 timestamp = 1;
+}
+
+message SignalPong {
+  int64 timestamp = 1;
+  int64 server_timestamp = 2;
+}
+
+message IncomingCallNotification {
+  string call_id = 1;
+  string caller_id = 2;
+  string caller_name = 3;
+  bytes caller_avatar = 4; // optional, ≤4 KB JPEG
+  CallType call_type = 5;
+  int64 offered_at = 6; // Unix ms
+}
+
+message SignalError {
+  SignalErrorCode code = 1;
+  string message = 2;
+}
+
+enum SignalErrorCode {
+  SIGNAL_ERROR_CODE_UNSPECIFIED = 0;
+  SIGNAL_ERROR_CODE_CALLEE_OFFLINE = 1;
+  SIGNAL_ERROR_CODE_CALLEE_BUSY = 2;
+  SIGNAL_ERROR_CODE_RATE_LIMITED = 3;
+  SIGNAL_ERROR_CODE_UNAUTHORIZED = 4;
+  SIGNAL_ERROR_CODE_CALL_EXPIRED = 5;
+}
+
+// ─────────── TURN Credentials ───────────
+
+message GetTurnCredentialsRequest {
+  string call_id = 1; // optional, for logging
+}
+
+message GetTurnCredentialsResponse {
+  TurnCredentials credentials = 1;
+}
