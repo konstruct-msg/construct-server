@@ -34,6 +34,7 @@ COPY delivery-worker ./delivery-worker
 COPY key-service ./key-service
 COPY mls-service ./mls-service
 COPY sentinel-service ./sentinel-service
+COPY signaling-service ./signaling-service
 
 # Build all binaries in release mode
 RUN cargo build --release --bins
@@ -65,6 +66,7 @@ COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 COPY --from=builder --chmod=+x /app/target/release/mls-service /usr/local/bin/mls-service
 COPY --from=builder --chmod=+x /app/target/release/sentinel-service /usr/local/bin/sentinel-service
+COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service
 
 # Copy migrations
 COPY shared/migrations /app/migrations
