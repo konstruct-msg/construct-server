@@ -7,7 +7,11 @@
 // ============================================================================
 
 use anyhow::{Context, Result};
-use construct_server_shared::{AppError, apns::DeviceTokenEncryption, utils::log_safe_id};
+use construct_server_shared::{
+    AppError,
+    apns::{ApnsSendError, DeviceTokenEncryption},
+    utils::log_safe_id,
+};
 use uuid::Uuid;
 
 use crate::NotificationServiceContext;
@@ -221,11 +225,33 @@ pub async fn send_blind_notification(
             .send_notification(&device_token, payload, push_type, priority)
             .await
         {
-            tracing::error!(
-                error = %e,
-                user_hash = %user_id_hash,
-                "Failed to send APNs notification"
-            );
+            if matches!(e, ApnsSendError::InvalidToken) {
+                tracing::warn!(
+                    user_hash = %user_id_hash,
+                    "APNs: token invalid/unregistered — disabling in DB"
+                );
+                // Disable the stale token so we never send to it again.
+                // The device will re-register on next app launch.
+                let _ = sqlx::query(
+                    "UPDATE device_tokens SET enabled = false \
+                     WHERE device_token_encrypted = $1",
+                )
+                .bind(&token_row.device_token_encrypted)
+                .execute(&*context.db_pool)
+                .await
+                .map_err(|db_err| {
+                    tracing::error!(
+                        error = %db_err,
+                        "Failed to disable invalid device token in DB"
+                    );
+                });
+            } else {
+                tracing::error!(
+                    error = %e,
+                    user_hash = %user_id_hash,
+                    "Failed to send APNs notification"
+                );
+            }
             // Continue trying other tokens even if one fails
             continue;
         }
