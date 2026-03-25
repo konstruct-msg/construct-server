@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use construct_apns::ApnsSendError;
 use construct_broker::KafkaMessageEnvelope;
 use construct_context::AppContext;
 use construct_error::AppError;
@@ -184,7 +185,35 @@ async fn send_push_notification(
             .decrypt(&row.device_token_encrypted)
         {
             Ok(token) => match app_context.apns_client.send_silent_push(&token, None).await {
-                Ok(_) => success += 1,
+                Ok(_) => {
+                    success += 1;
+                    tracing::info!(
+                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        "Silent push sent successfully"
+                    );
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    failed += 1;
+                    tracing::warn!(
+                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        "Silent push: token invalid/unregistered — disabling in DB"
+                    );
+                    // Disable the stale token so we never send to it again.
+                    // The device will re-register a fresh token on next app launch.
+                    if let Err(db_err) = sqlx::query(
+                        "UPDATE device_tokens SET enabled = false \
+                         WHERE device_token_encrypted = $1",
+                    )
+                    .bind(&row.device_token_encrypted)
+                    .execute(&*app_context.db_pool)
+                    .await
+                    {
+                        tracing::error!(
+                            error = %db_err,
+                            "Failed to disable invalid device token in DB"
+                        );
+                    }
+                }
                 Err(e) => {
                     failed += 1;
                     tracing::warn!(
@@ -205,7 +234,7 @@ async fn send_push_notification(
         }
     }
 
-    tracing::debug!(
+    tracing::info!(
         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
         success,
         failed,
