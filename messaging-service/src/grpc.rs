@@ -83,7 +83,7 @@ impl MessagingService for MessagingGrpcService {
                 }
             }
 
-            loop {
+            let close_reason = 'stream: loop {
                 // Lazy subscribe: subscribe as soon as user_id becomes known
                 // (e.g. from the first Send message if not in auth metadata).
                 if !wakeup_subscribed && let Some(uid) = user_id {
@@ -95,29 +95,50 @@ impl MessagingService for MessagingGrpcService {
                 }
 
                 tokio::select! {
-                    // Handle incoming requests from client
-                    Some(result) = in_stream.next() => {
+                    // Handle incoming requests from client — also catches None (graceful close)
+                    result = in_stream.next() => {
                         match result {
-                            Ok(req) => {
+                            Some(Ok(req)) => {
                                 if let Err(e) = handle_stream_request(
                                     req,
                                     &context,
                                     &tx,
                                     &mut user_id,
                                 ).await {
-                                    tracing::warn!("Error handling stream request: {}", e);
+                                    tracing::warn!(error = %e, "Error handling stream request");
                                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
-                                    break;
+                                    break 'stream "handler_error";
                                 }
                             }
-                            Err(e) => {
-                                // h2 protocol resets are normal client disconnects, not server errors
-                                if e.message().contains("h2 protocol") {
-                                    tracing::debug!("MessageStream closed by client: {}", e);
+                            Some(Err(e)) => {
+                                // Classify the disconnect so we know what's normal vs unexpected
+                                let msg = e.message();
+                                if msg.contains("h2 protocol")
+                                    || msg.contains("connection closed")
+                                    || msg.contains("broken pipe")
+                                    || msg.contains("reset by peer")
+                                    || e.code() == tonic::Code::Cancelled
+                                {
+                                    // Normal: iOS backgrounding / keepalive timeout / client restart
+                                    tracing::info!(
+                                        code = ?e.code(),
+                                        message = %msg,
+                                        "MessageStream: client disconnected (normal)"
+                                    );
+                                    break 'stream "client_disconnect";
                                 } else {
-                                    tracing::warn!("Stream error: {}", e);
+                                    tracing::warn!(
+                                        code = ?e.code(),
+                                        error = %e,
+                                        "MessageStream: unexpected stream error"
+                                    );
+                                    break 'stream "stream_error";
                                 }
-                                break;
+                            }
+                            None => {
+                                // Client closed the request side of the stream gracefully
+                                tracing::info!("MessageStream: client closed input stream (graceful)");
+                                break 'stream "client_eof";
                             }
                         }
                     }
@@ -142,11 +163,11 @@ impl MessagingService for MessagingGrpcService {
                             }
                         }
 
-                    else => break,
+                    else => break 'stream "all_channels_closed",
                 }
-            }
+            };
 
-            tracing::info!("MessageStream closed");
+            tracing::info!(reason = close_reason, "MessageStream closed");
         });
 
         let output_stream = ReceiverStream::new(rx);

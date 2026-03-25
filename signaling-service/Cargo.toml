@@ -1,0 +1,40 @@
+[package]
+name = "signaling-service"
+version = "0.1.0"
+edition = "2021"
+description = "SignalingService — WebRTC call signaling relay for Construct Messenger"
+license = "MIT"
+
+[dependencies]
+# Core runtime
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+
+# gRPC / Tonic
+tonic = "0.14"
+prost = "0.14.3"
+prost-types = "0.14.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# Redis
+redis = { version = "1.0", features = ["tokio-comp", "connection-manager"] }
+
+# Crypto (TURN credentials)
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
+
+# Logging + Health
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "fmt"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Shared
+construct-server-shared = { path = "../shared" }
+
+[[bin]]
+name = "signaling-service"
+path = "src/main.rs"

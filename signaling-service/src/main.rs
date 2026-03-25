@@ -1,0 +1,84 @@
+mod forwarded;
+mod rate_limiter;
+mod registry;
+mod routing;
+mod service;
+mod time;
+mod turn;
+
+use std::env;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tonic::transport::Server;
+use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use construct_server_shared::shared::proto::signaling::v1::signaling_service_server::SignalingServiceServer;
+
+use crate::rate_limiter::RateLimiter;
+use crate::registry::CallRegistry;
+use crate::service::{make_default_peer_salt, make_instance_id, SignalingServiceImpl};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "signaling_service=debug,tower_http=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+    let port: u16 = env::var("PORT")
+        .unwrap_or_else(|_| "50060".into())
+        .parse()?;
+    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+
+    let turn_secret = env::var("TURN_SECRET").unwrap_or_else(|_| "changeme".into());
+    let turn_ttl: u64 = env::var("TURN_CREDENTIALS_TTL_SECONDS")
+        .unwrap_or_else(|_| "86400".into())
+        .parse()?;
+
+    let peer_salt =
+        env::var("RATE_LIMIT_PEER_SALT").unwrap_or_else(|_| make_default_peer_salt(&turn_secret));
+
+    let instance_id = env::var("INSTANCE_ID").unwrap_or_else(|_| make_instance_id());
+    let registry = Arc::new(CallRegistry::new(&redis_url, instance_id)?);
+
+    tokio::spawn(Arc::clone(&registry).instance_pubsub_loop());
+    tokio::spawn(Arc::clone(&registry).cleanup_loop());
+
+    info!("SignalingService listening on {}", addr);
+
+    let http_port: u16 = env::var("METRICS_PORT")
+        .unwrap_or_else(|_| "8091".into())
+        .parse()?;
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
+    tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route("/health", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/metrics",
+                axum::routing::get(construct_server_shared::metrics::metrics_handler),
+            );
+        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+        info!("SignalingService HTTP/metrics listening on {}", http_addr);
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let service = SignalingServiceImpl {
+        registry: Arc::clone(&registry),
+        rate_limiter: RateLimiter::new(registry.redis_client(), peer_salt),
+        turn_secret,
+        turn_ttl,
+    };
+
+    Server::builder()
+        .add_service(SignalingServiceServer::new(service))
+        .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
+        .await?;
+
+    Ok(())
+}
