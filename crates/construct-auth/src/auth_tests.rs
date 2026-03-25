@@ -153,6 +153,7 @@ XQIDAQAB
                 team_id: String::new(),
                 bundle_id: String::new(),
                 topic: String::new(),
+                voip_topic: None,
                 device_token_encryption_key: "0".repeat(64),
             },
             federation: FederationConfig {

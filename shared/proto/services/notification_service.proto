@@ -19,6 +19,17 @@ service NotificationService {
   
   // Обновление настроек уведомлений для устройства
   rpc UpdateNotificationPreferences(UpdateNotificationPreferencesRequest) returns (UpdateNotificationPreferencesResponse);
+
+  // Регистрация VoIP token (APNs VoIP) — используется для входящих звонков (CallKit),
+  // когда приложение в фоне/убито.
+  rpc RegisterVoipToken(RegisterVoipTokenRequest) returns (RegisterVoipTokenResponse);
+
+  // Удаление VoIP token (при выходе с устройства).
+  rpc UnregisterVoipToken(UnregisterVoipTokenRequest) returns (UnregisterVoipTokenResponse);
+
+  // Внутренний RPC: отправить VoIP push о входящем звонке (APNs VoIP).
+  // Вызывается signaling-service когда callee оффлайн.
+  rpc SendVoipIncomingCall(SendVoipIncomingCallRequest) returns (SendVoipIncomingCallResponse);
 }
 
 // ============================================================================
@@ -142,4 +153,58 @@ enum NotificationFilter {
   
   // Только от контактов
   NOTIFICATION_FILTER_VISIBLE_CONTACTS = 5;
+}
+
+// ============================================================================
+// VoIP Token Registration Messages
+// ============================================================================
+
+message RegisterVoipTokenRequest {
+  // APNs VoIP token (PKPushRegistry)
+  string voip_token = 1;
+
+  // Stable device ID for upsert (Keychain UUID).
+  string device_id = 2;
+
+  // Platform string: "ios" | "macos"
+  string platform = 3;
+
+  // APNs environment for this token
+  PushEnvironment environment = 4;
+}
+
+message RegisterVoipTokenResponse {
+  bool success = 1;
+}
+
+message UnregisterVoipTokenRequest {
+  // Stable device ID (Keychain UUID)
+  string device_id = 1;
+}
+
+message UnregisterVoipTokenResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// VoIP Incoming Call Push (internal)
+// ============================================================================
+
+message SendVoipIncomingCallRequest {
+  // Target user (callee)
+  string user_id = 1;
+
+  // Call metadata (CallKit)
+  string call_id = 2;
+  string caller_id = 3;
+  string caller_name = 4;
+  // "audio" | "video"
+  string call_type = 5;
+  // Unix ms
+  int64 offered_at = 6;
+}
+
+message SendVoipIncomingCallResponse {
+  bool success = 1;
+  int32 sent_count = 2;
 }

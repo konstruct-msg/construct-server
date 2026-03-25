@@ -7,6 +7,8 @@ pub enum PushType {
     Silent,
     /// Visible push - shows notification to user (Phase 2)
     Visible,
+    /// VoIP push (PushKit) — incoming calls wake-up
+    Voip,
 }
 
 /// Notification priority
@@ -38,6 +40,9 @@ pub struct ApnsPayload {
     pub aps: ApsData,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub construct: Option<ConstructData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "construct_call")]
+    pub construct_call: Option<ConstructCallData>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +78,15 @@ pub struct ConstructData {
     pub conversation_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ConstructCallData {
+    pub call_id: String,
+    pub caller_id: String,
+    pub caller_name: String,
+    pub call_type: String,
+    pub offered_at: i64,
+}
+
 impl ApnsPayload {
     /// Create silent push notification (Phase 1: Option B from docs)
     /// Wakes app in background, no user-visible notification
@@ -88,6 +102,7 @@ impl ApnsPayload {
                 notification_type: "new_message".to_string(),
                 conversation_id,
             }),
+            construct_call: None,
         }
     }
 
@@ -108,6 +123,35 @@ impl ApnsPayload {
             construct: Some(ConstructData {
                 notification_type: "new_message".to_string(),
                 conversation_id,
+            }),
+            construct_call: None,
+        }
+    }
+
+    /// Create VoIP push (incoming call).
+    ///
+    /// Privacy: Only includes call metadata needed for CallKit, no content.
+    pub fn voip_incoming_call(
+        call_id: String,
+        caller_id: String,
+        caller_name: String,
+        call_type: String,
+        offered_at: i64,
+    ) -> Self {
+        Self {
+            aps: ApsData {
+                content_available: None,
+                alert: None,
+                sound: None,
+                badge: None,
+            },
+            construct: None,
+            construct_call: Some(ConstructCallData {
+                call_id,
+                caller_id,
+                caller_name,
+                call_type,
+                offered_at,
             }),
         }
     }

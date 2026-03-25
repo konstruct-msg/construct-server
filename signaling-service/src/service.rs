@@ -4,6 +4,8 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info};
 
+use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
     signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
     CallHangup, GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason,
@@ -23,6 +25,7 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) rate_limiter: RateLimiter,
     pub(crate) turn_secret: String,
     pub(crate) turn_ttl: u64,
+    pub(crate) notification_client: Option<NotificationClient>,
 }
 
 fn caller_user_id<T>(req: &Request<T>) -> Result<String, Status> {
@@ -55,6 +58,7 @@ impl SignalingService for SignalingServiceImpl {
         let mut inbound = request.into_inner();
         let registry = Arc::clone(&self.registry);
         let rate_limiter = self.rate_limiter.clone();
+        let notification_client = self.notification_client.clone();
 
         let tx = registry.register_user(&user_id, &device_id).await;
         registry.touch_online(&user_id, &device_id).await;
@@ -84,6 +88,7 @@ impl SignalingService for SignalingServiceImpl {
                                     if let Err(e) = handle_outbound_signal(
                                         &registry,
                                         &rate_limiter,
+                                        notification_client.as_ref(),
                                         &user_id,
                                         &device_id_for_inbound,
                                         routed,
@@ -228,6 +233,7 @@ impl SignalingService for SignalingServiceImpl {
 async fn handle_outbound_signal(
     registry: &Arc<CallRegistry>,
     rate_limiter: &RateLimiter,
+    notification_client: Option<&NotificationClient>,
     user_id: &str,
     device_id: &str,
     routed: RoutedWebRtcSignal,
@@ -319,6 +325,24 @@ async fn handle_outbound_signal(
                     )
                     .await;
             } else {
+                if let Some(client) = notification_client.cloned() {
+                    let req = services_proto::SendVoipIncomingCallRequest {
+                        user_id: callee_user_id.to_string(),
+                        call_id: call_id.clone(),
+                        caller_id: user_id.to_string(),
+                        caller_name: String::new(),
+                        call_type: call_type_to_str(offer.call_type).to_string(),
+                        offered_at: offer.offered_at,
+                    };
+                    tokio::spawn(async move {
+                        let mut grpc = client.get();
+                        if let Err(e) = grpc.send_voip_incoming_call(tonic::Request::new(req)).await
+                        {
+                            tracing::warn!(error = %e, "failed to send voip incoming call push");
+                        }
+                    });
+                }
+
                 let _ = out_tx
                     .send(Ok(SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
@@ -415,6 +439,16 @@ async fn handle_outbound_signal(
     }
 
     Ok(())
+}
+
+fn call_type_to_str(call_type: i32) -> &'static str {
+    match call_type {
+        1 => "audio",
+        2 => "video",
+        3 => "screen",
+        4 => "group",
+        _ => "audio",
+    }
 }
 
 pub(crate) fn make_instance_id() -> String {
