@@ -131,18 +131,36 @@ impl ApnsClient {
         );
         debug!("APNs payload: {}", payload_json);
 
+        let topic = match push_type {
+            PushType::Voip => self
+                .config
+                .voip_topic
+                .as_deref()
+                .unwrap_or(&self.config.topic),
+            _ => &self.config.topic,
+        };
+
         // Create notification options
         // apns-push-type is REQUIRED since iOS 13 — missing it causes silent drops
         let options = NotificationOptions {
-            apns_topic: Some(&self.config.topic),
+            apns_topic: Some(topic),
             apns_push_type: Some(match push_type {
                 PushType::Silent => ApnsPushType::Background,
                 PushType::Visible => ApnsPushType::Alert,
+                PushType::Voip => ApnsPushType::Voip,
             }),
-            apns_priority: Some(match priority {
-                NotificationPriority::High => Priority::High,
-                NotificationPriority::Low => Priority::Normal,
+            apns_priority: Some(match push_type {
+                PushType::Voip => Priority::High,
+                _ => match priority {
+                    NotificationPriority::High => Priority::High,
+                    NotificationPriority::Low => Priority::Normal,
+                },
             }),
+            apns_expiration: match push_type {
+                // Calls: do not store / retry when device is offline.
+                PushType::Voip => Some(0),
+                _ => None,
+            },
             ..Default::default()
         };
 
@@ -175,6 +193,7 @@ impl ApnsClient {
                 }
                 builder.build(device_token, options)
             }
+            PushType::Voip => DefaultNotificationBuilder::new().build(device_token, options),
         };
 
         // Attach our custom `construct` metadata so the iOS app knows message type / conversation
@@ -182,6 +201,12 @@ impl ApnsClient {
             && let Err(e) = built.add_custom_data("construct", construct_data)
         {
             warn!("Failed to attach custom APNs data: {}", e);
+        }
+
+        if let Some(ref call_data) = payload.construct_call
+            && let Err(e) = built.add_custom_data("construct_call", call_data)
+        {
+            warn!("Failed to attach custom APNs call data: {}", e);
         }
 
         // Send notification
@@ -253,6 +278,36 @@ impl ApnsClient {
             device_token,
             payload,
             PushType::Visible,
+            NotificationPriority::High,
+        )
+        .await
+    }
+
+    /// Send VoIP push notification (incoming call wake-up).
+    ///
+    /// Requires `APNS_VOIP_TOPIC` (or `APNS_VOIP_BUNDLE_ID`) to be set.
+    pub async fn send_voip_incoming_call_push(
+        &self,
+        device_token: &str,
+        call_id: String,
+        caller_id: String,
+        caller_name: String,
+        call_type: String,
+        offered_at: i64,
+    ) -> Result<(), ApnsSendError> {
+        if self.config.voip_topic.as_deref().unwrap_or("").is_empty() {
+            // Explicitly skip — we don't want to send a VoIP push with the normal topic,
+            // which APNs would reject.
+            debug!("APNs VoIP topic is not configured - skipping VoIP push send");
+            return Ok(());
+        }
+
+        let payload =
+            ApnsPayload::voip_incoming_call(call_id, caller_id, caller_name, call_type, offered_at);
+        self.send_notification(
+            device_token,
+            payload,
+            PushType::Voip,
             NotificationPriority::High,
         )
         .await

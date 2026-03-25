@@ -91,6 +91,7 @@ async fn setup_queue() -> (MessageQueue, redis::Connection) {
             team_id: "".to_string(),
             bundle_id: "".to_string(),
             topic: "".to_string(),
+            voip_topic: None,
             device_token_encryption_key:
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         },

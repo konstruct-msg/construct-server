@@ -74,6 +74,11 @@ pub struct ApnsConfig {
     pub bundle_id: String,
     /// APNs topic (usually same as bundle_id)
     pub topic: String,
+    /// VoIP APNs topic (PushKit), e.g. "<bundle_id>.voip"
+    ///
+    /// If unset, VoIP pushes are disabled (and callers may fall back to
+    /// returning CALLEE_OFFLINE without wake).
+    pub voip_topic: Option<String>,
     /// Encryption key for device tokens in database (32 bytes hex = 64 chars)
     pub device_token_encryption_key: String,
 }
@@ -144,6 +149,14 @@ impl ApnsConfig {
                 .unwrap_or_else(|| {
                     std::env::var("APNS_BUNDLE_ID")
                         .unwrap_or_else(|_| "com.example.construct".to_string())
+                }),
+            voip_topic: std::env::var("APNS_VOIP_TOPIC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    std::env::var("APNS_VOIP_BUNDLE_ID")
+                        .ok()
+                        .filter(|s| !s.is_empty())
                 }),
             device_token_encryption_key: key,
         })

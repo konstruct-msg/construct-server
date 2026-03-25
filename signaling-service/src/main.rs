@@ -14,6 +14,7 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::signaling::v1::signaling_service_server::SignalingServiceServer;
 
 use crate::rate_limiter::RateLimiter;
@@ -50,6 +51,29 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(Arc::clone(&registry).instance_pubsub_loop());
     tokio::spawn(Arc::clone(&registry).cleanup_loop());
 
+    let notification_client = match env::var("NOTIFICATION_GRPC_ENDPOINT") {
+        Ok(endpoint) if !endpoint.trim().is_empty() => {
+            match NotificationClient::new(&endpoint).await {
+                Ok(client) => {
+                    info!(
+                        "NotificationService client enabled (endpoint: {})",
+                        endpoint
+                    );
+                    Some(client)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        endpoint = %endpoint,
+                        "Failed to connect to NotificationService - VoIP wake disabled"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     info!("SignalingService listening on {}", addr);
 
     let http_port: u16 = env::var("METRICS_PORT")
@@ -73,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: RateLimiter::new(registry.redis_client(), peer_salt),
         turn_secret,
         turn_ttl,
+        notification_client,
     };
 
     Server::builder()

@@ -12,6 +12,7 @@ use construct_server_shared::{
     apns::{ApnsSendError, DeviceTokenEncryption},
     utils::log_safe_id,
 };
+use sqlx::Row;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -74,6 +75,47 @@ pub struct UpdateNotificationPreferencesOutput {
     pub success: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RegisterVoipTokenInput {
+    pub user_id: Uuid,
+    pub voip_token: String,
+    pub device_id: String,
+    pub platform: String,         // "ios" | "macos"
+    pub push_environment: String, // "sandbox" | "production"
+}
+
+#[derive(Debug, Clone)]
+pub struct RegisterVoipTokenOutput {
+    pub success: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnregisterVoipTokenInput {
+    pub user_id: Uuid,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnregisterVoipTokenOutput {
+    pub success: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SendVoipIncomingCallInput {
+    pub user_id: Uuid,
+    pub call_id: String,
+    pub caller_id: String,
+    pub caller_name: String,
+    pub call_type: String,
+    pub offered_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SendVoipIncomingCallOutput {
+    pub success: bool,
+    pub sent_count: i32,
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -97,6 +139,10 @@ fn is_valid_filter(filter: &str) -> bool {
         filter,
         "silent" | "visible_all" | "visible_dm" | "visible_mentions" | "visible_contacts"
     )
+}
+
+fn is_valid_platform(platform: &str) -> bool {
+    matches!(platform, "ios" | "macos")
 }
 
 // ============================================================================
@@ -238,6 +284,7 @@ pub async fn send_blind_notification(
                 notification_type: activity.clone(),
                 conversation_id: None,
             }),
+            construct_call: None,
         };
 
         // Retry with exponential backoff: 100ms → 300ms → 900ms (3 attempts total).
@@ -550,4 +597,233 @@ pub async fn update_notification_preferences(
     }
 
     Ok(UpdateNotificationPreferencesOutput { success })
+}
+
+/// Register VoIP token (APNs VoIP)
+pub async fn register_voip_token(
+    context: &NotificationServiceContext,
+    input: RegisterVoipTokenInput,
+) -> Result<RegisterVoipTokenOutput> {
+    let user_id_hash = log_safe_id(
+        &input.user_id.to_string(),
+        &context.config.logging.hash_salt,
+    );
+
+    if input.voip_token.is_empty() || input.voip_token.len() > 256 {
+        tracing::warn!(user_hash = %user_id_hash, "Invalid VoIP token format");
+        return Err(AppError::Validation("VoIP token format is invalid".to_string()).into());
+    }
+    if input.device_id.is_empty() || input.device_id.len() > 128 {
+        tracing::warn!(user_hash = %user_id_hash, "Invalid device_id format");
+        return Err(AppError::Validation("device_id format is invalid".to_string()).into());
+    }
+    if !is_valid_platform(&input.platform) {
+        tracing::warn!(user_hash = %user_id_hash, platform = %input.platform, "Invalid platform");
+        return Err(AppError::Validation("platform is invalid".to_string()).into());
+    }
+
+    let token_hash = DeviceTokenEncryption::hash_token(&input.voip_token);
+    let token_encrypted = context
+        .token_encryption
+        .encrypt(&input.voip_token)
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                user_hash = %user_id_hash,
+                "Failed to encrypt VoIP token"
+            );
+            e
+        })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO voip_tokens
+            (user_id, device_id, voip_token_hash, voip_token_encrypted,
+             platform, push_environment, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+        ON CONFLICT (user_id, device_id)
+        DO UPDATE SET
+            voip_token_hash      = EXCLUDED.voip_token_hash,
+            voip_token_encrypted = EXCLUDED.voip_token_encrypted,
+            platform             = EXCLUDED.platform,
+            push_environment     = EXCLUDED.push_environment,
+            enabled              = TRUE
+        "#,
+    )
+    .bind(input.user_id)
+    .bind(&input.device_id)
+    .bind(&token_hash)
+    .bind(&token_encrypted)
+    .bind(&input.platform)
+    .bind(&input.push_environment)
+    .execute(&*context.db_pool)
+    .await
+    .context("Failed to insert/update voip token")?;
+
+    tracing::info!(user_hash = %user_id_hash, "VoIP token registered successfully");
+    Ok(RegisterVoipTokenOutput { success: true })
+}
+
+/// Unregister VoIP token by device_id
+pub async fn unregister_voip_token(
+    context: &NotificationServiceContext,
+    input: UnregisterVoipTokenInput,
+) -> Result<UnregisterVoipTokenOutput> {
+    let user_id_hash = log_safe_id(
+        &input.user_id.to_string(),
+        &context.config.logging.hash_salt,
+    );
+
+    if input.device_id.is_empty() || input.device_id.len() > 128 {
+        tracing::warn!(user_hash = %user_id_hash, "Invalid device_id format");
+        return Err(AppError::Validation("device_id format is invalid".to_string()).into());
+    }
+
+    let result = sqlx::query(
+        r#"
+        DELETE FROM voip_tokens
+        WHERE user_id = $1 AND device_id = $2
+        "#,
+    )
+    .bind(input.user_id)
+    .bind(&input.device_id)
+    .execute(&*context.db_pool)
+    .await
+    .context("Failed to delete voip token")?;
+
+    let success = result.rows_affected() > 0;
+
+    if success {
+        tracing::info!(user_hash = %user_id_hash, "VoIP token unregistered successfully");
+    } else {
+        tracing::warn!(user_hash = %user_id_hash, "VoIP token not found for unregistration");
+    }
+
+    Ok(UnregisterVoipTokenOutput { success })
+}
+
+/// Internal: send VoIP push notification for an incoming call.
+///
+/// Best-effort: sends to all enabled devices for `user_id`, and disables tokens
+/// permanently rejected by APNs.
+pub async fn send_voip_incoming_call(
+    context: &NotificationServiceContext,
+    input: SendVoipIncomingCallInput,
+) -> Result<SendVoipIncomingCallOutput> {
+    let user_id_hash = log_safe_id(
+        &input.user_id.to_string(),
+        &context.config.logging.hash_salt,
+    );
+
+    if input.call_id.is_empty() || input.call_id.len() > 64 {
+        return Err(AppError::Validation("call_id format is invalid".to_string()).into());
+    }
+    if input.caller_id.is_empty() || input.caller_id.len() > 64 {
+        return Err(AppError::Validation("caller_id format is invalid".to_string()).into());
+    }
+    if input.caller_name.len() > 128 {
+        return Err(AppError::Validation("caller_name too long".to_string()).into());
+    }
+    if input.call_type.is_empty() || input.call_type.len() > 16 {
+        return Err(AppError::Validation("call_type format is invalid".to_string()).into());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, voip_token_encrypted, push_environment
+        FROM voip_tokens
+        WHERE user_id = $1 AND enabled = TRUE
+        "#,
+    )
+    .bind(input.user_id)
+    .fetch_all(&*context.db_pool)
+    .await
+    .context("Failed to fetch voip tokens")?;
+
+    if rows.is_empty() {
+        tracing::info!(user_hash = %user_id_hash, "No enabled VoIP tokens for user");
+        return Ok(SendVoipIncomingCallOutput {
+            success: true,
+            sent_count: 0,
+        });
+    }
+
+    let mut sent_count: i32 = 0;
+
+    for row in rows {
+        let token_id: Uuid = row.try_get("id").context("Missing voip token id")?;
+        let token_encrypted: Vec<u8> = row
+            .try_get("voip_token_encrypted")
+            .context("Missing voip token encrypted")?;
+        let push_environment: String = row
+            .try_get("push_environment")
+            .context("Missing voip token push_environment")?;
+
+        let token = match context.token_encryption.decrypt(&token_encrypted) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_hash = %user_id_hash,
+                    "Failed to decrypt VoIP token - disabling"
+                );
+                let _ = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                    .bind(token_id)
+                    .execute(&*context.db_pool)
+                    .await;
+                continue;
+            }
+        };
+
+        let apns_client = match push_environment.as_str() {
+            "sandbox" => &context.apns_sandbox_client,
+            _ => &context.apns_client,
+        };
+
+        match apns_client
+            .send_voip_incoming_call_push(
+                &token,
+                input.call_id.clone(),
+                input.caller_id.clone(),
+                input.caller_name.clone(),
+                input.call_type.clone(),
+                input.offered_at,
+            )
+            .await
+        {
+            Ok(()) => {
+                sent_count += 1;
+            }
+            Err(ApnsSendError::InvalidToken) => {
+                tracing::info!(
+                    user_hash = %user_id_hash,
+                    push_environment = %push_environment,
+                    "VoIP token rejected by APNs - disabling"
+                );
+                let _ = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                    .bind(token_id)
+                    .execute(&*context.db_pool)
+                    .await;
+            }
+            Err(ApnsSendError::Other(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    user_hash = %user_id_hash,
+                    push_environment = %push_environment,
+                    "Failed to send VoIP push (best-effort)"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        user_hash = %user_id_hash,
+        sent_count,
+        "VoIP incoming call push processed"
+    );
+
+    Ok(SendVoipIncomingCallOutput {
+        success: true,
+        sent_count,
+    })
 }
