@@ -299,9 +299,6 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    depends_on:
-      vault-agent:
-        condition: service_completed_successfully
 
   delivery:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
