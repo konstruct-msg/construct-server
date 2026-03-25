@@ -49,6 +49,9 @@ ICE_SERVER_KEY="{{ .Data.data.ICE_SERVER_KEY }}"
 {{- if .Data.data.ICE_IAT_MODE }}
 ICE_IAT_MODE="{{ .Data.data.ICE_IAT_MODE }}"
 {{- end }}
+{{- if .Data.data.ICE_COVER_UPSTREAM }}
+ICE_COVER_UPSTREAM="{{ .Data.data.ICE_COVER_UPSTREAM }}"
+{{- end }}
 {{- end }}
 EOT
   destination = "/secrets/app.env"

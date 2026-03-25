@@ -23,7 +23,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post, put},
 };
-use construct_config::Config;
+use construct_config::{ApnsEnvironment, Config};
 use construct_server_shared::apns::{ApnsClient, DeviceTokenEncryption};
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
@@ -229,8 +229,8 @@ async fn main() -> Result<()> {
     ));
     info!("Connected to Redis");
 
-    // Initialize APNs Client
-    info!("Initializing APNs client...");
+    // Initialize APNs Client (production endpoint: api.push.apple.com)
+    info!("Initializing APNs client (production)...");
     let apns_client =
         Arc::new(ApnsClient::new(config.apns.clone()).context("Failed to initialize APNs client")?);
     if let Err(e) = apns_client.initialize().await {
@@ -245,9 +245,29 @@ async fn main() -> Result<()> {
         }
         // If disabled: expected, ignore
     } else if config.apns.enabled {
-        info!("APNs client initialized and ENABLED");
+        info!("APNs client initialized and ENABLED (production)");
     } else {
         info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");
+    }
+
+    // Initialize APNs sandbox client (api.sandbox.push.apple.com) — for debug/TestFlight builds.
+    // Uses the same .p8 key; only the endpoint differs.
+    info!("Initializing APNs sandbox client...");
+    let mut sandbox_config = config.apns.clone();
+    sandbox_config.environment = ApnsEnvironment::Development;
+    let apns_sandbox_client = Arc::new(
+        ApnsClient::new(sandbox_config).context("Failed to initialize APNs sandbox client")?,
+    );
+    if let Err(e) = apns_sandbox_client.initialize().await {
+        if config.apns.enabled {
+            tracing::error!(
+                error = %e,
+                key_path = %config.apns.key_path,
+                "APNs sandbox initialization failed — sandbox push notifications DISABLED"
+            );
+        }
+    } else if config.apns.enabled {
+        info!("APNs sandbox client initialized and ENABLED");
     }
 
     // Initialize Device Token Encryption
@@ -304,6 +324,7 @@ async fn main() -> Result<()> {
         queue,
         auth_manager,
         apns_client,
+        apns_sandbox_client,
         token_encryption,
         config: config.clone(),
         key_management,

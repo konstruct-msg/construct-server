@@ -67,11 +67,11 @@ impl MessagingService for MessagingGrpcService {
             let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
             let mut wakeup_subscribed = false;
 
-            // Fallback poll interval — 30 s safety net for any missed pub/sub wakeup.
+            // Fallback poll interval — 5 s safety net for any missed pub/sub wakeup.
             // Real-time delivery is handled by spawn_inbox_wakeup (Redis pub/sub with
-            // auto-reconnect). This fallback ensures at most 30s lag if wakeup is lost,
-            // without flooding the shared queue Mutex with frequent polls.
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            // auto-reconnect). This fallback caps worst-case delay if a wakeup signal
+            // is missed during the pub/sub subscribe race window (~50ms at stream open).
+            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
             // If user_id is already known from auth metadata, subscribe now and
             // flush any messages that arrived before the stream opened.
@@ -241,18 +241,27 @@ impl MessagingService for MessagingGrpcService {
             }));
         }
 
+        let t_dispatch = std::time::Instant::now();
         let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
             content_type: envelope.content_type,
+            edits_message_id: envelope.edits_message_id.clone(),
         });
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(&app_context, kafka_envelope)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        let total_ms = t_dispatch.elapsed().as_millis();
+        tracing::info!(
+            dispatch_ms = total_ms,
+            message_id = %message_id,
+            "send_message dispatch complete"
+        );
 
         Ok(Response::new(proto::SendMessageResponse {
             message_id,

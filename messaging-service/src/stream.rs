@@ -88,6 +88,7 @@ pub(crate) async fn handle_stream_request(
                         message_id: message_id.clone(),
                         encrypted_payload: envelope.encrypted_payload.to_vec(),
                         content_type: envelope.content_type,
+                        edits_message_id: envelope.edits_message_id.clone(),
                     });
 
                 let app_context = Arc::new(context.to_app_context());
@@ -191,7 +192,12 @@ pub(crate) async fn handle_stream_request(
 ///
 /// Spawns a background task — exits automatically when the receiver is dropped
 /// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
-/// so the fallback 60s poll is never triggered in normal operation.
+/// so the fallback 5s poll is never triggered in normal operation.
+///
+/// **Race-condition protection**: sends a synthetic wakeup signal immediately after
+/// each successful SUBSCRIBE. This triggers an extra `poll_messages` call that catches
+/// any messages that were XADD'd to the stream between stream-open and subscribe
+/// completion (~50 ms window), preventing up to 5 s delivery delay on reconnect.
 pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
     tokio::spawn(async move {
         let channel = format!("inbox:wakeup:{}", user_id);
@@ -221,6 +227,14 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
                 continue;
             }
             tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
+
+            // Synthetic wakeup immediately after subscribe: polls for any messages
+            // that were dispatched during the TCP-connect + SUBSCRIBE window (~50 ms).
+            // Without this, those messages would wait for the next fallback poll (5s).
+            if tx.send(()).await.is_err() {
+                return; // stream closed
+            }
+
             let mut stream = pubsub.into_on_message();
             loop {
                 match stream.next().await {
@@ -251,12 +265,27 @@ pub(crate) async fn poll_messages(
     let user_id_str = user_id.to_string();
     let limit = 50;
 
+    let t_lock = std::time::Instant::now();
     let mut queue = context.queue.lock().await;
+    let lock_wait_ms = t_lock.elapsed().as_millis();
+
+    let t_xread = std::time::Instant::now();
     let messages = queue
         .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
         .await?;
+    let xread_ms = t_xread.elapsed().as_millis();
 
     drop(queue);
+
+    let msg_count = messages.len();
+    if lock_wait_ms > 20 || xread_ms > 20 {
+        tracing::info!(
+            lock_wait_ms,
+            xread_ms,
+            msg_count,
+            "poll_messages timing (slow)"
+        );
+    }
 
     for (stream_id, envelope) in messages {
         // Convert KafkaMessageEnvelope to the appropriate stream response

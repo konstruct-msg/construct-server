@@ -24,6 +24,8 @@ import "google/protobuf/timestamp.proto";
 // Port: 50059
 
 service SentinelService {
+  // ── Spam reports & blocks ───────────────────────────────────────────────
+
   // User reports a device as spam. No message content is sent — server is blind.
   rpc ReportSpam(ReportSpamRequest) returns (ReportSpamResponse);
 
@@ -36,6 +38,8 @@ service SentinelService {
   // List devices the caller has blocked.
   rpc GetBlockedDevices(GetBlockedDevicesRequest) returns (GetBlockedDevicesResponse);
 
+  // ── Trust & permissions ─────────────────────────────────────────────────
+
   // Get caller's current trust level, active restrictions, and remaining rate limits.
   // Auth token provides identity — no parameters needed.
   rpc GetTrustStatus(GetTrustStatusRequest) returns (GetTrustStatusResponse);
@@ -44,13 +48,38 @@ service SentinelService {
   // Call BEFORE encrypting and sending to avoid wasted work on denied sends.
   rpc CheckSendPermission(CheckSendPermissionRequest) returns (CheckSendPermissionResponse);
 
+  // ── Appeals (for users who were auto-restricted) ────────────────────────
+
   // Appeal an automatic restriction (rate limit, flag, or ban).
-  // Stub — full review workflow to be implemented later.
+  // Users can explain why restriction was unjust.
   rpc AppealRestriction(AppealRestrictionRequest) returns (AppealRestrictionResponse);
+
+  // List all appeals filed by the caller.
+  rpc GetAppeals(GetAppealsRequest) returns (GetAppealsResponse);
+
+  // ── Disputes (proof of innocence against botnet reports) ────────────────
+
+  // Submit a dispute with evidence that spam reports were from a botnet.
+  // System automatically analyzes report patterns and may auto-unban.
+  rpc SubmitDispute(SubmitDisputeRequest) returns (SubmitDisputeResponse);
+
+  // List all disputes filed by the caller with auto-collected evidence.
+  rpc GetDisputes(GetDisputesRequest) returns (GetDisputesResponse);
+
+  // ── Admin endpoints ─────────────────────────────────────────────────────
 
   // Aggregate protection statistics — admin/internal use only.
   // Returns no individual user data; aggregate counts only.
   rpc GetProtectionStats(GetProtectionStatsRequest) returns (GetProtectionStatsResponse);
+
+  // Manually ban a device (admin only).
+  rpc AdminBanDevice(AdminBanDeviceRequest) returns (AdminBanDeviceResponse);
+
+  // Manually unban a device (admin only).
+  rpc AdminUnbanDevice(AdminUnbanDeviceRequest) returns (AdminUnbanDeviceResponse);
+
+  // Clear flag from a device (admin only).
+  rpc AdminClearFlag(AdminClearFlagRequest) returns (AdminClearFlagResponse);
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -167,7 +196,56 @@ message AppealRestrictionResponse {
   string status = 3;
 }
 
-// ─── ProtectionStats (admin) ─────────────────────────────────────────────────
+message GetAppealsRequest {
+  // Caller identity comes from auth token.
+}
+
+message GetAppealsResponse {
+  repeated AppealInfo appeals = 1;
+}
+
+message AppealInfo {
+  string id = 1;
+  RestrictionType restriction_type = 2;
+  string context = 3;
+  string status = 4; // "pending_review" | "approved" | "rejected"
+  google.protobuf.Timestamp created_at = 5;
+  optional google.protobuf.Timestamp reviewed_at = 6;
+}
+
+// ─── Disputes (proof of innocence) ───────────────────────────────────────────
+
+message SubmitDisputeRequest {
+  RestrictionType restriction_type = 1;
+  string evidence_text = 2; // user's explanation of why reports were unjust
+}
+
+message SubmitDisputeResponse {
+  bool submitted = 1;
+  string dispute_id = 2;
+  string status = 3; // "pending_review" | "approved" | "rejected"
+  // If auto-analyzed and botnet detected, device may be automatically unbanned.
+  bool auto_resolved = 4;
+}
+
+message GetDisputesRequest {
+  // Caller identity comes from auth token.
+}
+
+message GetDisputesResponse {
+  repeated DisputeInfo disputes = 1;
+}
+
+message DisputeInfo {
+  string id = 1;
+  RestrictionType restriction_type = 2;
+  string evidence_text = 3; // user's evidence
+  string auto_evidence = 4; // system-collected evidence (JSON)
+  string status = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// ─── Admin endpoints ─────────────────────────────────────────────────────────
 
 message GetProtectionStatsRequest {
   // Admin-authenticated requests only. No filters needed for MVP.
@@ -181,4 +259,32 @@ message GetProtectionStatsResponse {
   int64 rate_limit_violations_24h = 4;
   int64 blocks_created_24h = 5;
   int64 appeals_pending = 6;
+}
+
+message AdminBanDeviceRequest {
+  string device_id = 1;
+  string reason = 2;
+  // Optional: set ban_expires_at for temporary bans (seconds from now).
+  // 0 or absent = permanent ban.
+  int64 duration_seconds = 3;
+}
+
+message AdminBanDeviceResponse {
+  bool success = 1;
+}
+
+message AdminUnbanDeviceRequest {
+  string device_id = 1;
+}
+
+message AdminUnbanDeviceResponse {
+  bool success = 1;
+}
+
+message AdminClearFlagRequest {
+  string device_id = 1;
+}
+
+message AdminClearFlagResponse {
+  bool success = 1;
 }

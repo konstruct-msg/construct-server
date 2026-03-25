@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_flags SET is_banned = FALSE, ban_reason = NULL, ban_expires_at = NULL, updated_at = NOW()\n             WHERE device_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32fccfe59cdfbada9ea29f29d49b19e509738e43bc72db425d56fbb7b31a8d33"
+}

@@ -353,12 +353,19 @@ pub async fn shutdown_signal() {
     }
 }
 
-/// Create a pre-configured tonic gRPC server with HTTP/2 keepalive.
+/// Create a pre-configured tonic gRPC server with HTTP/2 keepalive and tuned window sizes.
 ///
-/// Keepalive pings the client every 20s and closes unresponsive connections after 10s.
-/// This prevents silent H2 connection hangs and reduces stream reset noise in logs.
+/// - Keepalive pings the client every 20s and closes unresponsive connections after 10s.
+/// - HTTP/2 window sizes are set to 4 MB (connection) and 2 MB (per-stream) to prevent
+///   flow-control stalls when delivering large GetPendingMessages responses (many offline
+///   messages) without extra RTTs for window updates.
+/// - tcp_keepalive probes the underlying TCP connection every 30s; prevents the OS from
+///   silently dropping idle connections behind NAT/firewalls before Envoy notices.
 pub fn grpc_server() -> tonic::transport::Server {
     tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(std::time::Duration::from_secs(20)))
         .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
+        .initial_connection_window_size(4 * 1024 * 1024) // 4 MB (default 64 KB)
+        .initial_stream_window_size(2 * 1024 * 1024) // 2 MB (default 64 KB)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
 }

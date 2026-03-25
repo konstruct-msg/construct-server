@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 construct-config      = { path = "../construct-config" }
 construct-context     = { path = "../construct-context" }
+construct-crypto      = { path = "../construct-crypto" }
 construct-db          = { path = "../construct-db" }
 construct-auth        = { path = "../construct-auth" }
 construct-broker      = { path = "../construct-broker" }

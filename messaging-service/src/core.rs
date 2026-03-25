@@ -24,6 +24,7 @@ pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
     envelope: KafkaMessageEnvelope,
 ) -> Result<(), AppError> {
+    let t_start = std::time::Instant::now();
     let salt = &app_context.config.logging.hash_salt;
     let message_id = &envelope.message_id;
     let sender_id = &envelope.sender_id;
@@ -36,26 +37,31 @@ pub async fn dispatch_envelope(
         envelope.message_type,
         MessageType::DirectMessage | MessageType::MLSMessage
     );
-    if is_user_message {
-        let mut queue = app_context.queue.lock().await;
-        match queue.is_message_duplicate(message_id).await {
-            Ok(true) => {
-                tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
-                return Ok(());
-            }
-            Ok(false) => {
-                let _ = queue.mark_message_dispatched(message_id).await;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
-            }
-        }
-    }
 
     if let Some(kafka_producer) = &app_context.kafka_producer {
         if kafka_producer.is_enabled() {
+            // ── Kafka-enabled path ────────────────────────────────────────
+            // Dedup check happens before the async Kafka send (different lock window).
+            if is_user_message {
+                let mut queue = app_context.queue.lock().await;
+                match queue.is_message_duplicate(message_id).await {
+                    Ok(true) => {
+                        tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        let _ = queue.mark_message_dispatched(message_id).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
+                    }
+                }
+            }
+            let t_kafka = std::time::Instant::now();
             match kafka_producer.send_message(&envelope).await {
-                Ok(_) => {}
+                Ok(_) => {
+                    tracing::debug!(elapsed_ms = t_kafka.elapsed().as_millis(), "Kafka send OK");
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -64,6 +70,7 @@ pub async fn dispatch_envelope(
                         message_id = %message_id,
                         "Kafka unavailable — falling back to Redis direct delivery"
                     );
+                    // Kafka fallback + sender mapping in one lock to avoid double contention.
                     let mut queue = app_context.queue.lock().await;
                     queue
                         .write_message_to_user_stream(recipient_id, &envelope)
@@ -73,36 +80,75 @@ pub async fn dispatch_envelope(
                                 "Both Kafka and Redis delivery failed: {e} / {re}"
                             ))
                         })?;
+                    if !sender_id.is_empty()
+                        && let Err(se) = queue.store_message_sender(message_id, sender_id).await
+                    {
+                        tracing::warn!(error = %se, "Failed to store receipt sender (Kafka fallback)");
+                    }
                 }
             }
         } else {
-            // Kafka disabled (test mode) — write directly to Redis
+            // ── Kafka-disabled path (dev / test mode) ─────────────────────
+            // All Redis operations are batched inside ONE lock acquisition to avoid
+            // releasing and re-acquiring the mutex between the dedup check, the
+            // stream write, and the receipt-sender mapping.  Each lock cycle adds
+            // tokio scheduler overhead AND creates windows where poll_messages can
+            // steal the lock mid-dispatch, increasing per-message latency.
+            let t_lock = std::time::Instant::now();
             let mut queue = app_context.queue.lock().await;
+            tracing::debug!(
+                wait_ms = t_lock.elapsed().as_millis(),
+                "queue lock acquired (dispatch)"
+            );
+
+            if is_user_message {
+                match queue.is_message_duplicate(message_id).await {
+                    Ok(true) => {
+                        tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        let _ = queue.mark_message_dispatched(message_id).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
+                    }
+                }
+            }
+
             queue
                 .write_message_to_user_stream(recipient_id, &envelope)
                 .await
                 .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+
+            if !sender_id.is_empty()
+                && let Err(e) = queue.store_message_sender(message_id, sender_id).await
+            {
+                tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
+            }
+            // Single drop — releases lock once for all three operations.
+            drop(queue);
+            tracing::debug!(
+                redis_ms = t_lock.elapsed().as_millis(),
+                "dispatch redis batch done"
+            );
         }
     } else {
         return Err(AppError::Kafka("Kafka producer not available".to_string()));
     }
 
+    let elapsed = t_start.elapsed();
     tracing::info!(
+        elapsed_ms = elapsed.as_millis(),
         sender_hash = %log_safe_id(sender_id, salt),
         recipient_hash = %log_safe_id(recipient_id, salt),
         message_id = %message_id,
-        "Message dispatched successfully (gRPC path)"
+        "Message dispatched"
     );
 
-    // Store sender mapping for receipt routing — non-critical, log and continue on error.
-    // Stored in both Redis (fast path) and DB (durability fallback).
+    // ── Non-critical background tasks ─────────────────────────────────────────
+    // DB fallback for receipt routing (survives Redis restarts).
     if !sender_id.is_empty() {
-        let mut queue = app_context.queue.lock().await;
-        if let Err(e) = queue.store_message_sender(message_id, sender_id).await {
-            tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
-        }
-        drop(queue);
-        // DB fallback: persist to delivery_pending so receipts survive Redis restarts.
         let hash_salt = app_context.config.logging.hash_salt.clone();
         let msg_id = message_id.clone();
         let snd_id = sender_id.clone();
@@ -146,14 +192,6 @@ async fn send_push_notification(
     app_context: &Arc<AppContext>,
     recipient_id: &str,
 ) -> anyhow::Result<()> {
-    // Only send to devices matching the server's configured APNs environment.
-    // dev server (APNS_ENVIRONMENT=development) → sandbox tokens only
-    // prod server (APNS_ENVIRONMENT=production) → production tokens only
-    let env_str = match app_context.config.apns.environment {
-        construct_config::ApnsEnvironment::Production => "production",
-        _ => "sandbox",
-    };
-
     #[derive(sqlx::FromRow)]
     struct DeviceTokenRow {
         device_token_encrypted: Vec<u8>,
@@ -161,11 +199,9 @@ async fn send_push_notification(
 
     let rows = sqlx::query_as::<_, DeviceTokenRow>(
         "SELECT device_token_encrypted FROM device_tokens \
-         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns' \
-         AND push_environment = $2",
+         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns'",
     )
     .bind(recipient_id)
-    .bind(env_str)
     .fetch_all(&*app_context.db_pool)
     .await?;
 
@@ -177,6 +213,14 @@ async fn send_push_notification(
         return Ok(());
     }
 
+    tracing::info!(
+        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+        token_count = rows.len(),
+        "Sending silent push to recipient devices"
+    );
+
+    // With APNs token-based auth (p8), the production endpoint handles both
+    // production and sandbox device tokens — no need to route to separate sandbox endpoint.
     let mut success = 0u32;
     let mut failed = 0u32;
     for row in &rows {
@@ -198,19 +242,15 @@ async fn send_push_notification(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
                         "Silent push: token invalid/unregistered — disabling in DB"
                     );
-                    // Disable the stale token so we never send to it again.
-                    // The device will re-register a fresh token on next app launch.
-                    if let Err(db_err) = sqlx::query(
-                        "UPDATE device_tokens SET enabled = false \
-                         WHERE device_token_encrypted = $1",
-                    )
-                    .bind(&row.device_token_encrypted)
-                    .execute(&*app_context.db_pool)
-                    .await
+                    if let Err(db_err) =
+                        sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                            .bind(&row.device_token_encrypted)
+                            .execute(&*app_context.db_pool)
+                            .await
                     {
                         tracing::error!(
                             error = %db_err,
-                            "Failed to disable invalid device token in DB"
+                            "Failed to delete invalid device token from DB"
                         );
                     }
                 }

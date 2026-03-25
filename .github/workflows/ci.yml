@@ -152,6 +152,113 @@ jobs:
         if: always()
         run: ./scripts/cleanup_test_keys.sh
 
+  # Smoke tests — start real services in Docker and verify key gRPC endpoints
+  # respond correctly. Catches deployment/config regressions before production.
+  # Runs on every push; required before deploy on main.
+  smoke:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install grpcurl
+        run: |
+          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | tar -xz -C /usr/local/bin grpcurl
+          chmod +x /usr/local/bin/grpcurl
+
+      - name: Pull latest image
+        run: docker pull ghcr.io/${{ github.repository_owner }}/construct-server:latest
+
+      - name: Generate smoke test JWT keypair
+        run: |
+          # Generate a fresh RSA-2048 keypair for this CI run only.
+          # Keys are never committed — generated fresh each run and passed via env.
+          openssl genrsa -out /tmp/smoke_private.pem 2048 2>/dev/null
+          openssl rsa -in /tmp/smoke_private.pem -pubout -out /tmp/smoke_public.pem 2>/dev/null
+          # Use GitHub Actions heredoc format so env vars contain real newlines.
+          # Docker Compose substitutes ${SMOKE_JWT_*} after YAML parsing, so
+          # multiline values are safe and the PEM parser receives actual newlines.
+          echo "SMOKE_JWT_PRIVATE_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/smoke_private.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+          echo "SMOKE_JWT_PUBLIC_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/smoke_public.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+
+      - name: Start services
+        run: |
+          docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
+          sleep 5
+          IMAGE_TAG=latest docker compose -f ops/docker-compose.smoke.yml up -d \
+            auth-service messaging-service key-service gateway
+
+      - name: Wait for services to be healthy
+        run: |
+          # Wait for gateway HTTP (simple, no DB dependency)
+          echo "Waiting for gateway /health..."
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health && { echo "✅ gateway ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
+          done
+
+          # Wait for auth-service to be truly ready (GetPowChallenge requires DB).
+          # Uses the actual RPC — grpcurl exits 0 only if the call succeeds.
+          echo "Waiting for auth-service (GetPowChallenge)..."
+          for i in $(seq 1 40); do
+            grpcurl -plaintext -connect-timeout 2 \
+              -import-path shared/proto \
+              -proto services/auth_service.proto \
+              -d '{}' localhost:50051 \
+              shared.proto.services.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
+              && { echo "✅ auth-service ready"; break; }
+            echo "  attempt $i/40..."; sleep 2
+          done
+
+          # Wait for messaging-service port (TCP open = gRPC stack is up).
+          echo "Waiting for messaging-service port..."
+          for i in $(seq 1 30); do
+            nc -z localhost 50052 && { echo "✅ messaging-service ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
+          done
+
+          # Wait for key-service port
+          echo "Waiting for key-service port..."
+          for i in $(seq 1 30); do
+            nc -z localhost 50057 && { echo "✅ key-service ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
+          done
+
+      - name: Run smoke tests
+        run: bash scripts/smoke-test.sh
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "=== auth-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs auth-service
+          echo "=== messaging-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs messaging-service
+          echo "=== key-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs key-service
+          echo "=== gateway logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs gateway
+          echo "=== postgres logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs postgres
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f ops/docker-compose.smoke.yml down -v
+
   # Build and push Docker image to ghcr.io (only on push to main)
   docker:
     name: Build & Push Docker Image
@@ -200,7 +307,7 @@ jobs:
     name: Deploy to VPS
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [docker]
+    needs: [docker, smoke]
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0

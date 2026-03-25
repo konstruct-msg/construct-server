@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use construct_context::AppContext;
+use construct_crypto::hash_username;
 use construct_db::{self as db, CreateDeviceData};
 use construct_error::AppError;
 
@@ -484,41 +485,42 @@ pub async fn register_device_v2(
         crypto_suites,
     };
 
-    // Convert normalized username: Option<String> to Option<&str> for database
-    // None or empty string = maximum privacy (no username)
-    let username_opt = normalized_username
+    // Compute username hash (if username provided) — plaintext is never stored.
+    let username_hash_opt: Option<Vec<u8>> = normalized_username
         .as_ref()
         .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
+        .map(|username| {
+            let secret = &app_context.config.security.username_hmac_secret;
+            hash_username(secret, username)
+        });
 
-    // Check if username already exists (before attempting DB insert)
-    if let Some(username) = username_opt
+    // Check if username hash already exists (before attempting DB insert)
+    if let Some(ref hash) = username_hash_opt
         && let Ok(Some(_existing_user)) =
-            db::get_user_by_username(&app_context.db_pool, username).await
+            db::get_user_by_username_hash(&app_context.db_pool, hash).await
     {
         tracing::warn!(
-            username = username,
             device_id = %request.device_id,
             "Registration failed: username already taken"
         );
-        return Err(AppError::Conflict(format!(
-            "Username '{}' is already taken",
-            username
-        )));
+        return Err(AppError::Conflict("Username is already taken".to_string()));
     }
 
-    let (user, _device) =
-        db::create_user_with_first_device(&app_context.db_pool, username_opt, device_data)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to create user with device");
-                AppError::Unknown(e)
-            })?;
+    let (user, _device) = db::create_user_with_first_device(
+        &app_context.db_pool,
+        username_hash_opt.as_deref(),
+        device_data,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to create user with device");
+        AppError::Unknown(e)
+    })?;
 
     tracing::info!(
         user_id = %user.id,
         device_id = %request.device_id,
-        username = ?user.username,
+        has_username = user.username_hash.is_some(),
         "User + device registered successfully (passwordless)"
     );
 

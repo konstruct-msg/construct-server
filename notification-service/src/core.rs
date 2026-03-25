@@ -12,6 +12,7 @@ use construct_server_shared::{
     apns::{ApnsSendError, DeviceTokenEncryption},
     utils::log_safe_id,
 };
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::NotificationServiceContext;
@@ -119,10 +120,11 @@ pub async fn send_blind_notification(
         "Sending blind notification"
     );
 
-    // Fetch all active device tokens for this user
+    // Fetch all active device tokens for this user (including environment for APNS routing)
     let device_tokens = sqlx::query!(
         r#"
-        SELECT device_token_encrypted, notification_filter, enabled
+        SELECT device_token_encrypted, notification_filter, enabled,
+               push_provider, push_environment
         FROM device_tokens
         WHERE user_id = $1 AND enabled = TRUE
         "#,
@@ -181,6 +183,24 @@ pub async fn send_blind_notification(
             continue;
         }
 
+        // Route to the correct APNS client based on the token's push_environment.
+        // The same .p8 key is valid for both endpoints, but sending a sandbox token
+        // to the production endpoint (or vice versa) silently fails with BadDeviceToken.
+        let apns_client = if token_row.push_provider == "apns" {
+            match token_row.push_environment.as_str() {
+                "sandbox" => &context.apns_sandbox_client,
+                _ => &context.apns_client,
+            }
+        } else {
+            // FCM and other providers not yet implemented — skip silently
+            tracing::debug!(
+                user_hash = %user_id_hash,
+                push_provider = %token_row.push_provider,
+                "Skipping non-APNS token (FCM not yet implemented)"
+            );
+            continue;
+        };
+
         // Send notification via APNs
         // Note: FCM support can be added here with similar logic
         use construct_server_shared::apns::types::{
@@ -220,39 +240,62 @@ pub async fn send_blind_notification(
             }),
         };
 
-        if let Err(e) = context
-            .apns_client
-            .send_notification(&device_token, payload, push_type, priority)
-            .await
-        {
-            if matches!(e, ApnsSendError::InvalidToken) {
-                tracing::warn!(
-                    user_hash = %user_id_hash,
-                    "APNs: token invalid/unregistered — disabling in DB"
-                );
-                // Disable the stale token so we never send to it again.
-                // The device will re-register on next app launch.
-                let _ = sqlx::query(
-                    "UPDATE device_tokens SET enabled = false \
-                     WHERE device_token_encrypted = $1",
-                )
+        // Retry with exponential backoff: 100ms → 300ms → 900ms (3 attempts total).
+        // Skip retrying immediately on InvalidToken — APNs won't accept it regardless.
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut succeeded = false;
+        let mut invalid_token = false;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match apns_client
+                .send_notification(&device_token, payload.clone(), push_type, priority)
+                .await
+            {
+                Ok(()) => {
+                    succeeded = true;
+                    break;
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    invalid_token = true;
+                    break; // no retries — token is permanently dead
+                }
+                Err(ref e) if attempt < MAX_ATTEMPTS => {
+                    let delay = Duration::from_millis(100 * 3_u64.pow(attempt - 1));
+                    tracing::warn!(
+                        error = %e,
+                        user_hash = %user_id_hash,
+                        attempt = attempt,
+                        retry_ms = delay.as_millis(),
+                        "APNs send failed — retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        user_hash = %user_id_hash,
+                        "APNs send failed after all retries — giving up on this token"
+                    );
+                }
+            }
+        }
+        if invalid_token {
+            tracing::warn!(
+                user_hash = %user_id_hash,
+                "APNs: token invalid/unregistered — disabling in DB"
+            );
+            let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
                 .bind(&token_row.device_token_encrypted)
                 .execute(&*context.db_pool)
                 .await
                 .map_err(|db_err| {
                     tracing::error!(
                         error = %db_err,
-                        "Failed to disable invalid device token in DB"
+                        "Failed to delete invalid device token from DB"
                     );
                 });
-            } else {
-                tracing::error!(
-                    error = %e,
-                    user_hash = %user_id_hash,
-                    "Failed to send APNs notification"
-                );
-            }
-            // Continue trying other tokens even if one fails
+            continue;
+        }
+        if !succeeded {
             continue;
         }
 
