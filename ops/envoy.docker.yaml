@@ -67,6 +67,10 @@ static_resources:
                         # Sentinel service
                         - match: { prefix: "/shared.proto.sentinel.v1.SentinelService" }
                           route: { cluster: sentinel_service, timeout: 30s }
+                        # Signaling service (WebRTC calls)
+                        - match: { prefix: "/shared.proto.signaling.v1.SignalingService" }
+                          route: { cluster: signaling_service, timeout: 300s, max_stream_duration: { max_stream_duration: 300s } }
+                          # Long-lived bidirectional streams for calls
                         # Discovery & health (gateway binary)
                         - match: { prefix: "/.well-known" }
                           route: { cluster: discovery_service, timeout: 5s }
@@ -251,6 +255,22 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: sentinel, port_value: 50059 }
+
+    - name: signaling_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: signaling_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: signaling, port_value: 50060 }
 
     - name: discovery_service
       type: STRICT_DNS
