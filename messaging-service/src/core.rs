@@ -195,10 +195,11 @@ async fn send_push_notification(
     #[derive(sqlx::FromRow)]
     struct DeviceTokenRow {
         device_token_encrypted: Vec<u8>,
+        push_environment: String,
     }
 
     let rows = sqlx::query_as::<_, DeviceTokenRow>(
-        "SELECT device_token_encrypted FROM device_tokens \
+        "SELECT device_token_encrypted, push_environment FROM device_tokens \
          WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns'",
     )
     .bind(recipient_id)
@@ -219,20 +220,27 @@ async fn send_push_notification(
         "Sending silent push to recipient devices"
     );
 
-    // With APNs token-based auth (p8), the production endpoint handles both
-    // production and sandbox device tokens — no need to route to separate sandbox endpoint.
     let mut success = 0u32;
     let mut failed = 0u32;
     for row in &rows {
+        // Route to the correct APNs endpoint based on the token's registered environment.
+        // Sending a sandbox token to the production endpoint (or vice versa) → BadDeviceToken.
+        let apns_client = if row.push_environment == "production" {
+            &app_context.apns_client
+        } else {
+            &app_context.apns_sandbox_client
+        };
+
         match app_context
             .token_encryption
             .decrypt(&row.device_token_encrypted)
         {
-            Ok(token) => match app_context.apns_client.send_silent_push(&token, None).await {
+            Ok(token) => match apns_client.send_silent_push(&token, None).await {
                 Ok(_) => {
                     success += 1;
                     tracing::info!(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        push_environment = %row.push_environment,
                         "Silent push sent successfully"
                     );
                 }
@@ -240,7 +248,8 @@ async fn send_push_notification(
                     failed += 1;
                     tracing::warn!(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-                        "Silent push: token invalid/unregistered — disabling in DB"
+                        push_environment = %row.push_environment,
+                        "Silent push: token invalid/unregistered — deleting from DB"
                     );
                     if let Err(db_err) =
                         sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
@@ -258,6 +267,7 @@ async fn send_push_notification(
                     failed += 1;
                     tracing::warn!(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        push_environment = %row.push_environment,
                         error = %e,
                         "Silent push failed for device"
                     );
