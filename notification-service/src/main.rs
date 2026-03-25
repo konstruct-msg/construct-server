@@ -181,6 +181,84 @@ impl NotificationService for NotificationGrpcService {
             },
         ))
     }
+
+    async fn register_voip_token(
+        &self,
+        request: Request<proto::RegisterVoipTokenRequest>,
+    ) -> Result<Response<proto::RegisterVoipTokenResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = core::RegisterVoipTokenInput {
+            user_id,
+            voip_token: req.voip_token,
+            device_id: req.device_id,
+            platform: req.platform,
+            push_environment: match req.environment {
+                2 => "production".to_string(), // PUSH_ENV_PRODUCTION = 2
+                _ => "sandbox".to_string(),    // PUSH_ENV_SANDBOX = 1, default
+            },
+        };
+
+        let output = core::register_voip_token(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to register voip token: {}", e)))?;
+
+        Ok(Response::new(proto::RegisterVoipTokenResponse {
+            success: output.success,
+        }))
+    }
+
+    async fn unregister_voip_token(
+        &self,
+        request: Request<proto::UnregisterVoipTokenRequest>,
+    ) -> Result<Response<proto::UnregisterVoipTokenResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = core::UnregisterVoipTokenInput {
+            user_id,
+            device_id: req.device_id,
+        };
+
+        let output = core::unregister_voip_token(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to unregister voip token: {}", e)))?;
+
+        Ok(Response::new(proto::UnregisterVoipTokenResponse {
+            success: output.success,
+        }))
+    }
+
+    async fn send_voip_incoming_call(
+        &self,
+        request: Request<proto::SendVoipIncomingCallRequest>,
+    ) -> Result<Response<proto::SendVoipIncomingCallResponse>, Status> {
+        let req = request.into_inner();
+
+        let user_id = Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+
+        let input = core::SendVoipIncomingCallInput {
+            user_id,
+            call_id: req.call_id,
+            caller_id: req.caller_id,
+            caller_name: req.caller_name,
+            call_type: req.call_type,
+            offered_at: req.offered_at,
+        };
+
+        let output = core::send_voip_incoming_call(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to send VoIP incoming call: {}", e)))?;
+
+        Ok(Response::new(proto::SendVoipIncomingCallResponse {
+            success: output.success,
+            sent_count: output.sent_count,
+        }))
+    }
 }
 
 /// Health check endpoint
