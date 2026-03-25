@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use construct_apns::ApnsSendError;
 use construct_broker::KafkaMessageEnvelope;
 use construct_context::AppContext;
 use construct_error::AppError;
@@ -234,6 +235,24 @@ async fn send_push_notification(
                         recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
                         "Silent push sent successfully"
                     );
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    failed += 1;
+                    tracing::warn!(
+                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
+                        "Silent push: token invalid/unregistered — disabling in DB"
+                    );
+                    if let Err(db_err) =
+                        sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                            .bind(&row.device_token_encrypted)
+                            .execute(&*app_context.db_pool)
+                            .await
+                    {
+                        tracing::error!(
+                            error = %db_err,
+                            "Failed to delete invalid device token from DB"
+                        );
+                    }
                 }
                 Err(e) => {
                     failed += 1;

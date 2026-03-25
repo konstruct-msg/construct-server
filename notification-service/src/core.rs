@@ -7,7 +7,11 @@
 // ============================================================================
 
 use anyhow::{Context, Result};
-use construct_server_shared::{AppError, apns::DeviceTokenEncryption, utils::log_safe_id};
+use construct_server_shared::{
+    AppError,
+    apns::{ApnsSendError, DeviceTokenEncryption},
+    utils::log_safe_id,
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -237,9 +241,10 @@ pub async fn send_blind_notification(
         };
 
         // Retry with exponential backoff: 100ms → 300ms → 900ms (3 attempts total).
-        // Covers transient APNS connection errors without significant latency impact.
+        // Skip retrying immediately on InvalidToken — APNs won't accept it regardless.
         const MAX_ATTEMPTS: u32 = 3;
         let mut succeeded = false;
+        let mut invalid_token = false;
         for attempt in 1..=MAX_ATTEMPTS {
             match apns_client
                 .send_notification(&device_token, payload.clone(), push_type, priority)
@@ -248,6 +253,10 @@ pub async fn send_blind_notification(
                 Ok(()) => {
                     succeeded = true;
                     break;
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    invalid_token = true;
+                    break; // no retries — token is permanently dead
                 }
                 Err(ref e) if attempt < MAX_ATTEMPTS => {
                     let delay = Duration::from_millis(100 * 3_u64.pow(attempt - 1));
@@ -268,6 +277,23 @@ pub async fn send_blind_notification(
                     );
                 }
             }
+        }
+        if invalid_token {
+            tracing::warn!(
+                user_hash = %user_id_hash,
+                "APNs: token invalid/unregistered — disabling in DB"
+            );
+            let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                .bind(&token_row.device_token_encrypted)
+                .execute(&*context.db_pool)
+                .await
+                .map_err(|db_err| {
+                    tracing::error!(
+                        error = %db_err,
+                        "Failed to delete invalid device token from DB"
+                    );
+                });
+            continue;
         }
         if !succeeded {
             continue;
