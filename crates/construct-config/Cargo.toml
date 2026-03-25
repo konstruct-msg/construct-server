@@ -12,6 +12,7 @@ tracing = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
 base64 = "0.22"
 rand = "0.8"
+hex = "0.4"
 
 # Feature dependencies
 construct-error = { path = "../construct-error", optional = true }

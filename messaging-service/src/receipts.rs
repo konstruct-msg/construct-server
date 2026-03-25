@@ -147,10 +147,10 @@ pub(crate) fn build_receipt_response(
         status,
         timestamp: payload.timestamp,
         sender_device_id: String::new(),
-        // envelope.recipient_id holds the user_id of who sent this receipt
-        // (stored as receipt_sender_id in from_receipt). Device 1 needs this
-        // to know which contact delivered their message.
-        recipient_user_id: envelope.recipient_id.clone(),
+        // envelope.sender_id = who sent the receipt (device 1).
+        // The original sender (device 2) needs this to know which contact
+        // acknowledged their message.
+        recipient_user_id: envelope.sender_id.clone(),
     };
 
     let receipt = signaling::DeliveryReceipt {

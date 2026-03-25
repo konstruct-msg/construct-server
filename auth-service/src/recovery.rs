@@ -18,6 +18,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use construct_crypto::hash_username;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -160,18 +161,35 @@ pub async fn verify_recovery_signature(
     identifier: &str,
     challenge: &str,
     recovery_signature: &[u8],
+    hmac_secret: &[u8],
 ) -> Result<Uuid> {
-    // 1. Find user by username or UUID
-    let row = sqlx::query_as::<_, RecoveryKeyRow>(
-        r#"
-        SELECT id, recovery_public_key, last_recovery_at
-        FROM users
-        WHERE id::text = $1 OR username = $1
-        "#,
-    )
-    .bind(identifier)
-    .fetch_optional(db)
-    .await?;
+    // 1. Find user by UUID or username_hash (privacy-first)
+    let row = if let Ok(user_uuid) = identifier.parse::<Uuid>() {
+        // identifier is a UUID → direct lookup
+        sqlx::query_as::<_, RecoveryKeyRow>(
+            r#"
+            SELECT id, recovery_public_key, last_recovery_at
+            FROM users
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_uuid)
+        .fetch_optional(db)
+        .await?
+    } else {
+        // identifier is a username → hash and look up by hash
+        let hash = hash_username(hmac_secret, identifier);
+        sqlx::query_as::<_, RecoveryKeyRow>(
+            r#"
+            SELECT id, recovery_public_key, last_recovery_at
+            FROM users
+            WHERE username_hash = $1
+            "#,
+        )
+        .bind(&hash)
+        .fetch_optional(db)
+        .await?
+    };
 
     let row = row.ok_or_else(|| anyhow::anyhow!("Account not found"))?;
 

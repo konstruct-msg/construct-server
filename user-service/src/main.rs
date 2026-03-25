@@ -21,6 +21,7 @@ use axum::{
     routing::{get, post, put},
 };
 use construct_config::Config;
+use construct_crypto::hash_username;
 use construct_db as db_agility;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
@@ -62,7 +63,7 @@ impl UserService for UserGrpcService {
 
         Ok(Response::new(proto::UserProfile {
             user_id: user.id.to_string(),
-            username: user.username,
+            username: None, // server no longer stores plaintext username
             display_name: None,
             bio: None,
             profile_picture_url: None,
@@ -106,8 +107,10 @@ impl UserService for UserGrpcService {
                 ));
             }
 
+            let secret = &self.context.config.security.username_hmac_secret;
+            let hash = hash_username(secret, username);
             if let Some(existing) =
-                construct_server_shared::db::get_user_by_username(&self.context.db_pool, username)
+                construct_server_shared::db::get_user_by_username_hash(&self.context.db_pool, &hash)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?
                 && existing.id != user_id
@@ -116,17 +119,22 @@ impl UserService for UserGrpcService {
             }
         }
 
+        let username_hash_opt: Option<Vec<u8>> = normalized_username.as_ref().map(|u| {
+            let secret = &self.context.config.security.username_hmac_secret;
+            hash_username(secret, u)
+        });
+
         let updated = construct_server_shared::db::update_user_username(
             &self.context.db_pool,
             &user_id,
-            normalized_username.as_deref(),
+            username_hash_opt.as_deref(),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::UserProfile {
             user_id: updated.id.to_string(),
-            username: updated.username,
+            username: None, // server no longer stores plaintext username
             display_name: None,
             bio: None,
             profile_picture_url: None,
@@ -257,7 +265,7 @@ impl UserService for UserGrpcService {
             .into_iter()
             .map(|u| proto::BlockedUser {
                 user_id: u.user_id.to_string(),
-                username: u.username.unwrap_or_default(),
+                username: String::new(), // server no longer stores plaintext username
                 blocked_at: u.blocked_at.timestamp_millis(),
                 reason: u.reason,
             })
@@ -379,7 +387,7 @@ impl UserService for UserGrpcService {
             "data_notice": "Construct is a privacy-first messenger. Message content is never stored on the server. This export contains only your account metadata.",
             "profile": {
                 "user_id": user.id.to_string(),
-                "username": user.username,
+                "username": null, // server no longer stores plaintext username
                 "account_created": null,
             },
             "devices": device_list,
@@ -426,7 +434,9 @@ impl UserService for UserGrpcService {
         }
 
         use construct_server_shared::db;
-        match db::get_user_by_username(&self.context.db_pool, &normalized).await {
+        let secret = &self.context.config.security.username_hmac_secret;
+        let hash = hash_username(secret, &normalized);
+        match db::get_user_by_username_hash(&self.context.db_pool, &hash).await {
             Ok(None) => Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
                 available: true,
                 reason: None,

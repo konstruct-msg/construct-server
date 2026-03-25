@@ -229,10 +229,16 @@ pub async fn check_username_availability(
     let jitter_ms = rand::random::<u64>() % 40 + 10;
     tokio::time::sleep(tokio::time::Duration::from_millis(jitter_ms)).await;
 
-    // 5. Check database for existing username
-    let available = match db::get_user_by_username(&app_context.db_pool, &normalized).await {
-        Ok(None) => true,     // Username not found = available
-        Ok(Some(_)) => false, // Username exists = not available
+    // 5. Check database: compute HMAC hash and look for a matching row.
+    //    The server never stores plaintext usernames (migration 034), so the check
+    //    is a hash equality test — exact match only, no substring search.
+    use construct_crypto::hash_username;
+    let secret = &app_context.config.security.username_hmac_secret;
+    let hash = hash_username(secret, &normalized);
+
+    let available = match db::get_user_by_username_hash(&app_context.db_pool, &hash).await {
+        Ok(None) => true,
+        Ok(Some(_)) => false,
         Err(e) => {
             tracing::error!(error = %e, "Database error checking username");
             return Err(AppError::Unknown(e));

@@ -387,8 +387,12 @@ impl KafkaMessageEnvelope {
 
         Self {
             message_id: receipt_id,
-            sender_id: original_sender_id,   // receives the receipt
-            recipient_id: receipt_sender_id, // sent the receipt
+            // sender_id = who sent the receipt (device that acknowledged delivery).
+            // recipient_id = who should receive this notification (original message sender).
+            // parse_stream_message filters envelopes by `envelope.recipient_id == user_id`,
+            // so recipient_id must match the stream owner (original_sender_id).
+            sender_id: receipt_sender_id, // device that sent the receipt
+            recipient_id: original_sender_id, // original sender who gets notified
             timestamp: chrono::Utc::now().timestamp(),
             message_type: MessageType::Receipt,
             ephemeral_public_key: None,
@@ -515,6 +519,9 @@ pub struct ProtoEnvelopeContext {
     /// Proto ContentType value (from Envelope.content_type).
     /// Used to classify control messages (SESSION_RESET=21, KEY_SYNC=22).
     pub content_type: i32,
+    /// Propagated from proto Envelope.edits_message_id — links this message to the
+    /// original message being edited. None for new (non-edit) messages.
+    pub edits_message_id: Option<String>,
 }
 
 impl KafkaMessageEnvelope {
@@ -565,7 +572,7 @@ impl KafkaMessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
+            edits_message_id: ctx.edits_message_id.clone(),
         }
     }
 
@@ -748,6 +755,7 @@ mod tests {
             message_id: "msg-uuid".to_string(),
             encrypted_payload: fake_ciphertext.to_vec(),
             content_type: 0,
+            edits_message_id: None,
         };
 
         let envelope = KafkaMessageEnvelope::from_proto_envelope(&ctx);
@@ -858,6 +866,7 @@ mod tests {
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
+            edits_message_id: None,
         });
 
         let json = serde_json::to_string(&env).expect("serialize must succeed");
@@ -946,8 +955,10 @@ mod tests {
         let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.message_type, MessageType::Receipt);
-        assert_eq!(restored.sender_id, "alice");
-        assert_eq!(restored.recipient_id, "bob");
+        // After the receipt routing fix: sender_id = who sent the receipt (bob),
+        // recipient_id = original sender who gets notified (alice).
+        assert_eq!(restored.sender_id, "bob");
+        assert_eq!(restored.recipient_id, "alice");
 
         // The payload must be valid JSON containing message_ids and status
         let payload: serde_json::Value = serde_json::from_str(&restored.encrypted_payload)
@@ -967,6 +978,7 @@ mod tests {
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
+            edits_message_id: None,
         });
         assert!(env.validate().is_ok());
     }
@@ -989,6 +1001,7 @@ mod tests {
             message_id: "mls-1".to_string(),
             encrypted_payload: b"mls-ciphertext".to_vec(),
             content_type: 0,
+            edits_message_id: None,
         });
         env.message_type = MessageType::MLSMessage;
         env.mls_payload = None; // missing required field
@@ -1007,6 +1020,7 @@ mod tests {
             message_id: "fed-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
+            edits_message_id: None,
         });
         env.message_type = MessageType::FederatedMessage;
         env.server_signature = Some("sig".to_string());

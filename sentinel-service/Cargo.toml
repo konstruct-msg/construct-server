@@ -13,7 +13,8 @@ thiserror = "1"
 
 # gRPC / Tonic
 tonic = "0.14"
-prost = "0.13"
+prost = "0.14.3"
+prost-types = "0.14.3"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "uuid", "chrono"] }

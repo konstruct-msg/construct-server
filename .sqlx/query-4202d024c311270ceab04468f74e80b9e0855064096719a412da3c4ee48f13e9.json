@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_flags SET is_flagged = FALSE, updated_at = NOW()\n             WHERE device_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4202d024c311270ceab04468f74e80b9e0855064096719a412da3c4ee48f13e9"
+}

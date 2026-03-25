@@ -8,15 +8,21 @@
 // All gRPC traffic is routed through Envoy → tonic services directly.
 // This gateway no longer performs REST proxying.
 //
+// IMPORTANT: The /.well-known/construct-server endpoint MUST return 200 for
+// the client DPI detector to work correctly. If it returns 404 (not found),
+// clients falsely detect DPI interference and switch to ICE unnecessarily,
+// adding 5-8 seconds to every connection attempt.
+//
 // ============================================================================
 
 mod handlers;
 pub mod routes;
 
 use anyhow::{Context, Result};
-use axum::{Router, http::StatusCode, response::Response};
+use axum::{Json, Router, extract::State, http::StatusCode, response::Response};
 use construct_config::Config;
 use construct_server_shared::metrics;
+use serde_json::json;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
@@ -35,12 +41,23 @@ async fn main() -> Result<()> {
     info!("=== API Gateway Service Starting ===");
     info!("Port: {}", config.port);
 
-    // Create router — health + metrics only (all API routes are gRPC via Envoy)
+    // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
+    // NOTE: .well-known MUST return 200 — clients use it to detect DPI interference.
+    // A 404 here causes false-positive DPI detection → unnecessary ICE auto-start → 5-8s delay.
     let app = Router::new()
         .route("/health", axum::routing::get(health_check))
         .route("/health/ready", axum::routing::get(health_check))
         .route("/health/live", axum::routing::get(health_check))
         .route("/metrics", axum::routing::get(metrics_endpoint))
+        .route(
+            "/.well-known/construct-server",
+            axum::routing::get(well_known_construct_server),
+        )
+        .route(
+            "/.well-known/konstruct",
+            axum::routing::get(well_known_construct_server),
+        )
+        .with_state(config.clone())
         .layer(TraceLayer::new_for_http());
 
     // Start plain listener
@@ -76,6 +93,26 @@ async fn main() -> Result<()> {
             }
         };
 
+        // Cover proxy config — only active when no gateway-managed TLS (i.e. Traefik terminates
+        // TLS before us).  When set, connections that look like TLS ClientHello or HTTP are
+        // transparently forwarded to the upstream site; real obfs4 clients are unaffected.
+        let cover_cfg: Option<construct_ice::transport::cover::CoverProxyConfig> = if tls_acceptor
+            .is_none()
+        {
+            config.ice_cover_upstream.as_deref().map(|addr| {
+                    info!(upstream = %addr, "ICE cover proxy enabled — active probers forwarded to cover site");
+                    construct_ice::transport::cover::CoverProxyConfig::new(addr)
+                })
+        } else {
+            if config.ice_cover_upstream.is_some() {
+                tracing::warn!(
+                    "ICE_COVER_UPSTREAM is set but ICE-over-TLS is also active — \
+                        cover proxy disabled (peek happens before gateway TLS, not after)"
+                );
+            }
+            None
+        };
+
         let tcp_listener = tokio::net::TcpListener::bind(&ice_addr)
             .await
             .context("Failed to bind ICE listener")?;
@@ -88,11 +125,51 @@ async fn main() -> Result<()> {
             port = config.ice_port,
             upstream = %config.ice_upstream,
             tls = tls_acceptor.is_some(),
+            cover = config.ice_cover_upstream.as_deref().unwrap_or("disabled"),
             "ICE listener started — obfuscated traffic accepted"
         );
         let upstream = config.ice_upstream.clone();
         tokio::spawn(async move {
             loop {
+                // ── Cover proxy path (no gateway TLS) ────────────────────────────────
+                // peek() classifies the first bytes as TLS/HTTP → forward to cover site,
+                // or as obfs4 noise → proceed with normal handshake below.
+                if let Some(ref ccfg) = cover_cfg {
+                    match ice_listener.accept_obfs4_or_proxy(ccfg.clone()).await {
+                        Ok((
+                            construct_ice::transport::cover::MixedAccept::Proxied(handle),
+                            peer,
+                        )) => {
+                            tracing::debug!(peer = %peer, "ICE cover: TLS/HTTP probe forwarded to cover upstream");
+                            tokio::spawn(async move {
+                                if let Err(e) = handle.await {
+                                    tracing::debug!(peer = %peer, error = %e, "ICE cover proxy task error");
+                                }
+                            });
+                            continue;
+                        }
+                        Ok((
+                            construct_ice::transport::cover::MixedAccept::Obfs4(ice_stream),
+                            peer,
+                        )) => {
+                            let upstream = upstream.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    proxy_to_upstream(*ice_stream, &upstream, peer).await
+                                {
+                                    tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
+                                }
+                            });
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ICE accept error (cover path)");
+                            continue;
+                        }
+                    }
+                }
+
+                // ── Standard path (no cover proxy) ───────────────────────────────────
                 match ice_listener.accept_tcp().await {
                     Ok((tcp, peer)) => {
                         let upstream = upstream.clone();
@@ -100,7 +177,7 @@ async fn main() -> Result<()> {
                         let tls_acceptor = tls_acceptor.clone();
                         tokio::spawn(async move {
                             // If TLS configured: wrap TCP in TLS first, then obfs4
-                            // If no TLS: plain obfs4 over TCP (legacy mode)
+                            // If no TLS: plain obfs4 over TCP (Traefik terminates TLS upstream)
                             let proxy_result = if let Some(acceptor) = tls_acceptor {
                                 match acceptor.accept(tcp).await {
                                     Ok(tls_stream) => {
@@ -234,6 +311,54 @@ where
         ),
     }
     Ok(())
+}
+
+/// GET /.well-known/construct-server
+/// GET /.well-known/konstruct
+///
+/// Server discovery endpoint for DPI detection and ICE endpoint configuration.
+/// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
+/// DPI detection, triggering ICE auto-start and adding 5-8 seconds to every connection.
+async fn well_known_construct_server(
+    State(config): State<Arc<Config>>,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<serde_json::Value>,
+) {
+    let domain = &config.instance_domain;
+    let body = json!({
+        "version": "1.0",
+        "protocol": "grpc",
+        "server": {
+            "domain": domain,
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "grpc_endpoint": format!("{}:443", domain),
+        "services": [
+            "auth.AuthService",
+            "user.UserService",
+            "messaging.MessagingService",
+            "notification.NotificationService",
+            "invite.InviteService",
+            "media.MediaService"
+        ],
+        "ice": {
+            "primary": format!("ice.{}:443", domain),
+            "relays": [],
+        },
+        "capabilities": {
+            "max_message_size_bytes": 100_000,
+            "max_file_size_bytes": 100_000_000,
+            "supports_streaming": true,
+            "supports_grpc_web": true,
+        },
+    });
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(body),
+    )
 }
 
 /// Health check endpoint

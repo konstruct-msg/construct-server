@@ -123,6 +123,7 @@ XQIDAQAB
                 max_pow_challenges_per_hour: 5,
                 max_registrations_per_hour: 3,
                 pow_difficulty: 1,
+                username_hmac_secret: vec![0u8; 32],
             },
             kafka: KafkaConfig {
                 enabled: false,
@@ -169,6 +170,7 @@ XQIDAQAB
             },
             db: DbConfig {
                 max_connections: 1,
+                min_connections: 0,
                 acquire_timeout_secs: 5,
                 idle_timeout_secs: 60,
             },
@@ -237,6 +239,7 @@ XQIDAQAB
             ice_upstream: "envoy:8080".to_string(),
             ice_tls_cert_path: None,
             ice_tls_key_path: None,
+            ice_cover_upstream: None,
         }
     }
 

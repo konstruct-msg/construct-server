@@ -77,7 +77,8 @@ async fn test_get_account_success() {
 
     let account: AccountInfo = response.json().await.unwrap();
     assert_eq!(account.user_id, user_id);
-    assert_eq!(account.username.as_deref(), Some(username.as_str()));
+    // username is not returned by the server (privacy-first: only HMAC hash stored)
+    assert_eq!(account.username, None);
 }
 
 #[tokio::test]

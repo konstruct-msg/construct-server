@@ -1159,3 +1159,82 @@ async fn test_authenticate_device_invalid_signature() {
 
     cleanup_rate_limits("redis://127.0.0.1:6379").await;
 }
+
+#[tokio::test]
+#[serial]
+async fn test_register_device_duplicate_username() {
+    cleanup_rate_limits("redis://127.0.0.1:6379").await;
+    let app = spawn_app().await;
+    let client = create_api_client();
+
+    // Register first user with a username
+    let username = generate_test_username("dupetest");
+    let (user_id1, _) =
+        test_utils::register_user_passwordless(&client, &app.auth_address, Some(&username)).await;
+    assert!(!user_id1.is_empty());
+
+    cleanup_rate_limits("redis://127.0.0.1:6379").await;
+
+    // Attempt to register a second user with the exact same username — must be rejected
+    let signing_key2 = SigningKey::generate(&mut OsRng);
+    let identity_secret2 = EphemeralSecret::random_from_rng(OsRng);
+    let identity_public2 = X25519PublicKey::from(&identity_secret2);
+    let prekey_secret2 = EphemeralSecret::random_from_rng(OsRng);
+    let prekey_public2 = X25519PublicKey::from(&prekey_secret2);
+    let prekey_signature2 = {
+        let mut message = Vec::new();
+        message.extend_from_slice(b"KonstruktX3DH-v1");
+        message.extend_from_slice(&[0x00, 0x01]);
+        message.extend_from_slice(prekey_public2.as_bytes());
+        signing_key2.sign(&message)
+    };
+    let device_id2 = hex::encode(&sha2::Sha256::digest(identity_public2.as_bytes())[0..16]);
+
+    let challenge: serde_json::Value = client
+        .get(format!("http://{}/api/v1/auth/challenge", app.auth_address))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let (nonce, pow_hash) = solve_pow(
+        challenge["challenge"].as_str().unwrap(),
+        challenge["difficulty"].as_u64().unwrap() as u32,
+    );
+
+    let response = client
+        .post(format!(
+            "http://{}/api/v1/auth/register-device",
+            app.auth_address
+        ))
+        .json(&json!({
+            "username": username,   // same username as first user
+            "deviceId": device_id2,
+            "publicKeys": {
+                "verifyingKey": BASE64.encode(signing_key2.verifying_key().as_bytes()),
+                "identityPublic": BASE64.encode(identity_public2.as_bytes()),
+                "signedPrekeyPublic": BASE64.encode(prekey_public2.as_bytes()),
+                "signedPrekeySignature": BASE64.encode(prekey_signature2.to_bytes()),
+                "cryptoSuite": "Curve25519+Ed25519"
+            },
+            "powSolution": {
+                "challenge": challenge["challenge"],
+                "nonce": nonce,
+                "hash": pow_hash
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::CONFLICT,
+        "Expected 409 Conflict for duplicate username, got: {}",
+        response.status()
+    );
+
+    cleanup_rate_limits("redis://127.0.0.1:6379").await;
+}

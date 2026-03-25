@@ -30,8 +30,10 @@ pub struct MessagingServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub kafka_producer: Arc<MessageProducer>,
-    /// APNs client for sending push notifications when messages arrive
+    /// APNs production client
     pub apns_client: Arc<ApnsClient>,
+    /// APNs sandbox client (for development/TestFlight builds)
+    pub apns_sandbox_client: Arc<ApnsClient>,
     /// Device token encryption for decrypting tokens before sending push
     pub token_encryption: Arc<DeviceTokenEncryption>,
     pub config: Arc<Config>,
@@ -52,6 +54,7 @@ impl MessagingServiceContext {
             .with_config(self.config.clone())
             .with_kafka_producer(self.kafka_producer.clone())
             .with_apns_client(self.apns_client.clone())
+            .with_apns_sandbox_client(self.apns_sandbox_client.clone())
             .with_token_encryption(self.token_encryption.clone())
             .with_server_instance_id(uuid::Uuid::new_v4().to_string());
 
