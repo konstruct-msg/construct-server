@@ -157,12 +157,19 @@ impl ApnsClient {
                     .build(device_token, options)
             }
             PushType::Visible => {
-                // Visible alert: generic title/body (never include message content — privacy)
+                // Use alert title/body from payload; fall back to generic strings (privacy-safe).
+                let (title, body) = if let Some(ref alert) = payload.aps.alert {
+                    (alert.title.as_str(), alert.body.as_str())
+                } else {
+                    ("Construct", "New message")
+                };
+                let sound = payload.aps.sound.as_deref().unwrap_or("default");
                 let mut builder = DefaultNotificationBuilder::new()
-                    .title("New Message")
-                    .body("You have a new message")
-                    .sound("default")
-                    .mutable_content(); // lets iOS notification extension enrich it later
+                    .title(title)
+                    .body(body)
+                    .sound(sound)
+                    .content_available() // wake app even for visible alerts (lock screen + killed)
+                    .mutable_content(); // lets iOS notification extension process it in foreground
                 if let Some(badge) = payload.aps.badge {
                     builder = builder.badge(badge);
                 }
