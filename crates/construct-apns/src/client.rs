@@ -1,17 +1,38 @@
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use apns_h2::{
     Client, ClientConfig, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
-    NotificationOptions, Priority, PushType as ApnsPushType,
+    NotificationOptions, Priority, PushType as ApnsPushType, error::Error as ApnsH2Error,
+    response::ErrorReason,
 };
 use hex;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use super::types::{ApnsPayload, NotificationPriority, PushType};
 use construct_config::{ApnsConfig, ApnsEnvironment};
+
+/// Error type returned by APNs send operations.
+///
+/// Callers MUST handle `InvalidToken` by disabling the token in the database —
+/// APNs will never accept it again until the device re-registers.
+#[derive(Debug, Error)]
+pub enum ApnsSendError {
+    /// APNs rejected the device token (`BadDeviceToken` or `Unregistered`).
+    ///
+    /// The token is permanently invalid. Caller should set `enabled = false`
+    /// on the `device_tokens` row so we stop hammering APNs with dead tokens.
+    #[error("APNs: device token is invalid or unregistered")]
+    InvalidToken,
+
+    /// Any other APNs or infrastructure error.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// APNs client wrapper
 #[derive(Clone)]
@@ -73,14 +94,17 @@ impl ApnsClient {
         Ok(())
     }
 
-    /// Send push notification to device
+    /// Send push notification to device.
+    ///
+    /// Returns `Err(ApnsSendError::InvalidToken)` when APNs signals the token is
+    /// permanently invalid — caller should disable it in the database.
     pub async fn send_notification(
         &self,
         device_token: &str,
         payload: ApnsPayload,
         push_type: PushType,
         priority: NotificationPriority,
-    ) -> Result<()> {
+    ) -> Result<(), ApnsSendError> {
         if !self.config.enabled {
             debug!("APNs disabled - skipping notification send");
             return Ok(());
@@ -160,25 +184,43 @@ impl ApnsClient {
                 Ok(())
             }
             Err(e) => {
+                // Detect permanently-invalid tokens so callers can disable them in the DB.
+                // BadDeviceToken  → token format wrong or environment mismatch
+                // Unregistered    → app was uninstalled, token no longer exists
+                let is_invalid_token = if let ApnsH2Error::ResponseError(ref resp) = e {
+                    resp.error
+                        .as_ref()
+                        .map(|body| {
+                            matches!(
+                                body.reason,
+                                ErrorReason::BadDeviceToken | ErrorReason::Unregistered
+                            )
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
                 error!("Failed to send APNs notification: {:?}", e);
+                warn!("APNs error: {}", e);
 
-                // Check if error indicates invalid token
-                // Note: apns-h2 error handling - check ErrorReason for BadDeviceToken
-                warn!("APNs error (may indicate invalid token): {}", e);
-                // TODO: Parse error response and handle invalid tokens
-                // TODO: Check if e contains ErrorReason::BadDeviceToken
-
-                Err(e.into())
+                if is_invalid_token {
+                    return Err(ApnsSendError::InvalidToken);
+                }
+                Err(anyhow::anyhow!(e).into())
             }
         }
     }
 
-    /// Send silent push notification (Phase 1)
+    /// Send silent push notification (background wake-up, no visible alert).
+    ///
+    /// Returns `Err(ApnsSendError::InvalidToken)` if the token is dead — caller
+    /// should disable it in the database.
     pub async fn send_silent_push(
         &self,
         device_token: &str,
         conversation_id: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<(), ApnsSendError> {
         let payload = ApnsPayload::silent(conversation_id);
         self.send_notification(
             device_token,
@@ -189,13 +231,16 @@ impl ApnsClient {
         .await
     }
 
-    /// Send visible push notification (Phase 2)
+    /// Send visible push notification (shows alert banner).
+    ///
+    /// Returns `Err(ApnsSendError::InvalidToken)` if the token is dead — caller
+    /// should disable it in the database.
     pub async fn send_visible_push(
         &self,
         device_token: &str,
         sender_name: &str,
         conversation_id: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<(), ApnsSendError> {
         let payload = ApnsPayload::visible(sender_name, conversation_id);
         self.send_notification(
             device_token,
