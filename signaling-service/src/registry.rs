@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use prost::Message;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::StreamExt;
 use tonic::Status;
 use tracing::{error, info, warn};
 
+use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::signaling::v1::{
     web_rtc_signal, CallHangup, HangupReason, SignalErrorCode, WebRtcSignal,
 };
@@ -61,6 +64,10 @@ impl CallRegistry {
 
     fn call_key(call_id: &str) -> String {
         format!("call:{}", call_id)
+    }
+
+    fn call_offer_delivery_key(call_id: &str, device_id: &str) -> String {
+        format!("call:{}:offer_delivered:{}", call_id, device_id)
     }
 
     pub(crate) async fn register_user(
@@ -360,6 +367,12 @@ impl CallRegistry {
                 .arg(callee_user_id)
                 .arg("accepted_callee_device_id")
                 .arg("")
+                .arg("offer_b64")
+                .arg("")
+                .arg("caller_name")
+                .arg("")
+                .arg("caller_avatar_b64")
+                .arg("")
                 .arg("created_at_s")
                 .arg(now.to_string())
                 .arg("offered_at_ms")
@@ -380,6 +393,166 @@ impl CallRegistry {
                 .query_async(&mut conn)
                 .await;
         }
+
+        metrics::ACTIVE_CALLS.inc();
+    }
+
+    pub(crate) async fn store_call_metadata(
+        &self,
+        call_id: &str,
+        caller_name: &str,
+        caller_avatar: &[u8],
+    ) {
+        let caller_name: String = caller_name.chars().take(128).collect();
+        let avatar_b64 = if caller_avatar.len() <= 4096 {
+            BASE64.encode(caller_avatar)
+        } else {
+            String::new()
+        };
+
+        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+            let key = Self::call_key(call_id);
+            let _: Result<(), _> = redis::pipe()
+                .cmd("HSET")
+                .arg(&key)
+                .arg("caller_name")
+                .arg(caller_name)
+                .arg("caller_avatar_b64")
+                .arg(avatar_b64)
+                .cmd("EXPIRE")
+                .arg(&key)
+                .arg(300)
+                .query_async(&mut conn)
+                .await;
+        }
+    }
+
+    async fn load_call_metadata(&self, call_id: &str) -> (String, Vec<u8>) {
+        let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await else {
+            return (String::new(), Vec::new());
+        };
+        let key = Self::call_key(call_id);
+        let caller_name: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("caller_name")
+            .query_async(&mut conn)
+            .await
+            .ok();
+        let caller_avatar_b64: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("caller_avatar_b64")
+            .query_async(&mut conn)
+            .await
+            .ok();
+
+        let name = caller_name.unwrap_or_default();
+        let avatar = caller_avatar_b64
+            .filter(|s| !s.is_empty())
+            .and_then(|s| BASE64.decode(s).ok())
+            .unwrap_or_default();
+        (name, avatar)
+    }
+
+    pub(crate) async fn store_pending_offer(&self, call_id: &str, offer_signal: &WebRtcSignal) {
+        let encoded = BASE64.encode(offer_signal.encode_to_vec());
+        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+            let key = Self::call_key(call_id);
+            let _: Result<(), _> = redis::pipe()
+                .cmd("HSET")
+                .arg(&key)
+                .arg("offer_b64")
+                .arg(encoded)
+                .cmd("EXPIRE")
+                .arg(&key)
+                .arg(300)
+                .query_async(&mut conn)
+                .await;
+        }
+    }
+
+    async fn load_pending_offer(&self, call_id: &str) -> Option<WebRtcSignal> {
+        let mut conn = self.redis.get_multiplexed_async_connection().await.ok()?;
+        let key = Self::call_key(call_id);
+        let offer_b64: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("offer_b64")
+            .query_async(&mut conn)
+            .await
+            .ok();
+        let offer_b64 = offer_b64?;
+        if offer_b64.is_empty() {
+            return None;
+        }
+        let bytes = BASE64.decode(offer_b64).ok()?;
+        WebRtcSignal::decode(bytes.as_slice()).ok()
+    }
+
+    /// On stream open, deliver any pending Offer to this device (best-effort).
+    pub(crate) async fn deliver_pending_offer_on_connect(&self, user_id: &str, device_id: &str) {
+        let Some(call_id) = self.get_user_call(user_id).await else {
+            return;
+        };
+        let Some(state) = self.load_call_state(&call_id).await else {
+            return;
+        };
+        if state.callee_user_id != user_id {
+            return;
+        }
+        if state.ringing_at_ms.is_some() || state.answered_at_ms.is_some() {
+            return;
+        }
+
+        let Some(offer_signal) = self.load_pending_offer(&call_id).await else {
+            return;
+        };
+
+        // Ensure idempotency per device.
+        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+            let key = Self::call_offer_delivery_key(&call_id, device_id);
+            let res: Result<String, _> = redis::cmd("SET")
+                .arg(&key)
+                .arg("1")
+                .arg("NX")
+                .arg("EX")
+                .arg(60)
+                .query_async(&mut conn)
+                .await;
+            if res.is_err() {
+                return;
+            }
+        }
+
+        let (caller_id, call_type, offered_at) = match &offer_signal.signal {
+            Some(web_rtc_signal::Signal::Offer(offer)) => (
+                offer.caller_user_id.clone(),
+                offer.call_type,
+                offer.offered_at,
+            ),
+            _ => (state.caller_user_id.clone(), 0, state.offered_at_ms),
+        };
+        let (caller_name, caller_avatar) = self.load_call_metadata(&call_id).await;
+
+        let _ = self
+            .send_to_user(
+                user_id,
+                Some(device_id),
+                ForwardedSignal::IncomingCall(crate::forwarded::IncomingCall {
+                    call_id: call_id.clone(),
+                    caller_id,
+                    caller_name,
+                    caller_avatar,
+                    call_type,
+                    offered_at,
+                }),
+            )
+            .await;
+        let _ = self
+            .send_to_user(
+                user_id,
+                Some(device_id),
+                ForwardedSignal::Signal(offer_signal),
+            )
+            .await;
     }
 
     pub(crate) async fn remove_call(&self, call_id: &str) {
@@ -404,6 +577,8 @@ impl CallRegistry {
                     .query_async(&mut conn)
                     .await;
             }
+
+            metrics::ACTIVE_CALLS.dec();
         }
     }
 
@@ -760,6 +935,10 @@ impl CallRegistry {
                             call_id,
                             caller_user_id, "call cleanup: sending error to caller"
                         );
+                        let code_str = code.to_string();
+                        metrics::SIGNALING_ERRORS_TOTAL
+                            .with_label_values(&[code_str.as_str()])
+                            .inc();
                         let _ = self
                             .send_to_user(
                                 &caller_user_id,
@@ -777,6 +956,15 @@ impl CallRegistry {
                         reason,
                     } => {
                         warn!(call_id, "call cleanup: sending synthetic hangup");
+                        match reason {
+                            r if r == HangupReason::Timeout as i32 => {
+                                metrics::CALLS_MISSED_TOTAL.inc();
+                            }
+                            r if r == HangupReason::ConnectionFailed as i32 => {
+                                metrics::CALLS_FAILED_TOTAL.inc();
+                            }
+                            _ => {}
+                        }
                         let hangup = WebRtcSignal {
                             call_id: call_id.clone(),
                             signal: Some(web_rtc_signal::Signal::Hangup(CallHangup {

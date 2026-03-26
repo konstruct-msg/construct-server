@@ -23,6 +23,10 @@ pub mod key_sizes;
 pub mod username;
 pub use username::hash_username;
 
+/// Generic HMAC-SHA256 hashing helper (privacy-preserving identifiers)
+pub mod hmac_hash;
+pub use hmac_hash::hmac_sha256;
+
 /// End-to-end encryption primitives (Signal Protocol)
 #[cfg(feature = "e2ee")]
 pub mod e2e;

@@ -18,6 +18,7 @@ pub(crate) struct IncomingCall {
     pub(crate) call_id: String,
     pub(crate) caller_id: String,
     pub(crate) caller_name: String,
+    pub(crate) caller_avatar: Vec<u8>,
     pub(crate) call_type: i32,
     pub(crate) offered_at: i64,
 }
@@ -46,7 +47,7 @@ pub(crate) fn signal_response_from_forwarded(signal: &ForwardedSignal) -> Signal
                     call_id: call.call_id.clone(),
                     caller_id: call.caller_id.clone(),
                     caller_name: call.caller_name.clone(),
-                    caller_avatar: Vec::new(),
+                    caller_avatar: call.caller_avatar.clone(),
                     call_type: call.call_type,
                     offered_at: call.offered_at,
                 },
@@ -69,6 +70,7 @@ pub(crate) fn forwarded_from_signal_response(resp: SignalResponse) -> Option<For
                 call_id: call.call_id,
                 caller_id: call.caller_id,
                 caller_name: call.caller_name,
+                caller_avatar: call.caller_avatar,
                 call_type: call.call_type,
                 offered_at: call.offered_at,
             }))

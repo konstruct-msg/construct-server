@@ -16,6 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::signaling::v1::signaling_service_server::SignalingServiceServer;
+use sqlx::postgres::PgPoolOptions;
 
 use crate::rate_limiter::RateLimiter;
 use crate::registry::CallRegistry;
@@ -74,6 +75,25 @@ async fn main() -> anyhow::Result<()> {
         _ => None,
     };
 
+    let contact_hmac_secret = match env::var("CONTACT_HMAC_SECRET") {
+        Ok(hex) => match hex::decode(&hex) {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            _ => {
+                tracing::warn!(
+                    "CONTACT_HMAC_SECRET is not valid hex — using insecure default (dev only)"
+                );
+                b"construct-insecure-contact-hmac".to_vec()
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "CONTACT_HMAC_SECRET not set — using insecure default (dev only). \
+                 Set it in production: openssl rand -hex 32"
+            );
+            b"construct-insecure-contact-hmac".to_vec()
+        }
+    };
+
     info!("SignalingService listening on {}", addr);
 
     let http_port: u16 = env::var("METRICS_PORT")
@@ -98,6 +118,35 @@ async fn main() -> anyhow::Result<()> {
         turn_secret,
         turn_ttl,
         notification_client,
+        contact_hmac_secret: Arc::new(contact_hmac_secret),
+        db_pool: match env::var("DATABASE_URL") {
+            Ok(url) if !url.trim().is_empty() => {
+                match PgPoolOptions::new()
+                    .max_connections(
+                        env::var("DB_MAX_CONNECTIONS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(20),
+                    )
+                    .min_connections(0)
+                    .connect(&url)
+                    .await
+                {
+                    Ok(pool) => {
+                        info!("DB pool enabled for signaling-service (user_blocks checks)");
+                        Some(Arc::new(pool))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to connect DB - calls_allowed checks limited to Redis-only"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        },
     };
 
     Server::builder()

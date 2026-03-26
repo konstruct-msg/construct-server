@@ -27,15 +27,8 @@ impl RateLimiter {
         user_id: &str,
         peer_id: &str,
     ) -> Result<bool, anyhow::Error> {
-        use hmac::{Hmac, Mac};
-        use sha1::Sha1;
-
+        let peer_bucket = self.peer_bucket(peer_id)?;
         let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let mut mac = Hmac::<Sha1>::new_from_slice(self.peer_salt.as_bytes())?;
-        mac.update(peer_id.as_bytes());
-        let peer_bucket =
-            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-
         let key = format!("ratelimit:calls:{}:{}", user_id, peer_bucket);
         let count: i64 = redis::pipe()
             .incr(&key, 1i64)
@@ -43,6 +36,35 @@ impl RateLimiter {
             .query_async(&mut conn)
             .await?;
         Ok(count <= 3)
+    }
+
+    pub(crate) async fn check_decline_cooldown(
+        &self,
+        user_id: &str,
+        peer_id: &str,
+    ) -> Result<bool, anyhow::Error> {
+        let peer_bucket = self.peer_bucket(peer_id)?;
+        let key = format!("ratelimit:decline_cooldown:{}:{}", user_id, peer_bucket);
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let exists: bool = redis::cmd("EXISTS").arg(key).query_async(&mut conn).await?;
+        Ok(!exists)
+    }
+
+    pub(crate) async fn set_decline_cooldown(
+        &self,
+        user_id: &str,
+        peer_id: &str,
+    ) -> Result<(), anyhow::Error> {
+        let peer_bucket = self.peer_bucket(peer_id)?;
+        let key = format!("ratelimit:decline_cooldown:{}:{}", user_id, peer_bucket);
+        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let _: () = redis::cmd("SETEX")
+            .arg(key)
+            .arg(60)
+            .arg("1")
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn check_turn_rate(&self, user_id: &str) -> Result<bool, anyhow::Error> {
@@ -54,5 +76,14 @@ impl RateLimiter {
             .query_async(&mut conn)
             .await?;
         Ok(count <= 1)
+    }
+
+    fn peer_bucket(&self, peer_id: &str) -> Result<String, anyhow::Error> {
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+
+        let mut mac = Hmac::<Sha1>::new_from_slice(self.peer_salt.as_bytes())?;
+        mac.update(peer_id.as_bytes());
+        Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
     }
 }

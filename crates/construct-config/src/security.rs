@@ -62,6 +62,14 @@ pub struct SecurityConfig {
     /// In production this must be set — keep it secret, back it up, never rotate
     /// (rotating invalidates all stored username hashes and breaks lookup).
     pub username_hmac_secret: Vec<u8>,
+
+    /// HMAC-SHA256 secret for privacy-preserving contact links (mutual contacts enforcement).
+    ///
+    /// Stored server-side as `HMAC-SHA256(secret, user_id_bytes)` pairs to avoid persisting
+    /// explicit social-graph edges in the database.
+    ///
+    /// Set via `CONTACT_HMAC_SECRET` env var (32 bytes hex recommended).
+    pub contact_hmac_secret: Vec<u8>,
 }
 
 impl SecurityConfig {
@@ -187,6 +195,21 @@ impl SecurityConfig {
                             Set it in production: openssl rand -hex 32"
                         );
                         b"construct-insecure-username-hmac".to_vec()
+                    }
+                }
+            },
+            contact_hmac_secret: {
+                match std::env::var("CONTACT_HMAC_SECRET") {
+                    Ok(hex) => hex::decode(&hex).unwrap_or_else(|_| {
+                        tracing::warn!("CONTACT_HMAC_SECRET is not valid hex — falling back to insecure default");
+                        b"construct-insecure-contact-hmac".to_vec()
+                    }),
+                    Err(_) => {
+                        tracing::warn!(
+                            "CONTACT_HMAC_SECRET not set — using insecure default. \
+                            Set it in production: openssl rand -hex 32"
+                        );
+                        b"construct-insecure-contact-hmac".to_vec()
                     }
                 }
             },

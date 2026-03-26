@@ -10,9 +10,9 @@
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use prometheus::{
-    Encoder, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, TextEncoder, opts,
-    register_gauge_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec,
+    Encoder, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    TextEncoder, opts, register_gauge, register_gauge_vec, register_histogram,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
 };
 
 // ============================================================================
@@ -135,6 +135,108 @@ pub static GATEWAY_SERVICE_HEALTH: Lazy<GaugeVec> = Lazy::new(|| {
         &["service"]
     )
     .expect("Failed to register GATEWAY_SERVICE_HEALTH metric")
+});
+
+// ============================================================================
+// Calls / Signaling Metrics
+// ============================================================================
+
+/// Total initiated calls (offer received).
+pub static CALLS_INITIATED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_calls_initiated_total",
+            "Total number of calls initiated (offer received)"
+        ),
+        &["type"]
+    )
+    .expect("Failed to register CALLS_INITIATED_TOTAL metric")
+});
+
+/// Total connected calls (offer -> answer).
+pub static CALLS_CONNECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_calls_connected_total",
+        "Total number of calls successfully connected (offer -> answer)"
+    ))
+    .expect("Failed to register CALLS_CONNECTED_TOTAL metric")
+});
+
+/// Total missed calls (ringing -> timeout without answer).
+pub static CALLS_MISSED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_calls_missed_total",
+        "Total number of calls missed (timeout without answer)"
+    ))
+    .expect("Failed to register CALLS_MISSED_TOTAL metric")
+});
+
+/// Total declined calls (hangup declined).
+pub static CALLS_DECLINED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_calls_declined_total",
+        "Total number of calls declined (hangup declined)"
+    ))
+    .expect("Failed to register CALLS_DECLINED_TOTAL metric")
+});
+
+/// Total failed calls (connection failed / keepalive timeout).
+pub static CALLS_FAILED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_calls_failed_total",
+        "Total number of calls failed (connection failed)"
+    ))
+    .expect("Failed to register CALLS_FAILED_TOTAL metric")
+});
+
+/// Total signaling errors returned to clients.
+pub static SIGNALING_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_signaling_errors_total",
+            "Total number of signaling errors returned"
+        ),
+        &["code"]
+    )
+    .expect("Failed to register SIGNALING_ERRORS_TOTAL metric")
+});
+
+/// Call setup duration (seconds) from offer receipt to answer.
+pub static CALL_SETUP_DURATION_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "construct_call_setup_duration_seconds",
+        "Call setup duration in seconds (offer -> answer)"
+    )
+    .expect("Failed to register CALL_SETUP_DURATION_SECONDS metric")
+});
+
+/// Current number of active calls (including pending attempts).
+pub static ACTIVE_CALLS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "construct_active_calls",
+        "Current number of active calls (including pending attempts)"
+    )
+    .expect("Failed to register ACTIVE_CALLS metric")
+});
+
+/// Placeholder: total calls relayed via TURN (incremented by clients / media plane later).
+#[allow(dead_code)]
+pub static CALLS_TURN_RELAYED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_calls_turn_relayed_total",
+        "Total number of calls relayed via TURN (not P2P)"
+    ))
+    .expect("Failed to register CALLS_TURN_RELAYED_TOTAL metric")
+});
+
+/// Placeholder: active TURN allocations (set by TURN service later).
+#[allow(dead_code)]
+pub static TURN_ACTIVE_ALLOCATIONS: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!(
+        "construct_turn_active_allocations",
+        "Current number of active TURN allocations"
+    )
+    .expect("Failed to register TURN_ACTIVE_ALLOCATIONS metric")
 });
 
 // ============================================================================
