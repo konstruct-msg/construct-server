@@ -55,6 +55,15 @@ message RoutedWebRtcSignal {
   // Required for initial Offer (the server otherwise cannot find the callee(s)).
   // Optional for subsequent signals when server can route via call registry.
   SignalRoute route = 2;
+
+  // Caller metadata for UI (optional; mainly used for Offer).
+  //
+  // Server treats this as best-effort UI data and does not validate it.
+  // The authoritative identity is always `caller_id` / `user_id`.
+  string caller_name = 3;
+
+  // Optional avatar thumbnail (≤ 4 KB JPEG recommended).
+  bytes caller_avatar = 4;
 }
 
 message SignalRoute {

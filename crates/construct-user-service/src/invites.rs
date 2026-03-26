@@ -10,6 +10,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use construct_context::AppContext;
+use construct_crypto::hmac_sha256;
 use construct_db::DbPool;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
@@ -399,7 +400,27 @@ pub async fn accept_invite(
                 "Invite accepted and burned"
             );
 
-            // TODO: Actually add user to contacts
+            // Privacy-preserving contact links: accepting an invite creates a mutual
+            // connection (both directions). This means both users can initiate calls.
+            // Using a single invite acceptance as the "mutual consent" signal is correct
+            // because the inviter generated the link with intent to connect.
+            let secret = &app_context.config.security.contact_hmac_secret;
+            let accepter_hmac = hmac_sha256(secret, accepter_user_id.as_bytes());
+            let inviter_hmac = hmac_sha256(secret, invite.uuid.as_bytes());
+            // accepter → inviter
+            construct_db::add_contact_link(&app_context.db_pool, &accepter_hmac, &inviter_hmac)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to store contact link (accepter→inviter)");
+                    AppError::Unknown(e)
+                })?;
+            // inviter → accepter (required for mutual contacts check in signaling-service)
+            construct_db::add_contact_link(&app_context.db_pool, &inviter_hmac, &accepter_hmac)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to store contact link (inviter→accepter)");
+                    AppError::Unknown(e)
+                })?;
 
             Ok((
                 StatusCode::OK,

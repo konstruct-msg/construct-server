@@ -3,8 +3,11 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info};
+use uuid::Uuid;
 
+use construct_crypto::hmac_sha256;
 use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
     signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
@@ -26,6 +29,8 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) turn_secret: String,
     pub(crate) turn_ttl: u64,
     pub(crate) notification_client: Option<NotificationClient>,
+    pub(crate) db_pool: Option<Arc<construct_db::DbPool>>,
+    pub(crate) contact_hmac_secret: Arc<Vec<u8>>,
 }
 
 fn caller_user_id<T>(req: &Request<T>) -> Result<String, Status> {
@@ -59,10 +64,15 @@ impl SignalingService for SignalingServiceImpl {
         let registry = Arc::clone(&self.registry);
         let rate_limiter = self.rate_limiter.clone();
         let notification_client = self.notification_client.clone();
+        let db_pool = self.db_pool.clone();
+        let contact_hmac_secret = Arc::clone(&self.contact_hmac_secret);
 
         let tx = registry.register_user(&user_id, &device_id).await;
         registry.touch_online(&user_id, &device_id).await;
         let mut rx = tx.subscribe();
+        registry
+            .deliver_pending_offer_on_connect(&user_id, &device_id)
+            .await;
 
         info!(user_id, device_id, "signal stream opened");
 
@@ -89,6 +99,8 @@ impl SignalingService for SignalingServiceImpl {
                                         &registry,
                                         &rate_limiter,
                                         notification_client.as_ref(),
+                                        db_pool.as_deref(),
+                                        &contact_hmac_secret,
                                         &user_id,
                                         &device_id_for_inbound,
                                         routed,
@@ -141,7 +153,7 @@ impl SignalingService for SignalingServiceImpl {
                                         call_id: call.call_id,
                                         caller_id: call.caller_id,
                                         caller_name: call.caller_name,
-                                        caller_avatar: Vec::new(),
+                                        caller_avatar: call.caller_avatar,
                                         call_type: call.call_type,
                                         offered_at: call.offered_at,
                                     },
@@ -230,18 +242,33 @@ impl SignalingService for SignalingServiceImpl {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_outbound_signal(
     registry: &Arc<CallRegistry>,
     rate_limiter: &RateLimiter,
     notification_client: Option<&NotificationClient>,
+    db_pool: Option<&construct_db::DbPool>,
+    contact_hmac_secret: &[u8],
     user_id: &str,
     device_id: &str,
     routed: RoutedWebRtcSignal,
     out_tx: &tokio::sync::mpsc::Sender<Result<SignalResponse, Status>>,
 ) -> Result<(), Status> {
-    let signal = routed
-        .signal
-        .ok_or_else(|| Status::invalid_argument("Missing routed_signal.signal"))?;
+    let RoutedWebRtcSignal {
+        signal,
+        route,
+        caller_name,
+        caller_avatar,
+    } = routed;
+
+    let caller_name: String = caller_name.chars().take(128).collect();
+    let caller_avatar: Vec<u8> = if caller_avatar.len() <= 4096 {
+        caller_avatar
+    } else {
+        Vec::new()
+    };
+
+    let signal = signal.ok_or_else(|| Status::invalid_argument("Missing routed_signal.signal"))?;
     let call_id = signal.call_id.clone();
     let is_answer = matches!(signal.signal, Some(web_rtc_signal::Signal::Answer(_)));
     let sender_device_id = if signal.sender_device_id.is_empty() {
@@ -252,13 +279,104 @@ async fn handle_outbound_signal(
 
     match &signal.signal {
         Some(web_rtc_signal::Signal::Offer(offer)) => {
-            let callee_user_id = callee_user_id_from_route(routed.route.as_ref())?;
+            let callee_user_id = callee_user_id_from_route(route.as_ref())?;
+
+            if let Some(pool) = db_pool {
+                let (Ok(caller_uuid), Ok(callee_uuid)) =
+                    (Uuid::parse_str(user_id), Uuid::parse_str(callee_user_id))
+                else {
+                    return Err(Status::invalid_argument("Invalid user_id UUID"));
+                };
+
+                // Enforce strict mutual contacts for calls.
+                let caller_hmac = hmac_sha256(contact_hmac_secret, caller_uuid.as_bytes());
+                let callee_hmac = hmac_sha256(contact_hmac_secret, callee_uuid.as_bytes());
+                match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        metrics::SIGNALING_ERRORS_TOTAL
+                            .with_label_values(&[signal_error_code_to_str(
+                                SignalErrorCode::Unauthorized,
+                            )])
+                            .inc();
+                        let _ = out_tx
+                            .send(Ok(SignalResponse {
+                                response: Some(signal_response::Response::Error(SignalError {
+                                    code: SignalErrorCode::Unauthorized as i32,
+                                    message: "Calls allowed only for mutual contacts".into(),
+                                })),
+                            }))
+                            .await;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to check mutual contacts - denying call (fail-closed)"
+                        );
+                        metrics::SIGNALING_ERRORS_TOTAL
+                            .with_label_values(&[signal_error_code_to_str(
+                                SignalErrorCode::Unauthorized,
+                            )])
+                            .inc();
+                        let _ = out_tx
+                            .send(Ok(SignalResponse {
+                                response: Some(signal_response::Response::Error(SignalError {
+                                    code: SignalErrorCode::Unauthorized as i32,
+                                    message: "Calls not allowed".into(),
+                                })),
+                            }))
+                            .await;
+                        return Ok(());
+                    }
+                }
+
+                match construct_db::is_blocked_by(pool, &callee_uuid, &caller_uuid).await {
+                    Ok(true) => {
+                        metrics::SIGNALING_ERRORS_TOTAL
+                            .with_label_values(&[signal_error_code_to_str(
+                                SignalErrorCode::Unauthorized,
+                            )])
+                            .inc();
+                        let _ = out_tx
+                            .send(Ok(SignalResponse {
+                                response: Some(signal_response::Response::Error(SignalError {
+                                    code: SignalErrorCode::Unauthorized as i32,
+                                    message: "Call not allowed".into(),
+                                })),
+                            }))
+                            .await;
+                        return Ok(());
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to check user_blocks - proceeding");
+                    }
+                }
+            } else {
+                // Without DB we cannot enforce mutual-contact policy — deny (fail-closed).
+                metrics::SIGNALING_ERRORS_TOTAL
+                    .with_label_values(&[signal_error_code_to_str(SignalErrorCode::Unauthorized)])
+                    .inc();
+                let _ = out_tx
+                    .send(Ok(SignalResponse {
+                        response: Some(signal_response::Response::Error(SignalError {
+                            code: SignalErrorCode::Unauthorized as i32,
+                            message: "Calls allowed only for mutual contacts".into(),
+                        })),
+                    }))
+                    .await;
+                return Ok(());
+            }
 
             if !rate_limiter
                 .check_call_rate(user_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
             {
+                metrics::SIGNALING_ERRORS_TOTAL
+                    .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
+                    .inc();
                 let _ = out_tx
                     .send(Ok(SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
@@ -274,6 +392,9 @@ async fn handle_outbound_signal(
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?
             {
+                metrics::SIGNALING_ERRORS_TOTAL
+                    .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
+                    .inc();
                 let _ = out_tx
                     .send(Ok(SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
@@ -284,35 +405,64 @@ async fn handle_outbound_signal(
                     .await;
                 return Ok(());
             }
+            if !rate_limiter
+                .check_decline_cooldown(user_id, callee_user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+            {
+                metrics::SIGNALING_ERRORS_TOTAL
+                    .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
+                    .inc();
+                let _ = out_tx
+                    .send(Ok(SignalResponse {
+                        response: Some(signal_response::Response::Error(SignalError {
+                            code: SignalErrorCode::RateLimited as i32,
+                            message: "Callee declined recently (cooldown)".into(),
+                        })),
+                    }))
+                    .await;
+                return Ok(());
+            }
+
+            if registry.is_user_busy(callee_user_id).await {
+                metrics::SIGNALING_ERRORS_TOTAL
+                    .with_label_values(&[signal_error_code_to_str(SignalErrorCode::CalleeBusy)])
+                    .inc();
+                let _ = out_tx
+                    .send(Ok(SignalResponse {
+                        response: Some(signal_response::Response::Error(SignalError {
+                            code: SignalErrorCode::CalleeBusy as i32,
+                            message: "Callee is busy".into(),
+                        })),
+                    }))
+                    .await;
+                return Ok(());
+            }
+
+            metrics::CALLS_INITIATED_TOTAL
+                .with_label_values(&[call_type_to_str(offer.call_type)])
+                .inc();
 
             let callee_devices = registry.list_online_devices(callee_user_id).await;
             if !callee_devices.is_empty() {
-                if registry.is_user_busy(callee_user_id).await {
-                    let _ = out_tx
-                        .send(Ok(SignalResponse {
-                            response: Some(signal_response::Response::Error(SignalError {
-                                code: SignalErrorCode::CalleeBusy as i32,
-                                message: "Callee is busy".into(),
-                            })),
-                        }))
-                        .await;
-                    return Ok(());
-                }
-
                 registry
                     .create_call(
                         &call_id,
                         user_id,
                         &sender_device_id,
                         callee_user_id,
-                        offer.offered_at,
+                        unix_millis(),
                     )
+                    .await;
+                registry
+                    .store_call_metadata(&call_id, &caller_name, &caller_avatar)
                     .await;
 
                 let incoming = ForwardedSignal::IncomingCall(IncomingCall {
                     call_id: call_id.clone(),
                     caller_id: user_id.to_string(),
-                    caller_name: String::new(),
+                    caller_name: caller_name.clone(),
+                    caller_avatar: caller_avatar.clone(),
                     call_type: offer.call_type,
                     offered_at: offer.offered_at,
                 });
@@ -330,7 +480,7 @@ async fn handle_outbound_signal(
                         user_id: callee_user_id.to_string(),
                         call_id: call_id.clone(),
                         caller_id: user_id.to_string(),
-                        caller_name: String::new(),
+                        caller_name: caller_name.clone(),
                         call_type: call_type_to_str(offer.call_type).to_string(),
                         offered_at: offer.offered_at,
                     };
@@ -343,14 +493,21 @@ async fn handle_outbound_signal(
                     });
                 }
 
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
-                        response: Some(signal_response::Response::Error(SignalError {
-                            code: SignalErrorCode::CalleeOffline as i32,
-                            message: "Callee is offline".into(),
-                        })),
-                    }))
+                // Create a short-lived pending call attempt to allow VoIP wake.
+                // `cleanup_loop` will send CALLEE_OFFLINE if no Ringing within 5 seconds.
+                registry
+                    .create_call(
+                        &call_id,
+                        user_id,
+                        &sender_device_id,
+                        callee_user_id,
+                        unix_millis(),
+                    )
                     .await;
+                registry
+                    .store_call_metadata(&call_id, &caller_name, &caller_avatar)
+                    .await;
+                registry.store_pending_offer(&call_id, &signal).await;
             }
         }
         Some(web_rtc_signal::Signal::Answer(_))
@@ -389,6 +546,19 @@ async fn handle_outbound_signal(
             registry.remove_call(&call_id).await;
         }
         Some(web_rtc_signal::Signal::Hangup(_)) => {
+            if let Some(web_rtc_signal::Signal::Hangup(hangup)) = &signal.signal {
+                if hangup.reason == HangupReason::Declined as i32 {
+                    if let Some(state) = registry.load_call_state(&call_id).await {
+                        if state.callee_user_id == user_id {
+                            metrics::CALLS_DECLINED_TOTAL.inc();
+                            let _ = rate_limiter
+                                .set_decline_cooldown(&state.caller_user_id, &state.callee_user_id)
+                                .await;
+                        }
+                    }
+                }
+            }
+
             let _ = registry
                 .forward_signal(
                     &call_id,
@@ -407,6 +577,14 @@ async fn handle_outbound_signal(
         if let Some((state, newly_accepted)) =
             registry.accept_call(&call_id, &sender_device_id).await
         {
+            if newly_accepted {
+                metrics::CALLS_CONNECTED_TOTAL.inc();
+                if let Some(answered_at_ms) = state.answered_at_ms {
+                    let dur_ms = answered_at_ms.saturating_sub(state.offered_at_ms);
+                    metrics::CALL_SETUP_DURATION_SECONDS.observe(dur_ms as f64 / 1000.0);
+                }
+            }
+
             let hangup = WebRtcSignal {
                 call_id: call_id.clone(),
                 signal: Some(web_rtc_signal::Signal::Hangup(CallHangup {
@@ -448,6 +626,17 @@ fn call_type_to_str(call_type: i32) -> &'static str {
         3 => "screen",
         4 => "group",
         _ => "audio",
+    }
+}
+
+fn signal_error_code_to_str(code: SignalErrorCode) -> &'static str {
+    match code {
+        SignalErrorCode::Unspecified => "unspecified",
+        SignalErrorCode::CalleeOffline => "callee_offline",
+        SignalErrorCode::CalleeBusy => "callee_busy",
+        SignalErrorCode::RateLimited => "rate_limited",
+        SignalErrorCode::Unauthorized => "unauthorized",
+        SignalErrorCode::CallExpired => "call_expired",
     }
 }
 

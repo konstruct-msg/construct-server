@@ -238,6 +238,45 @@ pub async fn is_blocked_by(pool: &DbPool, recipient_id: &Uuid, sender_id: &Uuid)
     Ok(blocked)
 }
 
+// ============================================================================
+// Privacy-preserving contact links
+// ============================================================================
+
+/// Insert directional contact link `user_hmac -> peer_hmac`.
+pub async fn add_contact_link(pool: &DbPool, user_hmac: &[u8], peer_hmac: &[u8]) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO contact_links (user_hmac, peer_hmac)
+        VALUES ($1, $2)
+        ON CONFLICT (user_hmac, peer_hmac) DO NOTHING
+        "#,
+    )
+    .bind(user_hmac)
+    .bind(peer_hmac)
+    .execute(pool)
+    .await
+    .context("Failed to insert contact link")?;
+    Ok(())
+}
+
+/// Check if two users are mutual contacts (both directional links exist).
+pub async fn are_mutual_contacts(pool: &DbPool, a_hmac: &[u8], b_hmac: &[u8]) -> Result<bool> {
+    let ok: bool = sqlx::query_scalar(
+        r#"
+        SELECT
+          EXISTS(SELECT 1 FROM contact_links WHERE user_hmac = $1 AND peer_hmac = $2)
+          AND
+          EXISTS(SELECT 1 FROM contact_links WHERE user_hmac = $2 AND peer_hmac = $1)
+        "#,
+    )
+    .bind(a_hmac)
+    .bind(b_hmac)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check mutual contacts")?;
+    Ok(ok)
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct KeyBundleRecord {

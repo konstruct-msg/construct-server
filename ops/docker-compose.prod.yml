@@ -142,6 +142,7 @@ services:
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -185,6 +186,7 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -295,6 +297,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       PORT: "50060"
       METRICS_PORT: "8091"
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -323,6 +326,7 @@ services:
       KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
       KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-all}
       KAFKA_PRODUCER_COMPRESSION: ${KAFKA_PRODUCER_COMPRESSION:-none}
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
