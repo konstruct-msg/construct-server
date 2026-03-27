@@ -20,14 +20,29 @@ pub(crate) fn generate_turn_credentials(user_id: &str, secret: &str, ttl: u64) -
     mac.update(username.as_bytes());
     let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
-    let turn_host = env::var("TURN_HOST").unwrap_or_else(|_| "turn.konstruct.cc".into());
+    // Support multiple TURN servers via TURN_HOSTS (comma-separated).
+    // Falls back to legacy TURN_HOST for single-server setups.
+    let hosts: Vec<String> = env::var("TURN_HOSTS")
+        .or_else(|_| env::var("TURN_HOST"))
+        .unwrap_or_else(|_| "turn.konstruct.cc".into())
+        .split(',')
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .collect();
+
+    let urls = hosts
+        .iter()
+        .flat_map(|host| {
+            [
+                format!("turn:{}:3478?transport=udp", host),
+                format!("turn:{}:3478?transport=tcp", host),
+                format!("turns:{}:5349?transport=tcp", host),
+            ]
+        })
+        .collect();
 
     TurnCredentials {
-        urls: vec![
-            format!("turn:{}:3478?transport=udp", turn_host),
-            format!("turn:{}:3478?transport=tcp", turn_host),
-            format!("turns:{}:5349?transport=tcp", turn_host),
-        ],
+        urls,
         username,
         credential,
         expires_at: (expiry * 1000) as i64,
