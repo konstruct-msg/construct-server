@@ -105,7 +105,6 @@ impl InviteToken {
     ///
     /// This ensures consistent signing/verification across implementations
     pub fn canonical_string(&self) -> String {
-        let username = self.username.as_deref().unwrap_or("");
         match self.v {
             1 => {
                 // v1: Without deviceId
@@ -114,12 +113,24 @@ impl InviteToken {
                     self.v, self.jti, self.uuid, self.server, self.eph_key, self.ts
                 )
             }
-            2 | 3 => {
-                // v2/v3: With deviceId and username (v3 adds username)
+            2 => {
+                // v2: With deviceId, no username
                 let device_id = self
                     .device_id
                     .as_ref()
-                    .expect("deviceId required for v2/v3 invites");
+                    .expect("deviceId required for v2 invites");
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    self.v, self.jti, self.uuid, device_id, self.server, self.eph_key, self.ts
+                )
+            }
+            3 => {
+                // v3: With deviceId and username
+                let device_id = self
+                    .device_id
+                    .as_ref()
+                    .expect("deviceId required for v3 invites");
+                let username = self.username.as_deref().unwrap_or("");
                 format!(
                     "{}|{}|{}|{}|{}|{}|{}|{}",
                     self.v,
