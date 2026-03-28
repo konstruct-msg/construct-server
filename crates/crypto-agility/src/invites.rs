@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Invite token object for one-time contact sharing (v1/v2)
+/// Invite token object for one-time contact sharing (v1/v2/v3)
 ///
 /// This structure is cryptographically signed by the user's Identity Key
 /// and can be encoded into QR codes or deep links for secure contact exchange.
@@ -11,6 +11,7 @@ use uuid::Uuid;
 /// Protocol versions:
 /// - v1: userId only (backwards compatible)
 /// - v2: userId + deviceId (for device-based key fetching)
+/// - v3: userId + deviceId + username (for display name sharing)
 ///
 /// Security properties:
 /// - One-time use only (jti tracking prevents replay)
@@ -20,7 +21,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InviteToken {
-    /// Protocol version: 1 or 2
+    /// Protocol version: 1, 2, or 3
     pub v: u32,
 
     /// Unique invite ID (JWT jti) - prevents replay attacks
@@ -29,7 +30,7 @@ pub struct InviteToken {
     /// User UUID who created this invite
     pub uuid: Uuid,
 
-    /// Device ID (v2 only) - 32-char lowercase hex string
+    /// Device ID (v2/v3 only) - 32-char lowercase hex string
     /// None for v1 invites (backwards compat)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
@@ -47,8 +48,14 @@ pub struct InviteToken {
     /// Ed25519 signature over canonical form
     /// v1: (v, jti, uuid, server, ephKey, ts)
     /// v2: (v, jti, uuid, deviceId, server, ephKey, ts)
+    /// v3: (v, jti, uuid, deviceId, server, ephKey, ts, username)
     /// Signed with user's long-term Identity Key
     pub sig: String,
+
+    /// Username of the sender (v3 only) - for display purposes
+    /// Empty string if not set. Signed as part of canonical string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// Validation errors for invite tokens
@@ -94,9 +101,11 @@ impl InviteToken {
     /// Format depends on protocol version:
     /// - v1: `v|jti|uuid|server|ephKey|ts`
     /// - v2: `v|jti|uuid|deviceId|server|ephKey|ts`
+    /// - v3: `v|jti|uuid|deviceId|server|ephKey|ts|username`
     ///
     /// This ensures consistent signing/verification across implementations
     pub fn canonical_string(&self) -> String {
+        let username = self.username.as_deref().unwrap_or("");
         match self.v {
             1 => {
                 // v1: Without deviceId
@@ -105,15 +114,22 @@ impl InviteToken {
                     self.v, self.jti, self.uuid, self.server, self.eph_key, self.ts
                 )
             }
-            2 => {
-                // v2: With deviceId
+            2 | 3 => {
+                // v2/v3: With deviceId and username (v3 adds username)
                 let device_id = self
                     .device_id
                     .as_ref()
-                    .expect("deviceId required for v2 invites");
+                    .expect("deviceId required for v2/v3 invites");
                 format!(
-                    "{}|{}|{}|{}|{}|{}|{}",
-                    self.v, self.jti, self.uuid, device_id, self.server, self.eph_key, self.ts
+                    "{}|{}|{}|{}|{}|{}|{}|{}",
+                    self.v,
+                    self.jti,
+                    self.uuid,
+                    device_id,
+                    self.server,
+                    self.eph_key,
+                    self.ts,
+                    username
                 )
             }
             _ => panic!("Unsupported invite version: {}", self.v),
@@ -146,12 +162,12 @@ impl InviteToken {
     /// - Signature is valid Base64 (64 bytes)
     pub fn validate(&self) -> Result<(), InviteValidationError> {
         // Version check
-        if self.v != 1 && self.v != 2 {
+        if self.v != 1 && self.v != 2 && self.v != 3 {
             return Err(InviteValidationError::UnsupportedVersion(self.v));
         }
 
-        // Device ID validation (required for v2)
-        if self.v == 2 {
+        // Device ID validation (required for v2/v3)
+        if self.v >= 2 {
             match &self.device_id {
                 None => return Err(InviteValidationError::MissingDeviceID),
                 Some(device_id) => {
@@ -242,6 +258,7 @@ mod tests {
             eph_key: "test_key_base64".to_string(),
             ts: 1675209600,
             sig: "test_sig".to_string(),
+            username: None,
         };
 
         let canonical = invite.canonical_string();
@@ -262,6 +279,7 @@ mod tests {
             eph_key: "test_key_base64".to_string(),
             ts: 1675209600,
             sig: "test_sig".to_string(),
+            username: None,
         };
 
         let canonical = invite.canonical_string();
@@ -282,6 +300,7 @@ mod tests {
             eph_key: "key".to_string(),
             ts: Utc::now().timestamp() - 400, // 400 seconds ago
             sig: "sig".to_string(),
+            username: None,
         };
 
         assert!(old_invite.is_expired(300)); // 5 min TTL
@@ -299,6 +318,7 @@ mod tests {
             eph_key: "key".to_string(),
             ts: Utc::now().timestamp() + 200, // 200 seconds in future
             sig: "sig".to_string(),
+            username: None,
         };
 
         assert!(future_invite.is_future());
@@ -315,6 +335,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(invite.validate().is_ok());
@@ -331,6 +352,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(invite.validate().is_ok());
@@ -347,6 +369,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(matches!(
@@ -366,6 +389,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(matches!(
@@ -385,6 +409,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(matches!(
@@ -404,6 +429,7 @@ mod tests {
             eph_key: STANDARD.encode([0u8; 32]),
             ts: Utc::now().timestamp(),
             sig: STANDARD.encode([0u8; 64]),
+            username: None,
         };
 
         assert!(matches!(
