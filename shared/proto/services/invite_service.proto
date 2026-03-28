@@ -88,6 +88,9 @@ message InviteToken {
   
   // Ed25519 signature (64 bytes, base64)
   string sig = 8;
+  
+  // Username создателя (V3, optional - пустая строка если не установлен)
+  optional string un = 9;
 }
 
 // Ответ после успешного принятия invite

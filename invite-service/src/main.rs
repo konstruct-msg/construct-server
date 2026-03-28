@@ -105,6 +105,7 @@ impl InviteService for InviteGrpcService {
             eph_key: invite_token.eph_pub,
             ts: invite_token.ts,
             sig: invite_token.sig,
+            username: invite_token.un,
         };
 
         // Call core business logic
