@@ -120,7 +120,7 @@ message Envelope {
 // ContentType - Type of message content
 enum ContentType {
   // Unscpecified content type (must be 0)
-  CONTENT_TYPE_UNSPECITIED = 0;
+  CONTENT_TYPE_UNSPECIFIED = 0;
 
   // === E2EE Messages ===
 
