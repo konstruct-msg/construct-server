@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package shared.proto.services.v1;
 
-import "core/crypto.proto";
 import "core/identity.proto";
 
 // AuthService - Authentication & session management
@@ -51,12 +50,17 @@ service AuthService {
   // Signed by this server's Ed25519 federation key.
   // Client should cache the certificate for up to 24 hours.
   rpc GetSenderCertificate(GetSenderCertificateRequest) returns (GetSenderCertificateResponse);
+
+  // ApproveJoinRequest - Phone approves TUI device link (Flow B)
+  // Authenticated: requires valid JWT from the primary/existing device
+  // Creates the device in DB and returns auth tokens for the new device
+  rpc ApproveJoinRequest(ApproveJoinRequestRequest) returns (AuthTokensResponse);
 }
 
 // DeviceService - Device management
 service DeviceService {
   // ListDevices - List all devices for current user
-  rpc ListDevices(ListDevicesRequest) returns (stream DeviceInfo);
+  rpc ListDevices(ListDevicesRequest) returns (stream ListDevicesResponse);
 
   // RevokeDevice - Revoke device (logout remotely)
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
@@ -84,9 +88,18 @@ service DeviceService {
 
 // DeviceLinkService - Device linking flow (separate service to avoid auth middleware)
 service DeviceLinkService {
-  // ConfirmDeviceLink - New device completes the link using the QR token
+  // ConfirmDeviceLink - New device completes the link using the QR token (Flow A)
   // NOT authenticated: new device has no JWT yet, uses link_token instead
   rpc ConfirmDeviceLink(ConfirmDeviceLinkRequest) returns (AuthTokensResponse);
+
+  // SubmitJoinRequest - TUI device submits a join request (Flow B)
+  // NOT authenticated: the TUI device has no JWT yet
+  // Stores device keys + metadata in Redis for 10 minutes
+  rpc SubmitJoinRequest(JoinRequestPayload) returns (JoinRequestAck);
+
+  // CheckJoinRequestStatus - TUI polls to check if phone approved (Flow B)
+  // NOT authenticated: still waiting for approval
+  rpc CheckJoinRequestStatus(CheckJoinRequestStatusRequest) returns (CheckJoinRequestStatusResponse);
 }
 
 // === AuthService Messages ===
@@ -126,6 +139,7 @@ message AuthenticateDeviceRequest {
   string signature = 3;
 }
 
+// AuthTokensResponse - returned for all device auth/linking operations
 message AuthTokensResponse {
   string user_id = 1;
   string access_token = 2;
@@ -134,7 +148,6 @@ message AuthTokensResponse {
 
   // ICE (obfs4) bridge cert for transport obfuscation.
   // Populated only when the server has ICE_ENABLED=true.
-  // Client passes this to ClientConfig::from_bridge_cert() to connect via obfs4.
   optional string ice_bridge_cert = 5;
 }
 
@@ -225,6 +238,11 @@ message DeviceInfo {
 
   // Reserved for future features
   reserved 9 to 15;
+}
+
+// ListDevicesResponse - wraps a single device in the stream
+message ListDevicesResponse {
+  DeviceInfo device = 1;
 }
 
 // RevokeDeviceRequest - Revoke device
@@ -543,4 +561,67 @@ message ConfirmDeviceLinkRequest {
 
   // New device public keys for E2EE and authentication
   DevicePublicKeys public_keys = 3;
+}
+
+// ============================================================================
+// Device Linking Messages — Flow B (TUI → Phone)
+// ============================================================================
+
+// JoinRequestPayload - TUI device submits its keys and metadata
+message JoinRequestPayload {
+  // New device identifier (derived from identity key)
+  string pending_device_id = 1;
+
+  // X25519 identity key (base64)
+  string identity_public_b64 = 2;
+
+  // Ed25519 verifying key (base64)
+  string verifying_key_b64 = 3;
+
+  // Signed prekey public (base64)
+  string signed_prekey_public_b64 = 4;
+
+  // Ed25519 signature of (prologue || spk_pub), 64 bytes (base64)
+  string signed_prekey_signature_b64 = 5;
+
+  // Human-readable device name (e.g., "MacBook Pro")
+  string device_name = 6;
+
+  // Platform identifier (e.g., "macos", "linux", "windows")
+  string platform = 7;
+}
+
+// JoinRequestAck - Server acknowledges the join request was stored
+message JoinRequestAck {
+  // The pending_device_id that was accepted
+  string pending_device_id = 1;
+}
+
+// CheckJoinRequestStatusRequest - TUI polls with its pending_device_id
+message CheckJoinRequestStatusRequest {
+  string pending_device_id = 1;
+}
+
+// CheckJoinRequestStatusResponse - Current status of the join request
+message CheckJoinRequestStatusResponse {
+  enum Status {
+    PENDING = 0; // Still waiting for phone approval
+    APPROVED = 1; // Phone approved — tokens included
+    REJECTED = 2; // Phone rejected
+    EXPIRED = 3; // TTL expired before approval
+  }
+
+  Status status = 1;
+
+  // Populated only when status == APPROVED
+  optional AuthTokensResponse tokens = 2;
+}
+
+// ApproveJoinRequestRequest - Phone approves the TUI device
+message ApproveJoinRequestRequest {
+  // The pending_device_id of the TUI device to approve
+  string pending_device_id = 1;
+
+  // Crypto suite to assign (e.g., "Curve25519+Ed25519")
+  string crypto_suite = 2;
 }

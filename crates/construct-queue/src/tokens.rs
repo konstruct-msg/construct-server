@@ -131,4 +131,66 @@ impl<'a> TokenManager<'a> {
         }
         Ok(user_id)
     }
+
+    // =========================================================================
+    // Join Request Tokens (Flow B: TUI → Phone linking)
+    // =========================================================================
+
+    /// Store a join request payload (JSON) with 10-minute TTL.
+    pub(crate) async fn store_join_request(
+        &mut self,
+        pending_device_id: &str,
+        json_payload: &str,
+    ) -> Result<()> {
+        let key = format!("join_req:{}", pending_device_id);
+        let _: () = self.client.set_ex(&key, json_payload, 10 * 60).await?;
+        Ok(())
+    }
+
+    /// Get a join request payload by pending_device_id (non-destructive read).
+    pub(crate) async fn get_join_request(
+        &mut self,
+        pending_device_id: &str,
+    ) -> Result<Option<String>> {
+        let key = format!("join_req:{}", pending_device_id);
+        let payload: Option<String> = self.client.get(&key).await?;
+        Ok(payload)
+    }
+
+    /// Atomically consume a join request (GET + DEL).
+    /// Returns the JSON payload if it existed.
+    pub(crate) async fn consume_join_request(
+        &mut self,
+        pending_device_id: &str,
+    ) -> Result<Option<String>> {
+        let key = format!("join_req:{}", pending_device_id);
+        let payload: Option<String> = self.client.get(&key).await?;
+        if payload.is_some() {
+            let _: i64 = self.client.del(&key).await?;
+        }
+        Ok(payload)
+    }
+
+    /// Store approved join result with tokens, 2-minute TTL.
+    /// Value format: "{access_token}:{refresh_token}:{user_id}:{exp_timestamp}"
+    pub(crate) async fn store_join_approved(
+        &mut self,
+        pending_device_id: &str,
+        value: &str,
+    ) -> Result<()> {
+        let key = format!("join_approved:{}", pending_device_id);
+        let _: () = self.client.set_ex(&key, value, 2 * 60).await?;
+        Ok(())
+    }
+
+    /// Get approved join result by pending_device_id.
+    /// Returns: "{access_token}:{refresh_token}:{user_id}:{exp_timestamp}" or None.
+    pub(crate) async fn get_join_approved(
+        &mut self,
+        pending_device_id: &str,
+    ) -> Result<Option<String>> {
+        let key = format!("join_approved:{}", pending_device_id);
+        let value: Option<String> = self.client.get(&key).await?;
+        Ok(value)
+    }
 }

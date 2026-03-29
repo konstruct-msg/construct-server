@@ -34,6 +34,7 @@ use construct_config::Config;
 use construct_server_shared::auth_service::AuthServiceContext;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
 use std::sync::Arc;
@@ -56,6 +57,18 @@ struct AuthGrpcService {
     context: Arc<AuthServiceContext>,
     /// Pre-computed obfs4 bridge cert (None when ICE_ENABLED=false or key not set).
     ice_bridge_cert: Option<String>,
+}
+
+/// Data stored in Redis for a join request (Flow B).
+#[derive(Debug, Serialize, Deserialize)]
+struct JoinRequestData {
+    pending_device_id: String,
+    identity_public_b64: String,
+    verifying_key_b64: String,
+    signed_prekey_public_b64: String,
+    signed_prekey_signature_b64: String,
+    device_name: String,
+    platform: String,
 }
 
 #[tonic::async_trait]
@@ -551,6 +564,141 @@ impl AuthService for AuthGrpcService {
             expires_at,
         }))
     }
+
+    // =========================================================================
+    // Flow B: Phone approves TUI device link
+    // =========================================================================
+
+    async fn approve_join_request(
+        &self,
+        request: Request<proto::ApproveJoinRequestRequest>,
+    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let req = request.into_inner();
+
+        if req.pending_device_id.is_empty() {
+            return Err(Status::invalid_argument("pending_device_id is required"));
+        }
+
+        // Verify auth token
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        // Atomically consume the join request from Redis
+        let json_payload = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .consume_join_request(&req.pending_device_id)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+        }
+        .ok_or_else(|| Status::not_found("join request not found or expired"))?;
+
+        let join_data: JoinRequestData = serde_json::from_str(&json_payload)
+            .map_err(|e| Status::internal(format!("invalid join request data: {e}")))?;
+
+        // Check device_id not already registered
+        if construct_db::device_exists(self.context.db_pool.as_ref(), &req.pending_device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::already_exists("device_id already registered"));
+        }
+
+        // Decode keys
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let decode = |s: &str, field: &str| {
+            b64.decode(s)
+                .map_err(|_| Status::invalid_argument(format!("invalid base64 in {field}")))
+        };
+
+        let verifying_key = decode(&join_data.verifying_key_b64, "verifying_key_b64")?;
+        let identity_public = decode(&join_data.identity_public_b64, "identity_public_b64")?;
+        let signed_prekey_public = decode(
+            &join_data.signed_prekey_public_b64,
+            "signed_prekey_public_b64",
+        )?;
+        let signed_prekey_signature = decode(
+            &join_data.signed_prekey_signature_b64,
+            "signed_prekey_signature_b64",
+        )?;
+
+        let hostname = self.context.config.instance_domain.clone();
+        let crypto_suite = if req.crypto_suite.is_empty() {
+            "Curve25519+Ed25519".to_string()
+        } else {
+            req.crypto_suite
+        };
+
+        let device_data = construct_db::CreateDeviceData {
+            device_id: req.pending_device_id.clone(),
+            server_hostname: hostname,
+            verifying_key,
+            identity_public,
+            signed_prekey_public,
+            signed_prekey_signature,
+            crypto_suites: format!("[\"{crypto_suite}\"]"),
+        };
+
+        construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create device: {e}")))?;
+
+        // Issue JWT for the new device
+        let (access_token, _, exp_timestamp) = self
+            .context
+            .auth_manager
+            .create_token(&user_id)
+            .map_err(|e| Status::internal(format!("Failed to create access token: {e}")))?;
+
+        let (refresh_token, refresh_jti, _) = self
+            .context
+            .auth_manager
+            .create_refresh_token(&user_id)
+            .map_err(|e| Status::internal(format!("Failed to create refresh token: {e}")))?;
+
+        let refresh_ttl =
+            self.context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
+        {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .store_refresh_token(&refresh_jti, &user_id.to_string(), refresh_ttl)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to store refresh token: {e}")))?;
+        }
+
+        // Store approved result in Redis so TUI can pick it up via polling
+        let approved_value = format!(
+            "{}:{}:{}:{}",
+            access_token, refresh_token, user_id, exp_timestamp
+        );
+        {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .store_join_approved(&req.pending_device_id, &approved_value)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to store approval: {e}")))?;
+        }
+
+        tracing::info!(
+            approver_user_id = %user_id,
+            new_device_id = %req.pending_device_id,
+            "Join request approved — device linked"
+        );
+
+        Ok(Response::new(proto::AuthTokensResponse {
+            user_id: user_id.to_string(),
+            access_token,
+            refresh_token,
+            expires_at: exp_timestamp,
+            ice_bridge_cert: self.ice_bridge_cert.clone(),
+        }))
+    }
 }
 
 // =============================================================================
@@ -561,8 +709,9 @@ impl AuthService for AuthGrpcService {
 impl proto::device_service_server::DeviceService for AuthGrpcService {
     type ListDevicesStream = std::pin::Pin<
         Box<
-            dyn tonic::codegen::tokio_stream::Stream<Item = Result<proto::DeviceInfo, Status>>
-                + Send
+            dyn tonic::codegen::tokio_stream::Stream<
+                    Item = Result<proto::ListDevicesResponse, Status>,
+                > + Send
                 + 'static,
         >,
     >;
@@ -586,26 +735,28 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
 
         // current device_id lives in the JWT "jti" claim naming convention varies;
         // we don't store device_id in claims so skip is_current detection for now
-        let items: Vec<Result<proto::DeviceInfo, Status>> = devices
+        let items: Vec<Result<proto::ListDevicesResponse, Status>> = devices
             .into_iter()
             .map(|d| {
-                Ok(proto::DeviceInfo {
-                    device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
-                        user: None,
-                        device_id: d.device_id.clone(),
+                Ok(proto::ListDevicesResponse {
+                    device: Some(proto::DeviceInfo {
+                        device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
+                            user: None,
+                            device_id: d.device_id.clone(),
+                            platform: 0,
+                            device_name: None,
+                            registered_at: d.registered_at.timestamp(),
+                            last_seen: 0,
+                            capabilities: 0,
+                        }),
+                        device_name: String::new(),
                         platform: 0,
-                        device_name: None,
-                        registered_at: d.registered_at.timestamp(),
                         last_seen: 0,
+                        created_at: d.registered_at.timestamp(),
+                        push_provider: None,
+                        is_current: false,
                         capabilities: 0,
                     }),
-                    device_name: String::new(),
-                    platform: 0,
-                    last_seen: 0,
-                    created_at: d.registered_at.timestamp(),
-                    push_provider: None,
-                    is_current: false,
-                    capabilities: 0,
                 })
             })
             .collect();
@@ -947,6 +1098,138 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
             refresh_token,
             expires_at: exp_timestamp,
             ice_bridge_cert: self.ice_bridge_cert.clone(),
+        }))
+    }
+
+    // =========================================================================
+    // Flow B: TUI → Phone linking
+    // =========================================================================
+
+    async fn submit_join_request(
+        &self,
+        request: Request<proto::JoinRequestPayload>,
+    ) -> Result<Response<proto::JoinRequestAck>, Status> {
+        let req = request.into_inner();
+
+        if req.pending_device_id.is_empty() {
+            return Err(Status::invalid_argument("pending_device_id is required"));
+        }
+        if req.identity_public_b64.is_empty() {
+            return Err(Status::invalid_argument("identity_public_b64 is required"));
+        }
+        if req.verifying_key_b64.is_empty() {
+            return Err(Status::invalid_argument("verifying_key_b64 is required"));
+        }
+        if req.signed_prekey_public_b64.is_empty() {
+            return Err(Status::invalid_argument(
+                "signed_prekey_public_b64 is required",
+            ));
+        }
+        if req.signed_prekey_signature_b64.is_empty() {
+            return Err(Status::invalid_argument(
+                "signed_prekey_signature_b64 is required",
+            ));
+        }
+
+        // Check device_id not already registered
+        if construct_db::device_exists(self.context.db_pool.as_ref(), &req.pending_device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::already_exists("device_id already registered"));
+        }
+
+        let pending_device_id = req.pending_device_id.clone();
+
+        let data = JoinRequestData {
+            pending_device_id: req.pending_device_id,
+            identity_public_b64: req.identity_public_b64,
+            verifying_key_b64: req.verifying_key_b64,
+            signed_prekey_public_b64: req.signed_prekey_public_b64,
+            signed_prekey_signature_b64: req.signed_prekey_signature_b64,
+            device_name: req.device_name,
+            platform: req.platform,
+        };
+
+        let json_payload = serde_json::to_string(&data)
+            .map_err(|e| Status::internal(format!("serialize: {e}")))?;
+
+        {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .store_join_request(&pending_device_id, &json_payload)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to store join request: {e}")))?;
+        }
+
+        tracing::info!(
+            pending_device_id = %pending_device_id,
+            "Join request stored (10 min TTL)"
+        );
+
+        Ok(Response::new(proto::JoinRequestAck { pending_device_id }))
+    }
+
+    async fn check_join_request_status(
+        &self,
+        request: Request<proto::CheckJoinRequestStatusRequest>,
+    ) -> Result<Response<proto::CheckJoinRequestStatusResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.pending_device_id.is_empty() {
+            return Err(Status::invalid_argument("pending_device_id is required"));
+        }
+
+        // Check if approved first
+        let approved_value = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .get_join_approved(&req.pending_device_id)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+        };
+
+        if let Some(value) = approved_value {
+            // Parse: "{access_token}:{refresh_token}:{user_id}:{exp_timestamp}"
+            let parts: Vec<&str> = value.splitn(4, ':').collect();
+            if parts.len() == 4 {
+                let exp_timestamp: i64 = parts[3]
+                    .parse()
+                    .map_err(|_| Status::internal("invalid exp in approved data"))?;
+
+                return Ok(Response::new(proto::CheckJoinRequestStatusResponse {
+                    status: proto::check_join_request_status_response::Status::Approved as i32,
+                    tokens: Some(proto::AuthTokensResponse {
+                        user_id: parts[2].to_string(),
+                        access_token: parts[0].to_string(),
+                        refresh_token: parts[1].to_string(),
+                        expires_at: exp_timestamp,
+                        ice_bridge_cert: self.ice_bridge_cert.clone(),
+                    }),
+                }));
+            }
+        }
+
+        // Check if join request still exists (pending)
+        let join_request_exists = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .get_join_request(&req.pending_device_id)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+                .is_some()
+        };
+
+        let status = if join_request_exists {
+            proto::check_join_request_status_response::Status::Pending
+        } else {
+            // Neither approved nor pending → expired (or never existed)
+            proto::check_join_request_status_response::Status::Expired
+        };
+
+        Ok(Response::new(proto::CheckJoinRequestStatusResponse {
+            status: status as i32,
+            tokens: None,
         }))
     }
 }

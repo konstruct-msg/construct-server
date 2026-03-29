@@ -341,6 +341,51 @@ impl MessageQueue {
             .await
     }
 
+    // =========================================================================
+    // Join Request Tokens (Flow B)
+    // =========================================================================
+
+    pub async fn store_join_request(
+        &mut self,
+        pending_device_id: &str,
+        json_payload: &str,
+    ) -> Result<()> {
+        tokens::TokenManager::new(&mut self.client)
+            .store_join_request(pending_device_id, json_payload)
+            .await
+    }
+
+    pub async fn get_join_request(&mut self, pending_device_id: &str) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .get_join_request(pending_device_id)
+            .await
+    }
+
+    pub async fn consume_join_request(
+        &mut self,
+        pending_device_id: &str,
+    ) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .consume_join_request(pending_device_id)
+            .await
+    }
+
+    pub async fn store_join_approved(
+        &mut self,
+        pending_device_id: &str,
+        value: &str,
+    ) -> Result<()> {
+        tokens::TokenManager::new(&mut self.client)
+            .store_join_approved(pending_device_id, value)
+            .await
+    }
+
+    pub async fn get_join_approved(&mut self, pending_device_id: &str) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .get_join_approved(pending_device_id)
+            .await
+    }
+
     // ============================================================================
     // Cache Operations (delegated to cache module)
     // ============================================================================
