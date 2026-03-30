@@ -298,9 +298,11 @@ services:
       PORT: "50060"
       METRICS_PORT: "8091"
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
-      TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.ice.konstruct.cc}
+      TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.msk.konstruct.cc}
       TURN_SECRET: ${TURN_SECRET}
       TURN_TTL: ${TURN_TTL:-86400}
+      NOTIFICATION_GRPC_ENDPOINT: "notification:50054"
+      DATABASE_URL: ${DATABASE_URL}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
