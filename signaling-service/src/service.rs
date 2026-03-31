@@ -12,8 +12,8 @@ use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
     signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
     CallHangup, GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason,
-    IncomingCallNotification, RoutedWebRtcSignal, SignalError, SignalErrorCode, SignalPong,
-    SignalRequest, SignalResponse, WebRtcSignal,
+    IncomingCallNotification, InitiateCallRequest, InitiateCallResponse, RoutedWebRtcSignal,
+    SignalError, SignalErrorCode, SignalPong, SignalRequest, SignalResponse, WebRtcSignal,
 };
 
 use crate::forwarded::{ForwardedSignal, IncomingCall};
@@ -70,9 +70,6 @@ impl SignalingService for SignalingServiceImpl {
         let tx = registry.register_user(&user_id, &device_id).await;
         registry.touch_online(&user_id, &device_id).await;
         let mut rx = tx.subscribe();
-        registry
-            .deliver_pending_offer_on_connect(&user_id, &device_id)
-            .await;
 
         info!(user_id, device_id, "signal stream opened");
 
@@ -238,6 +235,165 @@ impl SignalingService for SignalingServiceImpl {
         let credentials = generate_turn_credentials(&user_id, &self.turn_secret, self.turn_ttl);
         Ok(Response::new(GetTurnCredentialsResponse {
             credentials: Some(credentials),
+        }))
+    }
+
+    async fn initiate_call(
+        &self,
+        request: Request<InitiateCallRequest>,
+    ) -> Result<Response<InitiateCallResponse>, Status> {
+        let caller_id = caller_user_id(&request)?;
+        let caller_device_id_str = caller_device_id(&request)?;
+        let req = request.into_inner();
+
+        let call_id = req.call_id.clone();
+        let callee_user_id = req.callee_user_id.as_str();
+        let caller_name: String = req.caller_name.chars().take(128).collect();
+        let caller_avatar: Vec<u8> = if req.caller_avatar.len() <= 4096 {
+            req.caller_avatar.clone()
+        } else {
+            Vec::new()
+        };
+
+        if call_id.is_empty() || callee_user_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "call_id and callee_user_id are required",
+            ));
+        }
+
+        // ── Mutual contacts + block check ─────────────────────────────────
+        if let Some(pool) = self.db_pool.as_deref() {
+            let (Ok(caller_uuid), Ok(callee_uuid)) =
+                (Uuid::parse_str(&caller_id), Uuid::parse_str(callee_user_id))
+            else {
+                return Err(Status::invalid_argument("Invalid user_id UUID"));
+            };
+
+            let caller_hmac = hmac_sha256(&self.contact_hmac_secret, caller_uuid.as_bytes());
+            let callee_hmac = hmac_sha256(&self.contact_hmac_secret, callee_uuid.as_bytes());
+            match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(Status::permission_denied(
+                        "Calls allowed only for mutual contacts",
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to check mutual contacts — denying (fail-closed)");
+                    return Err(Status::permission_denied("Calls not allowed"));
+                }
+            }
+
+            match construct_db::is_blocked_by(pool, &callee_uuid, &caller_uuid).await {
+                Ok(true) => return Err(Status::permission_denied("Call not allowed")),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "Failed to check user_blocks — proceeding"),
+            }
+        } else {
+            return Err(Status::permission_denied(
+                "Calls allowed only for mutual contacts",
+            ));
+        }
+
+        // ── Rate limits ────────────────────────────────────────────────────
+        if !self
+            .rate_limiter
+            .check_call_rate(&caller_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::resource_exhausted("Call rate limit exceeded"));
+        }
+        if !self
+            .rate_limiter
+            .check_peer_rate(&caller_id, callee_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::resource_exhausted("Too many calls to this peer"));
+        }
+        if !self
+            .rate_limiter
+            .check_decline_cooldown(&caller_id, callee_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        {
+            return Err(Status::resource_exhausted(
+                "Callee declined recently (cooldown)",
+            ));
+        }
+
+        // ── Busy check ─────────────────────────────────────────────────────
+        if self.registry.is_user_busy(callee_user_id).await {
+            return Err(Status::failed_precondition("Callee is busy"));
+        }
+
+        metrics::CALLS_INITIATED_TOTAL
+            .with_label_values(&[call_type_to_str(req.call_type)])
+            .inc();
+
+        // ── Register call in Redis ─────────────────────────────────────────
+        let callee_devices = self.registry.list_online_devices(callee_user_id).await;
+        let callee_online = !callee_devices.is_empty();
+
+        self.registry
+            .create_call(
+                &call_id,
+                &caller_id,
+                &caller_device_id_str,
+                callee_user_id,
+                unix_millis(),
+            )
+            .await;
+        self.registry
+            .store_call_metadata(&call_id, &caller_name, &caller_avatar)
+            .await;
+
+        if callee_online {
+            // ── Deliver IncomingCallNotification to online callee ──────────
+            // SDP offer is NOT included — callee receives it via E2EE MessagingService.
+            let incoming = ForwardedSignal::IncomingCall(IncomingCall {
+                call_id: call_id.clone(),
+                caller_id: caller_id.clone(),
+                caller_name: caller_name.clone(),
+                caller_avatar: caller_avatar.clone(),
+                call_type: req.call_type,
+                offered_at: unix_millis(),
+            });
+            let _ = self
+                .registry
+                .send_to_user(callee_user_id, None, incoming)
+                .await;
+        } else if let Some(client) = self.notification_client.clone() {
+            // ── VoIP push to wake offline callee (no SDP in payload) ───────
+            let push_req = services_proto::SendVoipIncomingCallRequest {
+                user_id: callee_user_id.to_string(),
+                call_id: call_id.clone(),
+                caller_id: caller_id.clone(),
+                caller_name: caller_name.clone(),
+                call_type: call_type_to_str(req.call_type).to_string(),
+                offered_at: unix_millis(),
+            };
+            tokio::spawn(async move {
+                let mut grpc = client.get();
+                if let Err(e) = grpc
+                    .send_voip_incoming_call(tonic::Request::new(push_req))
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to send VoIP push for InitiateCall");
+                }
+            });
+        }
+
+        info!(
+            call_id,
+            caller_id, callee_user_id, callee_online, "call initiated"
+        );
+
+        Ok(Response::new(InitiateCallResponse {
+            callee_online,
+            // Capability negotiation not yet implemented — all modern clients support WebRTC.
+            callee_has_webrtc: true,
         }))
     }
 }
@@ -443,6 +599,17 @@ async fn handle_outbound_signal(
                 .with_label_values(&[call_type_to_str(offer.call_type)])
                 .inc();
 
+            // Deprecated: SDP offer forwarding via Signal stream.
+            // In the E2EE protocol, offer SDP travels through MessagingService.
+            // We still honour the legacy path to avoid breaking older clients during
+            // the transition, but log a warning so we can track adoption.
+            tracing::warn!(
+                call_id,
+                user_id,
+                "Received plaintext Offer via Signal stream (deprecated). \
+                 Use InitiateCall + MessagingService for E2EE call signalling."
+            );
+
             let callee_devices = registry.list_online_devices(callee_user_id).await;
             if !callee_devices.is_empty() {
                 registry
@@ -458,6 +625,8 @@ async fn handle_outbound_signal(
                     .store_call_metadata(&call_id, &caller_name, &caller_avatar)
                     .await;
 
+                // Deliver IncomingCallNotification — callee gets the push notification UI.
+                // Do NOT forward the SDP offer; callee receives it via E2EE MessagingService.
                 let incoming = ForwardedSignal::IncomingCall(IncomingCall {
                     call_id: call_id.clone(),
                     caller_id: user_id.to_string(),
@@ -467,13 +636,6 @@ async fn handle_outbound_signal(
                     offered_at: offer.offered_at,
                 });
                 let _ = registry.send_to_user(callee_user_id, None, incoming).await;
-                let _ = registry
-                    .send_to_user(
-                        callee_user_id,
-                        None,
-                        ForwardedSignal::Signal(signal.clone()),
-                    )
-                    .await;
             } else {
                 if let Some(client) = notification_client.cloned() {
                     let req = services_proto::SendVoipIncomingCallRequest {
@@ -493,8 +655,6 @@ async fn handle_outbound_signal(
                     });
                 }
 
-                // Create a short-lived pending call attempt to allow VoIP wake.
-                // `cleanup_loop` will send CALLEE_OFFLINE if no Ringing within 5 seconds.
                 registry
                     .create_call(
                         &call_id,
@@ -507,11 +667,23 @@ async fn handle_outbound_signal(
                 registry
                     .store_call_metadata(&call_id, &caller_name, &caller_avatar)
                     .await;
-                registry.store_pending_offer(&call_id, &signal).await;
+                // Pending offer NOT stored — SDP travels via E2EE MessagingService.
             }
         }
-        Some(web_rtc_signal::Signal::Answer(_))
-        | Some(web_rtc_signal::Signal::IceCandidate(_))
+        Some(web_rtc_signal::Signal::Answer(_)) => {
+            // SDP answer now travels via MessagingService (E2EE).
+            // Receiving a plaintext Answer here indicates a legacy client.
+            // Do NOT forward the SDP; just update call state so metrics and
+            // ACCEPTED_ELSEWHERE logic work correctly.
+            tracing::warn!(
+                call_id,
+                user_id,
+                "Received plaintext Answer via Signal stream (deprecated). \
+                 Updating call state only — SDP not forwarded."
+            );
+            // `is_answer = true` → accept_call is called after this match block ✓
+        }
+        Some(web_rtc_signal::Signal::IceCandidate(_))
         | Some(web_rtc_signal::Signal::IceCandidates(_))
         | Some(web_rtc_signal::Signal::MediaUpdate(_)) => {
             registry
