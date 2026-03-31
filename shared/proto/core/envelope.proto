@@ -133,10 +133,17 @@ enum ContentType {
   // === Signaling ===
 
   // WebRTC signaling (SDP, ICE candidates)
+  // Deprecated for SDP: use CONTENT_TYPE_CALL_SIGNAL for E2EE-wrapped call offer/answer.
   CONTENT_TYPE_WEBRTC_SIGNAL = 10;
 
   // Presence updates (typing, online, receipts)
   CONTENT_TYPE_PRESENCE = 11;
+
+  // E2EE-wrapped call signal (Double Ratchet).
+  // Used for call_offer and call_answer payloads so the server cannot
+  // read or tamper with the DTLS fingerprint. Forwarded opaquely like
+  // any other E2EE message.
+  CONTENT_TYPE_CALL_SIGNAL = 12;
 
   // === Control Messages ===
 
@@ -160,7 +167,7 @@ enum ContentType {
   CONTENT_TYPE_SENDER_SYNC = 23;
 
   // Reserved for future types
-  reserved 3 to 9, 12 to 19, 24 to 100;
+  reserved 3 to 9, 13 to 19, 24 to 100;
 }
 
 // MessagePriority - Delivery priority
