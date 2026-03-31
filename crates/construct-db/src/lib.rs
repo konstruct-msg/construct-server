@@ -139,6 +139,52 @@ pub async fn create_user_passwordless(
     Ok(user)
 }
 
+/// Set or clear the `searchable` flag for a user (migration 038+).
+///
+/// When `searchable = true` the user appears in `FindUser` results.
+/// Default is `false` — server never exposes users without explicit opt-in.
+pub async fn set_user_searchable(pool: &DbPool, user_id: &Uuid, searchable: bool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET searchable = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(searchable)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .context("Failed to update searchable flag")?;
+
+    Ok(())
+}
+
+/// Find a discoverable user by their HMAC username hash.
+///
+/// Returns `Some(user_id)` only when a matching row exists **and** `searchable = TRUE`.
+/// Callers must return the same "not found" response for `None` regardless of whether
+/// the user doesn't exist or simply opted out — this prevents username existence oracles.
+pub async fn find_discoverable_user_by_username_hash(
+    pool: &DbPool,
+    username_hash: &[u8],
+) -> Result<Option<Uuid>> {
+    let user_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM users
+        WHERE username_hash = $1
+          AND searchable = TRUE
+        "#,
+    )
+    .bind(username_hash)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to search user by username hash")?;
+
+    Ok(user_id)
+}
+
 /// Delete user account and all associated data
 /// This performs a hard delete (cascade will handle related records)
 pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
