@@ -36,6 +36,16 @@ service UserService {
 
   // CheckUsernameAvailability - Check if username is available (no auth required)
   rpc CheckUsernameAvailability(CheckUsernameAvailabilityRequest) returns (CheckUsernameAvailabilityResponse);
+
+  // SetDiscoverable - Opt in or out of username search (requires auth)
+  // Default is off. Idempotent — safe to call multiple times with the same value.
+  rpc SetDiscoverable(SetDiscoverableRequest) returns (SetDiscoverableResponse);
+
+  // FindUser - Find a user by exact username match (requires auth)
+  // Only returns users who have explicitly opted in via SetDiscoverable.
+  // Returns identical NOT_FOUND for "user doesn't exist" and "user not discoverable"
+  // to prevent username existence oracle attacks.
+  rpc FindUser(FindUserRequest) returns (FindUserResponse);
 }
 
 // UserProfile - User profile information
@@ -348,3 +358,41 @@ message CheckUsernameAvailabilityResponse {
   // Reason if not available: "taken", "reserved", "invalid_format"
   optional string reason = 2;
 }
+
+// ============================================================================
+// SetDiscoverable Messages
+// ============================================================================
+
+// Request to opt in or out of username-based discovery.
+// Requires authentication (x-user-id set by Envoy auth interceptor).
+// The user must have a username set (username_hash != NULL) to opt in.
+message SetDiscoverableRequest {
+  // true = opt in to search; false = opt out
+  bool discoverable = 1;
+}
+
+// Confirmation that the flag was updated.
+message SetDiscoverableResponse {
+  // Current state after the update.
+  bool discoverable = 1;
+}
+
+// ============================================================================
+// FindUser Messages
+// ============================================================================
+
+// Request to find a user by exact username match.
+// Requires authentication. Rate-limited per caller.
+message FindUserRequest {
+  // Plaintext username to look up (server normalizes and hashes internally).
+  string username = 1;
+}
+
+// Response with the found user's ID.
+// Returns NOT_FOUND status for both "no such user" and "user not discoverable"
+// so the response is indistinguishable to the caller.
+message FindUserResponse {
+  // The user_id (UUID) of the found user.
+  string user_id = 1;
+}
+

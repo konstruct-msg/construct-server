@@ -448,6 +448,111 @@ impl UserService for UserGrpcService {
             Err(e) => Err(Status::internal(format!("Database error: {}", e))),
         }
     }
+
+    async fn set_discoverable(
+        &self,
+        request: Request<proto::SetDiscoverableRequest>,
+    ) -> Result<Response<proto::SetDiscoverableResponse>, Status> {
+        // Auth: extract user_id from Envoy-injected metadata header.
+        let user_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+
+        let discoverable = request.into_inner().discoverable;
+
+        // When opting in, verify the user actually has a username set.
+        if discoverable {
+            use construct_server_shared::db;
+            let user = db::get_user_by_id(&self.context.db_pool, &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("user not found"))?;
+
+            if user.username_hash.is_none() {
+                return Err(Status::failed_precondition(
+                    "A username must be set before enabling discoverability",
+                ));
+            }
+        }
+
+        use construct_server_shared::db;
+        db::set_user_searchable(&self.context.db_pool, &user_id, discoverable)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        tracing::info!(
+            user_id = %user_id,
+            discoverable = discoverable,
+            "User updated discoverability setting"
+        );
+
+        Ok(Response::new(proto::SetDiscoverableResponse {
+            discoverable,
+        }))
+    }
+
+    async fn find_user(
+        &self,
+        request: Request<proto::FindUserRequest>,
+    ) -> Result<Response<proto::FindUserResponse>, Status> {
+        // Auth: must be authenticated to search.
+        let caller_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+
+        let req = request.into_inner();
+        if req.username.is_empty() {
+            return Err(Status::invalid_argument("username is required"));
+        }
+
+        // Rate limit: 5 searches per hour per caller (keyed by user_id to prevent
+        // multi-account scraping through IP rotation — also add IP limit if needed).
+        const MAX_SEARCHES_PER_HOUR: i64 = 5;
+        const WINDOW_SECONDS: i64 = 3600;
+        let rate_key = format!("rate:find_user:{}:hour", caller_id);
+        {
+            let mut queue = self.context.queue.lock().await;
+            let count = queue
+                .increment_rate_limit(&rate_key, WINDOW_SECONDS)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if count > MAX_SEARCHES_PER_HOUR {
+                return Err(Status::resource_exhausted(
+                    "Search rate limit exceeded. Try again later.",
+                ));
+            }
+        }
+
+        let normalized = req.username.trim().to_lowercase();
+        let valid_format = normalized.len() >= 3
+            && normalized.len() <= 30
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid_format {
+            // Return not_found (not invalid_argument) to avoid leaking format oracle.
+            return Err(Status::not_found("user not found"));
+        }
+
+        let secret = &self.context.config.security.username_hmac_secret;
+        let hash = hash_username(secret, &normalized);
+
+        use construct_server_shared::db;
+        match db::find_discoverable_user_by_username_hash(&self.context.db_pool, &hash).await {
+            Ok(Some(found_id)) => Ok(Response::new(proto::FindUserResponse {
+                user_id: found_id.to_string(),
+            })),
+            // Identical response for "not found" and "not discoverable" — prevents oracle.
+            Ok(None) => Err(Status::not_found("user not found")),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
 }
 
 /// Health check endpoint
