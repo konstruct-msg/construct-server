@@ -40,7 +40,7 @@ use construct_server_shared::{
             MessagingService as GrpcMessagingService, MessagingServiceServer,
         },
     },
-    user_service::{UserServiceContext, handlers as user_handlers},
+    user_service::UserServiceContext,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures_core::Stream;
@@ -360,9 +360,7 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             }),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        .route("/api/v1/account", get(user_handlers::get_account))
-        .route("/api/v1/account", put(user_handlers::update_account))
-        // Note: DELETE /api/v1/account removed - use device-signed deletion
+        // Note: REST account/invite routes removed — use gRPC UserService instead
         // Note: /api/v1/keys/upload and /api/v1/users/:id/public-key removed — gRPC only (KeyService)
         .layer(axum_middleware::from_fn_with_state(
             context.auth_manager.clone(),
