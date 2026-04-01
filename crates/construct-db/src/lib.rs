@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use construct_crypto::{BundleData, UploadableKeyBundle};
+use construct_crypto::UploadableKeyBundle;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
@@ -323,115 +323,14 @@ pub async fn are_mutual_contacts(pool: &DbPool, a_hmac: &[u8], b_hmac: &[u8]) ->
     Ok(ok)
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct KeyBundleRecord {
-    pub user_id: Uuid,
-    pub master_identity_key: Vec<u8>,
-    pub bundle_data: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub registered_at: DateTime<Utc>,
-}
-
-/// Stores a key bundle in the crypto-agile format
-pub async fn store_key_bundle(
-    pool: &DbPool,
-    user_id: &Uuid,
-    bundle: &UploadableKeyBundle,
-) -> Result<()> {
-    // Decode base64 strings to Vec<u8> for storage
-    let master_identity_key = BASE64
-        .decode(&bundle.master_identity_key)
-        .context("Failed to decode master_identity_key from base64")?;
-
-    let bundle_data_bytes = BASE64
-        .decode(&bundle.bundle_data)
-        .context("Failed to decode bundle_data from base64")?;
-
-    let signature = BASE64
-        .decode(&bundle.signature)
-        .context("Failed to decode signature from base64")?;
-
-    // Verify that bundle_data decodes as valid protobuf BundleData and extract the user_id
-    let bundle_data: BundleData = prost::Message::decode(bundle_data_bytes.as_slice())
-        .context("Failed to decode bundle_data as protobuf")?;
-
-    // Security check: ensure the user_id in bundle_data matches the authenticated user
-    if bundle_data.user_id != user_id.to_string() {
-        return Err(anyhow::anyhow!(
-            "User ID mismatch: bundle contains '{}' but user is '{}'",
-            bundle_data.user_id,
-            user_id
-        ));
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO key_bundles (user_id, master_identity_key, bundle_data, signature, registered_at, updated_at)
-        VALUES ($1, $2, $3, $4, NOW(), NOW())
-        ON CONFLICT (user_id) DO UPDATE SET
-            bundle_data = EXCLUDED.bundle_data,
-            signature = EXCLUDED.signature,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(user_id)
-    .bind(master_identity_key)
-    .bind(bundle_data_bytes)
-    .bind(signature)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-// Record for key bundle (username removed — server no longer stores plaintext)
-#[derive(sqlx::FromRow)]
-struct KeyBundleWithUsername {
-    pub master_identity_key: Vec<u8>,
-    pub bundle_data: Vec<u8>,
-    pub signature: Vec<u8>,
-}
-
-/// Retrieves a key bundle in the crypto-agile format along with username
-/// Returns (bundle, username) tuple
+/// Retrieves a key bundle in the crypto-agile format along with username.
+/// Returns (bundle, username) tuple.
 ///
-/// This function supports both:
-/// 1. Legacy key_bundles table (for old users who uploaded keys)
-/// 2. New devices table (for passwordless auth users)
+/// Constructs the bundle from the devices table (passwordless auth users).
 pub async fn get_key_bundle(
     pool: &DbPool,
     user_id: &Uuid,
 ) -> Result<Option<(UploadableKeyBundle, String)>> {
-    // First, try the legacy key_bundles table
-    let record = sqlx::query_as::<_, KeyBundleWithUsername>(
-        r#"
-        SELECT
-            kb.master_identity_key,
-            kb.bundle_data,
-            kb.signature
-        FROM key_bundles kb
-        WHERE kb.user_id = $1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(r) = record {
-        return Ok(Some((
-            UploadableKeyBundle {
-                master_identity_key: BASE64.encode(r.master_identity_key),
-                bundle_data: BASE64.encode(r.bundle_data),
-                signature: BASE64.encode(r.signature),
-                nonce: None,
-                timestamp: None,
-            },
-            String::new(),
-        )));
-    }
-
-    // Fallback: Try to construct key bundle from devices table (passwordless auth users)
     get_key_bundle_from_device(pool, user_id).await
 }
 
@@ -573,39 +472,6 @@ pub async fn get_extended_key_bundle(
     .await?;
 
     let Some(d) = device else {
-        // Fallback: try legacy key_bundles table
-        // For legacy users, verifying_key = master_identity_key (Ed25519)
-        let record = sqlx::query_as::<_, KeyBundleWithUsername>(
-            r#"
-            SELECT
-                kb.master_identity_key,
-                kb.bundle_data,
-                kb.signature
-            FROM key_bundles kb
-            WHERE kb.user_id = $1
-            "#,
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
-
-        if let Some(r) = record {
-            // For legacy bundles, master_identity_key is Ed25519 (used for both)
-            let verifying_key = BASE64.encode(&r.master_identity_key);
-            return Ok(Some(ExtendedKeyBundle {
-                bundle: UploadableKeyBundle {
-                    master_identity_key: verifying_key.clone(),
-                    bundle_data: BASE64.encode(&r.bundle_data),
-                    signature: BASE64.encode(&r.signature),
-                    nonce: None,
-                    timestamp: None,
-                },
-                username: String::new(),
-                verifying_key: verifying_key.clone(),
-                identity_key: verifying_key, // Legacy: same key for both
-            }));
-        }
-
         return Ok(None);
     };
 

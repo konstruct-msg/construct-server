@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use construct_config::Config;
 use construct_crypto::hash_username;
@@ -647,23 +647,6 @@ async fn main() -> Result<()> {
             "/metrics",
             get(construct_server_shared::metrics::metrics_handler),
         )
-        // User profile endpoints
-        .route(
-            "/api/v1/users/:device_id/profile",
-            get(handlers::get_device_profile),
-        )
-        // Account management endpoints
-        .route("/api/v1/account", get(handlers::get_account))
-        .route("/api/v1/account", put(handlers::update_account))
-        // Note: DELETE /api/v1/account removed - use device-signed deletion instead
-        // Username availability check (no auth required)
-        .route(
-            "/api/v1/users/username/availability",
-            get(handlers::check_username_availability),
-        )
-        // Invite endpoints (Phase 5: Dynamic invite tokens)
-        .route("/api/v1/invites/generate", post(handlers::generate_invite))
-        .route("/api/v1/invites/accept", post(handlers::accept_invite))
         // Device-signed account deletion (Phase 5.0.1)
         .route(
             "/api/v1/users/me/delete-challenge",
