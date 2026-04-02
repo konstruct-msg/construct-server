@@ -204,20 +204,7 @@ impl MessagingService for MessagingGrpcService {
             .recipient
             .ok_or_else(|| Status::invalid_argument("recipient is required"))?;
 
-        if envelope.encrypted_payload.is_empty() {
-            return Err(Status::invalid_argument("encrypted_payload is required"));
-        }
-
-        // Reject oversized payloads before any DB work.
-        // 64 KB matches client-side WirePayload limit (~6 KB typical + 100× headroom).
-        const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-        if envelope.encrypted_payload.len() > MAX_PAYLOAD_BYTES {
-            return Err(Status::invalid_argument(format!(
-                "encrypted_payload exceeds maximum size ({} > {} bytes)",
-                envelope.encrypted_payload.len(),
-                MAX_PAYLOAD_BYTES
-            )));
-        }
+        validate_payload(&envelope.encrypted_payload).map_err(Status::invalid_argument)?;
 
         // Use client-provided message_id (echo back per proto contract).
         // Priority: envelope.message_id → idempotency_key → generated UUID.
@@ -673,5 +660,51 @@ impl MessagingService for MessagingGrpcService {
         );
 
         Ok(Response::new(proto::RequestKeySyncResponse {}))
+    }
+}
+
+// ============================================================================
+// Pure helpers
+// ============================================================================
+
+/// Validates that `payload` is non-empty and within the 64 KiB size limit.
+pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
+    if payload.is_empty() {
+        return Err("encrypted_payload is required".to_string());
+    }
+    const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(format!(
+            "encrypted_payload exceeds maximum size ({} > {} bytes)",
+            payload.len(),
+            MAX_PAYLOAD_BYTES
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_payload_size_empty_rejected() {
+        assert!(validate_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn test_payload_size_64kb_accepted() {
+        let payload = vec![0u8; 65535];
+        assert!(validate_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn test_payload_size_over_64kb_rejected() {
+        let payload = vec![0u8; 65537];
+        assert!(validate_payload(&payload).is_err());
     }
 }
