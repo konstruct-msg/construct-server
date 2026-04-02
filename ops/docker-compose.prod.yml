@@ -352,6 +352,10 @@ services:
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
       ICE_UPSTREAM: "envoy:8080"
+      # Relay addresses advertised in /.well-known/construct-server.
+      # Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS on the relay server).
+      # Add more relays as comma-separated list: "ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"
+      ICE_RELAY_ADDRESSES: ${ICE_RELAY_ADDRESSES:-ice.msk.konstruct.cc:443}
       # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Traefik terminates TLS.
       # Set these only for deployments where gateway is exposed directly without Traefik.
     ports:
