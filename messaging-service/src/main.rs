@@ -226,8 +226,7 @@ async fn main() -> Result<()> {
     {
         let queue_clone = Arc::clone(&context.queue);
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;

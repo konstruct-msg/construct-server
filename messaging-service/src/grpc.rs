@@ -268,12 +268,9 @@ impl MessagingService for MessagingGrpcService {
         // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.
         let mut trust_level = crate::trust::TrustLevel::Trusted;
         if let Ok(mut redis_conn) = self.context.redis_conn().await {
-            let trust = crate::trust::get_trust_level(
-                &mut redis_conn,
-                &self.context.db_pool,
-                sender_id,
-            )
-            .await;
+            let trust =
+                crate::trust::get_trust_level(&mut redis_conn, &self.context.db_pool, sender_id)
+                    .await;
             trust_level = trust;
 
             // Hourly message rate check
