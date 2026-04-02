@@ -198,6 +198,7 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         ice_tls_cert_path: None,
         ice_tls_key_path: None,
         ice_cover_upstream: None,
+        ice_relay_addresses: vec![],
     };
 
     // Allow overriding redis_url from environment for CI/different setups
