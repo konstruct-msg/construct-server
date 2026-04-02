@@ -242,6 +242,7 @@ impl SignalingService for SignalingServiceImpl {
         &self,
         request: Request<InitiateCallRequest>,
     ) -> Result<Response<InitiateCallResponse>, Status> {
+        tracing::info!("InitiateCall received");
         let caller_id = caller_user_id(&request)?;
         let caller_device_id_str = caller_device_id(&request)?;
         let req = request.into_inner();
