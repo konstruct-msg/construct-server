@@ -422,6 +422,13 @@ impl CallRegistry {
         }
     }
 
+    /// Remove all in-memory and Redis state for a completed/ended call.
+    ///
+    /// # Privacy invariant
+    /// Do NOT add database persistence here. Storing (caller_id, callee_id,
+    /// timestamp) tuples creates a durable social graph — exactly what this
+    /// system is designed to prevent. Call history belongs on-device only,
+    /// encrypted, and synced via the E2EE SenderSync channel.
     pub(crate) async fn remove_call(&self, call_id: &str) {
         let state = {
             let mut calls = self.calls.write().await;

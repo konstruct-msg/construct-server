@@ -11,9 +11,16 @@ import "signaling/webrtc.proto";
 // It does NOT participate in media, only forwards
 // signals between peers and manages active call state.
 //
-//     Call history is NOT stored on server.
-//     Only active sessions in Redis with auto-expiry.
-//     See: 07_WebRTC_Calls_Server_Spec.md §0-A
+// PRIVACY INVARIANT (do not violate):
+// The server MUST NOT persist (caller_id, callee_id, timestamp)
+// tuples in any durable store. Doing so creates a social graph
+// that undermines the privacy model of the entire system.
+// Active sessions live in Redis with a short TTL and are wiped
+// on call end. No DB writes, no audit logs.
+// Call history is stored encrypted on-device only and synced
+// between a user's own devices via the E2EE SenderSync channel.
+//
+// See: 07_WebRTC_Calls_Server_Spec.md §0-A
 //
 // Port: 50060
 // ─────────────────────────────────────────────────
