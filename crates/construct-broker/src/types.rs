@@ -145,6 +145,13 @@ pub struct KafkaMessageEnvelope {
     /// When set, the recipient client replaces the original message in their local store.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edits_message_id: Option<String>,
+
+    // ===== Anti-Spam Fields =====
+    /// Override MAXLEN for recipient's offline queue.
+    /// None = use default (10,000). Set to 100 when sender is TrustLevel::New
+    /// to prevent spam flooding of recipient queues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queue_len: Option<i64>,
 }
 
 impl KafkaMessageEnvelope {
@@ -180,6 +187,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -220,6 +228,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: true,
             sealed_inner_b64: Some(sealed_b64),
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -258,6 +267,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -291,6 +301,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -408,6 +419,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 }
@@ -459,6 +471,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
                     edits_message_id: None,
+                    max_queue_len: None,
                 }
             }
             ConstructMessageType::EndSession => {
@@ -489,6 +502,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
                     edits_message_id: None,
+                    max_queue_len: None,
                 }
             }
         }
@@ -573,6 +587,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: ctx.edits_message_id.clone(),
+            max_queue_len: None,
         }
     }
 
@@ -617,6 +632,7 @@ impl KafkaMessageEnvelope {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: Some(original_message_id),
+            max_queue_len: None,
         }
     }
 }

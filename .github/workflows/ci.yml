@@ -200,7 +200,7 @@ jobs:
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
           sleep 5
           IMAGE_TAG=latest docker compose -f ops/docker-compose.smoke.yml up -d \
-            auth-service messaging-service key-service gateway
+            auth-service messaging-service key-service gateway signaling-service
 
       - name: Wait for services to be healthy
         run: |
@@ -238,6 +238,13 @@ jobs:
             echo "  attempt $i/30..."; sleep 2
           done
 
+          # Wait for signaling-service port
+          echo "Waiting for signaling-service port..."
+          for i in $(seq 1 30); do
+            nc -z localhost 50060 && { echo "✅ signaling-service ready"; break; }
+            echo "  attempt $i/30..."; sleep 2
+          done
+
       - name: Run smoke tests
         run: bash scripts/smoke-test.sh
 
@@ -252,6 +259,8 @@ jobs:
           docker compose -f ops/docker-compose.smoke.yml logs key-service
           echo "=== gateway logs ==="
           docker compose -f ops/docker-compose.smoke.yml logs gateway
+          echo "=== signaling-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs signaling-service
           echo "=== postgres logs ==="
           docker compose -f ops/docker-compose.smoke.yml logs postgres
 

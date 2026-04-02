@@ -259,11 +259,103 @@ impl MessagingService for MessagingGrpcService {
                     error_message: "Recipient has blocked you".to_string(),
                     retryable: false,
                 }),
+                rate_limit_challenge: None,
             }));
         }
 
+        // ── TrustLevel + rate limiting ─────────────────────────────────────────
+        // Fail-open: if Redis is unavailable we skip rate checks and default to
+        // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.
+        let mut trust_level = crate::trust::TrustLevel::Trusted;
+        if let Ok(mut redis_conn) = self.context.redis_conn().await {
+            let trust = crate::trust::get_trust_level(
+                &mut redis_conn,
+                &self.context.db_pool,
+                sender_id,
+            )
+            .await;
+            trust_level = trust;
+
+            // Hourly message rate check
+            let hourly_result = crate::trust::check_hourly_rate(
+                &mut redis_conn,
+                &sender_id.to_string(),
+                trust.hourly_limit(),
+            )
+            .await;
+
+            if let Err(pow_level) = hourly_result {
+                let (challenge, expires_at) = crate::trust::make_challenge(pow_level);
+                tracing::info!(
+                    sender = %sender_id,
+                    pow_level,
+                    "Rate limit exceeded — issuing PoW challenge"
+                );
+                return Ok(Response::new(proto::SendMessageResponse {
+                    message_id: message_id.clone(),
+                    message_number: 0,
+                    server_timestamp: chrono::Utc::now().timestamp_millis(),
+                    success: false,
+                    error: Some(proto::MessageError {
+                        message_id: message_id.clone(),
+                        error_code: proto::ErrorCode::RateLimit.into(),
+                        error_message: format!(
+                            "Rate limit exceeded — solve PoW level {}",
+                            pow_level
+                        ),
+                        retryable: true,
+                    }),
+                    rate_limit_challenge: Some(proto::RateLimitChallenge {
+                        challenge,
+                        difficulty: pow_level,
+                        expires_at,
+                    }),
+                }));
+            }
+
+            // Daily fanout limit check
+            if let Some(fanout_limit) = trust.fanout_limit() {
+                let fanout_result = crate::trust::check_fanout_rate(
+                    &mut redis_conn,
+                    &sender_id.to_string(),
+                    &recipient.user_id,
+                    fanout_limit,
+                )
+                .await;
+
+                if let Err(pow_level) = fanout_result {
+                    let (challenge, expires_at) = crate::trust::make_challenge(pow_level);
+                    tracing::info!(
+                        sender = %sender_id,
+                        pow_level,
+                        "Fanout limit exceeded — issuing PoW challenge"
+                    );
+                    return Ok(Response::new(proto::SendMessageResponse {
+                        message_id: message_id.clone(),
+                        message_number: 0,
+                        server_timestamp: chrono::Utc::now().timestamp_millis(),
+                        success: false,
+                        error: Some(proto::MessageError {
+                            message_id: message_id.clone(),
+                            error_code: proto::ErrorCode::RateLimit.into(),
+                            error_message: format!(
+                                "Fanout limit exceeded — solve PoW level {}",
+                                pow_level
+                            ),
+                            retryable: true,
+                        }),
+                        rate_limit_challenge: Some(proto::RateLimitChallenge {
+                            challenge,
+                            difficulty: pow_level,
+                            expires_at,
+                        }),
+                    }));
+                }
+            }
+        }
+
         let t_dispatch = std::time::Instant::now();
-        let kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let mut kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
@@ -271,6 +363,7 @@ impl MessagingService for MessagingGrpcService {
             content_type: envelope.content_type,
             edits_message_id: envelope.edits_message_id.clone(),
         });
+        kafka_envelope.max_queue_len = Some(trust_level.queue_maxlen());
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(&app_context, kafka_envelope)
@@ -290,6 +383,7 @@ impl MessagingService for MessagingGrpcService {
             server_timestamp: chrono::Utc::now().timestamp_millis(),
             success: true,
             error: None,
+            rate_limit_challenge: None,
         }))
     }
 

@@ -214,6 +214,20 @@ message SendMessageRequest {
   reserved 3 to 10;
 }
 
+// RateLimitChallenge - Proof-of-Work challenge issued on soft rate-limit breach.
+// Client must solve this challenge before retrying the send.
+// difficulty: 4 = x1.5 limit, 6 = x3 limit, 8 = x5+ limit
+message RateLimitChallenge {
+  // Random hex string the client must hash against
+  string challenge = 1;
+
+  // Argon2 difficulty level
+  uint32 difficulty = 2;
+
+  // Unix millis — challenge expires in 60 seconds
+  int64 expires_at = 3;
+}
+
 // SendMessageResponse - Send message response
 message SendMessageResponse {
   // Message ID (echo back)
@@ -230,6 +244,10 @@ message SendMessageResponse {
 
   // Error (if failed)
   optional MessageError error = 5;
+
+  // PoW challenge issued when rate limit is soft-exceeded.
+  // Client must solve this challenge before retrying.
+  optional RateLimitChallenge rate_limit_challenge = 6;
 }
 
 

@@ -6,6 +6,7 @@ mod handlers;
 mod media_routes;
 mod receipts;
 mod stream;
+mod trust;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -220,6 +221,31 @@ async fn main() -> Result<()> {
     });
     info!("Messaging gRPC listening on {}", grpc_bind_address);
 
+    // Periodic queue TTL: trim offline streams older than 30 days.
+    // Runs every 1 hour. Non-critical — errors are logged but don't stop the service.
+    {
+        let queue_clone = Arc::clone(&context.queue);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let mut queue = queue_clone.lock().await;
+                match queue.trim_streams_by_age(30 * 24 * 3600).await {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!(trimmed = n, "Queue TTL: trimmed old messages");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Queue TTL trim failed (non-critical)");
+                    }
+                }
+            }
+        });
+    }
+
     // Create router
     let app = Router::new()
         // Health check
@@ -305,6 +331,7 @@ mod tests {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -328,6 +355,7 @@ mod tests {
             is_sealed_sender: false,
             sealed_inner_b64: None,
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 
@@ -351,6 +379,7 @@ mod tests {
             is_sealed_sender: true,
             sealed_inner_b64: Some(sealed_b64.to_string()),
             edits_message_id: None,
+            max_queue_len: None,
         }
     }
 

@@ -75,3 +75,14 @@ impl construct_db::HasDbPool for MessagingServiceContext {
         &self.db_pool
     }
 }
+
+impl MessagingServiceContext {
+    /// Get a Redis ConnectionManager for rate-limiting and caching.
+    ///
+    /// Briefly locks the queue to clone the ConnectionManager, then releases the lock.
+    /// The returned handle is independent — callers do not hold the queue lock during use.
+    pub async fn redis_conn(&self) -> anyhow::Result<redis::aio::ConnectionManager> {
+        let queue = self.queue.lock().await;
+        Ok(queue.clone_redis_connection())
+    }
+}
