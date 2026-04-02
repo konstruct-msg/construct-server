@@ -96,6 +96,7 @@ services:
       - user
       - messaging
       - notification
+      - signaling
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
