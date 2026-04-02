@@ -53,26 +53,27 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(Arc::clone(&registry).cleanup_loop());
 
     let notification_client = match env::var("NOTIFICATION_GRPC_ENDPOINT") {
-        Ok(endpoint) if !endpoint.trim().is_empty() => {
-            match NotificationClient::new(&endpoint).await {
-                Ok(client) => {
-                    info!(
-                        "NotificationService client enabled (endpoint: {})",
-                        endpoint
-                    );
-                    Some(client)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        endpoint = %endpoint,
-                        "Failed to connect to NotificationService - VoIP wake disabled"
-                    );
-                    None
-                }
+        Ok(endpoint) if !endpoint.trim().is_empty() => match NotificationClient::new(&endpoint) {
+            Ok(client) => {
+                info!(
+                    endpoint = %endpoint,
+                    "NotificationService client configured (lazy connect)"
+                );
+                Some(client)
             }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    endpoint = %endpoint,
+                    "Invalid NOTIFICATION_GRPC_ENDPOINT — VoIP wake disabled"
+                );
+                None
+            }
+        },
+        _ => {
+            tracing::debug!("NOTIFICATION_GRPC_ENDPOINT not set — VoIP wake disabled");
+            None
         }
-        _ => None,
     };
 
     let contact_hmac_secret = match env::var("CONTACT_HMAC_SECRET") {
