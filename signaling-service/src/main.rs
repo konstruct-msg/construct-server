@@ -46,8 +46,37 @@ async fn main() -> anyhow::Result<()> {
     let peer_salt =
         env::var("RATE_LIMIT_PEER_SALT").unwrap_or_else(|_| make_default_peer_salt(&turn_secret));
 
+    let db_pool: Option<Arc<construct_db::DbPool>> = match env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            match PgPoolOptions::new()
+                .max_connections(
+                    env::var("DB_MAX_CONNECTIONS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(20),
+                )
+                .min_connections(0)
+                .connect(&url)
+                .await
+            {
+                Ok(pool) => {
+                    info!("DB pool enabled for signaling-service");
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to connect DB — call records and block checks disabled"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     let instance_id = env::var("INSTANCE_ID").unwrap_or_else(|_| make_instance_id());
-    let registry = Arc::new(CallRegistry::new(&redis_url, instance_id)?);
+    let registry = Arc::new(CallRegistry::new(&redis_url, instance_id, db_pool.clone())?);
 
     tokio::spawn(Arc::clone(&registry).instance_pubsub_loop());
     tokio::spawn(Arc::clone(&registry).cleanup_loop());
@@ -120,34 +149,7 @@ async fn main() -> anyhow::Result<()> {
         turn_ttl,
         notification_client,
         contact_hmac_secret: Arc::new(contact_hmac_secret),
-        db_pool: match env::var("DATABASE_URL") {
-            Ok(url) if !url.trim().is_empty() => {
-                match PgPoolOptions::new()
-                    .max_connections(
-                        env::var("DB_MAX_CONNECTIONS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(20),
-                    )
-                    .min_connections(0)
-                    .connect(&url)
-                    .await
-                {
-                    Ok(pool) => {
-                        info!("DB pool enabled for signaling-service (user_blocks checks)");
-                        Some(Arc::new(pool))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to connect DB - calls_allowed checks limited to Redis-only"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        },
+        db_pool,
     };
 
     Server::builder()
