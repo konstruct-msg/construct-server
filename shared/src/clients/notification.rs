@@ -11,10 +11,11 @@ pub struct NotificationClient {
 
 impl NotificationClient {
     /// Creates a new client for the given endpoint.
-    pub async fn new(endpoint: &str) -> Result<Self, tonic::transport::Error> {
-        let channel = Endpoint::from_shared(endpoint.to_string())?
-            .connect()
-            .await?;
+    /// Uses lazy connect — the TCP connection is established on the first RPC call,
+    /// not at construction time. This avoids startup warnings when the notification
+    /// service is temporarily unavailable or not yet ready.
+    pub fn new(endpoint: &str) -> Result<Self, tonic::transport::Error> {
+        let channel = Endpoint::from_shared(endpoint.to_string())?.connect_lazy();
 
         Ok(Self { channel })
     }
