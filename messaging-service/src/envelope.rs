@@ -143,6 +143,7 @@ pub(crate) async fn dispatch_sealed_sender(
             server_timestamp: chrono::Utc::now().timestamp_millis(),
             success: true,
             error: None,
+            rate_limit_challenge: None,
         });
     }
 
@@ -172,5 +173,6 @@ pub(crate) async fn dispatch_sealed_sender(
         server_timestamp: chrono::Utc::now().timestamp_millis(),
         success: true,
         error: None,
+        rate_limit_challenge: None,
     })
 }

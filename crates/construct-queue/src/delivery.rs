@@ -607,7 +607,7 @@ impl<'a> DeliveryManager<'a> {
             .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
 
         // Use XADD with MAXLEN for automatic trimming
-        let max_len = 10000_i64; // Same as delivery worker default
+        let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
 
         let stream_id: String = redis::cmd("XADD")
             .arg(&stream_key)
@@ -662,7 +662,7 @@ impl<'a> DeliveryManager<'a> {
         let payload = rmp_serde::to_vec(envelope)
             .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
 
-        let max_len = 10000_i64;
+        let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
         let stream_id: String = redis::cmd("XADD")
             .arg(&stream_key)
             .arg("MAXLEN")
@@ -780,5 +780,57 @@ impl<'a> DeliveryManager<'a> {
         let key = format!("receipt:sender:{}", message_id);
         let result: Option<String> = self.client.get(&key).await?;
         Ok(result)
+    }
+
+    /// Trim all offline message streams to remove entries older than `max_age_seconds`.
+    ///
+    /// Uses Redis SCAN to find all stream keys matching the offline queue pattern,
+    /// then applies XTRIM MINID for time-based expiry.
+    /// This is O(N) over total message count — run periodically (e.g., every 1 hour).
+    pub(crate) async fn trim_streams_by_age(&mut self, max_age_seconds: u64) -> Result<u64> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let cutoff_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("System time error")?
+            .as_millis()
+            .saturating_sub(max_age_seconds as u128 * 1000) as u64;
+
+        // MINID format: "{milliseconds_timestamp}-0"
+        let minid = format!("{}-0", cutoff_ms);
+        let pattern = format!("{}:offline:*", self.delivery_queue_prefix);
+
+        let mut cursor: u64 = 0;
+        let mut total_trimmed: u64 = 0;
+
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100u64)
+                .query_async(self.client.connection_mut())
+                .await
+                .context("SCAN failed")?;
+
+            for key in keys {
+                let trimmed: i64 = redis::cmd("XTRIM")
+                    .arg(&key)
+                    .arg("MINID")
+                    .arg(&minid)
+                    .query_async(self.client.connection_mut())
+                    .await
+                    .unwrap_or(0);
+                total_trimmed += trimmed as u64;
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        Ok(total_trimmed)
     }
 }

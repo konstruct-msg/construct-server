@@ -7,7 +7,7 @@
 # Tests that key gRPC endpoints respond correctly and without hanging.
 #
 # Usage:
-#   ./scripts/smoke-test.sh [auth_host] [msg_host] [key_host] [gateway_host]
+#   ./scripts/smoke-test.sh [auth_host] [msg_host] [key_host] [gateway_host] [signaling_host]
 #
 # Defaults to localhost with standard smoke ports.
 # Exits with non-zero on any failure.
@@ -21,6 +21,7 @@ AUTH_HOST="${1:-localhost:50051}"
 MSG_HOST="${2:-localhost:50052}"
 KEY_HOST="${3:-localhost:50057}"
 GW_HOST="${4:-localhost:8080}"
+SIG_HOST="${5:-localhost:50060}"
 PROTO_DIR="shared/proto"
 TIMEOUT_S=5   # max seconds any single RPC is allowed to take
 WARN_MS=2000  # warn (but don't fail) if an RPC is slower than this
@@ -76,12 +77,38 @@ _timed_err() {
   fi
 }
 
+# _timed_err_unauthenticated: like _timed_err, but additionally verifies the error
+# is UNAUTHENTICATED (not UNIMPLEMENTED). Catches stale-binary regression where a
+# missing RPC returns gRPC status 12 (Unimplemented) instead of status 16.
+_timed_err_unauthenticated() {
+  local label="$1"; shift
+  local start elapsed exit_code=0 output
+  start=$(date +%s%3N)
+  output=$(timeout "$TIMEOUT_S" "$@" 2>&1) || exit_code=$?
+  elapsed=$(( $(date +%s%3N) - start ))
+  if [ "$exit_code" -eq 124 ]; then
+    _fail "$label — hung (timed out after ${TIMEOUT_S}s)"
+  elif [ "$exit_code" -eq 0 ]; then
+    _fail "$label — expected rejection but got success"
+  elif echo "$output" | grep -qi "connection refused\|no such host\|dial tcp\|i/o timeout"; then
+    _fail "$label — cannot connect to server (${elapsed}ms)"
+  elif echo "$output" | grep -qi "Unimplemented\|unimplemented"; then
+    _fail "$label — got UNIMPLEMENTED (stale binary? method not registered)"
+  else
+    _ok "$label (${elapsed}ms, rejected as expected)"
+    if [ "$elapsed" -gt "$WARN_MS" ]; then
+      _warn "$label — slow rejection: ${elapsed}ms > ${WARN_MS}ms"
+    fi
+  fi
+}
+
 echo ""
 echo "=== Construct Smoke Tests ==="
 echo "Auth:        $AUTH_HOST"
 echo "Messaging:   $MSG_HOST"
 echo "Key service: $KEY_HOST"
 echo "Gateway:     $GW_HOST"
+echo "Signaling:   $SIG_HOST"
 echo ""
 
 # ── 1. Gateway health ────────────────────────────────────────────────────────
@@ -162,6 +189,32 @@ _timed_err "GetPreKeyBundle (fake JWT → rejected fast)" grpcurl \
   -d '{"user_id": "00000000-0000-0000-0000-000000000000"}' \
   "$KEY_HOST" \
   shared.proto.services.v1.KeyService/GetPreKeyBundle
+
+
+# ── 5. Signaling service ──────────────────────────────────────────────────────
+echo ""
+echo "--- Signaling Service ---"
+
+# InitiateCall without x-user-id header → must return UNAUTHENTICATED.
+# CRITICAL REGRESSION TEST: if binary is stale (pre-InitiateCall), this returns
+# UNIMPLEMENTED (gRPC status 12) instead and the test fails, alerting us of a
+# Docker build cache issue before we deploy to production.
+_timed_err_unauthenticated "InitiateCall (no auth → UNAUTHENTICATED, not UNIMPLEMENTED)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/signaling_service.proto \
+  -d '{"call_id":"smoke","callee_user_id":"00000000-0000-0000-0000-000000000000","has_video":false}' \
+  "$SIG_HOST" \
+  shared.proto.signaling.v1.SignalingService/InitiateCall
+
+# GetTurnCredentials without x-user-id → must also reject quickly (liveness).
+_timed_err "GetTurnCredentials (no auth → rejected fast)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/signaling_service.proto \
+  -d '{}' \
+  "$SIG_HOST" \
+  shared.proto.signaling.v1.SignalingService/GetTurnCredentials
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

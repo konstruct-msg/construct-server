@@ -14,6 +14,7 @@
 # NO: Traefik, Vault, Kafka, Envoy, ICE, media-service, mls-service,
 #     sentinel-service, delivery-worker, notification-service, invite-service,
 #     user-service, invite-service
+# YES: signaling-service (added to catch InitiateCall registration regressions)
 # =============================================================================
 
 name: construct-smoke
@@ -139,6 +140,22 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+
+  signaling-service:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: signaling-service
+    environment:
+      PORT: "50060"
+      METRICS_PORT: "8091"
+      REDIS_URL: redis://redis:6379
+      # No DATABASE_URL — service starts without DB (contacts checks limited to Redis)
+      # No CONTACT_HMAC_SECRET — uses insecure default (fine for smoke tests)
+      # No NOTIFICATION_GRPC_ENDPOINT — VoIP push disabled
+    ports:
+      - "50060:50060"
+    networks: [smoke]
+    depends_on:
+      redis: { condition: service_healthy }
 
 networks:
   smoke:

@@ -818,4 +818,27 @@ impl MessageQueue {
         }
         Ok(count)
     }
+
+    /// Clone the internal Redis ConnectionManager for rate-limiting / caching operations.
+    ///
+    /// `ConnectionManager` is designed to be cloned — the clone shares the same underlying
+    /// connection pool and reconnect logic. Callers get an independent handle without
+    /// needing to hold the queue lock while performing Redis operations.
+    pub fn clone_redis_connection(&self) -> redis::aio::ConnectionManager {
+        self.client.connection().clone()
+    }
+
+    /// Trim all offline message streams to remove entries older than `max_age_seconds`.
+    ///
+    /// Delegates to `DeliveryManager::trim_streams_by_age`. Intended to be called from
+    /// a periodic background task (e.g., every hour) to enforce the 30-day queue TTL.
+    pub async fn trim_streams_by_age(&mut self, max_age_seconds: u64) -> Result<u64> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .trim_streams_by_age(max_age_seconds)
+        .await
+    }
 }

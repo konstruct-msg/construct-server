@@ -444,6 +444,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             server_timestamp: chrono::Utc::now().timestamp_millis(),
             success: true,
             error: None,
+            rate_limit_challenge: None,
         }))
     }
 
