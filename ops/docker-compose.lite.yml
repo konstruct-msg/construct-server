@@ -272,14 +272,58 @@ services:
       redis:
         condition: service_healthy
 
+  # ─── Signaling Service ───────────────────────────────────────────────────────
+  # WebRTC call signaling (gRPC-only). Routed via Envoy → ICE gateway.
+  signaling:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    command: /usr/local/bin/signaling-service
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: "50060"
+      METRICS_PORT: "8091"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
+      NOTIFICATION_GRPC_ENDPOINT: "notification:50054"
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET:-}
+      TURN_HOSTS: ${TURN_HOSTS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_TTL: ${TURN_TTL:-86400}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Envoy (gRPC routing) ────────────────────────────────────────────────────
+  # Routes gRPC calls from ICE gateway to individual microservices.
+  # Client → gateway ICE port (obfs4) → envoy:8080 → service:5005x
+  envoy:
+    image: envoyproxy/envoy:v1.37.0
+    restart: unless-stopped
+    volumes:
+      - ./envoy.docker.yaml:/etc/envoy/envoy.yaml:ro
+    networks:
+      - internal
+    depends_on:
+      - auth
+      - user
+      - messaging
+      - notification
+      - signaling
+
   # ─── Gateway ─────────────────────────────────────────────────────────────────
   # Exposes port 3000. Put nginx/caddy/traefik in front for TLS.
+  # ICE port (9443) handles obfs4-encrypted gRPC → proxied to Envoy.
   gateway:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     ports:
       - "${GATEWAY_PORT:-3000}:3000"
+      - "${ICE_PORT:-9443}:9443"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-construct}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-construct}
       REDIS_URL: redis://redis:6379
@@ -288,9 +332,10 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       KAFKA_ENABLED: "false"
-      ICE_ENABLED: ${ICE_ENABLED:-false}
-      ICE_PORT: ${ICE_PORT:-9443}
-      ICE_SERVER_KEY: ${ICE_SERVER_KEY:-}
+      ICE_ENABLED: ${ICE_ENABLED:-true}
+      ICE_PORT: "9443"
+      ICE_SERVER_KEY: ${ICE_SERVER_KEY:?ICE_SERVER_KEY is required for obfs4}
+      ICE_UPSTREAM: "envoy:8080"
     networks:
       - internal
     depends_on:
@@ -298,6 +343,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      envoy:
+        condition: service_started
 
 volumes:
   postgres-data:
