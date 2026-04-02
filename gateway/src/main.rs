@@ -347,7 +347,7 @@ async fn well_known_construct_server(
         ],
         "ice": {
             "primary": format!("ice.{}:443", domain),
-            "relays": [],
+            "relays": config.ice_relay_addresses,
         },
         "capabilities": {
             "max_message_size_bytes": 100_000,

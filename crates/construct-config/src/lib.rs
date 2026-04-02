@@ -160,6 +160,13 @@ pub struct Config {
     /// Only effective when not using gateway-managed TLS (`ICE_TLS_CERT_PATH` unset),
     /// i.e. when Traefik handles TLS termination.
     pub ice_cover_upstream: Option<String>,
+
+    /// Comma-separated list of ICE relay addresses advertised in `/.well-known/construct-server`.
+    /// Each entry should be `host:port`.  Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS).
+    /// Port 9443 = legacy plain obfs4.
+    ///
+    /// Example: `"ice.msk.konstruct.cc:443"` — or multiple: `"ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"`
+    pub ice_relay_addresses: Vec<String>,
 }
 
 impl Config {
@@ -312,6 +319,13 @@ impl Config {
             ice_tls_cert_path: std::env::var("ICE_TLS_CERT_PATH").ok(),
             ice_tls_key_path: std::env::var("ICE_TLS_KEY_PATH").ok(),
             ice_cover_upstream: std::env::var("ICE_COVER_UPSTREAM").ok(),
+            ice_relay_addresses: std::env::var("ICE_RELAY_ADDRESSES")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
         })
     }
 
