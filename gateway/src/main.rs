@@ -335,13 +335,15 @@ async fn well_known_construct_server(
             "version": env!("CARGO_PKG_VERSION"),
         },
         "grpc_endpoint": format!("{}:443", domain),
+        "signaling_endpoint": format!("{}:443", domain),
         "services": [
             "auth.AuthService",
             "user.UserService",
             "messaging.MessagingService",
             "notification.NotificationService",
             "invite.InviteService",
-            "media.MediaService"
+            "media.MediaService",
+            "signaling.SignalingService"
         ],
         "ice": {
             "primary": format!("ice.{}:443", domain),
