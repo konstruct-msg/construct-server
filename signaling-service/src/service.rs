@@ -11,9 +11,10 @@ use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
     signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
-    CallHangup, GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason,
-    IncomingCallNotification, InitiateCallRequest, InitiateCallResponse, RoutedWebRtcSignal,
-    SignalError, SignalErrorCode, SignalPong, SignalRequest, SignalResponse, WebRtcSignal,
+    CallHangup, CallHistoryRecord, GetCallHistoryRequest, GetCallHistoryResponse,
+    GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason, IncomingCallNotification,
+    InitiateCallRequest, InitiateCallResponse, RoutedWebRtcSignal, SignalError, SignalErrorCode,
+    SignalPong, SignalRequest, SignalResponse, WebRtcSignal,
 };
 
 use crate::forwarded::{ForwardedSignal, IncomingCall};
@@ -206,7 +207,9 @@ impl SignalingService for SignalingServiceImpl {
                         ForwardedSignal::Signal(hangup),
                     )
                     .await;
-                registry.remove_call(&state.call_id).await;
+                registry
+                    .save_and_remove_call(&state.call_id, "failed")
+                    .await;
             }
 
             registry.unregister_user(&user_id, &device_id).await;
@@ -343,6 +346,7 @@ impl SignalingService for SignalingServiceImpl {
                 &caller_id,
                 &caller_device_id_str,
                 callee_user_id,
+                req.call_type,
                 unix_millis(),
             )
             .await;
@@ -395,6 +399,57 @@ impl SignalingService for SignalingServiceImpl {
             callee_online,
             // Capability negotiation not yet implemented — all modern clients support WebRTC.
             callee_has_webrtc: true,
+        }))
+    }
+
+    async fn get_call_history(
+        &self,
+        request: Request<GetCallHistoryRequest>,
+    ) -> Result<Response<GetCallHistoryResponse>, Status> {
+        let user_id = caller_user_id(&request)?;
+        let req = request.into_inner();
+
+        let limit = req.limit.clamp(1, 200) as i64;
+        let before_ms: Option<i64> = if req.page_token.is_empty() {
+            None
+        } else {
+            req.page_token.parse::<i64>().ok().map(|ts| ts + 1) // exclusive upper bound
+        };
+
+        let rows = self
+            .registry
+            .get_call_history(&user_id, limit + 1, before_ms)
+            .await;
+
+        let has_more = rows.len() as i64 > limit;
+        let rows = &rows[..rows.len().min(limit as usize)];
+
+        let next_page_token = if has_more {
+            rows.last()
+                .map(|r| r.offered_at_ms.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let records = rows
+            .iter()
+            .map(|r| CallHistoryRecord {
+                call_id: r.call_id.clone(),
+                caller_id: r.caller_user_id.clone(),
+                callee_id: r.callee_user_id.clone(),
+                call_type: r.call_type.clone(),
+                status: r.status.clone(),
+                offered_at: r.offered_at_ms,
+                answered_at: r.answered_at_ms.unwrap_or(0),
+                ended_at: r.ended_at_ms,
+                duration_seconds: r.duration_seconds.unwrap_or(0),
+            })
+            .collect();
+
+        Ok(Response::new(GetCallHistoryResponse {
+            records,
+            next_page_token,
         }))
     }
 }
@@ -619,6 +674,7 @@ async fn handle_outbound_signal(
                         user_id,
                         &sender_device_id,
                         callee_user_id,
+                        offer.call_type,
                         unix_millis(),
                     )
                     .await;
@@ -662,6 +718,7 @@ async fn handle_outbound_signal(
                         user_id,
                         &sender_device_id,
                         callee_user_id,
+                        offer.call_type,
                         unix_millis(),
                     )
                     .await;
@@ -716,10 +773,10 @@ async fn handle_outbound_signal(
                     ForwardedSignal::Signal(signal),
                 )
                 .await;
-            registry.remove_call(&call_id).await;
+            registry.save_and_remove_call(&call_id, "busy").await;
         }
         Some(web_rtc_signal::Signal::Hangup(_)) => {
-            if let Some(web_rtc_signal::Signal::Hangup(hangup)) = &signal.signal {
+            let status = if let Some(web_rtc_signal::Signal::Hangup(hangup)) = &signal.signal {
                 if hangup.reason == HangupReason::Declined as i32 {
                     if let Some(state) = registry.load_call_state(&call_id).await {
                         if state.callee_user_id == user_id {
@@ -729,8 +786,23 @@ async fn handle_outbound_signal(
                                 .await;
                         }
                     }
+                    "declined"
+                } else {
+                    // Determine completed vs missed based on whether call was answered.
+                    let was_answered = registry
+                        .load_call_state(&call_id)
+                        .await
+                        .and_then(|s| s.answered_at_ms)
+                        .is_some();
+                    if was_answered {
+                        "completed"
+                    } else {
+                        "missed"
+                    }
                 }
-            }
+            } else {
+                "completed"
+            };
 
             let _ = registry
                 .forward_signal(
@@ -740,7 +812,7 @@ async fn handle_outbound_signal(
                     ForwardedSignal::Signal(signal),
                 )
                 .await;
-            registry.remove_call(&call_id).await;
+            registry.save_and_remove_call(&call_id, status).await;
             info!(user_id, call_id, "call ended");
         }
         None => {}
@@ -792,7 +864,7 @@ async fn handle_outbound_signal(
     Ok(())
 }
 
-fn call_type_to_str(call_type: i32) -> &'static str {
+pub(crate) fn call_type_to_str(call_type: i32) -> &'static str {
     match call_type {
         1 => "audio",
         2 => "video",
