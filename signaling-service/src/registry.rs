@@ -25,7 +25,6 @@ pub(crate) struct CallState {
     pub(crate) callee_user_id: String,
     pub(crate) caller_device_id: String,
     pub(crate) accepted_callee_device_id: Option<String>,
-    pub(crate) call_type: i32,
     pub(crate) created_at: u64,
     pub(crate) offered_at_ms: i64,
     pub(crate) ringing_at_ms: Option<i64>,
@@ -41,35 +40,16 @@ pub(crate) struct CallRegistry {
     user_channels: RwLock<HashMap<String, HashMap<String, broadcast::Sender<ForwardedSignal>>>>,
     instance_id: String,
     redis: redis::Client,
-    db_pool: Option<Arc<construct_db::DbPool>>,
-}
-
-#[derive(sqlx::FromRow)]
-pub(crate) struct CallHistoryRow {
-    pub call_id: String,
-    pub caller_user_id: String,
-    pub callee_user_id: String,
-    pub call_type: String,
-    pub status: String,
-    pub offered_at_ms: i64,
-    pub answered_at_ms: Option<i64>,
-    pub ended_at_ms: i64,
-    pub duration_seconds: Option<i32>,
 }
 
 impl CallRegistry {
-    pub(crate) fn new(
-        redis_url: &str,
-        instance_id: String,
-        db_pool: Option<Arc<construct_db::DbPool>>,
-    ) -> Result<Self, anyhow::Error> {
+    pub(crate) fn new(redis_url: &str, instance_id: String) -> Result<Self, anyhow::Error> {
         Ok(Self {
             calls: RwLock::new(HashMap::new()),
             active_calls: RwLock::new(HashMap::new()),
             user_channels: RwLock::new(HashMap::new()),
             instance_id,
             redis: redis::Client::open(redis_url)?,
-            db_pool,
         })
     }
 
@@ -339,7 +319,6 @@ impl CallRegistry {
         caller_user_id: &str,
         caller_device_id: &str,
         callee_user_id: &str,
-        call_type: i32,
         offered_at_ms: i64,
     ) {
         let now = unix_seconds();
@@ -350,7 +329,6 @@ impl CallRegistry {
             callee_user_id: callee_user_id.to_string(),
             caller_device_id: caller_device_id.to_string(),
             accepted_callee_device_id: None,
-            call_type,
             created_at: now,
             offered_at_ms,
             ringing_at_ms: None,
@@ -384,8 +362,6 @@ impl CallRegistry {
                 .arg(callee_user_id)
                 .arg("accepted_callee_device_id")
                 .arg("")
-                .arg("call_type")
-                .arg(call_type.to_string())
                 .arg("offer_b64")
                 .arg("")
                 .arg("caller_name")
@@ -473,90 +449,6 @@ impl CallRegistry {
         }
     }
 
-    /// Remove the call from Redis/in-memory and persist a record to PostgreSQL.
-    /// `status` — "completed" | "missed" | "declined" | "busy" | "failed"
-    pub(crate) async fn save_and_remove_call(&self, call_id: &str, status: &str) {
-        // Load state before removal so we have the full snapshot.
-        let state = self.load_call_state(call_id).await;
-        self.remove_call(call_id).await;
-
-        let Some(state) = state else { return };
-        let Some(pool) = self.db_pool.as_deref() else {
-            return;
-        };
-
-        let ended_at_ms = unix_millis();
-        let duration_seconds: Option<i32> = state.answered_at_ms.map(|a| {
-            let dur_ms = ended_at_ms.saturating_sub(a);
-            (dur_ms / 1000) as i32
-        });
-
-        use crate::service::call_type_to_str;
-        let call_type_str = call_type_to_str(state.call_type);
-
-        let res = sqlx::query(
-            r#"
-            INSERT INTO call_records
-                (call_id, caller_user_id, callee_user_id, call_type, status,
-                 offered_at_ms, answered_at_ms, ended_at_ms, duration_seconds)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (call_id) DO NOTHING
-            "#,
-        )
-        .bind(&state.call_id)
-        .bind(&state.caller_user_id)
-        .bind(&state.callee_user_id)
-        .bind(call_type_str)
-        .bind(status)
-        .bind(state.offered_at_ms)
-        .bind(state.answered_at_ms)
-        .bind(ended_at_ms)
-        .bind(duration_seconds)
-        .execute(pool)
-        .await;
-
-        if let Err(e) = res {
-            warn!(call_id, error = %e, "failed to persist call record");
-        }
-    }
-
-    /// Paginated call history for a user.
-    /// Returns (records, next_cursor) where each record is
-    /// (call_id, caller_user_id, callee_user_id, call_type, status,
-    ///  offered_at_ms, answered_at_ms, ended_at_ms, duration_seconds).
-    pub(crate) async fn get_call_history(
-        &self,
-        user_id: &str,
-        limit: i64,
-        before_offered_at_ms: Option<i64>,
-    ) -> Vec<CallHistoryRow> {
-        let Some(pool) = self.db_pool.as_deref() else {
-            return Vec::new();
-        };
-
-        let cutoff = before_offered_at_ms.unwrap_or(i64::MAX);
-
-        let rows = sqlx::query_as::<_, CallHistoryRow>(
-            r#"
-            SELECT call_id, caller_user_id, callee_user_id, call_type, status,
-                   offered_at_ms, answered_at_ms, ended_at_ms, duration_seconds
-            FROM call_records
-            WHERE (caller_user_id = $1 OR callee_user_id = $1)
-              AND offered_at_ms < $2
-            ORDER BY offered_at_ms DESC
-            LIMIT $3
-            "#,
-        )
-        .bind(user_id)
-        .bind(cutoff)
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-        rows
-    }
-
     pub(crate) async fn load_call_state(&self, call_id: &str) -> Option<CallState> {
         {
             let calls = self.calls.read().await;
@@ -612,10 +504,6 @@ impl CallRegistry {
             callee_user_id,
             caller_device_id,
             accepted_callee_device_id,
-            call_type: map
-                .get("call_type")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
             created_at,
             offered_at_ms,
             ringing_at_ms,
@@ -832,7 +720,6 @@ impl CallRegistry {
                 },
                 RemoveCall {
                     call_id: String,
-                    status: &'static str,
                 },
             }
 
@@ -846,11 +733,6 @@ impl CallRegistry {
                 if now_s.saturating_sub(state.created_at) > 300 {
                     actions.push(CleanupAction::RemoveCall {
                         call_id: state.call_id.clone(),
-                        status: if state.answered_at_ms.is_some() {
-                            "completed"
-                        } else {
-                            "failed"
-                        },
                     });
                     continue;
                 }
@@ -868,7 +750,6 @@ impl CallRegistry {
                     });
                     actions.push(CleanupAction::RemoveCall {
                         call_id: state.call_id.clone(),
-                        status: "missed",
                     });
                     continue;
                 }
@@ -887,7 +768,6 @@ impl CallRegistry {
                     });
                     actions.push(CleanupAction::RemoveCall {
                         call_id: state.call_id.clone(),
-                        status: "missed",
                     });
                     continue;
                 }
@@ -905,11 +785,6 @@ impl CallRegistry {
                     });
                     actions.push(CleanupAction::RemoveCall {
                         call_id: state.call_id.clone(),
-                        status: if state.answered_at_ms.is_some() {
-                            "completed"
-                        } else {
-                            "failed"
-                        },
                     });
                 }
             }
@@ -983,9 +858,9 @@ impl CallRegistry {
                             )
                             .await;
                     }
-                    CleanupAction::RemoveCall { call_id, status } => {
-                        warn!(call_id, status, "removing stale/expired call");
-                        self.save_and_remove_call(&call_id, status).await;
+                    CleanupAction::RemoveCall { call_id } => {
+                        warn!(call_id, "removing stale/expired call");
+                        self.remove_call(&call_id).await;
                     }
                 }
             }

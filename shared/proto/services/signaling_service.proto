@@ -11,8 +11,8 @@ import "signaling/webrtc.proto";
 // It does NOT participate in media, only forwards
 // signals between peers and manages active call state.
 //
-//     Active sessions are stored in Redis with auto-expiry.
-//     Completed calls are persisted in call_records (PostgreSQL).
+//     Call history is NOT stored on server.
+//     Only active sessions in Redis with auto-expiry.
 //     See: 07_WebRTC_Calls_Server_Spec.md §0-A
 //
 // Port: 50060
@@ -40,12 +40,6 @@ service SignalingService {
   // The SDP offer MUST be sent separately via MessagingService (Double Ratchet)
   // so the server cannot read or tamper with the DTLS fingerprint.
   rpc InitiateCall(InitiateCallRequest) returns (InitiateCallResponse);
-
-  // GetCallHistory — paginated call log for the authenticated user.
-  //
-  // Returns records where the user was either caller or callee,
-  // ordered by offered_at descending (most recent first).
-  rpc GetCallHistory(GetCallHistoryRequest) returns (GetCallHistoryResponse);
 }
 
 // ─────────── Signal stream ───────────
@@ -204,33 +198,4 @@ message InitiateCallResponse {
   // true if callee's client supports WebRTC calls (capability detection, best-effort).
   // Currently always true; reserved for future capability negotiation.
   bool callee_has_webrtc = 2;
-}
-
-// ─────────── Call History ───────────
-
-message GetCallHistoryRequest {
-  // Maximum number of records to return. Default 50, max 200.
-  int32 limit = 1;
-  // Opaque pagination cursor. Pass next_page_token from a previous response.
-  string page_token = 2;
-}
-
-message GetCallHistoryResponse {
-  repeated CallHistoryRecord records = 1;
-  // Empty when there are no more pages.
-  string next_page_token = 2;
-}
-
-message CallHistoryRecord {
-  string call_id          = 1;
-  string caller_id        = 2;
-  string callee_id        = 3;
-  // "audio" | "video"
-  string call_type        = 4;
-  // "completed" | "missed" | "declined" | "busy" | "failed"
-  string status           = 5;
-  int64  offered_at       = 6;  // Unix ms
-  int64  answered_at      = 7;  // Unix ms; 0 if never answered
-  int64  ended_at         = 8;  // Unix ms
-  int32  duration_seconds = 9;  // 0 if not answered
 }
