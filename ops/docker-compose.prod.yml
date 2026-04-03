@@ -301,7 +301,7 @@ services:
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
       TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.msk.konstruct.cc}
       TURN_SECRET: ${TURN_SECRET}
-      TURN_TTL: ${TURN_TTL:-86400}
+      TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
       NOTIFICATION_GRPC_ENDPOINT: "notification:50054"
       DATABASE_URL: ${DATABASE_URL}
     volumes:
