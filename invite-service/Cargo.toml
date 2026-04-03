@@ -36,6 +36,9 @@ hex = { workspace = true }
 prometheus = { workspace = true }
 tonic = "0.14.2"
 
+hmac = "0.12"
+sha2 = "0.10"
+
 # Crypto for invite signatures
 rand = "0.8"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
