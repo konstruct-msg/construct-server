@@ -13,10 +13,19 @@ use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use uuid::Uuid;
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
 use construct_server_shared::{
     AppError,
     db::{self as construct_db, DbPool},
 };
+
+fn hmac_sha256(secret: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
 use crypto_agility::{InviteToken, InviteValidationError};
 
 use crate::InviteServiceContext;
@@ -322,8 +331,30 @@ pub async fn accept_invite(
         "Invite accepted and burned"
     );
 
-    // 4. Establish mutual contact (TODO: implement Signal Protocol prekey exchange)
-    // For now, just return success
+    // 4. Establish mutual contact links (privacy-preserving: both directions)
+    let secret = &context.config.security.contact_hmac_secret;
+    let accepter_hmac = hmac_sha256(secret, input.accepter_user_id.as_bytes());
+    let creator_hmac = hmac_sha256(secret, creator_user_id.as_bytes());
+
+    if let Err(e) =
+        construct_db::add_contact_link(&context.db_pool, &accepter_hmac, &creator_hmac).await
+    {
+        tracing::error!(error = %e, "Failed to store contact link (accepter→creator)");
+        return Err(AppError::Unknown(e).into());
+    }
+    if let Err(e) =
+        construct_db::add_contact_link(&context.db_pool, &creator_hmac, &accepter_hmac).await
+    {
+        tracing::error!(error = %e, "Failed to store contact link (creator→accepter)");
+        return Err(AppError::Unknown(e).into());
+    }
+
+    tracing::info!(
+        jti = %invite.jti,
+        accepter = %input.accepter_user_id,
+        creator  = %creator_user_id,
+        "Mutual contact links established"
+    );
 
     Ok(AcceptInviteOutput {
         user_id: creator_user_id.to_string(),
