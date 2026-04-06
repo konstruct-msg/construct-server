@@ -160,5 +160,6 @@ pub(crate) fn build_receipt_response(
     Ok(proto::MessageStreamResponse {
         response: Some(proto::message_stream_response::Response::Receipt(receipt)),
         response_id: None,
+        stream_cursor: None,
     })
 }

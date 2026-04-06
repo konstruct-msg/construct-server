@@ -111,8 +111,13 @@ message MessageStreamResponse {
   // Response ID (correlates to request_id)
   optional string response_id = 10;
 
+  // Opaque server-assigned stream position cursor.
+  // Clients SHOULD persist the latest value and pass it as SubscribeRequest.since_cursor
+  // on the next reconnect to avoid re-reading already-delivered messages.
+  optional string stream_cursor = 11;
+
   // Reserved for future response types
-  reserved 8 to 9, 11 to 20;
+  reserved 8 to 9, 12 to 20;
 }
 
 // SubscribeRequest - Subscribe to conversation updates
@@ -122,6 +127,13 @@ message SubscribeRequest {
 
   // Subscribe to presence updates for these users?
   bool include_presence = 2;
+
+  // Resume cursor: last Redis stream ID received by the client on a previous
+  // connection.  When present, the server will deliver only messages AFTER this
+  // position, avoiding re-delivery of already-seen messages on reconnect.
+  // Clients should persist the last stream_cursor value from MessageStreamResponse
+  // and send it here when re-opening the stream after a disconnect.
+  optional string since_cursor = 3;
 }
 
 // UnsubscribeRequest - Unsubscribe from conversation updates

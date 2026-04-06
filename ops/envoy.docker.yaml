@@ -26,10 +26,14 @@ static_resources:
                 stream_idle_timeout: 0s
                 # HTTP/2 keepalive: send PING frames every 30s so mobile clients
                 # (iOS/Android) don't close the connection after 5 min idle.
+                # Enlarged flow-control windows reduce head-of-line blocking for
+                # concurrent gRPC streams sharing the same H2 connection.
                 http2_protocol_options:
                   connection_keepalive:
                     interval: 30s
                     timeout: 10s
+                  initial_stream_window_size: 2097152     # 2 MiB (default 64 KiB)
+                  initial_connection_window_size: 4194304 # 4 MiB (default 64 KiB)
                 route_config:
                   name: grpc_routes
                   virtual_hosts:
@@ -87,6 +91,8 @@ static_resources:
   clusters:
     - name: auth_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -106,6 +112,8 @@ static_resources:
 
     - name: user_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -125,6 +133,8 @@ static_resources:
 
     - name: messaging_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -134,6 +144,10 @@ static_resources:
               connection_keepalive:
                 interval: 20s
                 timeout: 10s
+              # Match the enlarged flow-control windows configured on the tonic server
+              # and the downstream listener to avoid back-pressure stalls on large messages.
+              initial_stream_window_size: 2097152     # 2 MiB
+              initial_connection_window_size: 4194304 # 4 MiB
       load_assignment:
         cluster_name: messaging_service
         endpoints:
@@ -144,6 +158,8 @@ static_resources:
 
     - name: notification_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -163,6 +179,8 @@ static_resources:
 
     - name: invite_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -182,6 +200,8 @@ static_resources:
 
     - name: media_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -201,6 +221,8 @@ static_resources:
 
     - name: key_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -220,6 +242,8 @@ static_resources:
 
     - name: mls_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -239,6 +263,8 @@ static_resources:
 
     - name: sentinel_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -258,12 +284,17 @@ static_resources:
 
     - name: signaling_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
-            http2_protocol_options: {}
+            http2_protocol_options:
+              connection_keepalive:
+                interval: 30s
+                timeout: 10s
       load_assignment:
         cluster_name: signaling_service
         endpoints:
@@ -274,6 +305,8 @@ static_resources:
 
     - name: discovery_service
       type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
       lb_policy: ROUND_ROBIN
       load_assignment:
         cluster_name: discovery_service
