@@ -19,6 +19,7 @@ use construct_config::Config;
 use construct_server_shared::apns::DeviceTokenEncryption;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::kafka::MessageProducer;
 use construct_server_shared::queue::MessageQueue;
@@ -129,6 +130,23 @@ async fn main() -> Result<()> {
         Err(_) => None,
     };
 
+    // Initialize sentinel-service gRPC client for send-path spam/rate protection
+    let sentinel_client = match env::var("SENTINEL_SERVICE_URL")
+        .unwrap_or_else(|_| "http://sentinel:50059".to_string())
+    {
+        url if url.is_empty() => None,
+        url => match SentinelClient::new(&url) {
+            Ok(client) => {
+                info!(url = %url, "Sentinel service gRPC client initialized");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create sentinel service gRPC client — send-path protection disabled");
+                None
+            }
+        },
+    };
+
     // Initialize Key Management System (optional, requires VAULT_ADDR)
     let key_management =
         match construct_server_shared::key_management::KeyManagementConfig::from_env() {
@@ -181,6 +199,7 @@ async fn main() -> Result<()> {
         apns_sandbox_client,
         token_encryption,
         notification_client,
+        sentinel_client,
         config: config.clone(),
         key_management,
         server_signer,

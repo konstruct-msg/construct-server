@@ -18,10 +18,6 @@
 //   - Skips delivery-worker if message was delivered via tx.send()
 //   - Reduces unnecessary work and network traffic
 //
-// Layer 3: Content hash deduplication (content_hash:{hash})
-//   - Prevents duplicate messages with different IDs but same content
-//   - Protects against client sending same message twice
-//
 // Key Principle:
 //   For ONLINE users: mark as processed, commit Kafka offset
 //   For OFFLINE users: do NOT mark as processed, Kafka will redeliver
@@ -33,7 +29,6 @@ use crate::state::WorkerState;
 use anyhow::{Context, Result};
 use construct_config::{SECONDS_PER_DAY, SECONDS_PER_HOUR};
 use redis::cmd;
-use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 /// Reason why a message was skipped
@@ -43,8 +38,6 @@ pub enum SkipReason {
     AlreadyProcessed,
     /// Message was delivered directly via tx.send()
     DeliveredDirect,
-    /// Message content hash already exists (duplicate content)
-    DuplicateContent,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -52,7 +45,6 @@ impl std::fmt::Display for SkipReason {
         match self {
             SkipReason::AlreadyProcessed => write!(f, "already_processed"),
             SkipReason::DeliveredDirect => write!(f, "delivered_direct"),
-            SkipReason::DuplicateContent => write!(f, "duplicate_content"),
         }
     }
 }
@@ -112,94 +104,6 @@ pub async fn was_delivered_direct(state: &WorkerState, message_id: &str) -> Resu
     .context("Failed to check delivered_direct after retries")?;
 
     Ok(was_delivered > 0)
-}
-
-/// Check if content hash already exists (duplicate content detection)
-///
-/// Calculates SHA-256 hash of message content and checks if it was already delivered.
-/// This prevents duplicate messages with different IDs but same content.
-///
-/// Key format: content_hash:{recipient_id}:{sha256_hash}
-/// TTL: Short (1 hour) to allow intentional resends while catching accidental duplicates
-///
-/// # Arguments
-/// * `state` - Worker state
-/// * `recipient_id` - Recipient user ID
-/// * `content` - Message content (ciphertext)
-///
-/// # Returns
-/// `true` if content hash exists, `false` otherwise
-pub async fn is_content_duplicate(
-    state: &WorkerState,
-    recipient_id: &str,
-    content: &[u8],
-) -> Result<bool> {
-    // Calculate SHA-256 hash of content
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    let hash = hasher.finalize();
-    let hash_hex = hex::encode(hash);
-
-    // Key format: content_hash:{recipient_id}:{hash}
-    // Include recipient_id to allow same content to different recipients
-    let content_hash_key = format!(
-        "{}content_hash:{}:{}",
-        state.config.redis_key_prefixes.processed_msg,
-        recipient_id,
-        &hash_hex[..16] // Use first 16 chars of hash (64 bits, collision-safe for dedup)
-    );
-
-    let exists: i64 = execute_redis_with_retry(state, "check_content_hash", |conn| {
-        let key = content_hash_key.clone();
-        Box::pin(async move { cmd("EXISTS").arg(&key).query_async(conn).await })
-    })
-    .await
-    .context("Failed to check content hash")?;
-
-    Ok(exists > 0)
-}
-
-/// Mark content hash as processed
-///
-/// # Arguments
-/// * `state` - Worker state
-/// * `recipient_id` - Recipient user ID
-/// * `content` - Message content (ciphertext)
-/// * `ttl_seconds` - TTL for the hash key (usually 1 hour for content dedup)
-pub async fn mark_content_hash_processed(
-    state: &WorkerState,
-    recipient_id: &str,
-    content: &[u8],
-    ttl_seconds: i64,
-) -> Result<()> {
-    let mut hasher = Sha256::new();
-    hasher.update(content);
-    let hash = hasher.finalize();
-    let hash_hex = hex::encode(hash);
-
-    let content_hash_key = format!(
-        "{}content_hash:{}:{}",
-        state.config.redis_key_prefixes.processed_msg,
-        recipient_id,
-        &hash_hex[..16]
-    );
-
-    let _: String = execute_redis_with_retry(state, "mark_content_hash", |conn| {
-        let key = content_hash_key.clone();
-        let ttl = ttl_seconds;
-        Box::pin(async move {
-            cmd("SETEX")
-                .arg(&key)
-                .arg(ttl)
-                .arg("1")
-                .query_async(conn)
-                .await
-        })
-    })
-    .await
-    .context("Failed to mark content hash as processed")?;
-
-    Ok(())
 }
 
 /// Mark message as processed (for deduplication)
@@ -304,60 +208,6 @@ pub async fn should_skip_message(
     Ok(None)
 }
 
-/// Extended skip check including content hash
-///
-/// Use this for full deduplication including content-based detection.
-/// More expensive than basic should_skip_message but catches duplicate content.
-///
-/// # Arguments
-/// * `state` - Worker state
-/// * `message_id` - Message ID to check
-/// * `recipient_id` - Recipient user ID
-/// * `content` - Message content (ciphertext)
-///
-/// # Returns
-/// `Some(SkipReason)` if message should be skipped, `None` if it should be processed
-pub async fn should_skip_message_with_content(
-    state: &WorkerState,
-    message_id: &str,
-    recipient_id: &str,
-    content: &[u8],
-) -> Result<Option<SkipReason>> {
-    // Layer 1 & 2: Basic deduplication
-    if let Some(reason) = should_skip_message(state, message_id).await? {
-        return Ok(Some(match reason {
-            "already_processed" => SkipReason::AlreadyProcessed,
-            "delivered_direct" => SkipReason::DeliveredDirect,
-            _ => SkipReason::AlreadyProcessed,
-        }));
-    }
-
-    // Layer 3: Content hash deduplication
-    if is_content_duplicate(state, recipient_id, content).await? {
-        info!(
-            message_id = %message_id,
-            reason = "duplicate_content",
-            "Message skipped (deduplication layer 3: content_hash)"
-        );
-
-        // Mark as processed
-        // Use TTL with safety margin (Kafka retention + 2h)
-        let ttl_seconds = (state.config.message_ttl_days * SECONDS_PER_DAY)
-            + (state.config.dedup_safety_margin_hours * SECONDS_PER_HOUR);
-        if let Err(e) = mark_message_processed(state, message_id, ttl_seconds).await {
-            warn!(
-                message_id = %message_id,
-                error = %e,
-                "Failed to mark duplicate content message as processed"
-            );
-        }
-
-        return Ok(Some(SkipReason::DuplicateContent));
-    }
-
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,95 +219,7 @@ mod tests {
             "already_processed"
         );
         assert_eq!(SkipReason::DeliveredDirect.to_string(), "delivered_direct");
-        assert_eq!(
-            SkipReason::DuplicateContent.to_string(),
-            "duplicate_content"
-        );
     }
-
-    // ── Content hash key determinism ──────────────────────────────────────────
-    //
-    // The hash key format is: processed_msg:content_hash:{recipient_id}:{sha256_hex[0..16]}
-    // We test the SHA-256 behavior directly since the key construction logic is
-    // inline in is_content_duplicate() and mark_content_hash_processed().
-
-    #[test]
-    fn test_sha256_content_hash_is_deterministic() {
-        use sha2::{Digest, Sha256};
-
-        let content = b"opaque-ciphertext-bytes-AAAA";
-
-        let hash1 = {
-            let mut h = Sha256::new();
-            h.update(content);
-            hex::encode(h.finalize())
-        };
-        let hash2 = {
-            let mut h = Sha256::new();
-            h.update(content);
-            hex::encode(h.finalize())
-        };
-
-        assert_eq!(
-            hash1, hash2,
-            "SHA-256 must be deterministic for the same input"
-        );
-        assert_eq!(hash1.len(), 64, "SHA-256 hex output must be 64 characters");
-    }
-
-    #[test]
-    fn test_sha256_different_content_produces_different_hash() {
-        use sha2::{Digest, Sha256};
-
-        let content_a = b"message-for-alice";
-        let content_b = b"message-for-alice-slightly-different";
-
-        let hash_a = hex::encode(Sha256::digest(content_a));
-        let hash_b = hex::encode(Sha256::digest(content_b));
-
-        assert_ne!(
-            hash_a, hash_b,
-            "different content must produce different content hashes"
-        );
-    }
-
-    #[test]
-    fn test_sha256_same_content_different_recipients_share_hash_prefix() {
-        // The key format uses recipient_id to namespace the key, so same ciphertext
-        // sent to alice and bob results in DIFFERENT Redis keys (not deduplicated across users).
-        use sha2::{Digest, Sha256};
-
-        let content = b"same-encrypted-payload";
-        let hash = &hex::encode(Sha256::digest(content))[..16]; // first 16 chars
-
-        let key_alice = format!("processed_msg:content_hash:alice:{hash}");
-        let key_bob = format!("processed_msg:content_hash:bob:{hash}");
-
-        assert_ne!(
-            key_alice, key_bob,
-            "same content sent to different recipients must have distinct dedup keys"
-        );
-    }
-
-    #[test]
-    fn test_sha256_truncation_to_16_chars_is_collision_safe_for_dedup() {
-        // 16 hex chars = 64 bits of entropy → collision probability ≈ 1.8e-19 per pair
-        // This is sufficient for deduplication (not a cryptographic guarantee).
-        use sha2::{Digest, Sha256};
-
-        let content = b"test dedup content";
-        let full_hash = hex::encode(Sha256::digest(content));
-        let truncated = &full_hash[..16];
-
-        assert_eq!(truncated.len(), 16);
-        // Must only contain valid hex chars
-        assert!(
-            truncated.chars().all(|c| c.is_ascii_hexdigit()),
-            "truncated hash must be valid hex"
-        );
-    }
-
-    // ── SkipReason clone and equality ─────────────────────────────────────────
 
     #[test]
     fn test_skip_reason_clone_and_eq() {
@@ -466,6 +228,5 @@ mod tests {
         assert_eq!(reason, cloned);
 
         assert_ne!(SkipReason::AlreadyProcessed, SkipReason::DeliveredDirect);
-        assert_ne!(SkipReason::DeliveredDirect, SkipReason::DuplicateContent);
     }
 }

@@ -20,7 +20,6 @@
 //   sentinel:blocks:{blocker}             → SET of blocked device_ids (TTL 300s)
 //   sentinel:rate:report:{device_id}      → counter (TTL = 86400s, daily window)
 //   sentinel:violations:24h               → counter (TTL = 86400s)
-//   sentinel:dispute:{device_id}:{id}     → dispute metadata cache
 // ============================================================================
 
 use anyhow::Result;
@@ -107,28 +106,6 @@ pub struct ProtectionStats {
     pub devices_banned_7d: i64,
     pub rate_limit_violations_24h: i64,
     pub blocks_created_24h: i64,
-    pub appeals_pending: i64,
-}
-
-pub struct DisputeEvidence {
-    pub id: String,
-    #[allow(dead_code)]
-    pub device_id: String,
-    pub restriction_type: String,
-    pub status: String,
-    pub evidence_text: String,
-    pub created_at: String,
-}
-
-pub struct AppealInfo {
-    pub id: String,
-    #[allow(dead_code)]
-    pub device_id: String,
-    pub restriction_type: String,
-    pub context: String,
-    pub status: String,
-    pub created_at: String,
-    pub reviewed_at: Option<String>,
 }
 
 // ─── Implementation ──────────────────────────────────────────────────────────
@@ -533,277 +510,6 @@ impl SentinelCore {
         Ok(())
     }
 
-    // ── Appeals ───────────────────────────────────────────────────────────────
-
-    pub async fn submit_appeal(
-        &self,
-        device_id: &str,
-        restriction_type: &str,
-        context: &str,
-    ) -> Result<String> {
-        // Check if device actually has an active restriction
-        let has_restriction = match restriction_type {
-            "banned" => {
-                let row = sqlx::query_scalar!(
-                    "SELECT is_banned FROM device_flags WHERE device_id = $1",
-                    device_id
-                )
-                .fetch_optional(&self.db)
-                .await?;
-                row.unwrap_or(false)
-            }
-            "flagged" => {
-                let row = sqlx::query_scalar!(
-                    "SELECT is_flagged FROM device_flags WHERE device_id = $1",
-                    device_id
-                )
-                .fetch_optional(&self.db)
-                .await?;
-                row.unwrap_or(false)
-            }
-            _ => true, // rate-limited appeals always allowed
-        };
-
-        if !has_restriction {
-            return Err(anyhow::anyhow!(
-                "No active {} restriction on this device",
-                restriction_type
-            ));
-        }
-
-        // Check for duplicate pending appeals
-        let existing = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM restriction_appeals
-             WHERE device_id = $1 AND restriction_type = $2 AND status = 'pending_review'",
-            device_id,
-            restriction_type
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        if existing.unwrap_or(0) > 0 {
-            return Err(anyhow::anyhow!(
-                "Appeal already pending for this restriction type"
-            ));
-        }
-
-        let appeal_id = sqlx::query_scalar!(
-            "INSERT INTO restriction_appeals (device_id, restriction_type, context)
-             VALUES ($1, $2, $3)
-             RETURNING id",
-            device_id,
-            restriction_type,
-            context
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        Ok(appeal_id.to_string())
-    }
-
-    pub async fn get_appeals(&self, device_id: &str) -> Result<Vec<AppealInfo>> {
-        let rows = sqlx::query!(
-            r#"SELECT id, device_id, restriction_type, context, status,
-                      created_at AS "created_at: chrono::DateTime<chrono::Utc>",
-                      reviewed_at AS "reviewed_at: chrono::DateTime<chrono::Utc>"
-               FROM restriction_appeals
-               WHERE device_id = $1
-               ORDER BY created_at DESC"#,
-            device_id
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| AppealInfo {
-                id: r.id.to_string(),
-                device_id: r.device_id,
-                restriction_type: r.restriction_type,
-                context: r.context.unwrap_or_default(),
-                status: r.status,
-                created_at: r.created_at.to_rfc3339(),
-                reviewed_at: r.reviewed_at.map(|t| t.to_rfc3339()),
-            })
-            .collect())
-    }
-
-    // ── Dispute (proof of innocence) ──────────────────────────────────────────
-
-    /// Submit a dispute with evidence against an auto-ban/flag.
-    /// Users can provide evidence that reports were from a botnet.
-    pub async fn submit_dispute(
-        &self,
-        device_id: &str,
-        restriction_type: &str,
-        evidence_text: &str,
-    ) -> Result<String> {
-        // Check active restriction
-        let trust = self.trust_level(device_id).await?;
-        match restriction_type {
-            "banned" => {
-                if trust != TrustLevel::Banned {
-                    return Err(anyhow::anyhow!("Device is not banned"));
-                }
-            }
-            "flagged" => {
-                if trust != TrustLevel::Flagged {
-                    return Err(anyhow::anyhow!("Device is not flagged"));
-                }
-            }
-            _ => return Err(anyhow::anyhow!("Invalid restriction type")),
-        }
-
-        // Rate-limit disputes (max 3 pending per device)
-        let pending_count: Option<i64> = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM disputes
-             WHERE device_id = $1 AND status = 'pending_review'",
-            device_id
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        if pending_count.unwrap_or(0) >= 3 {
-            return Err(anyhow::anyhow!("Too many pending disputes"));
-        }
-
-        // Collect evidence automatically
-        let report_stats = self.collect_report_evidence(device_id).await?;
-
-        let dispute_id: uuid::Uuid = sqlx::query_scalar!(
-            "INSERT INTO disputes (device_id, restriction_type, evidence_text, auto_evidence)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id",
-            device_id,
-            restriction_type,
-            evidence_text,
-            report_stats
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        // Auto-check: if evidence suggests botnet, auto-unban
-        if self.evaluate_dispute_evidence(device_id).await? {
-            match restriction_type {
-                "banned" => self.clear_ban(device_id).await?,
-                "flagged" => self.clear_flag(device_id).await?,
-                _ => {}
-            }
-            info!(device_id, "auto-unbanned based on dispute evidence");
-        }
-
-        Ok(dispute_id.to_string())
-    }
-
-    /// Collect automated evidence about report patterns.
-    async fn collect_report_evidence(&self, device_id: &str) -> Result<String> {
-        let mut conn = self.redis().await?;
-        let unique_key = format!("sentinel:reporters:{}", device_id);
-        let unique_reporters: usize = conn.scard(&unique_key).await.unwrap_or(0);
-        let total_reports: i64 = conn
-            .get(format!("sentinel:reports:{}", device_id))
-            .await
-            .unwrap_or(0);
-
-        // Check report timing patterns from DB
-        let recent_reports = sqlx::query!(
-            r#"SELECT reporter_device_id, category,
-                      created_at AS "created_at: chrono::DateTime<chrono::Utc>"
-               FROM spam_reports
-               WHERE reported_device_id = $1
-               ORDER BY created_at DESC
-               LIMIT 20"#,
-            device_id
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        let time_gaps: Vec<i64> = recent_reports
-            .windows(2)
-            .map(|w| (w[0].created_at - w[1].created_at).num_seconds())
-            .collect();
-
-        let avg_gap = if time_gaps.is_empty() {
-            0
-        } else {
-            time_gaps.iter().sum::<i64>() / time_gaps.len() as i64
-        };
-
-        // Suspicious patterns
-        let mut flags = Vec::new();
-        if unique_reporters > 0 && total_reports > 0 {
-            let ratio = total_reports as f64 / unique_reporters as f64;
-            if ratio > 3.0 {
-                flags.push("same_reporter_multiple_times");
-            }
-        }
-        if avg_gap > 0 && avg_gap < 60 {
-            flags.push("reports_too_fast");
-        }
-        if recent_reports.len() >= 5 {
-            let categories: std::collections::HashSet<_> =
-                recent_reports.iter().map(|r| &r.category).collect();
-            if categories.len() == 1 {
-                flags.push("all_same_category");
-            }
-        }
-
-        let evidence = serde_json::json!({
-            "total_reports": total_reports,
-            "unique_reporters": unique_reporters,
-            "avg_report_gap_seconds": avg_gap,
-            "suspicious_flags": flags,
-        });
-
-        Ok(evidence.to_string())
-    }
-
-    /// Evaluate if dispute evidence suggests botnet attack → auto-unban.
-    /// Returns true if device should be unbanned automatically.
-    async fn evaluate_dispute_evidence(&self, device_id: &str) -> Result<bool> {
-        let mut conn = self.redis().await?;
-        let unique_key = format!("sentinel:reporters:{}", device_id);
-        let unique_reporters: usize = conn.scard(&unique_key).await.unwrap_or(0);
-        let total_reports: i64 = conn
-            .get(format!("sentinel:reports:{}", device_id))
-            .await
-            .unwrap_or(0);
-
-        // Botnet indicators:
-        // 1. Few unique reporters but many total reports (same botnet)
-        // 2. All reports came in a very short time window
-        if total_reports >= AUTO_BAN_REPORTS && unique_reporters < MIN_UNIQUE_REPORTERS_FOR_BAN {
-            return Ok(true); // Not enough unique reporters — likely botnet
-        }
-
-        Ok(false)
-    }
-
-    pub async fn get_disputes(&self, device_id: &str) -> Result<Vec<DisputeEvidence>> {
-        let rows = sqlx::query!(
-            r#"SELECT id, device_id, restriction_type, status, evidence_text,
-                      created_at AS "created_at: chrono::DateTime<chrono::Utc>"
-               FROM disputes
-               WHERE device_id = $1
-               ORDER BY created_at DESC"#,
-            device_id
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| DisputeEvidence {
-                id: r.id.to_string(),
-                device_id: r.device_id,
-                restriction_type: r.restriction_type,
-                status: r.status,
-                evidence_text: r.evidence_text.unwrap_or_default(),
-                created_at: r.created_at.to_rfc3339(),
-            })
-            .collect())
-    }
-
     // ── Protection stats ──────────────────────────────────────────────────────
 
     pub async fn protection_stats(&self) -> Result<ProtectionStats> {
@@ -812,7 +518,7 @@ impl SentinelCore {
         // Get violations from Redis
         let violations: i64 = conn.get("sentinel:violations:24h").await.unwrap_or(0);
 
-        let (spam_24h, flagged_24h, banned_7d, blocks_24h, appeals_pending) = tokio::try_join!(
+        let (spam_24h, flagged_24h, banned_7d, blocks_24h) = tokio::try_join!(
             sqlx::query_scalar!(
                 "SELECT COUNT(*) FROM spam_reports WHERE created_at > NOW() - INTERVAL '24 hours'"
             )
@@ -829,10 +535,6 @@ impl SentinelCore {
                 "SELECT COUNT(*) FROM device_blocks WHERE created_at > NOW() - INTERVAL '24 hours'"
             )
             .fetch_one(&self.db),
-            sqlx::query_scalar!(
-                "SELECT COUNT(*) FROM restriction_appeals WHERE status = 'pending_review'"
-            )
-            .fetch_one(&self.db),
         )?;
 
         Ok(ProtectionStats {
@@ -841,7 +543,6 @@ impl SentinelCore {
             devices_banned_7d: banned_7d.unwrap_or(0),
             rate_limit_violations_24h: violations,
             blocks_created_24h: blocks_24h.unwrap_or(0),
-            appeals_pending: appeals_pending.unwrap_or(0),
         })
     }
 }

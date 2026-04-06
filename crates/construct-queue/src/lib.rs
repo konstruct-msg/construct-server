@@ -602,20 +602,6 @@ impl MessageQueue {
         .await
     }
 
-    pub async fn process_offline_messages_for_user(
-        &mut self,
-        user_id: &str,
-        server_instance_id: &str,
-    ) -> Result<usize> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .process_offline_messages_for_user(user_id, server_instance_id)
-        .await
-    }
-
     pub async fn publish_user_online(
         &mut self,
         user_id: &str,

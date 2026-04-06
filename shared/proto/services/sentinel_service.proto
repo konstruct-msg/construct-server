@@ -48,24 +48,6 @@ service SentinelService {
   // Call BEFORE encrypting and sending to avoid wasted work on denied sends.
   rpc CheckSendPermission(CheckSendPermissionRequest) returns (CheckSendPermissionResponse);
 
-  // ── Appeals (for users who were auto-restricted) ────────────────────────
-
-  // Appeal an automatic restriction (rate limit, flag, or ban).
-  // Users can explain why restriction was unjust.
-  rpc AppealRestriction(AppealRestrictionRequest) returns (AppealRestrictionResponse);
-
-  // List all appeals filed by the caller.
-  rpc GetAppeals(GetAppealsRequest) returns (GetAppealsResponse);
-
-  // ── Disputes (proof of innocence against botnet reports) ────────────────
-
-  // Submit a dispute with evidence that spam reports were from a botnet.
-  // System automatically analyzes report patterns and may auto-unban.
-  rpc SubmitDispute(SubmitDisputeRequest) returns (SubmitDisputeResponse);
-
-  // List all disputes filed by the caller with auto-collected evidence.
-  rpc GetDisputes(GetDisputesRequest) returns (GetDisputesResponse);
-
   // ── Admin endpoints ─────────────────────────────────────────────────────
 
   // Aggregate protection statistics — admin/internal use only.
@@ -182,69 +164,6 @@ message CheckSendPermissionResponse {
   int32 retry_after_seconds = 3; // > 0 if temporarily rate-limited
 }
 
-// ─── AppealRestriction ───────────────────────────────────────────────────────
-
-message AppealRestrictionRequest {
-  RestrictionType restriction_type = 1;
-  string context = 2; // user's explanation; plain text, no message content
-}
-
-message AppealRestrictionResponse {
-  bool submitted = 1;
-  string appeal_id = 2;
-  // status: "pending_review" | "approved" | "rejected"
-  string status = 3;
-}
-
-message GetAppealsRequest {
-  // Caller identity comes from auth token.
-}
-
-message GetAppealsResponse {
-  repeated AppealInfo appeals = 1;
-}
-
-message AppealInfo {
-  string id = 1;
-  RestrictionType restriction_type = 2;
-  string context = 3;
-  string status = 4; // "pending_review" | "approved" | "rejected"
-  google.protobuf.Timestamp created_at = 5;
-  optional google.protobuf.Timestamp reviewed_at = 6;
-}
-
-// ─── Disputes (proof of innocence) ───────────────────────────────────────────
-
-message SubmitDisputeRequest {
-  RestrictionType restriction_type = 1;
-  string evidence_text = 2; // user's explanation of why reports were unjust
-}
-
-message SubmitDisputeResponse {
-  bool submitted = 1;
-  string dispute_id = 2;
-  string status = 3; // "pending_review" | "approved" | "rejected"
-  // If auto-analyzed and botnet detected, device may be automatically unbanned.
-  bool auto_resolved = 4;
-}
-
-message GetDisputesRequest {
-  // Caller identity comes from auth token.
-}
-
-message GetDisputesResponse {
-  repeated DisputeInfo disputes = 1;
-}
-
-message DisputeInfo {
-  string id = 1;
-  RestrictionType restriction_type = 2;
-  string evidence_text = 3; // user's evidence
-  string auto_evidence = 4; // system-collected evidence (JSON)
-  string status = 5;
-  google.protobuf.Timestamp created_at = 6;
-}
-
 // ─── Admin endpoints ─────────────────────────────────────────────────────────
 
 message GetProtectionStatsRequest {
@@ -258,7 +177,6 @@ message GetProtectionStatsResponse {
   int64 devices_banned_7d = 3;
   int64 rate_limit_violations_24h = 4;
   int64 blocks_created_24h = 5;
-  int64 appeals_pending = 6;
 }
 
 message AdminBanDeviceRequest {
