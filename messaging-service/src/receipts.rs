@@ -161,5 +161,7 @@ pub(crate) fn build_receipt_response(
         response: Some(proto::message_stream_response::Response::Receipt(receipt)),
         response_id: None,
         stream_cursor: None,
+        rate_limit_challenge: None,
+        attempt_id: None,
     })
 }

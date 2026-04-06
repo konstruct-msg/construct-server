@@ -209,7 +209,9 @@ impl MessagingService for MessagingGrpcService {
                         };
                         if tx.send(Ok(proto::MessageStreamResponse {
                             response_id: None,
-                        stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: None,
+                            attempt_id: None,
                             response: Some(
                                 proto::message_stream_response::Response::HeartbeatAck(ack),
                             ),
@@ -249,6 +251,7 @@ impl MessagingService for MessagingGrpcService {
         request: Request<proto::SendMessageRequest>,
     ) -> Result<Response<proto::SendMessageResponse>, Status> {
         let req = request.into_inner();
+        let attempt_id = req.attempt_id.clone();
         let envelope = req
             .message
             .ok_or_else(|| Status::invalid_argument("message is required"))?;
@@ -310,6 +313,7 @@ impl MessagingService for MessagingGrpcService {
                         success: true,
                         error: None,
                         rate_limit_challenge: None,
+                        attempt_id: attempt_id.clone(),
                     }));
                 }
                 Ok(false) => {} // first time — proceed to rate check
@@ -339,8 +343,10 @@ impl MessagingService for MessagingGrpcService {
                     error_code: proto::ErrorCode::Blocked.into(),
                     error_message: "Recipient has blocked you".to_string(),
                     retryable: false,
+                    retry_after_ms: None,
                 }),
                 rate_limit_challenge: None,
+                attempt_id: attempt_id.clone(),
             }));
         }
 
@@ -389,8 +395,10 @@ impl MessagingService for MessagingGrpcService {
                             error_code: proto::ErrorCode::RateLimit.into(),
                             error_message: reason,
                             retryable: true,
+                            retry_after_ms: Some((retry_after * 1000).into()),
                         }),
                         rate_limit_challenge: None,
+                        attempt_id: attempt_id.clone(),
                     }));
                 } else {
                     tracing::info!(
@@ -408,8 +416,10 @@ impl MessagingService for MessagingGrpcService {
                             error_code: proto::ErrorCode::Blocked.into(),
                             error_message: reason,
                             retryable: false,
+                            retry_after_ms: None,
                         }),
                         rate_limit_challenge: None,
+                        attempt_id: attempt_id.clone(),
                     }));
                 }
             }
@@ -460,12 +470,14 @@ impl MessagingService for MessagingGrpcService {
                             pow_level
                         ),
                         retryable: true,
+                        retry_after_ms: None,
                     }),
                     rate_limit_challenge: Some(proto::RateLimitChallenge {
                         challenge,
                         difficulty: pow_level,
                         expires_at,
                     }),
+                    attempt_id: attempt_id.clone(),
                 }));
             }
 
@@ -501,12 +513,14 @@ impl MessagingService for MessagingGrpcService {
                                 pow_level
                             ),
                             retryable: true,
+                            retry_after_ms: None,
                         }),
                         rate_limit_challenge: Some(proto::RateLimitChallenge {
                             challenge,
                             difficulty: pow_level,
                             expires_at,
                         }),
+                        attempt_id: attempt_id.clone(),
                     }));
                 }
             }
@@ -550,6 +564,7 @@ impl MessagingService for MessagingGrpcService {
             success: true,
             error: None,
             rate_limit_challenge: None,
+            attempt_id,
         }))
     }
 

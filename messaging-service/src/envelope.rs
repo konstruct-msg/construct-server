@@ -144,6 +144,7 @@ pub(crate) async fn dispatch_sealed_sender(
             success: true,
             error: None,
             rate_limit_challenge: None,
+            attempt_id: None,
         });
     }
 
@@ -178,5 +179,6 @@ pub(crate) async fn dispatch_sealed_sender(
         success: true,
         error: None,
         rate_limit_challenge: None,
+        attempt_id: None,
     })
 }
