@@ -103,6 +103,12 @@ impl MessagingService for MessagingGrpcService {
             if let Some(uid) = user_id {
                 spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                 wakeup_subscribed = true;
+                if let Err(e) = stream_queue
+                    .track_user_online(&uid.to_string(), &context.server_instance_id)
+                    .await
+                {
+                    tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
+                }
                 if let Err(e) = poll_messages(
                     &mut stream_queue,
                     &context.config.messaging,
@@ -122,6 +128,12 @@ impl MessagingService for MessagingGrpcService {
                 if !wakeup_subscribed && let Some(uid) = user_id {
                     spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                     wakeup_subscribed = true;
+                    if let Err(e) = stream_queue
+                        .track_user_online(&uid.to_string(), &context.server_instance_id)
+                        .await
+                    {
+                        tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
+                    }
                     if let Err(e) = poll_messages(
                         &mut stream_queue,
                         &context.config.messaging,
@@ -237,6 +249,12 @@ impl MessagingService for MessagingGrpcService {
                 lifetime_secs,
                 "MessageStream closed"
             );
+
+            if let Some(uid) = user_id
+                && let Err(e) = stream_queue.untrack_user_online(&uid.to_string()).await
+            {
+                tracing::warn!(user_id = %uid, "untrack_user_online failed: {}", e);
+            }
         });
 
         let output_stream = ReceiverStream::new(rx);
@@ -346,10 +364,30 @@ impl MessagingService for MessagingGrpcService {
         }
 
         // Sentinel check: rate limits and spam/ban enforcement.
-        // Fails open — a sentinel outage does not block messaging.
-        if let Some(ref sentinel) = self.context.sentinel_client {
+        // Fails open — a sentinel outage or missing device_id does not block messaging.
+        // Uses device_id (not user_id): sentinel keys are SHA256(pubkey)[0..16].
+        let sender_device_id = envelope
+            .sender_device
+            .as_ref()
+            .map(|d| d.device_id.as_str())
+            .unwrap_or("");
+        let recipient_device_id = envelope
+            .recipient_device
+            .as_ref()
+            .map(|d| d.device_id.as_str())
+            .unwrap_or("");
+
+        if let Some(ref sentinel) = self.context.sentinel_client
+            && !sender_device_id.is_empty()
+        {
+            let target = if !recipient_device_id.is_empty() {
+                recipient_device_id
+            } else {
+                // Recipient device unknown: skip block check, only enforce sender limits.
+                sender_device_id
+            };
             let (allowed, reason, retry_after) = sentinel
-                .check_send_permission(&sender_id.to_string(), &recipient.user_id)
+                .check_send_permission(sender_device_id, target)
                 .await;
 
             if !allowed {

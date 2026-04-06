@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
         key_management,
         server_signer,
+        server_instance_id: uuid::Uuid::new_v4().to_string(),
     });
 
     // handlers module is local (messaging-service/src/handlers.rs)
