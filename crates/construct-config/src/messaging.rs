@@ -137,17 +137,17 @@ impl MessagingConfig {
             pow_level_low: std::env::var("MSG_POW_LEVEL_LOW")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(8),
+                .unwrap_or(16),
 
             pow_level_mid: std::env::var("MSG_POW_LEVEL_MID")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(10),
+                .unwrap_or(22),
 
             pow_level_high: std::env::var("MSG_POW_LEVEL_HIGH")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(12),
+                .unwrap_or(24),
 
             pow_ratio_mid: std::env::var("MSG_POW_RATIO_MID")
                 .ok()

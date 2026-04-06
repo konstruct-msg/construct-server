@@ -46,6 +46,9 @@ pub struct MessagingServiceContext {
     pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
     pub server_signer: Option<Arc<ServerSigner>>,
+    /// Stable ID for this process instance — stored in Redis at stream open so
+    /// delivery-worker can resolve which messaging-service instance a user is on.
+    pub server_instance_id: String,
 }
 
 impl MessagingServiceContext {
@@ -62,7 +65,7 @@ impl MessagingServiceContext {
             .with_apns_client(self.apns_client.clone())
             .with_apns_sandbox_client(self.apns_sandbox_client.clone())
             .with_token_encryption(self.token_encryption.clone())
-            .with_server_instance_id(uuid::Uuid::new_v4().to_string());
+            .with_server_instance_id(self.server_instance_id.clone());
 
         let builder = if let Some(signer) = &self.server_signer {
             builder.with_server_signer(signer.clone())

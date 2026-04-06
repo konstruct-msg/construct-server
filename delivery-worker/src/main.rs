@@ -122,15 +122,14 @@ async fn main() -> Result<()> {
     let client =
         redis::Client::open(config.redis_url.as_str()).context("Failed to create Redis client")?;
 
-    let redis_conn = client
-        .get_multiplexed_async_connection()
+    let redis_conn = redis::aio::ConnectionManager::new(client.clone())
         .await
-        .context("Failed to create Redis data connection")?;
+        .context("Failed to create Redis ConnectionManager")?;
 
     info!("Connected to Redis");
 
     // Create worker state using the module
-    let state = Arc::new(WorkerState::new(config.clone(), client.clone(), redis_conn));
+    let state = Arc::new(WorkerState::new(config.clone(), redis_conn));
 
     // Choose delivery mode based on KAFKA_ENABLED
     if config.kafka.enabled {
