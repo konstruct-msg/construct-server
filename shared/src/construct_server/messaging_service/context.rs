@@ -29,10 +29,12 @@ pub struct MessagingServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub kafka_producer: Arc<MessageProducer>,
-    /// APNs client for sending push notifications when messages arrive
+    /// APNs client (kept for to_app_context adapter compatibility)
     pub apns_client: Arc<ApnsClient>,
-    /// Device token encryption for decrypting tokens before sending push
+    /// Device token encryption (kept for to_app_context adapter compatibility)
     pub token_encryption: Arc<DeviceTokenEncryption>,
+    /// gRPC client for notification-service — used for silent push
+    pub notification_client: Option<crate::clients::notification::NotificationClient>,
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)

@@ -163,9 +163,13 @@ pub(crate) async fn dispatch_sealed_sender(
     );
 
     let app_context = Arc::new(context.to_app_context());
-    core::dispatch_envelope(&app_context, kafka_envelope)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    core::dispatch_envelope(
+        &app_context,
+        kafka_envelope,
+        context.notification_client.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(proto::SendMessageResponse {
         message_id,

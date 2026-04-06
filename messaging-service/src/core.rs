@@ -8,11 +8,12 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use construct_apns::ApnsSendError;
 use construct_broker::KafkaMessageEnvelope;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
+use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::shared::proto::services::v1::SendBlindNotificationRequest;
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
 
@@ -23,6 +24,7 @@ use construct_utils::{extract_client_ip, log_safe_id};
 pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
     envelope: KafkaMessageEnvelope,
+    notification_client: Option<NotificationClient>,
 ) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
     let salt = &app_context.config.logging.hash_salt;
@@ -170,13 +172,12 @@ pub async fn dispatch_envelope(
         });
     }
 
-    // Send silent push notification asynchronously — failures do not affect delivery
-    if app_context.config.apns.enabled {
-        let ctx = app_context.clone();
+    // Send silent push notification via notification-service gRPC (non-critical background task)
+    if let Some(notif_client) = notification_client {
         let recipient = recipient_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = send_push_notification(&ctx, &recipient).await {
-                tracing::warn!(error = %e, "Failed to send push notification (non-critical)");
+            if let Err(e) = send_blind_notification(&notif_client, &recipient).await {
+                tracing::warn!(error = %e, "Failed to send blind notification via notification-service (non-critical)");
             }
         });
     }
@@ -184,112 +185,27 @@ pub async fn dispatch_envelope(
     Ok(())
 }
 
-/// Send silent push notification to all active devices of a recipient.
+/// Send a privacy-preserving "blind" notification to a recipient via notification-service gRPC.
 ///
 /// Non-blocking helper — always called via `tokio::spawn`. Failures are logged
 /// but never propagate to the caller.
-async fn send_push_notification(
-    app_context: &Arc<AppContext>,
+async fn send_blind_notification(
+    notification_client: &NotificationClient,
     recipient_id: &str,
 ) -> anyhow::Result<()> {
-    #[derive(sqlx::FromRow)]
-    struct DeviceTokenRow {
-        device_token_encrypted: Vec<u8>,
-        push_environment: String,
+    let mut client = notification_client.get();
+    let resp = client
+        .send_blind_notification(SendBlindNotificationRequest {
+            user_id: recipient_id.to_string(),
+            badge_count: None,
+            activity_type: Some("new_message".to_string()),
+        })
+        .await?;
+    if resp.into_inner().success {
+        tracing::debug!(recipient_id = %recipient_id, "Blind notification sent via notification-service");
+    } else {
+        tracing::warn!(recipient_id = %recipient_id, "notification-service returned success=false for blind notification");
     }
-
-    let rows = sqlx::query_as::<_, DeviceTokenRow>(
-        "SELECT device_token_encrypted, push_environment FROM device_tokens \
-         WHERE user_id = $1::uuid AND enabled = true AND push_provider = 'apns'",
-    )
-    .bind(recipient_id)
-    .fetch_all(&*app_context.db_pool)
-    .await?;
-
-    if rows.is_empty() {
-        tracing::debug!(
-            recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-            "No active device tokens — push skipped"
-        );
-        return Ok(());
-    }
-
-    tracing::info!(
-        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-        token_count = rows.len(),
-        "Sending silent push to recipient devices"
-    );
-
-    let mut success = 0u32;
-    let mut failed = 0u32;
-    for row in &rows {
-        // Route to the correct APNs endpoint based on the token's registered environment.
-        // Sending a sandbox token to the production endpoint (or vice versa) → BadDeviceToken.
-        let apns_client = if row.push_environment == "production" {
-            &app_context.apns_client
-        } else {
-            &app_context.apns_sandbox_client
-        };
-
-        match app_context
-            .token_encryption
-            .decrypt(&row.device_token_encrypted)
-        {
-            Ok(token) => match apns_client.send_silent_push(&token, None).await {
-                Ok(_) => {
-                    success += 1;
-                    tracing::info!(
-                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-                        push_environment = %row.push_environment,
-                        "Silent push sent successfully"
-                    );
-                }
-                Err(ApnsSendError::InvalidToken) => {
-                    failed += 1;
-                    tracing::warn!(
-                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-                        push_environment = %row.push_environment,
-                        "Silent push: token invalid/unregistered — deleting from DB"
-                    );
-                    if let Err(db_err) =
-                        sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                            .bind(&row.device_token_encrypted)
-                            .execute(&*app_context.db_pool)
-                            .await
-                    {
-                        tracing::error!(
-                            error = %db_err,
-                            "Failed to delete invalid device token from DB"
-                        );
-                    }
-                }
-                Err(e) => {
-                    failed += 1;
-                    tracing::warn!(
-                        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-                        push_environment = %row.push_environment,
-                        error = %e,
-                        "Silent push failed for device"
-                    );
-                }
-            },
-            Err(e) => {
-                failed += 1;
-                tracing::error!(
-                    recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-                    error = %e,
-                    "Failed to decrypt device token"
-                );
-            }
-        }
-    }
-
-    tracing::info!(
-        recipient_hash = %log_safe_id(recipient_id, &app_context.config.logging.hash_salt),
-        success,
-        failed,
-        "Push notification attempt complete"
-    );
     Ok(())
 }
 

@@ -15,7 +15,7 @@ members = [
     "mls-service",
     "sentinel-service",
     "signaling-service",
-    # New modular crates (Phase 4)
+    # New modular crates
     "crates/construct-types",
     "crates/construct-error",
     "crates/construct-crypto",
@@ -28,9 +28,9 @@ members = [
     "crates/construct-auth-service",
     "crates/construct-notification-service",
     "crates/construct-apns",
-    # Phase 5 - Crypto-Agility
-    "crates/crypto-agility", "crates/construct-metrics",
-    # Phase 6 - Infrastructure crates
+    "crates/crypto-agility",
+    "crates/construct-metrics",
+    # Infrastructure crates
     "crates/construct-utils",
     "crates/construct-audit",
     "crates/construct-rate-limit",
@@ -46,7 +46,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.11.12"
+version = "0.11.13"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/maximeliseyev/construct-server"

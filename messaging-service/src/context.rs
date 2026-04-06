@@ -19,6 +19,7 @@ use construct_db::DbPool;
 use construct_federation::ServerSigner;
 use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
+use construct_server_shared::clients::notification::NotificationClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,12 +31,14 @@ pub struct MessagingServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub kafka_producer: Arc<MessageProducer>,
-    /// APNs production client
+    /// APNs production client (kept for to_app_context adapter compatibility)
     pub apns_client: Arc<ApnsClient>,
-    /// APNs sandbox client (for development/TestFlight builds)
+    /// APNs sandbox client (kept for to_app_context adapter compatibility)
     pub apns_sandbox_client: Arc<ApnsClient>,
-    /// Device token encryption for decrypting tokens before sending push
+    /// Device token encryption (kept for to_app_context adapter compatibility)
     pub token_encryption: Arc<DeviceTokenEncryption>,
+    /// gRPC client for notification-service — used for silent push instead of calling APNs directly
+    pub notification_client: Option<NotificationClient>,
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)

@@ -18,6 +18,7 @@ use axum::{
 use construct_config::Config;
 use construct_server_shared::apns::DeviceTokenEncryption;
 use construct_server_shared::auth::AuthManager;
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::kafka::MessageProducer;
 use construct_server_shared::queue::MessageQueue;
@@ -95,49 +96,38 @@ async fn main() -> Result<()> {
     let auth_manager =
         Arc::new(AuthManager::new(&config).context("Failed to initialize auth manager")?);
 
-    // Initialize APNs production client
-    info!("Initializing APNs production client...");
+    // Initialize APNs clients — kept for to_app_context() adapter; push is delegated to notification-service
     let apns_client = Arc::new(
         construct_server_shared::apns::ApnsClient::new(config.apns.clone())
-            .context("Failed to initialize APNs client")?,
+            .context("Failed to initialize APNs client (adapter compat)")?,
     );
-    if let Err(e) = apns_client.initialize().await {
-        if config.apns.enabled {
-            tracing::error!(
-                error = %e,
-                key_path = %config.apns.key_path,
-                "APNs production client init failed — production push DISABLED"
-            );
-        }
-    } else if config.apns.enabled {
-        info!("APNs production client initialized and ENABLED");
-    } else {
-        info!("APNs production client initialized but DISABLED (APNS_ENABLED=false)");
-    }
-
-    // Initialize APNs sandbox client (for development/TestFlight builds)
-    info!("Initializing APNs sandbox client...");
     let mut sandbox_config = config.apns.clone();
     sandbox_config.environment = construct_config::ApnsEnvironment::Development;
     let apns_sandbox_client = Arc::new(
         construct_server_shared::apns::ApnsClient::new(sandbox_config)
-            .context("Failed to initialize APNs sandbox client")?,
+            .context("Failed to initialize APNs sandbox client (adapter compat)")?,
     );
-    if let Err(e) = apns_sandbox_client.initialize().await {
-        if config.apns.enabled {
-            tracing::warn!(
-                error = %e,
-                "APNs sandbox client init failed — sandbox push DISABLED"
-            );
-        }
-    } else if config.apns.enabled {
-        info!("APNs sandbox client initialized and ENABLED");
-    }
-
     let token_encryption = Arc::new(
         DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
             .context("Failed to initialize device token encryption")?,
     );
+
+    // Initialize notification-service gRPC client for outgoing silent push
+    let notification_client = match env::var("NOTIFICATION_SERVICE_URL")
+        .or_else(|_| Ok::<_, std::env::VarError>("http://notification:50054".to_string()))
+    {
+        Ok(url) => match NotificationClient::new(&url) {
+            Ok(client) => {
+                info!(url = %url, "Notification service gRPC client initialized");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create notification service gRPC client — push notifications disabled");
+                None
+            }
+        },
+        Err(_) => None,
+    };
 
     // Initialize Key Management System (optional, requires VAULT_ADDR)
     let key_management =
@@ -190,6 +180,7 @@ async fn main() -> Result<()> {
         apns_client,
         apns_sandbox_client,
         token_encryption,
+        notification_client,
         config: config.clone(),
         key_management,
         server_signer,

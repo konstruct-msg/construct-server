@@ -176,6 +176,7 @@ pub(crate) async fn handle_stream_request(
                 match core::dispatch_envelope(
                     &app_context,
                     kafka_envelope,
+                    context.notification_client.clone(),
                 )
                 .await
                 {
