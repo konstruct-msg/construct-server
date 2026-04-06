@@ -188,6 +188,7 @@ services:
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
