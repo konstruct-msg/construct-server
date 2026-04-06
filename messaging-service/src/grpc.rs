@@ -345,6 +345,57 @@ impl MessagingService for MessagingGrpcService {
             }));
         }
 
+        // Sentinel check: rate limits and spam/ban enforcement.
+        // Fails open — a sentinel outage does not block messaging.
+        if let Some(ref sentinel) = self.context.sentinel_client {
+            let (allowed, reason, retry_after) = sentinel
+                .check_send_permission(&sender_id.to_string(), &recipient.user_id)
+                .await;
+
+            if !allowed {
+                if retry_after > 0 {
+                    tracing::info!(
+                        sender = %sender_id,
+                        retry_after_secs = retry_after,
+                        reason = %reason,
+                        "Sentinel: send denied (rate limited)"
+                    );
+                    return Ok(Response::new(proto::SendMessageResponse {
+                        message_id: message_id.clone(),
+                        message_number: 0,
+                        server_timestamp: chrono::Utc::now().timestamp_millis(),
+                        success: false,
+                        error: Some(proto::MessageError {
+                            message_id,
+                            error_code: proto::ErrorCode::RateLimit.into(),
+                            error_message: reason,
+                            retryable: true,
+                        }),
+                        rate_limit_challenge: None,
+                    }));
+                } else {
+                    tracing::info!(
+                        sender = %sender_id,
+                        reason = %reason,
+                        "Sentinel: send denied (banned or blocked)"
+                    );
+                    return Ok(Response::new(proto::SendMessageResponse {
+                        message_id: message_id.clone(),
+                        message_number: 0,
+                        server_timestamp: chrono::Utc::now().timestamp_millis(),
+                        success: false,
+                        error: Some(proto::MessageError {
+                            message_id,
+                            error_code: proto::ErrorCode::Blocked.into(),
+                            error_message: reason,
+                            retryable: false,
+                        }),
+                        rate_limit_challenge: None,
+                    }));
+                }
+            }
+        }
+
         // ── TrustLevel + rate limiting ─────────────────────────────────────────
         // Fail-open: if Redis is unavailable we skip rate checks and default to
         // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.

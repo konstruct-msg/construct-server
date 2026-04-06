@@ -20,6 +20,7 @@ use construct_federation::ServerSigner;
 use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
 use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::clients::sentinel::SentinelClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -39,6 +40,8 @@ pub struct MessagingServiceContext {
     pub token_encryption: Arc<DeviceTokenEncryption>,
     /// gRPC client for notification-service — used for silent push instead of calling APNs directly
     pub notification_client: Option<NotificationClient>,
+    /// gRPC client for sentinel-service — rate limiting and spam protection
+    pub sentinel_client: Option<SentinelClient>,
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
