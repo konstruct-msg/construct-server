@@ -22,6 +22,8 @@ pub(crate) async fn handle_stream_request(
 
     match req.request {
         Some(StreamReq::Send(envelope)) => {
+            let attempt_id = req.attempt_id.clone();
+
             // Extract user_id from envelope if not set yet (regular messages only)
             if user_id.is_none()
                 && envelope.sealed_sender.is_none()
@@ -37,14 +39,17 @@ pub(crate) async fn handle_stream_request(
                     Err(e) => {
                         let error = proto::MessageError {
                             message_id: String::new(),
-                            error_code: proto::ErrorCode::Unspecified.into(),
+                            error_code: proto::ErrorCode::Internal.into(),
                             error_message: e.to_string(),
-                            retryable: false,
+                            retryable: true,
+                            retry_after_ms: None,
                         };
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: None,
+                            attempt_id,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -60,7 +65,9 @@ pub(crate) async fn handle_stream_request(
                 let response = proto::MessageStreamResponse {
                     response: Some(proto::message_stream_response::Response::Ack(ack)),
                     response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                    stream_cursor: None,
+                    rate_limit_challenge: None,
+                    attempt_id,
                 };
                 tx.send(Ok(response)).await?;
                 return Ok(());
@@ -107,22 +114,23 @@ pub(crate) async fn handle_stream_request(
                             pow_level,
                             "Rate limit exceeded — issuing PoW challenge (stream)"
                         );
-                        // Encode challenge as JSON in error_message until the proto adds a
-                        // dedicated RateLimitChallenge variant to MessageStreamResponse.
-                        let challenge_json = format!(
-                            r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
-                            challenge, pow_level, expires_at
-                        );
                         let error = proto::MessageError {
                             message_id: message_id.clone(),
                             error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: challenge_json,
+                            error_message: format!("Rate limit exceeded — solve PoW level {}", pow_level),
                             retryable: true,
+                            retry_after_ms: None,
                         };
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: Some(proto::RateLimitChallenge {
+                                challenge,
+                                difficulty: pow_level,
+                                expires_at,
+                            }),
+                            attempt_id,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -139,20 +147,23 @@ pub(crate) async fn handle_stream_request(
                             pow_level,
                             "Fanout limit exceeded — issuing PoW challenge (stream)"
                         );
-                        let challenge_json = format!(
-                            r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
-                            challenge, pow_level, expires_at
-                        );
                         let error = proto::MessageError {
                             message_id: message_id.clone(),
                             error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: challenge_json,
+                            error_message: format!("Fanout limit exceeded — solve PoW level {}", pow_level),
                             retryable: true,
+                            retry_after_ms: None,
                         };
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: Some(proto::RateLimitChallenge {
+                                challenge,
+                                difficulty: pow_level,
+                                expires_at,
+                            }),
+                            attempt_id,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -191,7 +202,9 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Ack(ack)),
                             response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: None,
+                            attempt_id,
                         };
 
                         tx.send(Ok(response)).await?;
@@ -209,15 +222,18 @@ pub(crate) async fn handle_stream_request(
 
                         let error = proto::MessageError {
                             message_id: message_id_str,
-                            error_code: proto::ErrorCode::Unspecified.into(),
+                            error_code: proto::ErrorCode::Internal.into(),
                             error_message: e.to_string(),
-                            retryable: false,
+                            retryable: true,
+                            retry_after_ms: None,
                         };
 
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
-                                stream_cursor: None,
+                            stream_cursor: None,
+                            rate_limit_challenge: None,
+                            attempt_id,
                         };
 
                         tx.send(Ok(response)).await?;
@@ -235,7 +251,9 @@ pub(crate) async fn handle_stream_request(
             let response = proto::MessageStreamResponse {
                 response: Some(proto::message_stream_response::Response::HeartbeatAck(ack)),
                 response_id: Some(req.request_id),
-            stream_cursor: None,
+                stream_cursor: None,
+                rate_limit_challenge: None,
+                attempt_id: req.attempt_id,
             };
 
             tx.send(Ok(response)).await?;
@@ -409,6 +427,8 @@ pub(crate) async fn poll_messages(
                 )),
                 response_id: None,
                 stream_cursor: None,
+                rate_limit_challenge: None,
+                attempt_id: None,
             }
         };
 

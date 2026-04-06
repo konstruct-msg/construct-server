@@ -78,6 +78,11 @@ message MessageStreamRequest {
   // Request ID (for correlation)
   string request_id = 10;
 
+  // Client-assigned attempt ID for tracing this specific send attempt.
+  // Use a new UUID per attempt (including retries after errors).
+  // Echoed in the MessageStreamResponse for "attempt → decision" correlation.
+  optional string attempt_id = 21;
+
   // Reserved for future request types
   reserved 7 to 9, 11 to 20;
 }
@@ -115,6 +120,14 @@ message MessageStreamResponse {
   // Clients SHOULD persist the latest value and pass it as SubscribeRequest.since_cursor
   // on the next reconnect to avoid re-reading already-delivered messages.
   optional string stream_cursor = 11;
+
+  // Rate-limit PoW challenge for the stream send path.
+  // Populated when the oneof error has error_code = RATE_LIMIT.
+  // Replaces the legacy JSON-encoded challenge in error_message.
+  optional RateLimitChallenge rate_limit_challenge = 21;
+
+  // Echoed from MessageStreamRequest.attempt_id for "attempt → decision" tracing.
+  optional string attempt_id = 22;
 
   // Reserved for future response types
   reserved 8 to 9, 12 to 20;
@@ -185,6 +198,11 @@ message MessageError {
 
   // Retry allowed?
   bool retryable = 4;
+
+  // How long the client should wait before retrying (milliseconds).
+  // 0 or absent = retry immediately (e.g. after solving a PoW challenge).
+  // Only meaningful when retryable = true.
+  optional int64 retry_after_ms = 5;
 }
 
 // ErrorCode - Message error codes
@@ -210,6 +228,9 @@ enum ErrorCode {
   // Recipient offline (no push token)
   ERROR_CODE_OFFLINE = 6;
 
+  // Internal server error — not caused by the client, safe to retry.
+  ERROR_CODE_INTERNAL = 21;
+
   // Reserved for future errors
   reserved 7 to 20;
 }
@@ -221,6 +242,11 @@ message SendMessageRequest {
 
   // Idempotency key (prevent duplicate sends)
   optional string idempotency_key = 2;
+
+  // Client-assigned attempt ID echoed in the response.
+  // Use a new UUID per send attempt (including retries) to correlate
+  // "attempt → server decision → retry policy" in client and server logs.
+  optional string attempt_id = 11;
 
   // Reserved for future features
   reserved 3 to 10;
@@ -260,6 +286,9 @@ message SendMessageResponse {
   // PoW challenge issued when rate limit is soft-exceeded.
   // Client must solve this challenge before retrying.
   optional RateLimitChallenge rate_limit_challenge = 6;
+
+  // Echoed from SendMessageRequest.attempt_id for client-side tracing.
+  optional string attempt_id = 7;
 }
 
 

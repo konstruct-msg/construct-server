@@ -446,6 +446,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             success: true,
             error: None,
             rate_limit_challenge: None,
+            attempt_id: None,
         }))
     }
 
