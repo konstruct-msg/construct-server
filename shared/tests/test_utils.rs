@@ -435,6 +435,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         construct_server_shared::messaging_service::core::dispatch_envelope(
             &app_context,
             kafka_envelope,
+            None, // push handled by notification-service in production; tests don't need real push
         )
         .await
         .map_err(|e| GrpcStatus::internal(e.to_string()))?;
@@ -512,6 +513,7 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
         kafka_producer,
         apns_client,
         token_encryption,
+        notification_client: None,
         config: config.clone(),
         key_management: None,
         server_signer: None,

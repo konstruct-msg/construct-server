@@ -434,9 +434,13 @@ impl MessagingService for MessagingGrpcService {
             Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
         let app_context = Arc::new(self.context.to_app_context());
-        core::dispatch_envelope(&app_context, kafka_envelope)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        core::dispatch_envelope(
+            &app_context,
+            kafka_envelope,
+            self.context.notification_client.clone(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         let dispatch_inner_ms = t_dispatch.elapsed().as_millis();
         tracing::info!(
