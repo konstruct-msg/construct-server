@@ -202,3 +202,6 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 2. **`to_app_context()` adapter** — requires non-optional `apns_client` in `MessagingServiceContext`, preventing full APNs client cleanup from messaging-service. Full fix: make `AppContext::apns_client` optional in `construct-context`.
 3. **Duplicate messaging_service code** — `messaging-service/src/` AND `shared/src/construct_server/messaging_service/` must be kept in sync. Any change to `dispatch_envelope` signature needs updating in both places AND in `shared/tests/test_utils.rs`.
 4. **delivery_queue:{server_instance_id} keys** — these are still created by server heartbeat but never read by delivery-worker (routing is user-based now). Consider removing the heartbeat registration or repurposing.
+5. **DLQ** — now sends to `{topic}-dlq` Kafka topic via `MessageProducer::send_raw_to_topic`. Topic must exist in Redpanda (`messages-dlq`). On Kafka failure falls back to structured `DLQ_MESSAGE` error log.
+6. **content-hash dedup (Layer 3)** — `should_skip_message_with_content` hashes ciphertext which always has a random IV, so Layer 3 never fires for E2EE messages. Function exists but is not called from processor.rs.
+7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action (Kafka auto-redelivers). Monitoring only.
