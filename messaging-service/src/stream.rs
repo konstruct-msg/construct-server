@@ -377,7 +377,7 @@ pub(crate) async fn poll_messages(
     drop(queue);
 
     let msg_count = messages.len();
-    if lock_wait_ms > 20 || xread_ms > 20 {
+    if lock_wait_ms > 20 || xread_ms > context.config.messaging.stream_xread_slow_ms {
         tracing::info!(
             lock_wait_ms,
             xread_ms,
