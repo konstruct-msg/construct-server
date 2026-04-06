@@ -30,10 +30,17 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
     key_service_server::{KeyService, KeyServiceServer},
+    SendBlindNotificationRequest,
 };
+
+/// Notify the device owner to replenish one-time prekeys when supply is low.
+/// - `otp_was_consumed = false` means keys were already exhausted before this request.
+/// - `otp_was_consumed = true`  means one key was just consumed; we check the remaining count.
+const LOW_PREKEY_THRESHOLD: u32 = 5;
 
 // ============================================================================
 // Service Context
@@ -41,6 +48,7 @@ use construct_server_shared::shared::proto::services::v1::{
 
 struct KeyServiceContext {
     db: sqlx::PgPool,
+    notification_client: Option<NotificationClient>,
 }
 
 impl KeyServiceContext {
@@ -51,7 +59,23 @@ impl KeyServiceContext {
             .await
             .context("Failed to connect to database")?;
 
-        Ok(Self { db })
+        let notification_client = env::var("NOTIFICATION_SERVICE_URL")
+            .ok()
+            .and_then(|url| match NotificationClient::new(&url) {
+                Ok(c) => {
+                    info!("Notification service client configured (low-prekey alerts enabled)");
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to create notification client — low-prekey alerts disabled");
+                    None
+                }
+            });
+
+        Ok(Self {
+            db,
+            notification_client,
+        })
     }
 }
 
@@ -86,31 +110,55 @@ impl KeyService for KeyGrpcService {
                 .map_err(|e| Status::internal(e.to_string()))?;
 
         match bundle {
-            Some(b) => Ok(Response::new(proto::GetPreKeyBundleResponse {
-                bundle: Some(proto::PreKeyBundle {
-                    registration_id: 1,
-                    identity_key: b.identity_key,
-                    signed_pre_key: b.signed_prekey,
-                    signed_pre_key_id: b.signed_prekey_id,
-                    signed_pre_key_signature: b.signed_prekey_signature,
-                    one_time_pre_key: b.one_time_prekey,
-                    one_time_pre_key_id: b.one_time_prekey_id,
-                    crypto_suite: b.crypto_suite,
-                    generated_at: b.registered_at.timestamp(),
-                    kyber_pre_key: b.kyber_pre_key,
-                    kyber_pre_key_id: b.kyber_pre_key_id,
-                    kyber_pre_key_signature: b.kyber_pre_key_signature,
-                    kyber_one_time_pre_key: b.kyber_one_time_pre_key,
-                    kyber_one_time_pre_key_id: b.kyber_one_time_pre_key_id,
-                    spk_uploaded_at: b.spk_uploaded_at.map(|t| t.timestamp()).unwrap_or(0),
-                    spk_rotation_epoch: b.spk_rotation_epoch,
-                    kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
-                    kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
-                }),
-                device_id: b.device_id,
-                has_one_time_key: b.one_time_prekey_id.is_some(),
-                verifying_key: b.verifying_key,
-            })),
+            Some(b) => {
+                // Capture for low-prekey check before b is moved into the response.
+                let otp_was_consumed = b.one_time_prekey_id.is_some();
+                let notify_device_id = b.device_id.clone();
+                let notify_user_id = req.user_id.clone();
+
+                let response = Response::new(proto::GetPreKeyBundleResponse {
+                    bundle: Some(proto::PreKeyBundle {
+                        registration_id: 1,
+                        identity_key: b.identity_key,
+                        signed_pre_key: b.signed_prekey,
+                        signed_pre_key_id: b.signed_prekey_id,
+                        signed_pre_key_signature: b.signed_prekey_signature,
+                        one_time_pre_key: b.one_time_prekey,
+                        one_time_pre_key_id: b.one_time_prekey_id,
+                        crypto_suite: b.crypto_suite,
+                        generated_at: b.registered_at.timestamp(),
+                        kyber_pre_key: b.kyber_pre_key,
+                        kyber_pre_key_id: b.kyber_pre_key_id,
+                        kyber_pre_key_signature: b.kyber_pre_key_signature,
+                        kyber_one_time_pre_key: b.kyber_one_time_pre_key,
+                        kyber_one_time_pre_key_id: b.kyber_one_time_pre_key_id,
+                        spk_uploaded_at: b.spk_uploaded_at.map(|t| t.timestamp()).unwrap_or(0),
+                        spk_rotation_epoch: b.spk_rotation_epoch,
+                        kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
+                        kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
+                    }),
+                    device_id: b.device_id,
+                    has_one_time_key: otp_was_consumed,
+                    verifying_key: b.verifying_key,
+                });
+
+                // Fire-and-forget: check if replenishment notification needed.
+                if let Some(notif_client) = self.context.notification_client.clone() {
+                    let db = self.context.db.clone();
+                    tokio::spawn(async move {
+                        maybe_notify_low_prekeys(
+                            &db,
+                            &notif_client,
+                            &notify_user_id,
+                            &notify_device_id,
+                            otp_was_consumed,
+                        )
+                        .await;
+                    });
+                }
+
+                Ok(response)
+            }
             None => Err(Status::not_found("User or device not found")),
         }
     }
@@ -436,6 +484,16 @@ impl KeyService for KeyGrpcService {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
 
+        // Collect per-device info for low-prekey check before consuming the iterator.
+        let notify_items: Vec<(String, bool)> = if self.context.notification_client.is_some() {
+            bundles
+                .iter()
+                .map(|b| (b.device_id.clone(), b.one_time_prekey_id.is_some()))
+                .collect()
+        } else {
+            vec![]
+        };
+
         let proto_bundles = bundles
             .into_iter()
             .map(|b| proto::DevicePreKeyBundle {
@@ -464,6 +522,24 @@ impl KeyService for KeyGrpcService {
             })
             .collect();
 
+        // Fire-and-forget low-prekey checks for each device.
+        if let Some(notif_client) = self.context.notification_client.clone() {
+            let db = self.context.db.clone();
+            let user_id = req.user_id.clone();
+            tokio::spawn(async move {
+                for (device_id, otp_was_consumed) in notify_items {
+                    maybe_notify_low_prekeys(
+                        &db,
+                        &notif_client,
+                        &user_id,
+                        &device_id,
+                        otp_was_consumed,
+                    )
+                    .await;
+                }
+            });
+        }
+
         Ok(Response::new(proto::GetPreKeyBundlesResponse {
             bundles: proto_bundles,
             unavailable_devices: unavailable,
@@ -472,8 +548,64 @@ impl KeyService for KeyGrpcService {
 }
 
 // ============================================================================
-// Health Check
+// Low-Prekey Notification Helper
 // ============================================================================
+
+/// Sends a `replenish_prekeys` blind notification to `user_id` when their
+/// device's one-time prekey supply drops below [`LOW_PREKEY_THRESHOLD`].
+///
+/// - `otp_was_consumed = false`: the prekey store was already empty before this
+///   request — notify immediately.
+/// - `otp_was_consumed = true`: one key was just consumed — query the remaining
+///   count and notify only if it is below the threshold.
+async fn maybe_notify_low_prekeys(
+    db: &sqlx::PgPool,
+    notif_client: &NotificationClient,
+    user_id: &str,
+    device_id: &str,
+    otp_was_consumed: bool,
+) {
+    let should_notify = if !otp_was_consumed {
+        true
+    } else {
+        match core::get_prekey_count(db, device_id).await {
+            Ok((count, _)) => count < LOW_PREKEY_THRESHOLD,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    device_id,
+                    "Failed to read prekey count for low-prekey check"
+                );
+                false
+            }
+        }
+    };
+
+    if should_notify {
+        let mut client = notif_client.get();
+        match client
+            .send_blind_notification(SendBlindNotificationRequest {
+                user_id: user_id.to_string(),
+                badge_count: None,
+                activity_type: Some("replenish_prekeys".to_string()),
+            })
+            .await
+        {
+            Ok(_) => tracing::info!(
+                user_id,
+                device_id,
+                exhausted = !otp_was_consumed,
+                "Low-prekey replenishment notification sent"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                user_id,
+                device_id,
+                "Failed to send low-prekey replenishment notification"
+            ),
+        }
+    }
+}
 
 async fn health_check() -> impl IntoResponse {
     Json(json!({
