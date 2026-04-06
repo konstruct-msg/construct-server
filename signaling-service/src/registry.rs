@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use redis::aio::ConnectionManager;
 use tokio::sync::{broadcast, RwLock};
 use tokio_stream::StreamExt;
 use tonic::Status;
@@ -39,21 +40,26 @@ pub(crate) struct CallRegistry {
     // user_id -> device_id -> sender
     user_channels: RwLock<HashMap<String, HashMap<String, broadcast::Sender<ForwardedSignal>>>>,
     instance_id: String,
-    redis: redis::Client,
+    redis: ConnectionManager,
+    /// Kept separately because ConnectionManager does not support PubSub.
+    redis_pubsub_client: redis::Client,
 }
 
 impl CallRegistry {
-    pub(crate) fn new(redis_url: &str, instance_id: String) -> Result<Self, anyhow::Error> {
+    pub(crate) async fn new(redis_url: &str, instance_id: String) -> Result<Self, anyhow::Error> {
+        let client = redis::Client::open(redis_url)?;
+        let redis = ConnectionManager::new(client.clone()).await?;
         Ok(Self {
             calls: RwLock::new(HashMap::new()),
             active_calls: RwLock::new(HashMap::new()),
             user_channels: RwLock::new(HashMap::new()),
             instance_id,
-            redis: redis::Client::open(redis_url)?,
+            redis,
+            redis_pubsub_client: client,
         })
     }
 
-    pub(crate) fn redis_client(&self) -> redis::Client {
+    pub(crate) fn redis_client(&self) -> ConnectionManager {
         self.redis.clone()
     }
 
@@ -89,7 +95,8 @@ impl CallRegistry {
             users.remove(user_id);
         }
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let _: Result<(), _> = redis::cmd("DEL")
                 .arg(Self::online_key(user_id, device_id))
                 .query_async(&mut conn)
@@ -114,7 +121,8 @@ impl CallRegistry {
     }
 
     pub(crate) async fn touch_online(&self, user_id: &str, device_id: &str) {
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let key = Self::online_key(user_id, device_id);
             let _: Result<(), _> = redis::pipe()
                 .set_ex(key, &self.instance_id, 90)
@@ -124,7 +132,7 @@ impl CallRegistry {
     }
 
     async fn lookup_device_instance(&self, user_id: &str, device_id: &str) -> Option<String> {
-        let mut conn = self.redis.get_multiplexed_async_connection().await.ok()?;
+        let mut conn = self.redis.clone();
         redis::cmd("GET")
             .arg(Self::online_key(user_id, device_id))
             .query_async::<Option<String>>(&mut conn)
@@ -134,10 +142,7 @@ impl CallRegistry {
     }
 
     pub(crate) async fn list_online_devices(&self, user_id: &str) -> Vec<(String, String)> {
-        let mut conn = match self.redis.get_multiplexed_async_connection().await {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
+        let mut conn = self.redis.clone();
 
         let pattern = format!("signaling:online:{}:*", user_id);
         let mut cursor: u64 = 0;
@@ -191,7 +196,7 @@ impl CallRegistry {
     ) -> Result<(), anyhow::Error> {
         let payload = serde_json::to_string(&env)?;
         let channel = format!("signaling:instance:{}", instance_id);
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let mut conn = self.redis.clone();
         let _: i64 = redis::cmd("PUBLISH")
             .arg(channel)
             .arg(payload)
@@ -347,7 +352,8 @@ impl CallRegistry {
             active.insert(callee_user_id.to_string(), call_id.to_string());
         }
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let call_key = Self::call_key(call_id);
             let _: Result<(), _> = redis::pipe()
                 .cmd("HSET")
@@ -405,7 +411,8 @@ impl CallRegistry {
             String::new()
         };
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let key = Self::call_key(call_id);
             let _: Result<(), _> = redis::pipe()
                 .cmd("HSET")
@@ -442,7 +449,8 @@ impl CallRegistry {
                 active.remove(&state.callee_user_id);
             }
 
-            if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+            {
+                let mut conn = self.redis.clone();
                 let call_key = Self::call_key(call_id);
                 let _: Result<(), _> = redis::pipe()
                     .del(call_key)
@@ -464,7 +472,7 @@ impl CallRegistry {
             }
         }
 
-        let mut conn = self.redis.get_multiplexed_async_connection().await.ok()?;
+        let mut conn = self.redis.clone();
         let key = Self::call_key(call_id);
         let map: HashMap<String, String> = redis::cmd("HGETALL")
             .arg(&key)
@@ -534,7 +542,7 @@ impl CallRegistry {
             }
         }
 
-        let mut conn = self.redis.get_multiplexed_async_connection().await.ok()?;
+        let mut conn = self.redis.clone();
         redis::cmd("GET")
             .arg(format!("user:{}:active_call", user_id))
             .query_async::<Option<String>>(&mut conn)
@@ -582,7 +590,8 @@ impl CallRegistry {
             return;
         };
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let key = Self::call_key(&call_id);
             let _: Result<(), _> = redis::pipe()
                 .cmd("HSET")
@@ -607,7 +616,8 @@ impl CallRegistry {
         }
         state.ringing_at_ms = Some(now_ms);
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let key = Self::call_key(call_id);
             let _: Result<(), _> = redis::pipe()
                 .cmd("HSET")
@@ -634,7 +644,8 @@ impl CallRegistry {
         state.accepted_callee_device_id = Some(callee_device_id.to_string());
         state.answered_at_ms = Some(unix_millis());
 
-        if let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await {
+        {
+            let mut conn = self.redis.clone();
             let key = Self::call_key(call_id);
             let answered_at_ms = state.answered_at_ms.unwrap_or_else(unix_millis);
             let _: Result<(), _> = redis::pipe()
@@ -875,9 +886,7 @@ impl CallRegistry {
     }
 
     async fn try_acquire_cleanup_lock(&self) -> bool {
-        let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await else {
-            return false;
-        };
+        let mut conn = self.redis.clone();
         let key = "signaling:cleanup_lock";
         let res: redis::RedisResult<String> = redis::cmd("SET")
             .arg(key)
@@ -891,9 +900,7 @@ impl CallRegistry {
     }
 
     async fn list_active_call_ids(&self) -> Vec<String> {
-        let Ok(mut conn) = self.redis.get_multiplexed_async_connection().await else {
-            return Vec::new();
-        };
+        let mut conn = self.redis.clone();
 
         let mut cursor: u64 = 0;
         let mut out: Vec<String> = Vec::new();
@@ -928,7 +935,7 @@ impl CallRegistry {
     pub(crate) async fn instance_pubsub_loop(self: Arc<Self>) {
         let channel = format!("signaling:instance:{}", self.instance_id);
 
-        let mut pubsub = match self.redis.get_async_pubsub().await {
+        let mut pubsub = match self.redis_pubsub_client.get_async_pubsub().await {
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "failed to create redis pubsub connection");

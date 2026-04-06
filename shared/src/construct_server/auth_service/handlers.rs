@@ -157,7 +157,14 @@ pub async fn logout(
     Json(request): Json<LogoutRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let TrustedUser(user_id) = user;
-    core::logout_user(app_state(&context).0, user_id, request.all_devices).await?;
+    core::logout_user(
+        app_state(&context).0,
+        user_id,
+        request.all_devices,
+        None,
+        None,
+    )
+    .await?;
     Ok((
         StatusCode::OK,
         Json(json!({

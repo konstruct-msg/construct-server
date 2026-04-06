@@ -14,8 +14,10 @@ pub(crate) const DEFAULT_SERVER_REGISTRY_TTL_SECS: i64 = 270;
 
 // Default TTL values
 pub(crate) const DEFAULT_MESSAGE_TTL_DAYS: i64 = 7;
-// Access token TTL: 168 hours (1 week) for better UX in messenger apps
-pub(crate) const DEFAULT_ACCESS_TOKEN_TTL_HOURS: i64 = 168;
+// Access token TTL: 24 hours. Reduces the window during which a revoked token
+// remains usable after logout (services verify crypto-only without blocklist lookup).
+// Override with ACCESS_TOKEN_TTL_HOURS env var.
+pub(crate) const DEFAULT_ACCESS_TOKEN_TTL_HOURS: i64 = 24;
 // Session TTL: kept for backward compatibility, but access tokens now use shorter TTL
 pub(crate) const DEFAULT_SESSION_TTL_DAYS: i64 = 30;
 // Refresh token TTL: 90 days (long-lived for user convenience)
