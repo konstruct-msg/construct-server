@@ -109,16 +109,6 @@ pub async fn send_to_dlq(
     retry_count: u32,
     failure_reason: &str,
 ) -> Result<()> {
-    if !producer.is_enabled() {
-        warn!(
-            message_id = %envelope.message_id,
-            retry_count = retry_count,
-            reason = failure_reason,
-            "Kafka disabled - DLQ message dropped (would be lost in production)"
-        );
-        return Ok(());
-    }
-
     let dlq_message = DeadLetterMessage {
         envelope: envelope.clone(),
         retry_count,
@@ -127,30 +117,58 @@ pub async fn send_to_dlq(
     };
 
     let dlq_topic = format!("{}-dlq", producer.topic());
+    let payload = serde_json::to_vec(&dlq_message).context("Failed to serialize DLQ message")?;
+    let key = envelope.recipient_id.as_bytes();
 
-    // We log the DLQ message as structured JSON to stderr as a recoverable fallback.
-    // TODO: Add DLQ-specific topic support to MessageProducer to actually send to Kafka.
-    let _ = producer; // producer reserved for future Kafka DLQ topic send
+    if !producer.is_enabled() {
+        warn!(
+            message_id = %envelope.message_id,
+            retry_count = retry_count,
+            reason = failure_reason,
+            "Kafka disabled — DLQ message logged only (would be sent to '{}' in production)",
+            dlq_topic
+        );
+        error!(
+            target: "dlq",
+            message_id = %envelope.message_id,
+            recipient_id = %envelope.recipient_id,
+            retry_count = retry_count,
+            failure_reason = failure_reason,
+            dlq_topic = %dlq_topic,
+            payload = %serde_json::to_string(&dlq_message).unwrap_or_default(),
+            "DLQ_MESSAGE: Message moved to dead letter queue after max retries"
+        );
+        return Ok(());
+    }
 
-    // For now: serialize DLQ message to structured log (stderr)
-    // This is safe and recoverable — ops team can grep logs for "DLQ_MESSAGE"
-    error!(
-        target: "dlq",
-        message_id = %envelope.message_id,
-        recipient_id = %envelope.recipient_id,
-        retry_count = retry_count,
-        failure_reason = failure_reason,
-        dlq_topic = %dlq_topic,
-        payload = %serde_json::to_string(&dlq_message).unwrap_or_default(),
-        "DLQ_MESSAGE: Message moved to dead letter queue after max retries"
-    );
-
-    info!(
-        message_id = %envelope.message_id,
-        retry_count = retry_count,
-        dlq_topic = %dlq_topic,
-        "Message dead-lettered after {} retries", retry_count
-    );
+    match producer.send_raw_to_topic(&dlq_topic, key, &payload).await {
+        Ok((partition, offset)) => {
+            info!(
+                message_id = %envelope.message_id,
+                retry_count = retry_count,
+                dlq_topic = %dlq_topic,
+                partition,
+                offset,
+                "Message dead-lettered: written to Kafka DLQ topic"
+            );
+        }
+        Err(e) => {
+            // DLQ send failed — log as structured error so ops can recover manually.
+            // We do NOT propagate the error: the caller must still commit the Kafka
+            // offset to prevent an infinite retry loop.
+            error!(
+                target: "dlq",
+                message_id = %envelope.message_id,
+                recipient_id = %envelope.recipient_id,
+                retry_count = retry_count,
+                failure_reason = failure_reason,
+                dlq_topic = %dlq_topic,
+                kafka_error = %e,
+                payload = %serde_json::to_string(&dlq_message).unwrap_or_default(),
+                "DLQ_MESSAGE: Failed to write to Kafka DLQ — message logged for manual recovery"
+            );
+        }
+    }
 
     Ok(())
 }

@@ -217,6 +217,34 @@ impl MessageProducer {
     pub fn topic(&self) -> &str {
         &self.topic
     }
+
+    /// Send raw bytes to an arbitrary topic (used by DLQ and other side-channel producers).
+    ///
+    /// Unlike `send_message`, this does NOT go through the circuit breaker —
+    /// DLQ sends must always attempt delivery even when the main topic is unhealthy.
+    pub async fn send_raw_to_topic(
+        &self,
+        topic: &str,
+        key: &[u8],
+        payload: &[u8],
+    ) -> anyhow::Result<(i32, i64)> {
+        let producer = match &self.producer {
+            Some(p) => p,
+            None => return Ok((-1, -1)),
+        };
+        let record = FutureRecord::to(topic).key(key).payload(payload);
+        match producer
+            .send(record, Timeout::After(Duration::from_secs(5)))
+            .await
+        {
+            Ok((partition, offset)) => Ok((partition, offset)),
+            Err((kafka_err, _)) => Err(anyhow::anyhow!(
+                "Failed to send to topic '{}': {}",
+                topic,
+                kafka_err
+            )),
+        }
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -270,6 +298,14 @@ impl MessageProducer {
     }
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+    pub async fn send_raw_to_topic(
+        &self,
+        _topic: &str,
+        _key: &[u8],
+        _payload: &[u8],
+    ) -> anyhow::Result<(i32, i64)> {
+        Ok((-1, -1))
     }
 }
 
