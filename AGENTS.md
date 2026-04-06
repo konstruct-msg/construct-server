@@ -256,6 +256,32 @@ At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
 
 ---
 
+## Security Architecture
+
+### Token Lifecycle (access tokens)
+
+- **TTL**: 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, default 24). Was 168h — reduced to limit exposure window.
+- **Blocklist key**: `invalidated_token:{jti}` — Redis `SET` with TTL = remaining token lifetime. Written on explicit logout/revocation.
+- **Check on gRPC logout** (`AuthService.Logout`): server requires `access_token` in request body (`field 1`). Extracts JTI → adds to blocklist. Client **must populate** `request.accessToken` from Keychain; if empty, server returns `INVALID_ARGUMENT` (client should treat this as a non-fatal warning and continue session cleanup).
+- **Check on token verify** (`AuthService.VerifyToken`): crypto verify + `EXISTS invalidated_token:{jti}`.
+- **Check in messaging-service gRPC**: `extract_authed_user_id()` in `grpc.rs` — checks blocklist for Bearer JWT auth path (fail-closed on Redis error). `x-user-id` header path (gateway-injected) is trusted without extra check.
+- **NOT checked in**: user-service and notification-service local JWT verify — these are gateway-only services (only receive `x-user-id`, no Bearer fallback), so a revoked token cannot reach them directly.
+
+### Refresh Token Reverse Index
+
+- On login: `SADD user_tokens:{user_id} {jti}` + `EXPIRE` to track all active refresh tokens.
+- `RevokeAll`: `SMEMBERS user_tokens:{user_id}` → delete each `refresh_token:{jti}` → delete index. O(n_tokens), not O(all_keys).
+
+### Low-Prekey Replenishment
+
+- After `GetPreKeyBundle` / `GetPreKeyBundles` consumes an OTP, key-service fires a **fire-and-forget** `SendBlindNotification` with `activity_type = "replenish_prekeys"` to the device owner if:
+  - Remaining OTP count < 5 (`LOW_PREKEY_THRESHOLD`), OR
+  - OTP store was already empty (has_one_time_key = false).
+- Requires `NOTIFICATION_SERVICE_URL` env var to be set on key-service.
+- Client must handle `activity_type = "replenish_prekeys"` by calling `KeyService.UploadPreKeys` in the background (upload `max(0, recommended_minimum - current_count)` keys; recommended_minimum = 20).
+
+---
+
 ## Known Issues / Tech Debt
 
 1. **Two-delivery Kafka pattern** — every message is processed twice by delivery-worker (see latency section above). Low priority (second pass is nearly free). Fix: return `ProcessResult::Delivered` in `delivery-worker/src/processor.rs` and commit offset for `Delivered` in the consumer loop.
@@ -271,3 +297,5 @@ At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
 6. **content-hash dedup (Layer 3) never fires** — `should_skip_message_with_content` hashes ciphertext which always has a random IV per message, so this dedup layer is dead code for E2EE messages. Function exists but is not called from `processor.rs`.
 
 7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action on messages (Kafka auto-redelivers on reconnect). Can be removed.
+
+8. **Signaling registry is in-memory only** — `CallRegistry` stores active call state in `RwLock<HashMap>`. Service restart = all active calls lost. Multi-instance deployments will have desynchronised state (partially mitigated by Redis pub/sub forwarding for signalling messages, but not for call state). Fix: persist call state in Redis hashes with TTL.
