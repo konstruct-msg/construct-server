@@ -57,6 +57,11 @@ impl MessagingService for MessagingGrpcService {
         let (tx, rx) = mpsc::channel(128);
 
         tokio::spawn(async move {
+            // Per-stream queue clone — avoids contention on the global context.queue mutex.
+            // ConnectionManager is Clone and pipelines commands internally, so concurrent
+            // XREAD calls from different stream tasks can proceed in parallel.
+            let mut stream_queue = context.queue.lock().await.clone();
+
             // Track last seen stream_id for pagination
             let mut last_stream_id: Option<String> = None;
             // Initialise from auth metadata; may also be set from first Send message
@@ -98,7 +103,15 @@ impl MessagingService for MessagingGrpcService {
             if let Some(uid) = user_id {
                 spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                 wakeup_subscribed = true;
-                if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                if let Err(e) = poll_messages(
+                    &mut stream_queue,
+                    &context.config.messaging,
+                    uid,
+                    &mut last_stream_id,
+                    &tx,
+                )
+                .await
+                {
                     tracing::warn!("Initial poll error: {}", e);
                 }
             }
@@ -109,7 +122,15 @@ impl MessagingService for MessagingGrpcService {
                 if !wakeup_subscribed && let Some(uid) = user_id {
                     spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                     wakeup_subscribed = true;
-                    if let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                    if let Err(e) = poll_messages(
+                        &mut stream_queue,
+                        &context.config.messaging,
+                        uid,
+                        &mut last_stream_id,
+                        &tx,
+                    )
+                    .await
+                    {
                         tracing::warn!("Initial poll error: {}", e);
                     }
                 }
@@ -167,7 +188,7 @@ impl MessagingService for MessagingGrpcService {
                     // Push: new message arrived — deliver immediately
                     Some(()) = wakeup_rx.recv() => {
                         if let Some(uid) = user_id
-                            && let Err(e) = poll_messages(&context, uid, &mut last_stream_id, &tx).await {
+                            && let Err(e) = poll_messages(&mut stream_queue, &context.config.messaging, uid, &mut last_stream_id, &tx).await {
                                 tracing::warn!("Error polling messages after wakeup: {}", e);
                             }
                     }
@@ -175,7 +196,8 @@ impl MessagingService for MessagingGrpcService {
                     // Fallback poll (covers missed pub/sub events and reconnects)
                     _ = poll_interval.tick() => {
                         if let Some(uid) = user_id && let Err(e) = poll_messages(
-                                &context,
+                                &mut stream_queue,
+                                &context.config.messaging,
                                 uid,
                                 &mut last_stream_id,
                                 &tx,

@@ -43,6 +43,12 @@ use construct_redis::RedisClient;
 /// 3. User connects     → Messages delivered from Redis queue
 /// 4. After delivery    → Messages DELETED from Redis immediately
 /// 5. After TTL expires → Undelivered messages AUTO-DELETED by Redis
+// MessageQueue clones share the same underlying Redis multiplexed connection.
+// Each clone is safe to use concurrently from a separate Tokio task without
+// additional locking, because redis::aio::ConnectionManager pipelines commands
+// internally. This allows per-stream queue clones to call XREAD in parallel
+// without serializing on a shared Mutex.
+#[derive(Clone)]
 pub struct MessageQueue {
     client: RedisClient,
     /// TTL for queued messages in seconds (configured via message_ttl_days)
