@@ -530,8 +530,8 @@ async fn main() -> Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(45),
     )
-        .add_service(KeyServiceServer::new(grpc_service))
-        .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
+    .add_service(KeyServiceServer::new(grpc_service))
+    .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
 
     // HTTP health server
     let http_addr: SocketAddr = env::var("KEY_SERVICE_HTTP_ADDR")

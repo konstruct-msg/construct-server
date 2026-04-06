@@ -124,34 +124,33 @@ pub(crate) async fn handle_stream_request(
                         return Ok(());
                     }
 
-                    if let Some(fanout_limit) = trust.fanout_limit(&context.config.messaging) {
-                        if let Err(pow_level) =
+                    if let Some(fanout_limit) = trust.fanout_limit(&context.config.messaging)
+                        && let Err(pow_level) =
                             crate::trust::check_fanout_rate(&mut redis_conn, &uid.to_string(), &recipient_id, fanout_limit, &context.config.messaging)
                                 .await
-                        {
-                            let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
-                            tracing::info!(
-                                sender = %uid,
-                                pow_level,
-                                "Fanout limit exceeded — issuing PoW challenge (stream)"
-                            );
-                            let challenge_json = format!(
-                                r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
-                                challenge, pow_level, expires_at
-                            );
-                            let error = proto::MessageError {
-                                message_id: message_id.clone(),
-                                error_code: proto::ErrorCode::RateLimit.into(),
-                                error_message: challenge_json,
-                                retryable: true,
-                            };
-                            let response = proto::MessageStreamResponse {
-                                response: Some(proto::message_stream_response::Response::Error(error)),
-                                response_id: Some(req.request_id.clone()),
-                            };
-                            tx.send(Ok(response)).await?;
-                            return Ok(());
-                        }
+                    {
+                        let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
+                        tracing::info!(
+                            sender = %uid,
+                            pow_level,
+                            "Fanout limit exceeded — issuing PoW challenge (stream)"
+                        );
+                        let challenge_json = format!(
+                            r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
+                            challenge, pow_level, expires_at
+                        );
+                        let error = proto::MessageError {
+                            message_id: message_id.clone(),
+                            error_code: proto::ErrorCode::RateLimit.into(),
+                            error_message: challenge_json,
+                            retryable: true,
+                        };
+                        let response = proto::MessageStreamResponse {
+                            response: Some(proto::message_stream_response::Response::Error(error)),
+                            response_id: Some(req.request_id.clone()),
+                        };
+                        tx.send(Ok(response)).await?;
+                        return Ok(());
                     }
                 }
 
