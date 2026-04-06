@@ -21,6 +21,7 @@ use axum::middleware::{self as axum_middleware, Next};
 use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::{ApnsEnvironment, Config};
+use construct_context::AppContext;
 use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
@@ -31,7 +32,6 @@ use construct_server_shared::{
         MessageProducer,
         types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
     },
-    messaging_service::MessagingServiceContext,
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -379,7 +379,7 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
 /// Only `send_message` is functional; all other RPCs return Unimplemented.
 #[derive(Clone)]
 struct TestMessagingGrpcService {
-    context: Arc<MessagingServiceContext>,
+    context: Arc<AppContext>,
 }
 
 #[tonic::async_trait]
@@ -431,7 +431,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             content_type: envelope.content_type,
             edits_message_id: envelope.edits_message_id.clone(),
         });
-        let app_context = Arc::new(self.context.to_app_context());
+        let app_context = self.context.clone();
         construct_server_shared::messaging_service::core::dispatch_envelope(
             &app_context,
             kafka_envelope,
@@ -506,38 +506,36 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             .expect("Failed to create token encryption"),
     );
 
-    let context = Arc::new(MessagingServiceContext {
-        db_pool,
-        queue,
-        auth_manager,
-        kafka_producer,
-        apns_client,
-        token_encryption,
-        notification_client: None,
-        config: config.clone(),
-        key_management: None,
-        server_signer: None,
-    });
+    let context = Arc::new(
+        AppContext::builder()
+            .with_db_pool(db_pool)
+            .with_queue(queue)
+            .with_auth_manager(auth_manager)
+            .with_config(config.clone())
+            .with_kafka_producer(kafka_producer)
+            .with_apns_client(apns_client.clone())
+            .with_apns_sandbox_client(apns_client)
+            .with_token_encryption(token_encryption)
+            .with_server_instance_id(uuid::Uuid::new_v4().to_string())
+            .build()
+            .expect("Failed to build test AppContext"),
+    );
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route(
             "/health/ready",
-            get(
-                |State(ctx): State<Arc<MessagingServiceContext>>| async move {
-                    let app_ctx = Arc::new(ctx.to_app_context());
-                    health::readiness_check_handler(axum::extract::State(app_ctx)).await
-                },
-            ),
+            get(|State(ctx): State<Arc<AppContext>>| async move {
+                health::readiness_check_handler(axum::extract::State(ctx)).await
+            }),
         )
         .route("/health/live", get(health::liveness_check_handler))
         .route(
             "/api/v1/messages/confirm",
             post(
-                |State(ctx): State<Arc<MessagingServiceContext>>,
+                |State(ctx): State<Arc<AppContext>>,
                  TrustedUser(user_id): TrustedUser,
                  Json(data): Json<construct_types::api::ConfirmMessageRequest>| async move {
-                    let app_ctx = Arc::new(ctx.to_app_context());
                     let uid = uuid::Uuid::parse_str(&user_id.to_string()).map_err(|_| {
                         construct_error::AppError::Validation(
                             "Invalid authenticated user ID".to_string(),
@@ -545,7 +543,7 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
                     })?;
                     let result =
                         construct_server_shared::messaging_service::core::confirm_pending_message(
-                            app_ctx,
+                            ctx,
                             uid,
                             &data.temp_id,
                         )
