@@ -194,11 +194,11 @@ pub async fn process_kafka_message(
     Ok(ProcessResult::UserOffline)
 }
 
-/// Publish notification to Redis Pub/Sub for long polling endpoints
+/// Publish wakeup notification to Redis Pub/Sub
 ///
-/// When a message is delivered to a user, this function publishes a notification
-/// to the channel `message_notifications:{user_id}` so that long polling endpoints
-/// can be notified and return messages immediately.
+/// Publishes to `inbox:wakeup:{user_id}` — the channel that messaging-service
+/// subscribes to in order to trigger an immediate XREAD when a new message arrives.
+/// Without this, messaging-service would only poll on its fallback timer (~1s delay).
 ///
 /// # Arguments
 /// * `state` - Worker state
@@ -206,27 +206,22 @@ pub async fn process_kafka_message(
 async fn publish_message_notification(state: &WorkerState, user_id: &str) -> Result<()> {
     use crate::retry::execute_redis_with_retry;
 
-    let channel = format!("message_notifications:{}", user_id);
+    let channel = format!("inbox:wakeup:{}", user_id);
 
     execute_redis_with_retry(state, "publish_message_notification", |conn| {
         let ch = channel.clone();
         Box::pin(async move {
-            // PUBLISH returns the number of subscribers that received the message
-            let _subscriber_count: i64 = cmd("PUBLISH")
-                .arg(&ch)
-                .arg("1") // Simple notification payload
-                .query_async(conn)
-                .await?;
+            let _subscriber_count: i64 = cmd("PUBLISH").arg(&ch).arg("1").query_async(conn).await?;
             Ok(())
         })
     })
     .await
-    .context("Failed to publish message notification")?;
+    .context("Failed to publish wakeup notification")?;
 
     debug!(
         user_id = %user_id,
         channel = %channel,
-        "Published message notification for long polling"
+        "Published inbox wakeup notification"
     );
 
     Ok(())
