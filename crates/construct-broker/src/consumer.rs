@@ -47,7 +47,7 @@ impl MessageConsumer {
             .set("auto.offset.reset", "earliest")
             .set("allow.auto.create.topics", "true")
             .set("fetch.min.bytes", "1")
-            .set("fetch.wait.max.ms", "500")
+            .set("fetch.wait.max.ms", "10")
             .set("max.partition.fetch.bytes", "1048576")
             .set("session.timeout.ms", "30000")
             .set("heartbeat.interval.ms", "3000")

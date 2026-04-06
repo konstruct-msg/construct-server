@@ -19,7 +19,7 @@
 | `invite` | `invite-service` | 50055 | 8085 | Invite link creation and redemption |
 | `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
 | `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
-| `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam trust scoring (**running but not integrated**) |
+| `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
 | `signaling` | `signaling-service` | 50060 | 8091 | WebRTC SDP/ICE signaling |
 | `delivery` | `delivery-worker` | — | 8092 | Kafka consumer → Redis stream writer |
 | `mls` | `mls-service` | — | — | **Stub — commented out in prod** |
@@ -39,7 +39,7 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 ### Shared crate
 `shared/` (`construct-server-shared`) contains:
 - `src/construct_server/auth_service/` — auth business logic
-- `src/construct_server/messaging_service/` — **second copy** of messaging core used only by shared integration tests (`shared/tests/test_utils.rs`)
+- `src/construct_server/messaging_service/core.rs` — `dispatch_envelope` + `confirm_pending_message` used **only** by `shared/tests/test_utils.rs` integration tests. The authoritative version is `messaging-service/src/core.rs`; if you change the signature, update both.
 - `src/clients/notification.rs` — `NotificationClient` wrapper (lazy gRPC connect)
 
 ### Crates under `crates/`
@@ -112,6 +112,7 @@ Using `message_notifications:{user_id}` (old name) would silently break real-tim
 ```
 messaging-service
     ├── → notification-service (SendBlindNotification, silent APNs push for offline users)
+    ├── → sentinel-service (CheckSendPermission — rate limit + block enforcement on send path)
     └── → key-service (via HTTP for key bundles, rare)
 
 auth-service
@@ -121,9 +122,11 @@ delivery-worker
     └── Kafka consumer only — no gRPC calls
 ```
 
-`sentinel-service` has full implementation (`CheckSendPermission`, `ReportSpam`, `GetTrustStatus`)
-but **no other service calls it**. It is an architectural island. Should either be wired into
-messaging-service's send path or disabled in docker-compose.prod.yml.
+`sentinel-service` has full implementation (`CheckSendPermission`, `ReportSpam`, `GetTrustStatus`).
+**Integrated** into messaging-service send path (`grpc.rs`) via `SentinelClient` (lazy gRPC, fail-open).
+- `SENTINEL_SERVICE_URL` env var, default `http://sentinel:50059`
+- Checks `sender_device_id` / `recipient_device_id` (32-char hex, NOT user UUID)
+- On any gRPC error → fail-open (message allowed through)
 
 ---
 
@@ -146,7 +149,9 @@ messaging-service's send path or disabled in docker-compose.prod.yml.
 | `MSG_STREAM_HEARTBEAT_INTERVAL_SECS` | 10 | HeartbeatAck sent to client |
 | `MSG_STREAM_POLL_FALLBACK_SECS` | 1 | XREAD fallback if no pub/sub wakeup |
 | `GRPC_KEEPALIVE_INTERVAL_SECS` | 30 | H2 PING interval on gRPC servers |
-| `POW_DIFFICULTY` | 10 | Leading-zero bits required in PoW |
+| `MSG_POW_LEVEL_LOW` | 16 | PoW difficulty bits (low-trust new device) |
+| `MSG_POW_LEVEL_MID` | 22 | PoW difficulty bits (mid-trust) |
+| `MSG_POW_LEVEL_HIGH` | 24 | PoW difficulty bits (high-trust established) |
 | `MESSAGE_TTL_DAYS` | 7 | Kafka + Redis message retention |
 
 > Note: tonic version is **0.14.5** — no `http2_keepalive_while_idle` support.
@@ -196,12 +201,73 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 
 ---
 
+## Message Delivery Latency Analysis
+
+### Kafka-enabled path (production)
+
+```
+Client gRPC send
+  → messaging-service receive + Kafka produce            ~1-5 ms
+  → Kafka broker stores message
+  → delivery-worker poll()                               0-500 ms  ← bottleneck (fetch.wait.max.ms=500)
+  → delivery-worker: Redis XADD + SETEX (MULTI/EXEC)    ~1-5 ms
+  → delivery-worker: Redis PUBLISH inbox:wakeup          ~1-2 ms
+  → messaging-service sub wakeup → XREAD                 ~1-5 ms
+  → gRPC stream deliver to client
+
+Total best case:  ~10 ms
+Total worst case: ~520 ms  (Kafka consumer just started a 500ms fetch wait)
+```
+
+**Key tunable:** `fetch.wait.max.ms=500` in `crates/construct-broker/src/consumer.rs:50`
+Reducing to **10ms** would drop worst-case Kafka consumer latency from 500ms → 10ms.
+No other config changes needed.
+
+### Kafka-disabled path (dev / when KAFKA_ENABLED=false)
+
+```
+Client gRPC send
+  → messaging-service receive
+  → Redis XADD + dedup (Mutex on queue)                  ~1-5 ms
+  → Redis PUBLISH inbox:wakeup (implicit in write_message_to_user_stream)
+  → messaging-service sub wakeup → XREAD                 ~1-5 ms
+  → gRPC stream deliver to client
+
+Total: ~5-15 ms
+```
+
+### Two-delivery Kafka pattern (known design issue)
+
+Every message is processed by delivery-worker **twice**:
+1. First delivery: writes to Redis, publishes wakeup → returns `UserOffline` (offset NOT committed)
+2. Kafka redelivers → dedup check finds `processed_msg:{id}` → returns `Skipped` → offset committed
+
+The second delivery does NOT affect client-facing latency (message already in Redis stream).
+It doubles Kafka consumer throughput consumption and Redis dedup key lookups.
+
+**How to fix** (when ready):
+In `delivery-worker/src/processor.rs` `process_kafka_message()`, change the final return to:
+```rust
+Ok(ProcessResult::Delivered)  // instead of ProcessResult::UserOffline
+```
+And in `delivery-worker/src/main.rs` consumer loop, commit offset for `Delivered` too.
+This requires trusting that Redis MULTI/EXEC was truly atomic (it is — no fix needed there).
+At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
+
+---
+
 ## Known Issues / Tech Debt
 
-1. **sentinel-service** — implemented but not integrated into any send path (architectural island)
-2. **`to_app_context()` adapter** — requires non-optional `apns_client` in `MessagingServiceContext`, preventing full APNs client cleanup from messaging-service. Full fix: make `AppContext::apns_client` optional in `construct-context`.
-3. **Duplicate messaging_service code** — `messaging-service/src/` AND `shared/src/construct_server/messaging_service/` must be kept in sync. Any change to `dispatch_envelope` signature needs updating in both places AND in `shared/tests/test_utils.rs`.
-4. **delivery_queue:{server_instance_id} keys** — these are still created by server heartbeat but never read by delivery-worker (routing is user-based now). Consider removing the heartbeat registration or repurposing.
-5. **DLQ** — now sends to `{topic}-dlq` Kafka topic via `MessageProducer::send_raw_to_topic`. Topic must exist in Redpanda (`messages-dlq`). On Kafka failure falls back to structured `DLQ_MESSAGE` error log.
-6. **content-hash dedup (Layer 3)** — `should_skip_message_with_content` hashes ciphertext which always has a random IV, so Layer 3 never fires for E2EE messages. Function exists but is not called from processor.rs.
-7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action (Kafka auto-redelivers). Monitoring only.
+1. **Two-delivery Kafka pattern** — every message is processed twice by delivery-worker (see latency section above). Low priority (second pass is nearly free). Fix: return `ProcessResult::Delivered` in `delivery-worker/src/processor.rs` and commit offset for `Delivered` in the consumer loop.
+
+2. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients must be initialized in `messaging-service/main.rs` even though messaging-service no longer calls APNs directly. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
+
+3. **Duplicate `dispatch_envelope`** — `messaging-service/src/core.rs` (authoritative, 466 lines) and `shared/src/construct_server/messaging_service/core.rs` (462 lines, test-only copy). If you change `dispatch_envelope` signature, update **both** files.
+
+4. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read by delivery-worker (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
+
+5. **DLQ topic must exist** — delivery-worker sends failures to `{topic}-dlq` (i.e. `messages-dlq`) via `MessageProducer::send_raw_to_topic`. Topic must be pre-created in Redpanda. On producer error falls back to structured `DLQ_MESSAGE` error log.
+
+6. **content-hash dedup (Layer 3) never fires** — `should_skip_message_with_content` hashes ciphertext which always has a random IV per message, so this dedup layer is dead code for E2EE messages. Function exists but is not called from `processor.rs`.
+
+7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action on messages (Kafka auto-redelivers on reconnect). Can be removed.
