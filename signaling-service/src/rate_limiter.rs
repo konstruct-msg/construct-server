@@ -1,24 +1,28 @@
 use base64::Engine;
+use redis::aio::ConnectionManager;
 
 #[derive(Clone)]
 pub(crate) struct RateLimiter {
-    redis: redis::Client,
+    redis: ConnectionManager,
     peer_salt: String,
 }
 
 impl RateLimiter {
-    pub(crate) fn new(redis: redis::Client, peer_salt: String) -> Self {
+    pub(crate) fn new(redis: ConnectionManager, peer_salt: String) -> Self {
         Self { redis, peer_salt }
     }
 
     pub(crate) async fn check_call_rate(&self, user_id: &str) -> Result<bool, anyhow::Error> {
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let mut conn = self.redis.clone();
         let key = format!("ratelimit:calls:{}", user_id);
-        let count: i64 = redis::pipe()
-            .incr(&key, 1i64)
-            .expire(&key, 60)
-            .query_async(&mut conn)
-            .await?;
+        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(60i64)
+                .query_async(&mut conn)
+                .await?;
+        }
         Ok(count <= 10)
     }
 
@@ -28,13 +32,16 @@ impl RateLimiter {
         peer_id: &str,
     ) -> Result<bool, anyhow::Error> {
         let peer_bucket = self.peer_bucket(peer_id)?;
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let mut conn = self.redis.clone();
         let key = format!("ratelimit:calls:{}:{}", user_id, peer_bucket);
-        let count: i64 = redis::pipe()
-            .incr(&key, 1i64)
-            .expire(&key, 60)
-            .query_async(&mut conn)
-            .await?;
+        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(60i64)
+                .query_async(&mut conn)
+                .await?;
+        }
         Ok(count <= 3)
     }
 
@@ -45,8 +52,11 @@ impl RateLimiter {
     ) -> Result<bool, anyhow::Error> {
         let peer_bucket = self.peer_bucket(peer_id)?;
         let key = format!("ratelimit:decline_cooldown:{}:{}", user_id, peer_bucket);
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
-        let exists: bool = redis::cmd("EXISTS").arg(key).query_async(&mut conn).await?;
+        let mut conn = self.redis.clone();
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await?;
         Ok(!exists)
     }
 
@@ -57,10 +67,10 @@ impl RateLimiter {
     ) -> Result<(), anyhow::Error> {
         let peer_bucket = self.peer_bucket(peer_id)?;
         let key = format!("ratelimit:decline_cooldown:{}:{}", user_id, peer_bucket);
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let mut conn = self.redis.clone();
         let _: () = redis::cmd("SETEX")
             .arg(key)
-            .arg(60)
+            .arg(60i64)
             .arg("1")
             .query_async(&mut conn)
             .await?;
@@ -68,13 +78,16 @@ impl RateLimiter {
     }
 
     pub(crate) async fn check_turn_rate(&self, user_id: &str) -> Result<bool, anyhow::Error> {
-        let mut conn = self.redis.get_multiplexed_async_connection().await?;
+        let mut conn = self.redis.clone();
         let key = format!("ratelimit:turn:{}", user_id);
-        let count: i64 = redis::pipe()
-            .incr(&key, 1i64)
-            .expire(&key, 30)
-            .query_async(&mut conn)
-            .await?;
+        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
+        if count == 1 {
+            let _: () = redis::cmd("EXPIRE")
+                .arg(&key)
+                .arg(30i64)
+                .query_async(&mut conn)
+                .await?;
+        }
         Ok(count <= 1)
     }
 

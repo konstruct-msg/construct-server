@@ -6,7 +6,6 @@
 
 use anyhow::Result;
 use construct_redis::RedisClient;
-use redis::AsyncCommands;
 
 pub(crate) struct TokenManager<'a> {
     client: &'a mut RedisClient,
@@ -17,7 +16,9 @@ impl<'a> TokenManager<'a> {
         Self { client }
     }
 
-    /// Store refresh token in Redis for validation and revocation
+    /// Store refresh token in Redis for validation and revocation.
+    /// Also registers the JTI in the per-user reverse index (user_tokens:{user_id})
+    /// so that revoke_all_user_tokens can work without a KEYS scan.
     pub(crate) async fn store_refresh_token(
         &mut self,
         jti: &str,
@@ -25,11 +26,12 @@ impl<'a> TokenManager<'a> {
         ttl_seconds: i64,
     ) -> Result<()> {
         let key = format!("refresh_token:{}", jti);
-        // Store user_id with the token for validation
-        let _: () = self
-            .client
+        let index_key = format!("user_tokens:{}", user_id);
+        self.client
             .set_ex(&key, user_id, ttl_seconds as u64)
             .await?;
+        self.client.sadd(&index_key, jti).await?;
+        self.client.expire(&index_key, ttl_seconds).await?;
         Ok(())
     }
 
@@ -47,25 +49,25 @@ impl<'a> TokenManager<'a> {
         Ok(())
     }
 
-    /// Revoke all refresh tokens for a user (logout from all devices)
+    /// Revoke all refresh tokens for a user (logout from all devices).
+    /// Uses the per-user reverse index user_tokens:{user_id} (populated by store_refresh_token)
+    /// to avoid a KEYS scan which blocks the Redis event loop.
     pub(crate) async fn revoke_all_user_tokens(&mut self, user_id: &str) -> Result<()> {
-        // Pattern: refresh_token:*
-        // Use KEYS for simplicity (in production with many tokens, use SCAN)
-        let pattern = "refresh_token:*";
+        let index_key = format!("user_tokens:{}", user_id);
 
-        // Note: KEYS can block Redis, but for token revocation it's acceptable
-        // In high-scale production, maintain a reverse index: user_tokens:{user_id} -> Set{jti}
-        let keys: Vec<String> = self.client.connection_mut().keys(pattern).await?;
+        let jtis: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(&index_key)
+            .query_async(self.client.connection_mut())
+            .await
+            .unwrap_or_default();
 
-        let mut deleted_count = 0;
-        for key in keys {
-            // Check if this token belongs to the user
-            let stored_user_id: Option<String> = self.client.get(&key).await?;
-            if stored_user_id.as_deref() == Some(user_id) {
-                let _: i64 = self.client.del(&key).await?;
-                deleted_count += 1;
-            }
+        let mut deleted_count = 0usize;
+        for jti in &jtis {
+            let token_key = format!("refresh_token:{}", jti);
+            let n: i64 = self.client.del(&token_key).await.unwrap_or(0);
+            deleted_count += n as usize;
         }
+        self.client.del(&index_key).await.unwrap_or(0i64);
 
         tracing::info!(
             user_id = %user_id,

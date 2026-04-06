@@ -158,20 +158,41 @@ impl AuthService for AuthGrpcService {
         request: Request<proto::VerifyTokenRequest>,
     ) -> Result<Response<proto::VerifyTokenResponse>, Status> {
         let token = request.into_inner().access_token;
-        match self.context.auth_manager.verify_token(&token) {
-            Ok(claims) => Ok(Response::new(proto::VerifyTokenResponse {
-                valid: true,
-                user_id: Some(claims.sub),
-                device_id: None,
-                expires_at: Some(claims.exp),
-            })),
-            Err(_) => Ok(Response::new(proto::VerifyTokenResponse {
+        let claims = match self.context.auth_manager.verify_token(&token) {
+            Ok(c) => c,
+            Err(_) => {
+                return Ok(Response::new(proto::VerifyTokenResponse {
+                    valid: false,
+                    user_id: None,
+                    device_id: None,
+                    expires_at: None,
+                }));
+            }
+        };
+
+        // Check access token blocklist (populated by logout)
+        let invalidated = {
+            let mut queue = self.context.queue.lock().await;
+            queue
+                .is_token_invalidated(&claims.jti)
+                .await
+                .unwrap_or(false)
+        };
+        if invalidated {
+            return Ok(Response::new(proto::VerifyTokenResponse {
                 valid: false,
                 user_id: None,
                 device_id: None,
                 expires_at: None,
-            })),
+            }));
         }
+
+        Ok(Response::new(proto::VerifyTokenResponse {
+            valid: true,
+            user_id: Some(claims.sub),
+            device_id: None,
+            expires_at: Some(claims.exp),
+        }))
     }
 
     async fn authenticate_device(
@@ -222,6 +243,8 @@ impl AuthService for AuthGrpcService {
             app_context,
             user_id,
             req.all_devices,
+            Some(&claims.jti),
+            Some(claims.exp),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -378,6 +401,8 @@ impl AuthService for AuthGrpcService {
             app_context.clone(),
             user_id,
             true,
+            None, // recovery flow — no specific access token to invalidate; all_devices revokes refresh tokens
+            None,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;

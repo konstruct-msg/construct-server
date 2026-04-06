@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         env::var("RATE_LIMIT_PEER_SALT").unwrap_or_else(|_| make_default_peer_salt(&turn_secret));
 
     let instance_id = env::var("INSTANCE_ID").unwrap_or_else(|_| make_instance_id());
-    let registry = Arc::new(CallRegistry::new(&redis_url, instance_id)?);
+    let registry = Arc::new(CallRegistry::new(&redis_url, instance_id).await?);
 
     tokio::spawn(Arc::clone(&registry).instance_pubsub_loop());
     tokio::spawn(Arc::clone(&registry).cleanup_loop());

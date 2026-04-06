@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::devices;
 use axum::Json;
+use chrono::Utc;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_utils::log_safe_id;
@@ -212,7 +213,22 @@ pub async fn logout_user(
     app_context: Arc<AppContext>,
     user_id: Uuid,
     all_devices: bool,
+    access_jti: Option<&str>,
+    access_exp: Option<i64>,
 ) -> Result<(), AppError> {
+    // Invalidate the current access token so it cannot be reused after logout.
+    // TTL is set to the token's remaining lifetime so the entry self-expires.
+    if let (Some(jti), Some(exp)) = (access_jti, access_exp) {
+        let remaining = (exp - Utc::now().timestamp()).max(0);
+        if remaining > 0 {
+            let mut queue = app_context.queue.lock().await;
+            if let Err(e) = queue.invalidate_access_token(jti, remaining).await {
+                tracing::error!(error = %e, "Failed to add access token to blocklist");
+                // Continue logout — best-effort blocklist, short TTL limits exposure
+            }
+        }
+    }
+
     if all_devices {
         let mut queue = app_context.queue.lock().await;
         if let Err(e) = queue.revoke_all_user_tokens(&user_id.to_string()).await {
