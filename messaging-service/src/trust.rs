@@ -270,12 +270,18 @@ mod tests {
 
     #[test]
     fn test_trust_level_warming_7_to_30_days() {
-        assert_eq!(TrustLevel::from_age_hours(200.0, &cfg()), TrustLevel::Warming);
+        assert_eq!(
+            TrustLevel::from_age_hours(200.0, &cfg()),
+            TrustLevel::Warming
+        );
     }
 
     #[test]
     fn test_trust_level_trusted_over_30_days() {
-        assert_eq!(TrustLevel::from_age_hours(800.0, &cfg()), TrustLevel::Trusted);
+        assert_eq!(
+            TrustLevel::from_age_hours(800.0, &cfg()),
+            TrustLevel::Trusted
+        );
     }
 
     #[test]
@@ -493,9 +499,9 @@ mod tests {
                 / 86400;
             let key = format!("fanout:{}:{}", user_id, day);
 
-            let r1 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
-            let r2 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
-            let r3 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
+            let r1 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
+            let r2 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
+            let r3 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
             del_key(&mut redis, &key).await;
 
             // HLL is approximate, but for a single element it must stay at 1.

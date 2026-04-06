@@ -78,10 +78,9 @@ impl MessagingService for MessagingGrpcService {
             // the HTTP/2 PING frames fire and NAT/firewalls/ICE proxies do not silently
             // drop the connection. tonic 0.14 does not expose keepalive_while_idle, so
             // application-level traffic is the only way to maintain idle streams.
-            let mut heartbeat_interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(
-                    context.config.messaging.stream_heartbeat_interval_secs,
-                ));
+            let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                context.config.messaging.stream_heartbeat_interval_secs,
+            ));
 
             // If user_id is already known from auth metadata, subscribe now and
             // flush any messages that arrived before the stream opened.
@@ -283,9 +282,13 @@ impl MessagingService for MessagingGrpcService {
         // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.
         let mut trust_level = crate::trust::TrustLevel::Trusted;
         if let Ok(mut redis_conn) = self.context.redis_conn().await {
-            let trust =
-                crate::trust::get_trust_level(&mut redis_conn, &self.context.db_pool, sender_id, &self.context.config.messaging)
-                    .await;
+            let trust = crate::trust::get_trust_level(
+                &mut redis_conn,
+                &self.context.db_pool,
+                sender_id,
+                &self.context.config.messaging,
+            )
+            .await;
             trust_level = trust;
 
             // Hourly message rate check
@@ -298,7 +301,8 @@ impl MessagingService for MessagingGrpcService {
             .await;
 
             if let Err(pow_level) = hourly_result {
-                let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &self.context.config.messaging);
+                let (challenge, expires_at) =
+                    crate::trust::make_challenge(pow_level, &self.context.config.messaging);
                 tracing::info!(
                     sender = %sender_id,
                     pow_level,
@@ -338,7 +342,8 @@ impl MessagingService for MessagingGrpcService {
                 .await;
 
                 if let Err(pow_level) = fanout_result {
-                    let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &self.context.config.messaging);
+                    let (challenge, expires_at) =
+                        crate::trust::make_challenge(pow_level, &self.context.config.messaging);
                     tracing::info!(
                         sender = %sender_id,
                         pow_level,
@@ -377,7 +382,8 @@ impl MessagingService for MessagingGrpcService {
             content_type: envelope.content_type,
             edits_message_id: envelope.edits_message_id.clone(),
         });
-        kafka_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
+        kafka_envelope.max_queue_len =
+            Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(&app_context, kafka_envelope)
