@@ -76,11 +76,13 @@ impl MessagingService for MessagingGrpcService {
             let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
             let mut wakeup_subscribed = false;
 
-            // Fallback poll interval — 5 s safety net for any missed pub/sub wakeup.
+            // Fallback poll interval — safety net for any missed pub/sub wakeup.
             // Real-time delivery is handled by spawn_inbox_wakeup (Redis pub/sub with
             // auto-reconnect). This fallback caps worst-case delay if a wakeup signal
             // is missed during the pub/sub subscribe race window (~50ms at stream open).
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                context.config.messaging.stream_poll_fallback_secs,
+            ));
 
             // Server-initiated keepalive: send a HeartbeatAck to the client every 30 s
             // when the stream is otherwise idle. This keeps the H2 stream active so that

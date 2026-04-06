@@ -65,7 +65,8 @@ static_resources:
                         # Media service
                         - match: { prefix: "/shared.proto.services.v1.MediaService" }
                           route: { cluster: media_service, timeout: 60s }
-                        # MLS service
+                        # MLS service — stub (disabled in docker-compose.prod.yml until v2).
+                        # Envoy returns 503 if a client calls MLS endpoints while mls container is down.
                         - match: { prefix: "/shared.proto.services.v1.MlsService" }
                           route: { cluster: mls_service, timeout: 30s }
                         # Sentinel service

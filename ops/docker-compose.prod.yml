@@ -257,20 +257,22 @@ services:
     networks:
       - internal
 
-  mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
-    command: /usr/local/bin/mls-service
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      METRICS_PORT: "8091"
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
+  # mls-service is a v2 stub (all endpoints return Unimplemented).
+  # Disabled until MLS group chat is implemented to avoid wasting resources.
+  # mls:
+  #   image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
+  #   command: /usr/local/bin/mls-service
+  #   restart: unless-stopped
+  #   env_file:
+  #     - path: /opt/construct/secrets/app.env
+  #       required: true
+  #   environment:
+  #     RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+  #     METRICS_PORT: "8091"
+  #   volumes:
+  #     - /opt/construct/secrets:/secrets:ro
+  #   networks:
+  #     - internal
 
   sentinel:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
