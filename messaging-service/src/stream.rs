@@ -356,8 +356,13 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
 }
 
 /// Poll for new messages from Redis Streams
+///
+/// Takes `queue` as a per-stream clone rather than locking the global
+/// `context.queue` mutex. This allows concurrent XREAD calls from multiple
+/// connected users without serializing on a single lock.
 pub(crate) async fn poll_messages(
-    context: &Arc<MessagingServiceContext>,
+    queue: &mut construct_queue::MessageQueue,
+    config: &construct_config::MessagingConfig,
     user_id: uuid::Uuid,
     last_stream_id: &mut Option<String>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
@@ -365,26 +370,15 @@ pub(crate) async fn poll_messages(
     let user_id_str = user_id.to_string();
     let limit = 50;
 
-    let t_lock = std::time::Instant::now();
-    let mut queue = context.queue.lock().await;
-    let lock_wait_ms = t_lock.elapsed().as_millis();
-
     let t_xread = std::time::Instant::now();
     let messages = queue
         .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
         .await?;
     let xread_ms = t_xread.elapsed().as_millis();
 
-    drop(queue);
-
     let msg_count = messages.len();
-    if lock_wait_ms > 20 || xread_ms > context.config.messaging.stream_xread_slow_ms {
-        tracing::info!(
-            lock_wait_ms,
-            xread_ms,
-            msg_count,
-            "poll_messages timing (slow)"
-        );
+    if xread_ms > config.stream_xread_slow_ms {
+        tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
     }
 
     for (stream_id, envelope) in messages {
