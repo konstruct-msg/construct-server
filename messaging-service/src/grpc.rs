@@ -29,27 +29,8 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<tonic::Streaming<proto::MessageStreamRequest>>,
     ) -> Result<Response<Self::MessageStreamStream>, Status> {
-        // Extract authenticated user_id: first try x-user-id (set by gateway/proxy),
-        // then fall back to Authorization Bearer JWT (set directly by the client).
-        let auth_user_id: Option<uuid::Uuid> = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .or_else(|| {
-                request
-                    .metadata()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .and_then(|token| {
-                        self.context
-                            .auth_manager
-                            .verify_token(token)
-                            .ok()
-                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
-                    })
-            });
+        let auth_user_id: Option<uuid::Uuid> =
+            extract_authed_user_id(request.metadata(), &self.context).await;
 
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
@@ -576,27 +557,10 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::EditMessageRequest>,
     ) -> Result<Response<proto::EditMessageResponse>, Status> {
-        // Extract authenticated sender_id from x-user-id header or Bearer JWT
-        let sender_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .or_else(|| {
-                request
-                    .metadata()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .and_then(|token| {
-                        self.context
-                            .auth_manager
-                            .verify_token(token)
-                            .ok()
-                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
-                    })
-            })
-            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
+        // Extract authenticated sender_id from x-user-id header or Bearer JWT (+ blocklist check)
+        let sender_id = extract_authed_user_id(request.metadata(), &self.context)
+            .await
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
 
         let req = request.into_inner();
         if req.message_id.is_empty() {
@@ -714,26 +678,10 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::GetPendingMessagesRequest>,
     ) -> Result<Response<proto::GetPendingMessagesResponse>, Status> {
-        let user_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                request
-                    .metadata()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .and_then(|token| {
-                        self.context
-                            .auth_manager
-                            .verify_token(token)
-                            .ok()
-                            .map(|claims| claims.sub)
-                    })
-            })
-            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
+        let user_id = extract_authed_user_id(request.metadata(), &self.context)
+            .await
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?
+            .to_string();
 
         let req = request.into_inner();
         let limit = req.limit.unwrap_or(50).min(100) as usize;
@@ -818,26 +766,9 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::RequestKeySyncRequest>,
     ) -> Result<Response<proto::RequestKeySyncResponse>, Status> {
-        let sender_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .or_else(|| {
-                request
-                    .metadata()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .and_then(|token| {
-                        self.context
-                            .auth_manager
-                            .verify_token(token)
-                            .ok()
-                            .and_then(|claims| uuid::Uuid::parse_str(&claims.sub).ok())
-                    })
-            })
-            .ok_or_else(|| Status::unauthenticated("Missing authentication"))?;
+        let sender_id = extract_authed_user_id(request.metadata(), &self.context)
+            .await
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
 
         let recipient_user_id = request.into_inner().recipient_user_id;
         if recipient_user_id.is_empty() {
@@ -882,6 +813,70 @@ pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+// ============================================================================
+// Auth Helpers
+// ============================================================================
+
+/// Extract the authenticated user UUID from gRPC request metadata.
+///
+/// Resolution order:
+/// 1. `x-user-id` header — injected by the gateway after it has already
+///    validated the JWT. Trusted; no further checks needed.
+/// 2. `Authorization: Bearer <jwt>` — used for direct (non-gateway) gRPC
+///    connections. Requires both cryptographic verification **and** a Redis
+///    blocklist check (fail-closed: rejects on Redis error).
+///
+/// Returns `None` when no auth header is present or when the JWT is
+/// invalid / revoked.
+async fn extract_authed_user_id(
+    metadata: &tonic::metadata::MetadataMap,
+    context: &MessagingServiceContext,
+) -> Option<uuid::Uuid> {
+    if let Some(uid) = metadata
+        .get("x-user-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    {
+        return Some(uid);
+    }
+
+    let token = metadata
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_owned())?;
+
+    let claims = context.auth_manager.verify_token(&token).ok()?;
+    let user_id = uuid::Uuid::parse_str(&claims.sub).ok()?;
+
+    // Fail-closed: reject the request if Redis is unavailable or the token
+    // has been explicitly revoked (e.g. via logout or device removal).
+    let mut redis = match context.redis_conn().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "Redis unavailable for blocklist check — rejecting JWT");
+            return None;
+        }
+    };
+
+    let key = format!("invalidated_token:{}", claims.jti);
+    match redis::cmd("EXISTS")
+        .arg(&key)
+        .query_async::<bool>(&mut redis)
+        .await
+    {
+        Ok(false) => Some(user_id),
+        Ok(true) => {
+            tracing::warn!(jti = %claims.jti, "Rejected revoked access token in gRPC auth");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Blocklist EXISTS check failed — rejecting JWT");
+            None
+        }
+    }
 }
 
 // ============================================================================
