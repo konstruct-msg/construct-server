@@ -15,9 +15,6 @@
 //
 // ============================================================================
 
-mod handlers;
-pub mod routes;
-
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::Response};
 use construct_config::Config;
