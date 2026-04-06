@@ -16,6 +16,7 @@ pub(crate) async fn handle_stream_request(
     context: &Arc<MessagingServiceContext>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     user_id: &mut Option<uuid::Uuid>,
+    last_stream_id: &mut Option<String>,
 ) -> anyhow::Result<()> {
     use proto::message_stream_request::Request as StreamReq;
 
@@ -43,6 +44,7 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -58,6 +60,7 @@ pub(crate) async fn handle_stream_request(
                 let response = proto::MessageStreamResponse {
                     response: Some(proto::message_stream_response::Response::Ack(ack)),
                     response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                 };
                 tx.send(Ok(response)).await?;
                 return Ok(());
@@ -119,6 +122,7 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -148,6 +152,7 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                         };
                         tx.send(Ok(response)).await?;
                         return Ok(());
@@ -185,6 +190,7 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Ack(ack)),
                             response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                         };
 
                         tx.send(Ok(response)).await?;
@@ -210,6 +216,7 @@ pub(crate) async fn handle_stream_request(
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
+                                stream_cursor: None,
                         };
 
                         tx.send(Ok(response)).await?;
@@ -227,6 +234,7 @@ pub(crate) async fn handle_stream_request(
             let response = proto::MessageStreamResponse {
                 response: Some(proto::message_stream_response::Response::HeartbeatAck(ack)),
                 response_id: Some(req.request_id),
+            stream_cursor: None,
             };
 
             tx.send(Ok(response)).await?;
@@ -248,11 +256,26 @@ pub(crate) async fn handle_stream_request(
                 relay_delivery_receipt(context, direct, uid.to_string()).await?;
             }
         }
-        Some(StreamReq::Typing(_))
-        | Some(StreamReq::Subscribe(_))
-        | Some(StreamReq::Unsubscribe(_)) => {
+        Some(StreamReq::Subscribe(sub)) => {
+            // conversation_ids are intentionally not logged or stored
+            // to avoid leaking the client's contact graph to the server.
+            // All messages for this user are already routed to their Redis stream regardless.
+            //
+            // If the subscribe carries a since_cursor, apply it as the resume position
+            // so that reconnecting clients don't re-read the entire Redis stream.
+            if let Some(cursor) = sub.since_cursor
+                && !cursor.is_empty()
+            {
+                tracing::debug!(cursor = %cursor, "Resuming stream from client cursor");
+                *last_stream_id = Some(cursor);
+            }
+        }
+        Some(StreamReq::Unsubscribe(_)) => {
+            // No-op: all messages are routed by user_id regardless of subscriptions
+        }
+        Some(StreamReq::Typing(_)) => {
             // Not implemented yet
-            tracing::debug!("Received unimplemented request type");
+            tracing::debug!("Received unimplemented request type (typing)");
         }
 
         None => {
@@ -370,7 +393,7 @@ pub(crate) async fn poll_messages(
             continue;
         };
 
-        let response = if matches!(
+        let mut response = if matches!(
             envelope.message_type,
             construct_server_shared::kafka::types::MessageType::Receipt
         ) {
@@ -390,8 +413,13 @@ pub(crate) async fn poll_messages(
                     proto_envelope,
                 )),
                 response_id: None,
+                stream_cursor: None,
             }
         };
+
+        // Attach the Redis stream position so the client can resume on the next
+        // reconnect by passing stream_cursor as SubscribeRequest.since_cursor.
+        response.stream_cursor = Some(stream_id.clone());
 
         tx.send(Ok(response)).await?;
         *last_stream_id = Some(stream_id);

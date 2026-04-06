@@ -62,6 +62,15 @@ impl MessagingService for MessagingGrpcService {
             // Initialise from auth metadata; may also be set from first Send message
             let mut user_id: Option<uuid::Uuid> = auth_user_id;
 
+            // Unique ID for this stream connection — used to correlate open/close log lines
+            let stream_conn_id = uuid::Uuid::new_v4();
+            let stream_opened_at = std::time::Instant::now();
+            tracing::info!(
+                stream_conn_id = %stream_conn_id,
+                user_id = user_id.map(|u| u.to_string()).unwrap_or_default(),
+                "MessageStream opened"
+            );
+
             // Wakeup channel: Redis pub/sub listener signals us when a new message
             // arrives so we can deliver immediately without waiting for the next poll.
             let (wakeup_tx, mut wakeup_rx) = mpsc::channel::<()>(4);
@@ -113,6 +122,7 @@ impl MessagingService for MessagingGrpcService {
                                     &context,
                                     &tx,
                                     &mut user_id,
+                                    &mut last_stream_id,
                                 ).await {
                                     tracing::warn!(error = %e, "Error handling stream request");
                                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
@@ -182,6 +192,7 @@ impl MessagingService for MessagingGrpcService {
                         };
                         if tx.send(Ok(proto::MessageStreamResponse {
                             response_id: None,
+                        stream_cursor: None,
                             response: Some(
                                 proto::message_stream_response::Response::HeartbeatAck(ack),
                             ),
@@ -194,7 +205,14 @@ impl MessagingService for MessagingGrpcService {
                 }
             };
 
-            tracing::info!(reason = close_reason, "MessageStream closed");
+            let lifetime_secs = stream_opened_at.elapsed().as_secs();
+            tracing::info!(
+                stream_conn_id = %stream_conn_id,
+                user_id = user_id.map(|u| u.to_string()).unwrap_or_default(),
+                reason = close_reason,
+                lifetime_secs,
+                "MessageStream closed"
+            );
         });
 
         let output_stream = ReceiverStream::new(rx);
@@ -250,6 +268,32 @@ impl MessagingService for MessagingGrpcService {
 
         use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
 
+        // ── Early idempotency fast-path ─────────────────────────────────────────
+        // Check if this message_id was already dispatched BEFORE touching rate
+        // counters.  Client retries after a disconnect share the same message_id,
+        // so without this check every retry inflates the hourly rate counter.
+        {
+            let mut queue = self.context.queue.lock().await;
+            match queue.is_message_duplicate(&message_id).await {
+                Ok(true) => {
+                    tracing::debug!(
+                        message_id = %message_id,
+                        "send_message: duplicate retry — returning cached success"
+                    );
+                    return Ok(Response::new(proto::SendMessageResponse {
+                        message_id,
+                        message_number: 0,
+                        server_timestamp: chrono::Utc::now().timestamp_millis(),
+                        success: true,
+                        error: None,
+                        rate_limit_challenge: None,
+                    }));
+                }
+                Ok(false) => {} // first time — proceed to rate check
+                Err(_) => {}    // fail-open: Redis unavailable, proceed normally
+            }
+        }
+
         // Block check: if recipient has blocked sender → return BLOCKED (not an error status).
         let recipient_id_uuid = uuid::Uuid::parse_str(&recipient.user_id)
             .map_err(|_| Status::invalid_argument("invalid recipient.user_id"))?;
@@ -280,6 +324,7 @@ impl MessagingService for MessagingGrpcService {
         // ── TrustLevel + rate limiting ─────────────────────────────────────────
         // Fail-open: if Redis is unavailable we skip rate checks and default to
         // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.
+        let t_rate = std::time::Instant::now();
         let mut trust_level = crate::trust::TrustLevel::Trusted;
         if let Ok(mut redis_conn) = self.context.redis_conn().await {
             let trust = crate::trust::get_trust_level(
@@ -374,6 +419,7 @@ impl MessagingService for MessagingGrpcService {
         }
 
         let t_dispatch = std::time::Instant::now();
+        let rate_ms = t_dispatch.duration_since(t_rate).as_millis();
         let mut kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
@@ -390,9 +436,11 @@ impl MessagingService for MessagingGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let total_ms = t_dispatch.elapsed().as_millis();
+        let dispatch_inner_ms = t_dispatch.elapsed().as_millis();
         tracing::info!(
-            dispatch_ms = total_ms,
+            rate_ms,
+            dispatch_ms = dispatch_inner_ms,
+            total_ms = t_rate.elapsed().as_millis(),
             message_id = %message_id,
             "send_message dispatch complete"
         );
