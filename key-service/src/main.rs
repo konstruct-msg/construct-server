@@ -524,7 +524,12 @@ async fn main() -> Result<()> {
 
     info!("gRPC server listening on {}", grpc_addr);
 
-    let grpc_server = construct_server_shared::grpc_server()
+    let grpc_server = construct_server_shared::grpc_server(
+        std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(45),
+    )
         .add_service(KeyServiceServer::new(grpc_service))
         .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
 

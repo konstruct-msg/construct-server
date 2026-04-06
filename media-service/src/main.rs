@@ -480,7 +480,7 @@ async fn main() -> Result<()> {
         let service = MediaGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server()
+        if let Err(e) = construct_server_shared::grpc_server(main_config.grpc_keepalive_interval_secs)
             .add_service(
                 MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024), // 2 MB per chunk
             )

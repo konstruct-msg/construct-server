@@ -256,11 +256,12 @@ async fn main() -> Result<()> {
     let grpc_addr = grpc_bind_address
         .parse()
         .context("Invalid INVITE_GRPC_BIND_ADDRESS")?;
+    let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = InviteGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server()
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(InviteServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

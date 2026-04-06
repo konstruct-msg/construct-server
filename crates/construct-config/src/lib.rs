@@ -14,6 +14,7 @@ mod federation;
 mod kafka;
 mod logging;
 mod media;
+mod messaging;
 mod microservices;
 mod redis;
 mod security;
@@ -30,6 +31,7 @@ pub use federation::{ApnsConfig, ApnsEnvironment, FederationConfig, MtlsConfig};
 pub use kafka::KafkaConfig;
 pub use logging::LoggingConfig;
 pub use media::MediaConfig;
+pub use messaging::MessagingConfig;
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use security::{CsrfConfig, SecurityConfig};
@@ -87,6 +89,9 @@ pub struct Config {
     pub offline_queue_prefix: String,
     pub delivery_queue_prefix: String,
     pub delivery_poll_interval_ms: u64,
+    /// HTTP/2 keepalive PING interval for gRPC servers (seconds).
+    /// Applied to all microservices via `grpc_server()`. Default: 45
+    pub grpc_keepalive_interval_secs: u64,
     pub rust_log: String,
 
     // Sub-configurations
@@ -102,6 +107,7 @@ pub struct Config {
     pub redis_channels: RedisChannels,
     pub media: MediaConfig,
     pub csrf: CsrfConfig,
+    pub messaging: MessagingConfig,
     pub microservices: MicroservicesConfig,
 
     // Legacy aliases (for backward compatibility)
@@ -193,6 +199,7 @@ impl Config {
         let media = MediaConfig::from_env();
         let csrf = CsrfConfig::from_env()?;
         let microservices = MicroservicesConfig::from_env();
+        let messaging = MessagingConfig::from_env();
 
         // Legacy federation aliases
         let instance_domain = federation.instance_domain.clone();
@@ -278,6 +285,11 @@ impl Config {
                 .and_then(|d| d.parse().ok())
                 .unwrap_or(DEFAULT_DELIVERY_POLL_INTERVAL_MS),
 
+            grpc_keepalive_interval_secs: std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(45),
+
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
 
             logging,
@@ -292,6 +304,7 @@ impl Config {
             redis_channels,
             media,
             csrf,
+            messaging,
             microservices,
 
             // Legacy aliases

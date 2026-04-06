@@ -76,7 +76,84 @@ pub(crate) async fn handle_stream_request(
                 if envelope.encrypted_payload.is_empty() {
                     return Err(anyhow::anyhow!("encrypted_payload is required"));
                 }
-                let message_id = uuid::Uuid::new_v4().to_string();
+
+                // Prefer client-provided message_id for idempotency; generate only as fallback.
+                use construct_server_shared::shared::proto::core::v1 as proto_core;
+                let message_id = match &envelope.message_id_type {
+                    Some(proto_core::envelope::MessageIdType::MessageId(id))
+                        if !id.is_empty() =>
+                    {
+                        id.clone()
+                    }
+                    _ => uuid::Uuid::new_v4().to_string(),
+                };
+
+                // ── Rate limiting (same policy as send_message gRPC) ────────
+                if let Ok(mut redis_conn) = context.redis_conn().await {
+                    let trust =
+                        crate::trust::get_trust_level(&mut redis_conn, &context.db_pool, *uid, &context.config.messaging)
+                            .await;
+
+                    if let Err(pow_level) =
+                        crate::trust::check_hourly_rate(&mut redis_conn, &uid.to_string(), trust.hourly_limit(&context.config.messaging), &context.config.messaging)
+                            .await
+                    {
+                        let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
+                        tracing::info!(
+                            sender = %uid,
+                            pow_level,
+                            "Rate limit exceeded — issuing PoW challenge (stream)"
+                        );
+                        // Encode challenge as JSON in error_message until the proto adds a
+                        // dedicated RateLimitChallenge variant to MessageStreamResponse.
+                        let challenge_json = format!(
+                            r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
+                            challenge, pow_level, expires_at
+                        );
+                        let error = proto::MessageError {
+                            message_id: message_id.clone(),
+                            error_code: proto::ErrorCode::RateLimit.into(),
+                            error_message: challenge_json,
+                            retryable: true,
+                        };
+                        let response = proto::MessageStreamResponse {
+                            response: Some(proto::message_stream_response::Response::Error(error)),
+                            response_id: Some(req.request_id.clone()),
+                        };
+                        tx.send(Ok(response)).await?;
+                        return Ok(());
+                    }
+
+                    if let Some(fanout_limit) = trust.fanout_limit(&context.config.messaging) {
+                        if let Err(pow_level) =
+                            crate::trust::check_fanout_rate(&mut redis_conn, &uid.to_string(), &recipient_id, fanout_limit, &context.config.messaging)
+                                .await
+                        {
+                            let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
+                            tracing::info!(
+                                sender = %uid,
+                                pow_level,
+                                "Fanout limit exceeded — issuing PoW challenge (stream)"
+                            );
+                            let challenge_json = format!(
+                                r#"{{"challenge":"{}","difficulty":{},"expires_at":{}}}"#,
+                                challenge, pow_level, expires_at
+                            );
+                            let error = proto::MessageError {
+                                message_id: message_id.clone(),
+                                error_code: proto::ErrorCode::RateLimit.into(),
+                                error_message: challenge_json,
+                                retryable: true,
+                            };
+                            let response = proto::MessageStreamResponse {
+                                response: Some(proto::message_stream_response::Response::Error(error)),
+                                response_id: Some(req.request_id.clone()),
+                            };
+                            tx.send(Ok(response)).await?;
+                            return Ok(());
+                        }
+                    }
+                }
 
                 use construct_server_shared::kafka::types::{
                     KafkaMessageEnvelope, ProtoEnvelopeContext,

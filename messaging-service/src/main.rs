@@ -205,11 +205,12 @@ async fn main() -> Result<()> {
         .parse()
         .context("Invalid MESSAGING_GRPC_BIND_ADDRESS")?;
     // Replace bare .serve() with graceful shutdown for gRPC
+    let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = MessagingGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server()
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(
                 MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
             )

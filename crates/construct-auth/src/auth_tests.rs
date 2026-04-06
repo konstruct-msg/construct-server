@@ -92,6 +92,7 @@ XQIDAQAB
             offline_queue_prefix: "queue:".to_string(),
             delivery_queue_prefix: "delivery:".to_string(),
             delivery_poll_interval_ms: 100,
+            grpc_keepalive_interval_secs: 45,
             rust_log: "info".to_string(),
             logging: LoggingConfig {
                 enable_message_metadata: false,
@@ -216,6 +217,7 @@ XQIDAQAB
                 cookie_name: "csrf_token".to_string(),
                 header_name: "X-CSRF-Token".to_string(),
             },
+            messaging: construct_config::MessagingConfig::default(),
             microservices: MicroservicesConfig {
                 enabled: false,
                 auth_service_url: "http://localhost:8001".to_string(),

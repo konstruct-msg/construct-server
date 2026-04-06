@@ -20,6 +20,7 @@
 use std::fmt::Write as FmtWrite;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use construct_config::MessagingConfig;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -39,12 +40,10 @@ pub enum TrustLevel {
 }
 
 impl TrustLevel {
-    pub fn from_age_hours(hours: f64) -> Self {
-        if hours < 168.0 {
-            // < 7 days
+    pub fn from_age_hours(hours: f64, config: &MessagingConfig) -> Self {
+        if hours < config.trust_new_max_age_hours {
             Self::New
-        } else if hours < 720.0 {
-            // < 30 days
+        } else if hours < config.trust_warming_max_age_hours {
             Self::Warming
         } else {
             Self::Trusted
@@ -52,29 +51,29 @@ impl TrustLevel {
     }
 
     /// Maximum messages per hour for this trust level.
-    pub fn hourly_limit(self) -> u32 {
+    pub fn hourly_limit(self, config: &MessagingConfig) -> u32 {
         match self {
-            Self::New => 20,
-            Self::Warming => 100,
-            Self::Trusted => 500,
+            Self::New => config.hourly_limit_new,
+            Self::Warming => config.hourly_limit_warming,
+            Self::Trusted => config.hourly_limit_trusted,
         }
     }
 
     /// Maximum unique recipients per day. `None` = unlimited.
-    pub fn fanout_limit(self) -> Option<u32> {
+    pub fn fanout_limit(self, config: &MessagingConfig) -> Option<u32> {
         match self {
-            Self::New => Some(10),
-            Self::Warming => Some(50),
+            Self::New => Some(config.fanout_limit_new),
+            Self::Warming => Some(config.fanout_limit_warming),
             Self::Trusted => None,
         }
     }
 
     /// MAXLEN applied to the recipient's offline queue when this sender writes.
     /// New senders get a smaller queue cap to prevent queue-flooding attacks.
-    pub fn queue_maxlen(self) -> i64 {
+    pub fn queue_maxlen(self, config: &MessagingConfig) -> i64 {
         match self {
-            Self::New => 100,
-            Self::Warming | Self::Trusted => 10_000,
+            Self::New => config.queue_maxlen_new,
+            Self::Warming | Self::Trusted => config.queue_maxlen_standard,
         }
     }
 }
@@ -91,6 +90,7 @@ pub async fn get_trust_level(
     redis: &mut ConnectionManager,
     pool: &PgPool,
     user_id: Uuid,
+    config: &MessagingConfig,
 ) -> TrustLevel {
     let cache_key = format!("trust:{}", user_id);
 
@@ -100,7 +100,7 @@ pub async fn get_trust_level(
         .query_async::<Option<f64>>(redis)
         .await
     {
-        return TrustLevel::from_age_hours(hours);
+        return TrustLevel::from_age_hours(hours, config);
     }
 
     // Cache miss — query the DB.
@@ -116,7 +116,7 @@ pub async fn get_trust_level(
         .query_async::<()>(redis)
         .await;
 
-    TrustLevel::from_age_hours(age_hours)
+    TrustLevel::from_age_hours(age_hours, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -127,24 +127,37 @@ pub async fn get_trust_level(
 ///
 /// Returns `Ok(current_count)` when under the limit, or `Err(pow_difficulty)`
 /// when the limit is exceeded (difficulty scales with overage).
+///
+/// Critically, the counter is **not** incremented when the limit is already
+/// exceeded — this prevents rate-limited retries from inflating the counter
+/// further (which would unfairly escalate the PoW difficulty on each attempt).
 pub async fn check_hourly_rate(
     redis: &mut ConnectionManager,
     user_id: &str,
     limit: u32,
+    config: &MessagingConfig,
 ) -> Result<i64, u32> {
     let key = format!("rate:msg:{}:hour", user_id);
 
-    // Atomic INCR + set TTL on first write.
+    // Atomic check-then-increment: only INCR when still under the limit so that
+    // rate-limited retries do not inflate the counter (and therefore the PoW ratio).
+    // If already at or above the limit, return the current count without touching it.
     let count: i64 = redis::Script::new(
         r#"
-        local current = redis.call('INCR', KEYS[1])
-        if current == 1 then
+        local limit = tonumber(ARGV[1])
+        local current = redis.call('GET', KEYS[1])
+        if current ~= false and tonumber(current) >= limit then
+            return tonumber(current)
+        end
+        local new_count = redis.call('INCR', KEYS[1])
+        if new_count == 1 then
             redis.call('EXPIRE', KEYS[1], 3600)
         end
-        return current
+        return new_count
         "#,
     )
     .key(&key)
+    .arg(limit)
     .invoke_async(redis)
     .await
     .unwrap_or(0);
@@ -153,12 +166,12 @@ pub async fn check_hourly_rate(
         Ok(count)
     } else {
         let ratio = count as f64 / limit as f64;
-        let pow_level = if ratio >= 5.0 {
-            8
-        } else if ratio >= 3.0 {
-            6
+        let pow_level = if ratio >= config.pow_ratio_high {
+            config.pow_level_high
+        } else if ratio >= config.pow_ratio_mid {
+            config.pow_level_mid
         } else {
-            4
+            config.pow_level_low
         };
         Err(pow_level)
     }
@@ -170,13 +183,14 @@ pub async fn check_hourly_rate(
 
 /// Track daily unique recipients via Redis HyperLogLog.
 ///
-/// Returns `Ok(approx_count)` when under the fanout limit, or `Err(4)` when
+/// Returns `Ok(approx_count)` when under the fanout limit, or `Err(pow_level_low)` when
 /// the daily unique-recipient cap is exceeded.
 pub async fn check_fanout_rate(
     redis: &mut ConnectionManager,
     user_id: &str,
     recipient_id: &str,
     limit: u32,
+    config: &MessagingConfig,
 ) -> Result<u64, u32> {
     // Key includes calendar day (days since epoch) so it naturally rolls over.
     let day = SystemTime::now()
@@ -209,7 +223,7 @@ pub async fn check_fanout_rate(
     if count <= limit as u64 {
         Ok(count)
     } else {
-        Err(4u32)
+        Err(config.pow_level_low)
     }
 }
 
@@ -220,7 +234,7 @@ pub async fn check_fanout_rate(
 /// Build a random PoW challenge string and expiry timestamp.
 ///
 /// Returns `(challenge_hex, expires_at_unix_millis)`.
-pub fn make_challenge(difficulty: u32) -> (String, i64) {
+pub fn make_challenge(difficulty: u32, config: &MessagingConfig) -> (String, i64) {
     let bytes: [u8; 16] = rand::random();
     let mut challenge = String::with_capacity(32);
     for b in bytes {
@@ -230,7 +244,7 @@ pub fn make_challenge(difficulty: u32) -> (String, i64) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
-        + 60_000; // 60 seconds from now
+        + (config.challenge_expiry_secs as i64 * 1_000);
     let _ = difficulty; // used by caller in the proto field, not here
     (challenge, expires_at)
 }
@@ -243,59 +257,67 @@ pub fn make_challenge(difficulty: u32) -> (String, i64) {
 mod tests {
     use super::*;
 
+    fn cfg() -> MessagingConfig {
+        MessagingConfig::default()
+    }
+
     // ── Pure unit tests ───────────────────────────────────────────────────────
 
     #[test]
     fn test_trust_level_new_under_7_days() {
-        assert_eq!(TrustLevel::from_age_hours(100.0), TrustLevel::New);
+        assert_eq!(TrustLevel::from_age_hours(100.0, &cfg()), TrustLevel::New);
     }
 
     #[test]
     fn test_trust_level_warming_7_to_30_days() {
-        assert_eq!(TrustLevel::from_age_hours(200.0), TrustLevel::Warming);
+        assert_eq!(TrustLevel::from_age_hours(200.0, &cfg()), TrustLevel::Warming);
     }
 
     #[test]
     fn test_trust_level_trusted_over_30_days() {
-        assert_eq!(TrustLevel::from_age_hours(800.0), TrustLevel::Trusted);
+        assert_eq!(TrustLevel::from_age_hours(800.0, &cfg()), TrustLevel::Trusted);
     }
 
     #[test]
     fn test_trust_level_boundaries() {
+        let c = cfg();
         // Just below 168h (7 days) → New
-        assert_eq!(TrustLevel::from_age_hours(167.0), TrustLevel::New);
+        assert_eq!(TrustLevel::from_age_hours(167.0, &c), TrustLevel::New);
         // At exactly 168h → Warming
-        assert_eq!(TrustLevel::from_age_hours(168.0), TrustLevel::Warming);
+        assert_eq!(TrustLevel::from_age_hours(168.0, &c), TrustLevel::Warming);
         // Just below 720h (30 days) → Warming
-        assert_eq!(TrustLevel::from_age_hours(719.0), TrustLevel::Warming);
+        assert_eq!(TrustLevel::from_age_hours(719.0, &c), TrustLevel::Warming);
         // At exactly 720h → Trusted
-        assert_eq!(TrustLevel::from_age_hours(720.0), TrustLevel::Trusted);
+        assert_eq!(TrustLevel::from_age_hours(720.0, &c), TrustLevel::Trusted);
     }
 
     #[test]
     fn test_hourly_limit_values() {
-        assert_eq!(TrustLevel::New.hourly_limit(), 20);
-        assert_eq!(TrustLevel::Warming.hourly_limit(), 100);
-        assert_eq!(TrustLevel::Trusted.hourly_limit(), 500);
+        let c = cfg();
+        assert_eq!(TrustLevel::New.hourly_limit(&c), 20);
+        assert_eq!(TrustLevel::Warming.hourly_limit(&c), 100);
+        assert_eq!(TrustLevel::Trusted.hourly_limit(&c), 500);
     }
 
     #[test]
     fn test_fanout_limit_values() {
-        assert_eq!(TrustLevel::New.fanout_limit(), Some(10));
-        assert_eq!(TrustLevel::Warming.fanout_limit(), Some(50));
-        assert_eq!(TrustLevel::Trusted.fanout_limit(), None);
+        let c = cfg();
+        assert_eq!(TrustLevel::New.fanout_limit(&c), Some(10));
+        assert_eq!(TrustLevel::Warming.fanout_limit(&c), Some(50));
+        assert_eq!(TrustLevel::Trusted.fanout_limit(&c), None);
     }
 
     #[test]
     fn test_queue_maxlen_values() {
-        assert_eq!(TrustLevel::New.queue_maxlen(), 100);
-        assert_eq!(TrustLevel::Warming.queue_maxlen(), 10_000);
-        assert_eq!(TrustLevel::Trusted.queue_maxlen(), 10_000);
+        let c = cfg();
+        assert_eq!(TrustLevel::New.queue_maxlen(&c), 100);
+        assert_eq!(TrustLevel::Warming.queue_maxlen(&c), 10_000);
+        assert_eq!(TrustLevel::Trusted.queue_maxlen(&c), 10_000);
     }
 
     #[test]
     fn test_make_challenge_format() {
-        let (challenge, expires_at) = make_challenge(4);
+        let (challenge, expires_at) = make_challenge(4, &cfg());
         assert_eq!(challenge.len(), 32, "challenge must be 32 hex chars");
         assert!(
             challenge.chars().all(|c| c.is_ascii_hexdigit()),
@@ -314,18 +336,21 @@ mod tests {
 
     #[test]
     fn test_make_challenge_unique() {
-        let (c1, _) = make_challenge(4);
-        let (c2, _) = make_challenge(4);
+        let c = cfg();
+        let (c1, _) = make_challenge(4, &c);
+        let (c2, _) = make_challenge(4, &c);
         assert_ne!(c1, c2, "consecutive challenges must differ");
     }
-
-    // ── Integration tests (Redis required) ────────────────────────────────────
 
     #[cfg(feature = "integration_tests")]
     mod integration {
         use super::*;
         use serial_test::serial;
         use uuid::Uuid;
+
+        fn cfg() -> MessagingConfig {
+            MessagingConfig::default()
+        }
 
         async fn redis_conn() -> ConnectionManager {
             redis::Client::open("redis://127.0.0.1:6379")
@@ -346,7 +371,7 @@ mod tests {
             let user_id = format!("test:trust:{}:hourly", Uuid::new_v4());
             let key = format!("rate:msg:{}:hour", user_id);
 
-            let result = check_hourly_rate(&mut redis, &user_id, 10).await;
+            let result = check_hourly_rate(&mut redis, &user_id, 10, &cfg()).await;
             del_key(&mut redis, &key).await;
 
             assert!(result.is_ok(), "first message should be allowed");
@@ -367,14 +392,14 @@ mod tests {
                 .query_async::<i64>(&mut redis)
                 .await;
 
-            let result = check_hourly_rate(&mut redis, &user_id, 10).await;
+            let result = check_hourly_rate(&mut redis, &user_id, 10, &cfg()).await;
             del_key(&mut redis, &key).await;
 
             assert!(result.is_err(), "counter at limit+1 should return Err");
             assert_eq!(
                 result.unwrap_err(),
-                4u32,
-                "ratio just over 1× → difficulty 4"
+                6u32,
+                "ratio just over 1× → difficulty 6"
             );
         }
 
@@ -383,8 +408,9 @@ mod tests {
         async fn test_check_hourly_rate_pow_scales_with_ratio() {
             let mut redis = redis_conn().await;
             let limit = 10u32;
+            let c = cfg();
 
-            // 5× ratio → difficulty 8
+            // 5× ratio → difficulty 10
             let user_id_5x = format!("test:trust:{}:pow5x", Uuid::new_v4());
             let key_5x = format!("rate:msg:{}:hour", user_id_5x);
             let _: Result<i64, _> = redis::cmd("SET")
@@ -392,11 +418,11 @@ mod tests {
                 .arg((limit as i64 * 5) - 1)
                 .query_async::<i64>(&mut redis)
                 .await;
-            let result_5x = check_hourly_rate(&mut redis, &user_id_5x, limit).await;
+            let result_5x = check_hourly_rate(&mut redis, &user_id_5x, limit, &c).await;
             del_key(&mut redis, &key_5x).await;
-            assert_eq!(result_5x.unwrap_err(), 8u32, "5× ratio → difficulty 8");
+            assert_eq!(result_5x.unwrap_err(), 10u32, "5× ratio → difficulty 10");
 
-            // 3× ratio → difficulty 6
+            // 3× ratio → difficulty 8
             let user_id_3x = format!("test:trust:{}:pow3x", Uuid::new_v4());
             let key_3x = format!("rate:msg:{}:hour", user_id_3x);
             let _: Result<i64, _> = redis::cmd("SET")
@@ -404,9 +430,9 @@ mod tests {
                 .arg((limit as i64 * 3) - 1)
                 .query_async::<i64>(&mut redis)
                 .await;
-            let result_3x = check_hourly_rate(&mut redis, &user_id_3x, limit).await;
+            let result_3x = check_hourly_rate(&mut redis, &user_id_3x, limit, &c).await;
             del_key(&mut redis, &key_3x).await;
-            assert_eq!(result_3x.unwrap_err(), 6u32, "3× ratio → difficulty 6");
+            assert_eq!(result_3x.unwrap_err(), 8u32, "3× ratio → difficulty 8");
         }
 
         #[tokio::test]
@@ -421,8 +447,8 @@ mod tests {
                 / 86400;
             let key = format!("fanout:{}:{}", user_id, day);
 
-            let r1 = check_fanout_rate(&mut redis, &user_id, "recipient_a", 50).await;
-            let r2 = check_fanout_rate(&mut redis, &user_id, "recipient_b", 50).await;
+            let r1 = check_fanout_rate(&mut redis, &user_id, "recipient_a", 50, &cfg()).await;
+            let r2 = check_fanout_rate(&mut redis, &user_id, "recipient_b", 50, &cfg()).await;
             del_key(&mut redis, &key).await;
 
             assert!(r1.is_ok());
@@ -442,16 +468,17 @@ mod tests {
                 .as_secs()
                 / 86400;
             let key = format!("fanout:{}:{}", user_id, day);
+            let c = cfg();
 
             // Add 2 unique recipients with limit=2 to fill it.
-            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_1", 2).await;
-            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_2", 2).await;
+            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_1", 2, &c).await;
+            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_2", 2, &c).await;
             // Third unique recipient should exceed limit.
-            let result = check_fanout_rate(&mut redis, &user_id, "rcpt_3", 2).await;
+            let result = check_fanout_rate(&mut redis, &user_id, "rcpt_3", 2, &c).await;
             del_key(&mut redis, &key).await;
 
             assert!(result.is_err(), "exceeding fanout limit should return Err");
-            assert_eq!(result.unwrap_err(), 4u32);
+            assert_eq!(result.unwrap_err(), 6u32);
         }
 
         #[tokio::test]

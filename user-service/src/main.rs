@@ -623,11 +623,12 @@ async fn main() -> Result<()> {
         .parse()
         .context("Invalid USER_GRPC_BIND_ADDRESS")?;
     // Replace bare .serve() with graceful shutdown for gRPC
+    let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = UserGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server()
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(UserServiceServer::new(service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await
