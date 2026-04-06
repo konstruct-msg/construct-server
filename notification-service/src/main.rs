@@ -457,6 +457,7 @@ async fn main() -> Result<()> {
     info!("gRPC API listening on {}", grpc_bind_address);
 
     // Start both servers concurrently
+    let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     let rest_server = async move {
         let listener = tokio::net::TcpListener::bind(&config.bind_address)
             .await
@@ -468,7 +469,7 @@ async fn main() -> Result<()> {
     };
 
     let grpc_server = async move {
-        construct_server_shared::grpc_server()
+        construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(NotificationServiceServer::new(grpc_service))
             .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
             .await

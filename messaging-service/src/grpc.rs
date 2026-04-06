@@ -73,6 +73,16 @@ impl MessagingService for MessagingGrpcService {
             // is missed during the pub/sub subscribe race window (~50ms at stream open).
             let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
+            // Server-initiated keepalive: send a HeartbeatAck to the client every 30 s
+            // when the stream is otherwise idle. This keeps the H2 stream active so that
+            // the HTTP/2 PING frames fire and NAT/firewalls/ICE proxies do not silently
+            // drop the connection. tonic 0.14 does not expose keepalive_while_idle, so
+            // application-level traffic is the only way to maintain idle streams.
+            let mut heartbeat_interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(
+                    context.config.messaging.stream_heartbeat_interval_secs,
+                ));
+
             // If user_id is already known from auth metadata, subscribe now and
             // flush any messages that arrived before the stream opened.
             if let Some(uid) = user_id {
@@ -162,6 +172,24 @@ impl MessagingService for MessagingGrpcService {
                                 tracing::warn!("Error polling messages: {}", e);
                             }
                         }
+
+                    // Server-initiated keepalive: send a HeartbeatAck so the H2 stream
+                    // stays active and tonic's keepalive PINGs are triggered even during
+                    // periods with no user messages (idle chats, background app state).
+                    _ = heartbeat_interval.tick() => {
+                        let ack = proto::HeartbeatAck {
+                            timestamp: 0, // server-initiated; no prior client ping to echo
+                            server_timestamp: chrono::Utc::now().timestamp_millis(),
+                        };
+                        if tx.send(Ok(proto::MessageStreamResponse {
+                            response_id: None,
+                            response: Some(
+                                proto::message_stream_response::Response::HeartbeatAck(ack),
+                            ),
+                        })).await.is_err() {
+                            break 'stream "heartbeat_tx_closed";
+                        }
+                    }
 
                     else => break 'stream "all_channels_closed",
                 }
@@ -256,7 +284,7 @@ impl MessagingService for MessagingGrpcService {
         let mut trust_level = crate::trust::TrustLevel::Trusted;
         if let Ok(mut redis_conn) = self.context.redis_conn().await {
             let trust =
-                crate::trust::get_trust_level(&mut redis_conn, &self.context.db_pool, sender_id)
+                crate::trust::get_trust_level(&mut redis_conn, &self.context.db_pool, sender_id, &self.context.config.messaging)
                     .await;
             trust_level = trust;
 
@@ -264,12 +292,13 @@ impl MessagingService for MessagingGrpcService {
             let hourly_result = crate::trust::check_hourly_rate(
                 &mut redis_conn,
                 &sender_id.to_string(),
-                trust.hourly_limit(),
+                trust.hourly_limit(&self.context.config.messaging),
+                &self.context.config.messaging,
             )
             .await;
 
             if let Err(pow_level) = hourly_result {
-                let (challenge, expires_at) = crate::trust::make_challenge(pow_level);
+                let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &self.context.config.messaging);
                 tracing::info!(
                     sender = %sender_id,
                     pow_level,
@@ -298,17 +327,18 @@ impl MessagingService for MessagingGrpcService {
             }
 
             // Daily fanout limit check
-            if let Some(fanout_limit) = trust.fanout_limit() {
+            if let Some(fanout_limit) = trust.fanout_limit(&self.context.config.messaging) {
                 let fanout_result = crate::trust::check_fanout_rate(
                     &mut redis_conn,
                     &sender_id.to_string(),
                     &recipient.user_id,
                     fanout_limit,
+                    &self.context.config.messaging,
                 )
                 .await;
 
                 if let Err(pow_level) = fanout_result {
-                    let (challenge, expires_at) = crate::trust::make_challenge(pow_level);
+                    let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &self.context.config.messaging);
                     tracing::info!(
                         sender = %sender_id,
                         pow_level,
@@ -347,7 +377,7 @@ impl MessagingService for MessagingGrpcService {
             content_type: envelope.content_type,
             edits_message_id: envelope.edits_message_id.clone(),
         });
-        kafka_envelope.max_queue_len = Some(trust_level.queue_maxlen());
+        kafka_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(&app_context, kafka_envelope)

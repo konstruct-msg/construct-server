@@ -38,12 +38,14 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         access_token_ttl_hours: 1,
         session_ttl_days: 30,
         refresh_token_ttl_days: 90,
+        grpc_keepalive_interval_secs: 45,
         jwt_issuer: "construct-test".to_string(),
         online_channel: "test-online-channel".to_string(),
         offline_queue_prefix: "test_queue:".to_string(),
         delivery_queue_prefix: "test_delivery_queue".to_string(),
         delivery_poll_interval_ms: 1000,
         rust_log: "info".to_string(),
+        messaging: construct_config::MessagingConfig::default(),
         // These nested configs are not used by MessageQueue but are required by the Config struct
         logging: construct_config::LoggingConfig {
             enable_message_metadata: false,

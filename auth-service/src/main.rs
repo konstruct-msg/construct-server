@@ -1506,12 +1506,13 @@ async fn main() -> Result<()> {
     let grpc_addr = grpc_bind_address
         .parse()
         .context("Invalid AUTH_GRPC_BIND_ADDRESS")?;
+    let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = AuthGrpcService {
             context: grpc_context,
             ice_bridge_cert: grpc_ice_bridge_cert,
         };
-        if let Err(e) = construct_server_shared::grpc_server()
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(AuthServiceServer::new(service.clone()))
             .add_service(DeviceServiceServer::new(service.clone()))
             .add_service(DeviceLinkServiceServer::new(service))

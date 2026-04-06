@@ -355,17 +355,21 @@ pub async fn shutdown_signal() {
 
 /// Create a pre-configured tonic gRPC server with HTTP/2 keepalive and tuned window sizes.
 ///
-/// - Keepalive pings the client every 40s and closes unresponsive connections after 20s.
-///   iOS suspends sockets for up to ~30s when the app backgrounds; 40s interval avoids
-///   false-positive disconnects while still cleaning up truly dead connections.
+/// - Keepalive pings the client every `keepalive_interval_secs` seconds and closes
+///   unresponsive connections after 20s.  iOS suspends sockets for up to ~30s when the
+///   app backgrounds; the default 45s avoids false-positive disconnects while still
+///   cleaning up truly dead connections.  Configurable via `GRPC_KEEPALIVE_INTERVAL_SECS`.
+/// - Application-level heartbeats in MessageStream keep streams active (configurable via
+///   `MSG_STREAM_HEARTBEAT_INTERVAL_SECS`), ensuring the HTTP/2 PING fires even during idle
+///   periods (tonic 0.14 does not expose keepalive_while_idle).
 /// - HTTP/2 window sizes are set to 4 MB (connection) and 2 MB (per-stream) to prevent
-///   flow-control stalls when delivering large GetPendingMessages responses (many offline
-///   messages) without extra RTTs for window updates.
+///   flow-control stalls when delivering large GetPendingMessages responses without extra
+///   RTTs for window updates.
 /// - tcp_keepalive probes the underlying TCP connection every 30s; prevents the OS from
-///   silently dropping idle connections behind NAT/firewalls before Envoy notices.
-pub fn grpc_server() -> tonic::transport::Server {
+///   silently dropping idle connections behind NAT/firewalls.
+pub fn grpc_server(keepalive_interval_secs: u64) -> tonic::transport::Server {
     tonic::transport::Server::builder()
-        .http2_keepalive_interval(Some(std::time::Duration::from_secs(40)))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(keepalive_interval_secs)))
         .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
         .initial_connection_window_size(4 * 1024 * 1024) // 4 MB (default 64 KB)
         .initial_stream_window_size(2 * 1024 * 1024) // 2 MB (default 64 KB)
