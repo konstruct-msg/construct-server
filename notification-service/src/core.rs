@@ -328,7 +328,9 @@ pub async fn send_blind_notification(
         if invalid_token {
             tracing::warn!(
                 user_hash = %user_id_hash,
-                "APNs: token invalid/unregistered — disabling in DB"
+                push_environment = %token_row.push_environment,
+                push_provider = %token_row.push_provider,
+                "APNs: token invalid/rejected (BadDeviceToken, Unregistered, or 403 Forbidden — possible sandbox/production mismatch) — deleting from DB"
             );
             let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
                 .bind(&token_row.device_token_encrypted)
