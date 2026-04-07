@@ -194,6 +194,8 @@ services:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
+    depends_on:
+      - notification
 
   notification:
     image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.11.0}
