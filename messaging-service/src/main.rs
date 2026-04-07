@@ -74,11 +74,12 @@ async fn main() -> Result<()> {
 
     // Initialize Redis
     info!("Connecting to Redis...");
-    let queue = Arc::new(Mutex::new(
-        MessageQueue::new(&config)
-            .await
-            .context("Failed to create message queue")?,
-    ));
+    let message_queue = MessageQueue::new(&config)
+        .await
+        .context("Failed to create message queue")?;
+    // Clone ConnectionManager before moving queue into Mutex — allows lock-free access later.
+    let redis_conn = message_queue.clone_redis_connection();
+    let queue = Arc::new(Mutex::new(message_queue));
     info!("Connected to Redis");
 
     // Initialize Kafka Producer (or no-op stub when KAFKA_ENABLED=false)
@@ -204,6 +205,7 @@ async fn main() -> Result<()> {
         key_management,
         server_signer,
         server_instance_id: uuid::Uuid::new_v4().to_string(),
+        redis_conn,
     });
 
     // handlers module is local (messaging-service/src/handlers.rs)

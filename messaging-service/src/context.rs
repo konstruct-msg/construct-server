@@ -49,6 +49,9 @@ pub struct MessagingServiceContext {
     /// Stable ID for this process instance — stored in Redis at stream open so
     /// delivery-worker can resolve which messaging-service instance a user is on.
     pub server_instance_id: String,
+    /// Standalone Redis ConnectionManager for rate-limiting and caching.
+    /// Cloned lock-free without acquiring the queue Mutex.
+    pub redis_conn: redis::aio::ConnectionManager,
 }
 
 impl MessagingServiceContext {
@@ -88,10 +91,8 @@ impl construct_db::HasDbPool for MessagingServiceContext {
 impl MessagingServiceContext {
     /// Get a Redis ConnectionManager for rate-limiting and caching.
     ///
-    /// Briefly locks the queue to clone the ConnectionManager, then releases the lock.
-    /// The returned handle is independent — callers do not hold the queue lock during use.
+    /// Returns a clone of the standalone ConnectionManager — O(1), no lock acquired.
     pub async fn redis_conn(&self) -> anyhow::Result<redis::aio::ConnectionManager> {
-        let queue = self.queue.lock().await;
-        Ok(queue.clone_redis_connection())
+        Ok(self.redis_conn.clone())
     }
 }
