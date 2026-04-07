@@ -110,20 +110,21 @@ pub async fn register_device(
 
     // Encrypt device token and device name
     let token_hash = DeviceTokenEncryption::hash_token(&request.device_token);
-    let token_encrypted = app_context
+    let token_enc = app_context
         .token_encryption
-        .encrypt(&request.device_token)
-        .map_err(|e| {
-            tracing::error!(
-                error = %e,
-                user_hash = %user_id_hash,
-                "Failed to encrypt device token"
-            );
-            AppError::Unknown(e)
-        })?;
+        .as_ref()
+        .expect("token_encryption required in notification service");
+    let token_encrypted = token_enc.encrypt(&request.device_token).map_err(|e| {
+        tracing::error!(
+            error = %e,
+            user_hash = %user_id_hash,
+            "Failed to encrypt device token"
+        );
+        AppError::Unknown(e)
+    })?;
 
     let name_encrypted = if let Some(ref name) = request.device_name {
-        Some(app_context.token_encryption.encrypt(name).map_err(|e| {
+        Some(token_enc.encrypt(name).map_err(|e| {
             tracing::error!(
                 error = %e,
                 user_hash = %user_id_hash,

@@ -48,24 +48,12 @@ use construct_broker::{MessageConsumer, MessageProducer};
 use construct_config::Config;
 use construct_server_shared::utils::log_safe_id;
 use dlq::{check_and_increment_retry, send_to_dlq};
-use futures_util::stream::StreamExt;
 use processor::{ProcessResult, process_kafka_message};
-use serde::{Deserialize, Serialize};
 use state::WorkerState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-/// Notification that a user has come online
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UserOnlineNotification {
-    /// User ID that came online
-    user_id: String,
-
-    /// Unique ID of the server instance handling this user's connection
-    server_instance_id: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -119,12 +107,11 @@ async fn main() -> Result<()> {
     info!("Connecting to Redis at: {}", redis_url_safe);
 
     // Connect to Redis
-    let client =
-        redis::Client::open(config.redis_url.as_str()).context("Failed to create Redis client")?;
-
-    let redis_conn = redis::aio::ConnectionManager::new(client.clone())
-        .await
-        .context("Failed to create Redis ConnectionManager")?;
+    let redis_conn = redis::aio::ConnectionManager::new(
+        redis::Client::open(config.redis_url.as_str()).context("Failed to create Redis client")?,
+    )
+    .await
+    .context("Failed to create Redis ConnectionManager")?;
 
     info!("Connected to Redis");
 
@@ -163,7 +150,7 @@ async fn main() -> Result<()> {
             shutdown_signal.store(true, Ordering::SeqCst);
         });
 
-        run_kafka_consumer_mode(state, client, shutdown).await
+        run_kafka_consumer_mode(state, shutdown).await
     } else {
         // KAFKA_ENABLED=false → Redis-only mode.
         // In this mode messaging-service writes directly to Redis Streams and
@@ -182,11 +169,7 @@ async fn main() -> Result<()> {
 /// CRITICAL: Offset is committed ONLY for Success and Skipped results.
 /// UserOffline results do NOT commit offset - Kafka will redeliver.
 /// Processing errors use DLQ after MAX_RETRIES to avoid infinite loops.
-async fn run_kafka_consumer_mode(
-    state: Arc<WorkerState>,
-    redis_client: redis::Client,
-    shutdown: Arc<AtomicBool>,
-) -> Result<()> {
+async fn run_kafka_consumer_mode(state: Arc<WorkerState>, shutdown: Arc<AtomicBool>) -> Result<()> {
     // Initialize message consumer
     let consumer =
         MessageConsumer::new(&state.config.kafka).context("Failed to initialize Kafka consumer")?;
@@ -200,18 +183,6 @@ async fn run_kafka_consumer_mode(
         "Polling messages from Kafka topic: {}",
         state.config.kafka.topic
     );
-
-    // Spawn user online notification listener
-    let state_clone = state.clone();
-    let redis_client_clone = redis_client.clone();
-    let _online_notification_handle = tokio::spawn(async move {
-        if let Err(e) = run_user_online_notification_listener(state_clone, redis_client_clone).await
-        {
-            error!(error = %e, "User online notification listener failed");
-        }
-    });
-    info!("Started user online notification listener");
-    info!("Subscribed to channel: {}", state.config.online_channel);
 
     // Metrics for logging
     let mut messages_delivered: u64 = 0;
@@ -366,84 +337,4 @@ async fn run_kafka_consumer_mode(
     }
     info!("Delivery worker stopped gracefully");
     Ok(())
-}
-
-/// Listen for user online notifications via Redis Pub/Sub
-///
-/// When a user comes online, Kafka consumer will automatically retry their messages
-/// because offsets were not committed (messages remained in Kafka).
-/// This listener is primarily for monitoring and logging.
-async fn run_user_online_notification_listener(
-    state: Arc<WorkerState>,
-    redis_client: redis::Client,
-) -> Result<()> {
-    loop {
-        let mut pubsub_conn = match redis_client.get_async_pubsub().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(error = %e, "Failed to create Redis Pub/Sub connection, retrying in 5s...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        // Subscribe to user online notifications
-        if let Err(e) = pubsub_conn
-            .subscribe(state.config.online_channel.as_str())
-            .await
-        {
-            error!(
-                error = %e,
-                channel = %state.config.online_channel,
-                "Failed to subscribe to user online notifications, retrying in 5s..."
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            continue;
-        }
-
-        info!(
-            channel = %state.config.online_channel,
-            "Subscribed to user online notifications"
-        );
-
-        // Listen for notifications
-        let mut stream = pubsub_conn.on_message();
-        while let Some(msg) = stream.next().await {
-            let payload: String = match msg.get_payload() {
-                Ok(p) => p,
-                Err(e) => {
-                    error!(error = %e, "Failed to get Pub/Sub message payload");
-                    continue;
-                }
-            };
-
-            // Parse notification
-            let notification: UserOnlineNotification = match serde_json::from_str(&payload) {
-                Ok(n) => n,
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        payload = %payload,
-                        "Failed to parse user online notification JSON"
-                    );
-                    continue;
-                }
-            };
-
-            // SECURITY: Hash user_id for privacy
-            let salt = &state.config.logging.hash_salt;
-            info!(
-                user_hash = %log_safe_id(&notification.user_id, salt),
-                "User came online - Kafka will redeliver any pending messages (offsets were not committed)"
-            );
-
-            // Note: We don't need to explicitly trigger Kafka consumer here.
-            // Kafka will automatically redeliver messages because offsets were not committed
-            // when user was offline. The consumer will process them on next poll().
-        }
-
-        // Stream ended - reconnect
-        warn!("Pub/Sub stream ended, reconnecting...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
 }
