@@ -219,8 +219,13 @@ impl ApnsClient {
                 // Detect permanently-invalid tokens so callers can disable them in the DB.
                 // BadDeviceToken  → token format wrong or environment mismatch
                 // Unregistered    → app was uninstalled, token no longer exists
+                // code 403        → APNs Forbidden; usually environment mismatch (sandbox token
+                //                   sent to production endpoint or vice versa). The `error` field
+                //                   is often `None` in this case because APNs returns an empty
+                //                   body. Retrying will never succeed — treat as invalid token.
                 let is_invalid_token = if let ApnsH2Error::ResponseError(ref resp) = e {
-                    resp.error
+                    let bad_reason = resp
+                        .error
                         .as_ref()
                         .map(|body| {
                             matches!(
@@ -228,7 +233,8 @@ impl ApnsClient {
                                 ErrorReason::BadDeviceToken | ErrorReason::Unregistered
                             )
                         })
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    bad_reason || resp.code == 403
                 } else {
                     false
                 };
