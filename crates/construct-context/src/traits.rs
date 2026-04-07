@@ -58,8 +58,8 @@ pub trait AuthProvider: Send + Sync {
 /// Trait for notification operations (for testing and dependency injection)
 #[allow(dead_code)]
 pub trait NotificationProvider: Send + Sync {
-    fn apns_client(&self) -> &Arc<ApnsClient>;
-    fn token_encryption(&self) -> &Arc<DeviceTokenEncryption>;
+    fn apns_client(&self) -> Option<&Arc<ApnsClient>>;
+    fn token_encryption(&self) -> Option<&Arc<DeviceTokenEncryption>>;
 }
 
 /// Trait for federation operations (for testing and dependency injection)
@@ -119,12 +119,12 @@ impl MessageProvider for crate::AppContext {
 }
 
 impl NotificationProvider for crate::AppContext {
-    fn apns_client(&self) -> &Arc<ApnsClient> {
-        &self.apns_client
+    fn apns_client(&self) -> Option<&Arc<ApnsClient>> {
+        self.apns_client.as_ref()
     }
 
-    fn token_encryption(&self) -> &Arc<DeviceTokenEncryption> {
-        &self.token_encryption
+    fn token_encryption(&self) -> Option<&Arc<DeviceTokenEncryption>> {
+        self.token_encryption.as_ref()
     }
 }
 

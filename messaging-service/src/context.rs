@@ -1,16 +1,11 @@
 // ============================================================================
-// Messaging Service - Phase 2.6.4 + APNs Integration
+// Messaging Service - Phase 2.6.4
 // ============================================================================
 //
 // Minimal context and utilities for Messaging Service microservice.
 //
-// Phase 2.9: Added APNs support for push notifications
-// - APNs client for sending silent push notifications
-// - Integrated directly into messaging service for low latency
-//
 // ============================================================================
 
-use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_broker::MessageProducer;
 use construct_config::Config;
@@ -32,12 +27,6 @@ pub struct MessagingServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub kafka_producer: Arc<MessageProducer>,
-    /// APNs production client (kept for to_app_context adapter compatibility)
-    pub apns_client: Arc<ApnsClient>,
-    /// APNs sandbox client (kept for to_app_context adapter compatibility)
-    pub apns_sandbox_client: Arc<ApnsClient>,
-    /// Device token encryption (kept for to_app_context adapter compatibility)
-    pub token_encryption: Arc<DeviceTokenEncryption>,
     /// gRPC client for notification-service — used for silent push instead of calling APNs directly
     pub notification_client: Option<NotificationClient>,
     /// gRPC client for sentinel-service — rate limiting and spam protection
@@ -58,16 +47,12 @@ impl MessagingServiceContext {
     /// Convert to AppContext for use with existing handlers
     /// This is a temporary adapter until handlers are refactored to use traits
     pub fn to_app_context(&self) -> AppContext {
-        // Create AppContext using builder pattern (Phase 2.8)
         let builder = AppContext::builder()
             .with_db_pool(self.db_pool.clone())
             .with_queue(self.queue.clone())
             .with_auth_manager(self.auth_manager.clone())
             .with_config(self.config.clone())
             .with_kafka_producer(self.kafka_producer.clone())
-            .with_apns_client(self.apns_client.clone())
-            .with_apns_sandbox_client(self.apns_sandbox_client.clone())
-            .with_token_encryption(self.token_encryption.clone())
             .with_server_instance_id(self.server_instance_id.clone());
 
         let builder = if let Some(signer) = &self.server_signer {

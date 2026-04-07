@@ -49,11 +49,14 @@ pub struct AppContext {
     /// Optional: some services (like auth) don't need Kafka
     pub kafka_producer: Option<Arc<MessageProducer>>,
     /// APNs client for push notifications (production tokens)
-    pub apns_client: Arc<ApnsClient>,
+    /// Optional: only required for services that send push notifications directly.
+    /// messaging-service delegates push to notification-service via gRPC and leaves this None.
+    pub apns_client: Option<Arc<ApnsClient>>,
     /// APNs sandbox client for development/TestFlight tokens
-    pub apns_sandbox_client: Arc<ApnsClient>,
+    pub apns_sandbox_client: Option<Arc<ApnsClient>>,
     /// Device token encryption for privacy
-    pub token_encryption: Arc<DeviceTokenEncryption>,
+    /// Optional: only required for services that register/decrypt device tokens.
+    pub token_encryption: Option<Arc<DeviceTokenEncryption>>,
     /// Unique identifier for this server instance (for delivery worker coordination)
     pub server_instance_id: String,
     /// Message Gateway client for delegating message processing (Phase 2+)
@@ -90,9 +93,9 @@ impl AppContext {
         auth_manager: Arc<AuthManager>,
         config: Arc<Config>,
         kafka_producer: Option<Arc<MessageProducer>>,
-        apns_client: Arc<ApnsClient>,
-        apns_sandbox_client: Arc<ApnsClient>,
-        token_encryption: Arc<DeviceTokenEncryption>,
+        apns_client: Option<Arc<ApnsClient>>,
+        apns_sandbox_client: Option<Arc<ApnsClient>>,
+        token_encryption: Option<Arc<DeviceTokenEncryption>>,
         server_instance_id: String,
     ) -> Self {
         // Initialize server signer if signing key is configured
@@ -202,9 +205,9 @@ impl AppContext {
     /// Get notification context (Phase 2.7)
     pub fn notifications(&self) -> NotificationContextRef<'_> {
         NotificationContextRef {
-            apns_client: &self.apns_client,
-            apns_sandbox_client: &self.apns_sandbox_client,
-            token_encryption: &self.token_encryption,
+            apns_client: self.apns_client.as_ref(),
+            apns_sandbox_client: self.apns_sandbox_client.as_ref(),
+            token_encryption: self.token_encryption.as_ref(),
         }
     }
 
@@ -255,9 +258,9 @@ pub struct AuthContextRef<'a> {
 
 /// Notification context reference (Phase 2.7)
 pub struct NotificationContextRef<'a> {
-    pub apns_client: &'a Arc<ApnsClient>,
-    pub apns_sandbox_client: &'a Arc<ApnsClient>,
-    pub token_encryption: &'a Arc<DeviceTokenEncryption>,
+    pub apns_client: Option<&'a Arc<ApnsClient>>,
+    pub apns_sandbox_client: Option<&'a Arc<ApnsClient>>,
+    pub token_encryption: Option<&'a Arc<DeviceTokenEncryption>>,
 }
 
 /// Federation context reference (Phase 2.7)
@@ -402,13 +405,6 @@ impl AppContextBuilder {
             .server_signer_override
             .or_else(|| AppContext::init_server_signer(&config));
 
-        let apns_client: Arc<ApnsClient> = self
-            .apns_client
-            .ok_or_else(|| "apns_client is required".to_string())?;
-        let apns_sandbox_client: Arc<ApnsClient> = self
-            .apns_sandbox_client
-            .unwrap_or_else(|| apns_client.clone());
-
         Ok(AppContext {
             db_pool: self
                 .db_pool
@@ -419,11 +415,9 @@ impl AppContextBuilder {
                 .ok_or_else(|| "auth_manager is required".to_string())?,
             config,
             kafka_producer: self.kafka_producer,
-            apns_client,
-            apns_sandbox_client,
-            token_encryption: self
-                .token_encryption
-                .ok_or_else(|| "token_encryption is required".to_string())?,
+            apns_client: self.apns_client,
+            apns_sandbox_client: self.apns_sandbox_client,
+            token_encryption: self.token_encryption,
             server_instance_id: self
                 .server_instance_id
                 .ok_or_else(|| "server_instance_id is required".to_string())?,

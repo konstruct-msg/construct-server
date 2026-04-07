@@ -16,7 +16,6 @@ use axum::{
     routing::{get, post},
 };
 use construct_config::Config;
-use construct_server_shared::apns::DeviceTokenEncryption;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::clients::sentinel::SentinelClient;
@@ -97,22 +96,6 @@ async fn main() -> Result<()> {
     // Initialize Auth Manager
     let auth_manager =
         Arc::new(AuthManager::new(&config).context("Failed to initialize auth manager")?);
-
-    // Initialize APNs clients — kept for to_app_context() adapter; push is delegated to notification-service
-    let apns_client = Arc::new(
-        construct_server_shared::apns::ApnsClient::new(config.apns.clone())
-            .context("Failed to initialize APNs client (adapter compat)")?,
-    );
-    let mut sandbox_config = config.apns.clone();
-    sandbox_config.environment = construct_config::ApnsEnvironment::Development;
-    let apns_sandbox_client = Arc::new(
-        construct_server_shared::apns::ApnsClient::new(sandbox_config)
-            .context("Failed to initialize APNs sandbox client (adapter compat)")?,
-    );
-    let token_encryption = Arc::new(
-        DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
-            .context("Failed to initialize device token encryption")?,
-    );
 
     // Initialize notification-service gRPC client for outgoing silent push
     let notification_client = match env::var("NOTIFICATION_SERVICE_URL")
@@ -196,9 +179,6 @@ async fn main() -> Result<()> {
         queue,
         auth_manager,
         kafka_producer,
-        apns_client,
-        apns_sandbox_client,
-        token_encryption,
         notification_client,
         sentinel_client,
         config: config.clone(),
