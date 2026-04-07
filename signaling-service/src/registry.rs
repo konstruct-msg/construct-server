@@ -604,6 +604,9 @@ impl CallRegistry {
                 .query_async(&mut conn)
                 .await;
         }
+
+        let mut calls = self.calls.write().await;
+        calls.insert(call_id, state);
     }
 
     pub(crate) async fn note_ringing(&self, call_id: &str) {
@@ -630,6 +633,9 @@ impl CallRegistry {
                 .query_async(&mut conn)
                 .await;
         }
+
+        let mut calls = self.calls.write().await;
+        calls.insert(call_id.to_string(), state);
     }
 
     pub(crate) async fn accept_call(
@@ -662,7 +668,12 @@ impl CallRegistry {
                 .await;
         }
 
-        Some((state.clone(), true))
+        {
+            let mut calls = self.calls.write().await;
+            calls.insert(call_id.to_string(), state.clone());
+        }
+
+        Some((state, true))
     }
 
     pub(crate) async fn is_user_busy(&self, user_id: &str) -> bool {
