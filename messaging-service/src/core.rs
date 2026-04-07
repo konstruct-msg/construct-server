@@ -176,8 +176,15 @@ pub async fn dispatch_envelope(
     if let Some(notif_client) = notification_client {
         let recipient = recipient_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = send_blind_notification(&notif_client, &recipient).await {
-                tracing::warn!(error = %e, "Failed to send blind notification via notification-service (non-critical)");
+            if notif_client.is_circuit_open() {
+                return; // service known down — skip silently until backoff expires
+            }
+            match send_blind_notification(&notif_client, &recipient).await {
+                Ok(()) => notif_client.record_success(),
+                Err(e) => {
+                    notif_client.record_failure();
+                    tracing::warn!(error = %e, "Failed to send blind notification via notification-service (non-critical) — pausing for 30s");
+                }
             }
         });
     }
@@ -200,7 +207,8 @@ async fn send_blind_notification(
             badge_count: None,
             activity_type: Some("new_message".to_string()),
         })
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     if resp.into_inner().success {
         tracing::debug!(recipient_id = %recipient_id, "Blind notification sent via notification-service");
     } else {
