@@ -170,13 +170,17 @@ impl AuthService for AuthGrpcService {
             }
         };
 
-        // Check access token blocklist (populated by logout)
+        // Check access token blocklist (populated by logout).
+        // Fail-closed: if Redis is unavailable, treat the token as invalidated.
         let invalidated = {
             let mut queue = self.context.queue.lock().await;
-            queue
-                .is_token_invalidated(&claims.jti)
-                .await
-                .unwrap_or(false)
+            match queue.is_token_invalidated(&claims.jti).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(error = %e, "Redis unavailable during token invalidation check — failing closed");
+                    true
+                }
+            }
         };
         if invalidated {
             return Ok(Response::new(proto::VerifyTokenResponse {

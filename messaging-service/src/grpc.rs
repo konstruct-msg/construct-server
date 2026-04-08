@@ -374,7 +374,7 @@ impl MessagingService for MessagingGrpcService {
                 sender_device_id
             };
             let (allowed, reason, retry_after) = sentinel
-                .check_send_permission(sender_device_id, target)
+                .check_send_permission_with_user(sender_device_id, target, &sender_id.to_string())
                 .await;
 
             if !allowed {

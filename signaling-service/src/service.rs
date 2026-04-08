@@ -24,6 +24,38 @@ use crate::routing::callee_user_id_from_route;
 use crate::time::unix_millis;
 use crate::turn::generate_turn_credentials;
 
+/// Simple per-stream token bucket rate limiter (no external crates).
+/// Refills at `rate_per_sec` tokens per second. Each `check()` consumes 1 token.
+struct TokenBucket {
+    tokens: f64,
+    rate_per_sec: f64,
+    last_refill: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn new(rate_per_sec: u32) -> Self {
+        Self {
+            tokens: rate_per_sec as f64,
+            rate_per_sec: rate_per_sec as f64,
+            last_refill: std::time::Instant::now(),
+        }
+    }
+
+    /// Returns `true` if the request is allowed, `false` if rate limit exceeded.
+    fn check(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.rate_per_sec);
+        self.last_refill = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub(crate) struct SignalingServiceImpl {
     pub(crate) registry: Arc<CallRegistry>,
     pub(crate) rate_limiter: RateLimiter,
@@ -98,6 +130,11 @@ impl SignalingService for SignalingServiceImpl {
 
         let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<SignalResponse, Status>>(64);
 
+        // Per-stream rate limiter: max 10 RoutedSignal messages per second.
+        // Prevents DoS amplification where one attacker floods signals that get
+        // forwarded to N devices of the callee.
+        let mut signal_limiter = TokenBucket::new(10);
+
         tokio::spawn(async move {
             let user_id = user_id.clone();
 
@@ -111,6 +148,23 @@ impl SignalingService for SignalingServiceImpl {
                         match msg_result {
                             Ok(msg) => match msg.request {
                                 Some(signal_request::Request::RoutedSignal(routed)) => {
+                                    // Enforce per-stream signal rate limit before forwarding.
+                                    if !signal_limiter.check() {
+                                        let _ = out_tx
+                                            .send(Ok(SignalResponse {
+                                                response: Some(
+                                                    signal_response::Response::Error(SignalError {
+                                                        code: SignalErrorCode::RateLimited as i32,
+                                                        message:
+                                                            "Signal rate limit exceeded (max 10/sec)"
+                                                                .into(),
+                                                    }),
+                                                ),
+                                            }))
+                                            .await;
+                                        continue;
+                                    }
+
                                     registry
                                         .touch_online(&user_id, &device_id_for_inbound)
                                         .await;

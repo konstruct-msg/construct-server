@@ -513,6 +513,19 @@ pub async fn register_device_v2(
     )
     .await
     .map_err(|e| {
+        // Check for unique_identity_public constraint violation (PostgreSQL SQLSTATE 23505)
+        if let Some(sqlx::Error::Database(db_err)) = e.downcast_ref::<sqlx::Error>()
+            && db_err.code().as_deref() == Some("23505")
+            && db_err
+                .constraint()
+                .is_some_and(|c| c.contains("identity_public"))
+        {
+            tracing::warn!(
+                device_id = %request.device_id,
+                "Registration failed: identity key already registered"
+            );
+            return AppError::Conflict("Identity key already registered by another device".into());
+        }
         tracing::error!(error = %e, "Failed to create user with device");
         AppError::Unknown(e)
     })?;

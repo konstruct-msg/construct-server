@@ -162,11 +162,10 @@ impl<'a> DeliveryManager<'a> {
             };
 
             let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
-                if let (Ok(ts), Ok(_seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
-                    // Next ID is either same timestamp with seq+1, or next timestamp with seq 0
-                    // Since we don't know if there are more messages at same timestamp,
-                    // use (timestamp+1)-0 to be safe
-                    format!("{}-0", ts + 1)
+                if let (Ok(ts), Ok(seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
+                    // Next ID = same timestamp, seq+1 — preserves messages at same timestamp
+                    // with a higher sequence number (e.g. ack "1707584371151-0" keeps "-1", "-2", …)
+                    format!("{}-{}", ts, seq + 1)
                 } else {
                     // Invalid format, skip deletion
                     tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format");

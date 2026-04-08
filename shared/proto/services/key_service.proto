@@ -180,6 +180,11 @@ message PreKeyBundle {
 
   // Monotonically increasing counter for Kyber SPK rotations.
   optional uint32 kyber_spk_rotation_epoch = 18;
+
+  // Ed25519 signature over the canonical bundle bytes, signed by the server's bundle signing key.
+  // Empty when bundle signing is not configured on the server (dev/test environments).
+  // Clients SHOULD verify this when non-empty using the public key from /.well-known/construct-server.
+  bytes bundle_signature = 19;
 }
 
 // ============================================================================

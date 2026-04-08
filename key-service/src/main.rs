@@ -20,6 +20,9 @@ mod core;
 
 use anyhow::{Context, Result};
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use ed25519_dalek::SigningKey;
+use redis::aio::ConnectionManager as RedisConnectionManager;
 use serde_json::json;
 use std::env;
 use std::net::SocketAddr;
@@ -49,6 +52,10 @@ const LOW_PREKEY_THRESHOLD: u32 = 5;
 struct KeyServiceContext {
     db: sqlx::PgPool,
     notification_client: Option<NotificationClient>,
+    redis: RedisConnectionManager,
+    /// Optional server Ed25519 key for signing pre-key bundles.
+    /// `None` when `BUNDLE_SIGNING_KEY` env var is not set (dev/test).
+    bundle_signing_key: Option<SigningKey>,
 }
 
 impl KeyServiceContext {
@@ -58,6 +65,12 @@ impl KeyServiceContext {
         let db = sqlx::PgPool::connect(&database_url)
             .await
             .context("Failed to connect to database")?;
+
+        let redis_url = env::var("REDIS_URL").context("REDIS_URL must be set")?;
+        let redis_client = redis::Client::open(redis_url).context("Failed to open Redis client")?;
+        let redis = RedisConnectionManager::new(redis_client)
+            .await
+            .context("Failed to connect to Redis")?;
 
         let notification_client = env::var("NOTIFICATION_SERVICE_URL")
             .ok()
@@ -72,9 +85,41 @@ impl KeyServiceContext {
                 }
             });
 
+        // Optional server bundle signing key
+        let bundle_signing_key = match env::var("BUNDLE_SIGNING_KEY") {
+            Ok(b64) => match BASE64.decode(b64.trim()) {
+                Ok(bytes) => {
+                    let arr: Result<[u8; 32], _> = bytes.try_into();
+                    match arr {
+                        Ok(seed) => {
+                            let sk = SigningKey::from_bytes(&seed);
+                            info!("Bundle signing key loaded — bundles will be server-signed");
+                            Some(sk)
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "BUNDLE_SIGNING_KEY must be 32 bytes — bundle signing disabled"
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to decode BUNDLE_SIGNING_KEY — bundle signing disabled");
+                    None
+                }
+            },
+            Err(_) => {
+                tracing::info!("BUNDLE_SIGNING_KEY not set — bundle signing disabled");
+                None
+            }
+        };
+
         Ok(Self {
             db,
             notification_client,
+            redis,
+            bundle_signing_key,
         })
     }
 }
@@ -82,6 +127,14 @@ impl KeyServiceContext {
 // ============================================================================
 // gRPC Service Implementation
 // ============================================================================
+
+/// Extract the caller's device_id from gRPC metadata (set by Envoy/gateway).
+fn extract_device_id<T>(req: &Request<T>) -> Option<String> {
+    req.metadata()
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
 
 #[derive(Clone)]
 struct KeyGrpcService {
@@ -98,16 +151,46 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::GetPreKeyBundleRequest>,
     ) -> Result<Response<proto::GetPreKeyBundleResponse>, Status> {
+        // Rate limit: max 10 bundle requests per minute per (caller_device, target_user) pair.
+        // This prevents OTPK exhaustion attacks where an attacker drains all one-time pre-keys,
+        // degrading forward-secrecy for the target.
+        let caller_device = extract_device_id(&request).unwrap_or_else(|| "anonymous".to_string());
         let req = request.into_inner();
 
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
 
-        let bundle =
-            core::get_prekey_bundle(&self.context.db, &req.user_id, req.device_id.as_deref())
+        {
+            let mut redis = self.context.redis.clone();
+            let rate_key = format!("rate:bundle:{}:{}", caller_device, req.user_id);
+            let count: i64 = redis::cmd("INCR")
+                .arg(&rate_key)
+                .query_async(&mut redis)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .unwrap_or(0);
+            if count == 1 {
+                let _: Result<(), _> = redis::cmd("EXPIRE")
+                    .arg(&rate_key)
+                    .arg(60i64)
+                    .query_async(&mut redis)
+                    .await;
+            }
+            if count > 10 {
+                return Err(Status::resource_exhausted(
+                    "Too many bundle requests — try again later",
+                ));
+            }
+        }
+
+        let bundle = core::get_prekey_bundle(
+            &self.context.db,
+            &req.user_id,
+            req.device_id.as_deref(),
+            self.context.bundle_signing_key.as_ref(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         match bundle {
             Some(b) => {
@@ -136,13 +219,12 @@ impl KeyService for KeyGrpcService {
                         spk_rotation_epoch: b.spk_rotation_epoch,
                         kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                         kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
+                        bundle_signature: b.bundle_signature.unwrap_or_default(),
                     }),
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
                     verifying_key: b.verifying_key,
                 });
-
-                // Fire-and-forget: check if replenishment notification needed.
                 if let Some(notif_client) = self.context.notification_client.clone() {
                     let db = self.context.db.clone();
                     tokio::spawn(async move {
@@ -479,10 +561,14 @@ impl KeyService for KeyGrpcService {
             Some(req.device_ids.as_slice())
         };
 
-        let (bundles, unavailable) =
-            core::get_prekey_bundles(&self.context.db, &req.user_id, device_ids)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        let (bundles, unavailable) = core::get_prekey_bundles(
+            &self.context.db,
+            &req.user_id,
+            device_ids,
+            self.context.bundle_signing_key.as_ref(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         // Collect per-device info for low-prekey check before consuming the iterator.
         let notify_items: Vec<(String, bool)> = if self.context.notification_client.is_some() {
@@ -517,6 +603,7 @@ impl KeyService for KeyGrpcService {
                     spk_rotation_epoch: b.spk_rotation_epoch,
                     kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                     kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
+                    bundle_signature: b.bundle_signature.unwrap_or_default(),
                 }),
                 platform: 0, // Unknown
             })

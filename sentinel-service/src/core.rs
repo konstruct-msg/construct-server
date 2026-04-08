@@ -123,7 +123,20 @@ impl SentinelCore {
 
     // ── Trust level ───────────────────────────────────────────────────────────
 
+    /// Returns the trust level for a device.
+    /// Fails closed: if Redis or DB are unavailable, returns `TrustLevel::Flagged`
+    /// (restricted limits) rather than propagating a 500 that could cause retry storms.
     pub async fn trust_level(&self, device_id: &str) -> Result<TrustLevel> {
+        match self.trust_level_inner(device_id).await {
+            Ok(level) => Ok(level),
+            Err(e) => {
+                warn!(error = %e, device_id = %device_id, "Trust level check failed — falling back to Flagged");
+                Ok(TrustLevel::Flagged)
+            }
+        }
+    }
+
+    async fn trust_level_inner(&self, device_id: &str) -> Result<TrustLevel> {
         let mut conn = self.redis().await?;
 
         // Fast path: ban/flag cached in Redis
@@ -225,6 +238,25 @@ impl SentinelCore {
         Ok(((limit - used).max(0), limit))
     }
 
+    /// User-level aggregate message quota: same hourly ceiling as per-device, but shared
+    /// across all devices of the user. Prevents N-device bypass.
+    /// Key: `sentinel:rate:msg:user:{user_id}`
+    pub async fn user_msg_quota(&self, user_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
+        let limit = trust.msg_limit_hour();
+        if limit <= 0 {
+            return Ok((0, limit));
+        }
+
+        let mut conn = self.redis().await?;
+        let key = format!("sentinel:rate:msg:user:{}", user_id);
+        let used: i64 = conn.incr(&key, 1i64).await.unwrap_or(1);
+        if used == 1 {
+            let _: Result<(), _> = conn.expire(&key, 3600i64).await;
+        }
+
+        Ok(((limit as i64 - used).max(0) as i32, limit))
+    }
+
     /// Increment rate-limit violation counter for stats.
     async fn record_violation(&self) {
         if let Ok(mut conn) = self.redis().await {
@@ -241,6 +273,7 @@ impl SentinelCore {
         &self,
         caller_device_id: &str,
         target_device_id: &str,
+        caller_user_id: Option<&str>,
     ) -> Result<SendPermission> {
         let trust = self.trust_level(caller_device_id).await?;
 
@@ -264,7 +297,7 @@ impl SentinelCore {
             });
         }
 
-        // Check hourly message rate
+        // Check device-level hourly message rate
         let (remaining, _) = self.msg_quota(caller_device_id, trust).await?;
         if remaining == 0 {
             self.record_violation().await;
@@ -273,6 +306,22 @@ impl SentinelCore {
                 denial_reason: "Hourly message limit reached".into(),
                 retry_after_seconds: 3600,
             });
+        }
+
+        // User-level aggregate ceiling: prevents N-device bypass where an attacker
+        // registers N devices and gets N × per-device limit.
+        if let Some(user_id) = caller_user_id {
+            if !user_id.is_empty() {
+                let (user_remaining, _) = self.user_msg_quota(user_id, trust).await?;
+                if user_remaining == 0 {
+                    self.record_violation().await;
+                    return Ok(SendPermission {
+                        allowed: false,
+                        denial_reason: "User hourly message limit reached".into(),
+                        retry_after_seconds: 3600,
+                    });
+                }
+            }
         }
 
         Ok(SendPermission {
