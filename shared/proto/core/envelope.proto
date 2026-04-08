@@ -166,8 +166,15 @@ enum ContentType {
   // Server is opaque to payload — E2EE is fully preserved.
   CONTENT_TYPE_SENDER_SYNC = 23;
 
+  // SESSION_RESET_INIT — atomic END_SESSION + new X3DH session init in a single
+  // delivery. The encrypted_payload carries the full EncryptedRatchetMessage with
+  // msgNum=0 under the new INITIATOR session. Eliminates the ordering race of the
+  // legacy two-step (END_SESSION → 200ms delay → session ping) tie-break path.
+  // Server treats this identically to E2EE_SIGNAL (opaque bytes, no inspection).
+  CONTENT_TYPE_SESSION_RESET_INIT = 24;
+
   // Reserved for future types
-  reserved 3 to 9, 13 to 19, 24 to 100;
+  reserved 3 to 9, 13 to 19, 25 to 100;
 }
 
 // MessagePriority - Delivery priority

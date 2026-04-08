@@ -57,13 +57,20 @@ pub(crate) fn convert_kafka_envelope_to_proto(
 
     // Map Kafka MessageType → proto ContentType so clients can detect control messages
     // (SESSION_RESET, END_SESSION, KEY_SYNC) without trying to decrypt them.
-    let content_type = match envelope.message_type {
-        MessageType::ControlMessage => match envelope.encrypted_payload.as_str() {
-            "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
-            "KEY_SYNC" => core::ContentType::KeySync,
+    // If proto_content_type is set (new path), use it directly — preserves the exact
+    // content_type the sender specified (e.g. SESSION_RESET_INIT=24, SENDER_SYNC=23).
+    let content_type = if let Some(ct) = envelope.proto_content_type {
+        core::ContentType::try_from(ct).unwrap_or(core::ContentType::E2eeSignal)
+    } else {
+        // Legacy fallback for envelopes without proto_content_type
+        match envelope.message_type {
+            MessageType::ControlMessage => match envelope.encrypted_payload.as_str() {
+                "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
+                "KEY_SYNC" => core::ContentType::KeySync,
+                _ => core::ContentType::E2eeSignal,
+            },
             _ => core::ContentType::E2eeSignal,
-        },
-        _ => core::ContentType::E2eeSignal,
+        }
     };
 
     // For control messages, send empty payload — the ASCII type string ("END_SESSION",

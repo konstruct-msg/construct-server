@@ -152,6 +152,14 @@ pub struct KafkaMessageEnvelope {
     /// to prevent spam flooding of recipient queues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_queue_len: Option<i64>,
+
+    /// Original proto ContentType value (from Envelope.content_type).
+    /// Preserved through Kafka so egress paths can reconstruct the exact
+    /// content_type the client sent (e.g. SESSION_RESET_INIT=24, SENDER_SYNC=23).
+    /// None for legacy envelopes created before this field existed — egress
+    /// falls back to inferring content_type from message_type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proto_content_type: Option<i32>,
 }
 
 impl KafkaMessageEnvelope {
@@ -188,6 +196,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -229,6 +238,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: Some(sealed_b64),
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -268,6 +278,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -302,6 +313,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -420,6 +432,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 }
@@ -472,6 +485,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     sealed_inner_b64: None,
                     edits_message_id: None,
                     max_queue_len: None,
+                    proto_content_type: None,
                 }
             }
             ConstructMessageType::EndSession => {
@@ -503,6 +517,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                     sealed_inner_b64: None,
                     edits_message_id: None,
                     max_queue_len: None,
+                    proto_content_type: None,
                 }
             }
         }
@@ -588,6 +603,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: ctx.edits_message_id.clone(),
             max_queue_len: None,
+            proto_content_type: Some(ctx.content_type),
         }
     }
 
@@ -633,6 +649,7 @@ impl KafkaMessageEnvelope {
             sealed_inner_b64: None,
             edits_message_id: Some(original_message_id),
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 }
@@ -801,6 +818,73 @@ mod tests {
             decoded, fake_ciphertext,
             "encrypted_payload must be stored verbatim (base64), not parsed"
         );
+    }
+
+    #[test]
+    fn test_from_proto_envelope_session_reset_init_preserves_content_type() {
+        let ctx = ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            message_id: "reset-init-1".to_string(),
+            encrypted_payload: b"x3dh-init-payload".to_vec(),
+            content_type: 24, // SESSION_RESET_INIT
+            edits_message_id: None,
+        };
+
+        let env = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+
+        // SESSION_RESET_INIT carries encrypted payload → DirectMessage, not ControlMessage
+        assert_eq!(env.message_type, MessageType::DirectMessage);
+        assert_eq!(
+            env.proto_content_type,
+            Some(24),
+            "proto_content_type must preserve the original content_type=24"
+        );
+        // Payload must be base64-encoded ciphertext (not an ASCII control string)
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&env.encrypted_payload)
+            .expect("payload must be valid base64");
+        assert_eq!(decoded, b"x3dh-init-payload");
+    }
+
+    #[test]
+    fn test_serde_proto_content_type_absent_for_legacy() {
+        // proto_content_type has skip_serializing_if = "Option::is_none"
+        let env = KafkaMessageEnvelope::new_direct_message(
+            "msg-1".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+            vec![0u8; 32],
+            0,
+            "payload".to_string(),
+            "hash".to_string(),
+        );
+
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert!(
+            !json.contains("protoContentType"),
+            "protoContentType must be absent when None (backward compat)"
+        );
+    }
+
+    #[test]
+    fn test_serde_proto_content_type_round_trip() {
+        let ctx = ProtoEnvelopeContext {
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            message_id: "msg-rt".to_string(),
+            encrypted_payload: b"payload".to_vec(),
+            content_type: 24,
+            edits_message_id: None,
+        };
+        let env = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains("protoContentType"));
+
+        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.proto_content_type, Some(24));
     }
 
     // ── from_edit ─────────────────────────────────────────────────────────────

@@ -737,13 +737,17 @@ impl MessagingService for MessagingGrpcService {
                     return None;
                 }
 
-                let content_type = match env.message_type {
-                    MessageType::ControlMessage => match env.encrypted_payload.as_str() {
-                        "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
-                        "KEY_SYNC" => core::ContentType::KeySync,
+                let content_type = if let Some(ct) = env.proto_content_type {
+                    core::ContentType::try_from(ct).unwrap_or(core::ContentType::E2eeSignal)
+                } else {
+                    match env.message_type {
+                        MessageType::ControlMessage => match env.encrypted_payload.as_str() {
+                            "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
+                            "KEY_SYNC" => core::ContentType::KeySync,
+                            _ => core::ContentType::E2eeSignal,
+                        },
                         _ => core::ContentType::E2eeSignal,
-                    },
-                    _ => core::ContentType::E2eeSignal,
+                    }
                 };
 
                 // For control messages (SESSION_RESET / END_SESSION / KEY_SYNC), the payload
