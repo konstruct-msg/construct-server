@@ -64,7 +64,10 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) notification_client: Option<NotificationClient>,
     pub(crate) db_pool: Option<Arc<construct_db::DbPool>>,
     pub(crate) contact_hmac_secret: Arc<Vec<u8>>,
-    pub(crate) auth: Arc<AuthManager>,
+    /// JWT auth manager for device_id cross-verification.
+    /// `None` when JWT_PUBLIC_KEY is not available (falls back to trusting
+    /// the gateway-injected x-device-id header directly).
+    pub(crate) auth: Option<Arc<AuthManager>>,
 }
 
 fn caller_user_id<T>(req: &Request<T>) -> Result<String, Status> {
@@ -85,8 +88,17 @@ fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
 
 /// Extract and verify device_id from both x-device-id header and JWT token.
 /// This prevents header forgery attacks where an attacker spoofs x-device-id.
-fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<String, Status> {
+/// When `auth` is `None` (JWT_PUBLIC_KEY not configured), falls back to
+/// trusting the gateway-injected x-device-id header directly.
+fn verified_caller_device_id<T>(
+    req: &Request<T>,
+    auth: Option<&AuthManager>,
+) -> Result<String, Status> {
     let header_device_id = caller_device_id(req)?;
+
+    let Some(auth) = auth else {
+        return Ok(header_device_id);
+    };
 
     let token = req
         .metadata()
@@ -114,7 +126,7 @@ impl SignalingService for SignalingServiceImpl {
         request: Request<Streaming<SignalRequest>>,
     ) -> Result<Response<Self::SignalStream>, Status> {
         let user_id = caller_user_id(&request)?;
-        let device_id = verified_caller_device_id(&request, &self.auth)?;
+        let device_id = verified_caller_device_id(&request, self.auth.as_deref())?;
         let mut inbound = request.into_inner();
         let registry = Arc::clone(&self.registry);
         let rate_limiter = self.rate_limiter.clone();
@@ -321,7 +333,7 @@ impl SignalingService for SignalingServiceImpl {
     ) -> Result<Response<InitiateCallResponse>, Status> {
         tracing::info!("InitiateCall received");
         let caller_id = caller_user_id(&request)?;
-        let caller_device_id_str = verified_caller_device_id(&request, &self.auth)?;
+        let caller_device_id_str = verified_caller_device_id(&request, self.auth.as_deref())?;
         let req = request.into_inner();
 
         let call_id = req.call_id.clone();
