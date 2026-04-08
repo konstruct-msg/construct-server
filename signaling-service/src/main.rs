@@ -14,6 +14,8 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_auth::AuthManager;
+use construct_config::Config;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::signaling::v1::signaling_service_server::SignalingServiceServer;
 use sqlx::postgres::PgPoolOptions;
@@ -97,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("SignalingService listening on {}", addr);
 
+    // Load config for JWT public key verification
+    let config = Config::from_env().map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
+    let auth = Arc::new(
+        AuthManager::new(&config).map_err(|e| anyhow::anyhow!("AuthManager error: {}", e))?,
+    );
+
     let http_port: u16 = env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8091".into())
         .parse()?;
@@ -120,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         turn_ttl,
         notification_client,
         contact_hmac_secret: Arc::new(contact_hmac_secret),
+        auth: Arc::clone(&auth),
         db_pool: match env::var("DATABASE_URL") {
             Ok(url) if !url.trim().is_empty() => {
                 match PgPoolOptions::new()

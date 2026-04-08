@@ -38,6 +38,10 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 construct-crypto = { path = "../crates/construct-crypto", default-features = false }
 
+# Auth
+construct-auth = { path = "../crates/construct-auth" }
+construct-config = { path = "../crates/construct-config" }
+
 # Shared
 construct-server-shared = { path = "../shared" }
 construct-db = { path = "../crates/construct-db" }

@@ -49,6 +49,36 @@ impl<'a> TokenManager<'a> {
         Ok(())
     }
 
+    /// Consume refresh token atomically: check existence and delete in one operation.
+    /// Returns Some(user_id) if token was valid and consumed.
+    /// Returns None if token doesn't exist or was already consumed.
+    /// This prevents race conditions where two parallel refresh requests could both succeed.
+    pub(crate) async fn consume_refresh_token(&mut self, jti: &str) -> Result<Option<String>> {
+        let key = format!("refresh_token:{}", jti);
+        let script = redis::Script::new(
+            r#"
+            local val = redis.call('GET', KEYS[1])
+            if val then
+                redis.call('DEL', KEYS[1])
+                return val
+            else
+                return false
+            end
+            "#,
+        );
+        let result: redis::Value = script
+            .key(&key)
+            .invoke_async(self.client.connection_mut())
+            .await?;
+
+        match result {
+            redis::Value::BulkString(bytes) => {
+                Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Revoke all refresh tokens for a user (logout from all devices).
     /// Uses the per-user reverse index user_tokens:{user_id} (populated by store_refresh_token)
     /// to avoid a KEYS scan which blocks the Redis event loop.

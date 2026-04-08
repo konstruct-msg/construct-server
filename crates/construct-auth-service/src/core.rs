@@ -68,59 +68,65 @@ pub async fn refresh_tokens(
             AppError::Auth("Invalid or expired refresh token".to_string())
         })?;
 
-    // 2. Check if refresh token is revoked (soft logout)
-    {
+    // 2. Atomically consume refresh token - prevents race condition
+    // where two parallel refresh requests could both succeed
+    let user_id_from_token = {
         let mut queue = app_context.queue.lock().await;
-        match queue.check_refresh_token(&claims.jti).await {
-            Ok(Some(_)) => {
-                // Token is valid, continue
-            }
+        match queue.consume_refresh_token(&claims.jti).await {
+            Ok(Some(user_id)) => user_id,
             Ok(None) => {
                 drop(queue);
                 tracing::warn!(
                     jti = %claims.jti,
                     user_hash = %log_safe_id(&claims.sub, &app_context.config.logging.hash_salt),
-                    "Refresh token was revoked"
+                    "Refresh token was already used or revoked"
                 );
-                return Err(AppError::Auth("Refresh token was revoked".to_string()));
+                return Err(AppError::Auth(
+                    "Refresh token was already used or revoked".to_string(),
+                ));
             }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to check refresh token");
-                // Fail open - continue but log error
+                tracing::error!(error = %e, "Failed to consume refresh token - fail closed");
+                // Fail closed: if Redis is down, reject the request
+                return Err(AppError::Auth("Cannot verify refresh token".to_string()));
             }
         }
+    };
 
-        // 3. Revoke old refresh token (token rotation)
-        if let Err(e) = queue.revoke_refresh_token(&claims.jti).await {
-            tracing::error!(error = %e, "Failed to revoke old refresh token");
-            // Continue anyway - token rotation is best effort
-        }
-        drop(queue);
-    }
-
-    // 4. Parse user ID
+    // 3. Parse user ID from token claims
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Validation("Invalid user ID in refresh token".to_string()))?;
 
-    // 5. Create new access token (1 hour)
+    // Verify user_id matches (defense in depth)
+    if user_id_from_token != claims.sub {
+        tracing::error!(
+            jti = %claims.jti,
+            token_user_id = %claims.sub,
+            redis_user_id = %user_id_from_token,
+            "User ID mismatch between JWT and Redis"
+        );
+        return Err(AppError::Auth("Token validation failed".to_string()));
+    }
+
+    // 4. Create new access token (1 hour) - preserve device_id from old token
     let (new_access_token, _access_jti, access_expires) = app_context
         .auth_manager
-        .create_token(&user_id)
+        .create_token_for_device(&user_id, claims.device_id.as_deref())
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create access token");
             AppError::Unknown(e)
         })?;
 
-    // 6. Create new refresh token (30 days)
+    // 5. Create new refresh token (30 days) - preserve device_id from old token
     let (new_refresh_token, refresh_jti, _refresh_expires) = app_context
         .auth_manager
-        .create_refresh_token(&user_id)
+        .create_refresh_token_for_device(&user_id, claims.device_id.as_deref())
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create refresh token");
             AppError::Unknown(e)
         })?;
 
-    // 7. Store new refresh token in Redis
+    // 6. Store new refresh token in Redis
     {
         let mut queue = app_context.queue.lock().await;
         let refresh_ttl_seconds =

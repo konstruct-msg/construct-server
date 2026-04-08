@@ -15,6 +15,8 @@ pub struct Claims {
     pub exp: i64,    // Expiration time
     pub iat: i64,    // Issued at
     pub iss: String, // Issuer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>, // Device identifier for device-level auth
 }
 
 /// JWT Authentication Manager using RS256 (RSA) algorithm only.
@@ -85,6 +87,16 @@ impl AuthManager {
     /// Create access token (short-lived, for REST API)
     /// Returns error if AuthManager is in verify-only mode
     pub fn create_token(&self, user_id: &Uuid) -> Result<(String, String, i64)> {
+        self.create_token_for_device(user_id, None)
+    }
+
+    /// Create access token for a specific device
+    /// Returns error if AuthManager is in verify-only mode
+    pub fn create_token_for_device(
+        &self,
+        user_id: &Uuid,
+        device_id: Option<&str>,
+    ) -> Result<(String, String, i64)> {
         let encoding_key = self.encoding_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Cannot create tokens: verify-only mode (no JWT_PRIVATE_KEY)")
         })?;
@@ -99,6 +111,7 @@ impl AuthManager {
             exp: exp.timestamp(),
             iat: now.timestamp(),
             iss: self.issuer.clone(),
+            device_id: device_id.map(String::from),
         };
 
         let header = Header::new(Algorithm::RS256);
@@ -110,6 +123,16 @@ impl AuthManager {
     /// Create refresh token (long-lived, for token refresh)
     /// Returns error if AuthManager is in verify-only mode
     pub fn create_refresh_token(&self, user_id: &Uuid) -> Result<(String, String, i64)> {
+        self.create_refresh_token_for_device(user_id, None)
+    }
+
+    /// Create refresh token for a specific device
+    /// Returns error if AuthManager is in verify-only mode
+    pub fn create_refresh_token_for_device(
+        &self,
+        user_id: &Uuid,
+        device_id: Option<&str>,
+    ) -> Result<(String, String, i64)> {
         let encoding_key = self.encoding_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Cannot create tokens: verify-only mode (no JWT_PRIVATE_KEY)")
         })?;
@@ -124,6 +147,7 @@ impl AuthManager {
             exp: exp.timestamp(),
             iat: now.timestamp(),
             iss: self.issuer.clone(),
+            device_id: device_id.map(String::from),
         };
 
         let header = Header::new(Algorithm::RS256);
@@ -152,6 +176,29 @@ impl AuthManager {
             .context("JWT verification failed")?;
 
         Ok(token_data.claims)
+    }
+
+    /// Verify that the device_id from header matches the device_id in JWT claims.
+    /// Returns the device_id if verification succeeds.
+    /// Returns error if:
+    /// - Header device_id is missing
+    /// - Claims device_id is missing (token was created without device_id)
+    /// - Header device_id doesn't match claims device_id
+    pub fn verify_device_id(&self, header_device_id: &str, claims: &Claims) -> Result<String> {
+        let claims_device_id = claims
+            .device_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Token missing device_id claim"))?;
+
+        if header_device_id != claims_device_id {
+            anyhow::bail!(
+                "x-device-id header '{}' does not match token device_id '{}'",
+                header_device_id,
+                claims_device_id
+            );
+        }
+
+        Ok(header_device_id.to_string())
     }
 }
 
