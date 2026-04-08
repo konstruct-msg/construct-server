@@ -325,6 +325,7 @@ mod tests {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -349,6 +350,7 @@ mod tests {
             sealed_inner_b64: None,
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -373,6 +375,7 @@ mod tests {
             sealed_inner_b64: Some(sealed_b64.to_string()),
             edits_message_id: None,
             max_queue_len: None,
+            proto_content_type: None,
         }
     }
 
@@ -470,6 +473,43 @@ mod tests {
         assert!(
             proto.edits_message_id.is_none(),
             "non-edit message must not set edits_message_id"
+        );
+    }
+
+    #[test]
+    fn test_convert_session_reset_init_preserves_content_type() {
+        use construct_server_shared::shared::proto::core::v1 as core;
+
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(b"x3dh-init-ciphertext");
+        let mut env = make_direct_envelope("alice", "bob", &payload_b64);
+        env.proto_content_type = Some(i32::from(core::ContentType::SessionResetInit));
+
+        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+
+        assert_eq!(
+            proto.content_type,
+            i32::from(core::ContentType::SessionResetInit),
+            "SESSION_RESET_INIT content_type must be preserved through Kafka round-trip"
+        );
+        assert!(
+            !proto.encrypted_payload.is_empty(),
+            "SESSION_RESET_INIT must carry encrypted payload (X3DH init)"
+        );
+    }
+
+    #[test]
+    fn test_convert_legacy_envelope_without_proto_content_type_falls_back() {
+        use construct_server_shared::shared::proto::core::v1 as core;
+
+        // Simulate a legacy envelope (proto_content_type = None)
+        let env = make_direct_envelope("alice", "bob", "dGVzdA==");
+        assert!(env.proto_content_type.is_none());
+
+        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        assert_eq!(
+            proto.content_type,
+            i32::from(core::ContentType::E2eeSignal),
+            "Legacy envelopes must fall back to E2EE_SIGNAL"
         );
     }
 
