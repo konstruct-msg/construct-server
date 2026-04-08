@@ -158,7 +158,7 @@ jobs:
   smoke:
     name: Smoke Tests
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
@@ -176,8 +176,8 @@ jobs:
             | tar -xz -C /usr/local/bin grpcurl
           chmod +x /usr/local/bin/grpcurl
 
-      - name: Pull latest image
-        run: docker pull ghcr.io/${{ github.repository_owner }}/construct-server:latest
+      - name: Pull image built from this commit
+        run: docker pull ghcr.io/${{ github.repository_owner }}/construct-server:${{ needs.docker.outputs.version }}
 
       - name: Generate smoke test JWT keypair
         run: |
@@ -199,7 +199,7 @@ jobs:
         run: |
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
           sleep 5
-          IMAGE_TAG=latest docker compose -f ops/docker-compose.smoke.yml up -d \
+          IMAGE_TAG=${{ needs.docker.outputs.version }} docker compose -f ops/docker-compose.smoke.yml up -d \
             auth-service messaging-service key-service gateway signaling-service
 
       - name: Wait for services to be healthy

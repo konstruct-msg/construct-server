@@ -148,6 +148,8 @@ services:
       PORT: "50060"
       METRICS_PORT: "8091"
       REDIS_URL: redis://redis:6379
+      LOG_HASH_SALT: smoke-test-log-salt-not-secret
+      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       # No DATABASE_URL — service starts without DB (contacts checks limited to Redis)
       # No CONTACT_HMAC_SECRET — uses insecure default (fine for smoke tests)
       # No NOTIFICATION_GRPC_ENDPOINT — VoIP push disabled
