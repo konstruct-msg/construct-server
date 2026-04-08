@@ -99,11 +99,31 @@ async fn main() -> anyhow::Result<()> {
 
     info!("SignalingService listening on {}", addr);
 
-    // Load config for JWT public key verification
-    let config = Config::from_env().map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
-    let auth = Arc::new(
-        AuthManager::new(&config).map_err(|e| anyhow::anyhow!("AuthManager error: {}", e))?,
-    );
+    // Load JWT auth manager for device_id cross-verification (S-C1).
+    // If JWT_PUBLIC_KEY is not set, start in degraded mode: trust gateway-injected
+    // x-device-id headers directly (same as pre-S-C1 behavior).
+    let auth: Option<Arc<AuthManager>> = match Config::from_env() {
+        Ok(config) => match AuthManager::new(&config) {
+            Ok(manager) => {
+                info!("JWT device_id verification enabled");
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "AuthManager init failed — device_id JWT verification disabled (set JWT_PUBLIC_KEY)"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Config load failed — device_id JWT verification disabled"
+            );
+            None
+        }
+    };
 
     let http_port: u16 = env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8091".into())
@@ -128,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
         turn_ttl,
         notification_client,
         contact_hmac_secret: Arc::new(contact_hmac_secret),
-        auth: Arc::clone(&auth),
+        auth,
         db_pool: match env::var("DATABASE_URL") {
             Ok(url) if !url.trim().is_empty() => {
                 match PgPoolOptions::new()
