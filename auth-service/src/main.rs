@@ -190,7 +190,7 @@ impl AuthService for AuthGrpcService {
         Ok(Response::new(proto::VerifyTokenResponse {
             valid: true,
             user_id: Some(claims.sub),
-            device_id: None,
+            device_id: claims.device_id,
             expires_at: Some(claims.exp),
         }))
     }
@@ -437,7 +437,7 @@ impl AuthService for AuthGrpcService {
         construct_server_shared::db::create_device(
             self.context.db_pool.as_ref(),
             construct_server_shared::db::CreateDeviceData {
-                device_id: new_device.device_id,
+                device_id: new_device.device_id.clone(),
                 server_hostname: hostname,
                 verifying_key,
                 identity_public,
@@ -453,12 +453,12 @@ impl AuthService for AuthGrpcService {
         // 5. Generate tokens for new device
         let (access_token, _, exp_timestamp) = app_context
             .auth_manager
-            .create_token(&user_id)
+            .create_token_for_device(&user_id, Some(&new_device.device_id))
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let (refresh_token, refresh_jti, _) = app_context
             .auth_manager
-            .create_refresh_token(&user_id)
+            .create_refresh_token_for_device(&user_id, Some(&new_device.device_id))
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Store refresh token
@@ -678,13 +678,13 @@ impl AuthService for AuthGrpcService {
         let (access_token, _, exp_timestamp) = self
             .context
             .auth_manager
-            .create_token(&user_id)
+            .create_token_for_device(&user_id, Some(&req.pending_device_id))
             .map_err(|e| Status::internal(format!("Failed to create access token: {e}")))?;
 
         let (refresh_token, refresh_jti, _) = self
             .context
             .auth_manager
-            .create_refresh_token(&user_id)
+            .create_refresh_token_for_device(&user_id, Some(&req.pending_device_id))
             .map_err(|e| Status::internal(format!("Failed to create refresh token: {e}")))?;
 
         let refresh_ttl =
@@ -1092,13 +1092,13 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
         let (access_token, _, exp_timestamp) = self
             .context
             .auth_manager
-            .create_token(&user_id)
+            .create_token_for_device(&user_id, Some(&req.device_id))
             .map_err(|e| Status::internal(format!("Failed to create access token: {e}")))?;
 
         let (refresh_token, refresh_jti, _) = self
             .context
             .auth_manager
-            .create_refresh_token(&user_id)
+            .create_refresh_token_for_device(&user_id, Some(&req.device_id))
             .map_err(|e| Status::internal(format!("Failed to create refresh token: {e}")))?;
 
         let refresh_ttl =

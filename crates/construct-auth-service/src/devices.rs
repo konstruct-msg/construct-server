@@ -524,10 +524,10 @@ pub async fn register_device_v2(
         "User + device registered successfully (passwordless)"
     );
 
-    // 8. Generate JWT tokens
+    // 8. Generate JWT tokens with device_id
     let (access_token, _, exp_timestamp) = app_context
         .auth_manager
-        .create_token(&user.id)
+        .create_token_for_device(&user.id, Some(&request.device_id))
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create access token");
             AppError::Unknown(e)
@@ -535,11 +535,11 @@ pub async fn register_device_v2(
 
     let (refresh_token, refresh_jti, _) = app_context
         .auth_manager
-        .create_refresh_token(&user.id)
+        .create_refresh_token_for_device(&user.id, Some(&request.device_id))
         .map_err(|e| {
-        tracing::error!(error = %e, "Failed to create refresh token");
-        AppError::Unknown(e)
-    })?;
+            tracing::error!(error = %e, "Failed to create refresh token");
+            AppError::Unknown(e)
+        })?;
 
     // Store refresh token in Redis
     {
@@ -703,10 +703,10 @@ pub async fn authenticate_device(
         .user_id
         .ok_or_else(|| AppError::internal("Device has no user_id"))?;
 
-    // 6. Generate JWT tokens
+    // 6. Generate JWT tokens with device_id
     let (access_token, _, exp_timestamp) = app_context
         .auth_manager
-        .create_token(&user_id)
+        .create_token_for_device(&user_id, Some(&device.device_id))
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create access token");
             AppError::Unknown(e)
@@ -714,11 +714,11 @@ pub async fn authenticate_device(
 
     let (refresh_token, refresh_jti, _) = app_context
         .auth_manager
-        .create_refresh_token(&user_id)
+        .create_refresh_token_for_device(&user_id, Some(&device.device_id))
         .map_err(|e| {
-        tracing::error!(error = %e, "Failed to create refresh token");
-        AppError::Unknown(e)
-    })?;
+            tracing::error!(error = %e, "Failed to create refresh token");
+            AppError::Unknown(e)
+        })?;
 
     // Store refresh token in Redis
     {

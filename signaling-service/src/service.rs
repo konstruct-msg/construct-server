@@ -5,6 +5,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info};
 use uuid::Uuid;
 
+use construct_auth::AuthManager;
 use construct_crypto::hmac_sha256;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::metrics;
@@ -31,6 +32,7 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) notification_client: Option<NotificationClient>,
     pub(crate) db_pool: Option<Arc<construct_db::DbPool>>,
     pub(crate) contact_hmac_secret: Arc<Vec<u8>>,
+    pub(crate) auth: Arc<AuthManager>,
 }
 
 fn caller_user_id<T>(req: &Request<T>) -> Result<String, Status> {
@@ -49,6 +51,27 @@ fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
         .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))
 }
 
+/// Extract and verify device_id from both x-device-id header and JWT token.
+/// This prevents header forgery attacks where an attacker spoofs x-device-id.
+fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<String, Status> {
+    let header_device_id = caller_device_id(req)?;
+
+    let token = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .ok_or_else(|| Status::unauthenticated("Missing Authorization header"))?;
+
+    let claims = auth
+        .verify_token(&token)
+        .map_err(|e| Status::unauthenticated(format!("Invalid token: {}", e)))?;
+
+    auth.verify_device_id(&header_device_id, &claims)
+        .map_err(|e| Status::permission_denied(format!("Device ID mismatch: {}", e)))
+}
+
 #[tonic::async_trait]
 impl SignalingService for SignalingServiceImpl {
     type SignalStream =
@@ -59,7 +82,7 @@ impl SignalingService for SignalingServiceImpl {
         request: Request<Streaming<SignalRequest>>,
     ) -> Result<Response<Self::SignalStream>, Status> {
         let user_id = caller_user_id(&request)?;
-        let device_id = caller_device_id(&request)?;
+        let device_id = verified_caller_device_id(&request, &self.auth)?;
         let mut inbound = request.into_inner();
         let registry = Arc::clone(&self.registry);
         let rate_limiter = self.rate_limiter.clone();
@@ -244,7 +267,7 @@ impl SignalingService for SignalingServiceImpl {
     ) -> Result<Response<InitiateCallResponse>, Status> {
         tracing::info!("InitiateCall received");
         let caller_id = caller_user_id(&request)?;
-        let caller_device_id_str = caller_device_id(&request)?;
+        let caller_device_id_str = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         let call_id = req.call_id.clone();

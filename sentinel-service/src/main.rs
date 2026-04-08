@@ -18,6 +18,8 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_auth::AuthManager;
+use construct_config::Config;
 use construct_server_shared::sentinel::{
     self as proto,
     sentinel_service_server::{SentinelService, SentinelServiceServer},
@@ -29,6 +31,38 @@ use core::SentinelCore;
 // Helpers
 // ============================================================================
 
+/// Extract and verify device_id from both x-device-id header and JWT token.
+/// This prevents header forgery attacks where an attacker spoofs x-device-id.
+fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<String, Status> {
+    // Extract header device_id
+    let header_device_id = req
+        .metadata()
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))?;
+
+    // Extract JWT token from authorization header
+    let token = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .ok_or_else(|| Status::unauthenticated("Missing Authorization header"))?;
+
+    // Verify JWT and extract claims
+    let claims = auth
+        .verify_token(&token)
+        .map_err(|e| Status::unauthenticated(format!("Invalid token: {}", e)))?;
+
+    // Verify header device_id matches token's device_id
+    auth.verify_device_id(&header_device_id, &claims)
+        .map_err(|e| Status::permission_denied(format!("Device ID mismatch: {}", e)))
+}
+
+/// Legacy function for backward compatibility - use verified_caller_device_id instead.
+#[allow(dead_code)]
 fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
     req.metadata()
         .get("x-device-id")
@@ -70,6 +104,7 @@ fn spam_category_str(cat: i32) -> &'static str {
 
 struct SentinelServiceImpl {
     core: Arc<SentinelCore>,
+    auth: Arc<AuthManager>,
 }
 
 // ============================================================================
@@ -84,7 +119,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::ReportSpamRequest>,
     ) -> Result<Response<proto::ReportSpamResponse>, Status> {
-        let reporter = caller_device_id(&request)?;
+        let reporter = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         if req.reported_device_id.is_empty() {
@@ -119,7 +154,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::BlockDeviceRequest>,
     ) -> Result<Response<proto::BlockDeviceResponse>, Status> {
-        let blocker = caller_device_id(&request)?;
+        let blocker = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         if req.device_id.is_empty() {
@@ -143,7 +178,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::UnblockDeviceRequest>,
     ) -> Result<Response<proto::UnblockDeviceResponse>, Status> {
-        let blocker = caller_device_id(&request)?;
+        let blocker = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         self.core
@@ -162,7 +197,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::GetBlockedDevicesRequest>,
     ) -> Result<Response<proto::GetBlockedDevicesResponse>, Status> {
-        let blocker = caller_device_id(&request)?;
+        let blocker = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         let (device_ids, has_more) = self
@@ -183,7 +218,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::GetTrustStatusRequest>,
     ) -> Result<Response<proto::GetTrustStatusResponse>, Status> {
-        let device_id = caller_device_id(&request)?;
+        let device_id = verified_caller_device_id(&request, &self.auth)?;
         let trust = self
             .core
             .trust_level(&device_id)
@@ -225,7 +260,7 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::CheckSendPermissionRequest>,
     ) -> Result<Response<proto::CheckSendPermissionResponse>, Status> {
-        let caller = caller_device_id(&request)?;
+        let caller = verified_caller_device_id(&request, &self.auth)?;
         let req = request.into_inner();
 
         if req.target_device_id.is_empty() {
@@ -365,6 +400,12 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
 
+    // Load config for JWT public key
+    let config = Config::from_env().map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
+    let auth = Arc::new(
+        AuthManager::new(&config).map_err(|e| anyhow::anyhow!("AuthManager error: {}", e))?,
+    );
+
     let core = Arc::new(SentinelCore::new(&database_url, &redis_url).await?);
 
     info!("SentinelService listening on {}", addr);
@@ -387,7 +428,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     Server::builder()
-        .add_service(SentinelServiceServer::new(SentinelServiceImpl { core }))
+        .add_service(SentinelServiceServer::new(SentinelServiceImpl {
+            core,
+            auth,
+        }))
         .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
         .await?;
 

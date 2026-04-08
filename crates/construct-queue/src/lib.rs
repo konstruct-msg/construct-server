@@ -313,6 +313,14 @@ impl MessageQueue {
             .await
     }
 
+    /// Atomically consume refresh token: check and delete in one operation.
+    /// Returns Some(user_id) if token was valid, None if not found.
+    pub async fn consume_refresh_token(&mut self, jti: &str) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .consume_refresh_token(jti)
+            .await
+    }
+
     pub async fn revoke_all_user_tokens(&mut self, user_id: &str) -> Result<()> {
         tokens::TokenManager::new(&mut self.client)
             .revoke_all_user_tokens(user_id)

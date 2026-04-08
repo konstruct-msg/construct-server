@@ -353,6 +353,7 @@ XQIDAQAB
             exp: past_exp,
             iat: past_exp - 3600,
             iss: "construct-test".to_string(),
+            device_id: None,
         };
 
         let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap();
@@ -445,6 +446,148 @@ XQIDAQAB
         assert!(
             claims.iat >= now - 5 && claims.iat <= now + 5,
             "iat must be within 5 seconds of now"
+        );
+    }
+
+    // ── device_id in Claims ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_token_without_device_id() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+
+        let (token, _, _) = auth.create_token(&user_id).unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert!(
+            claims.device_id.is_none(),
+            "device_id must be None when not provided"
+        );
+    }
+
+    #[test]
+    fn test_create_token_with_device_id() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device_id = "test-device-abc123";
+
+        let (token, _, _) = auth
+            .create_token_for_device(&user_id, Some(device_id))
+            .unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.device_id, Some(device_id.to_string()));
+    }
+
+    #[test]
+    fn test_create_refresh_token_with_device_id() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device_id = "test-device-xyz789";
+
+        let (token, _, _) = auth
+            .create_refresh_token_for_device(&user_id, Some(device_id))
+            .unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.device_id, Some(device_id.to_string()));
+    }
+
+    #[test]
+    fn test_device_id_in_claims_is_preserved_in_round_trip() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device_id = "device-1234567890abcdef";
+
+        let (token, jti, exp) = auth
+            .create_token_for_device(&user_id, Some(device_id))
+            .unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.jti, jti);
+        assert_eq!(claims.device_id, Some(device_id.to_string()));
+        assert_eq!(claims.exp, exp);
+    }
+
+    #[test]
+    fn test_different_tokens_same_user_different_devices() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device1 = "device-alpha";
+        let device2 = "device-beta";
+
+        let (token1, _, _) = auth
+            .create_token_for_device(&user_id, Some(device1))
+            .unwrap();
+        let (token2, _, _) = auth
+            .create_token_for_device(&user_id, Some(device2))
+            .unwrap();
+
+        let claims1 = auth.verify_token(&token1).unwrap();
+        let claims2 = auth.verify_token(&token2).unwrap();
+
+        assert_eq!(claims1.sub, claims2.sub);
+        assert_eq!(claims1.device_id, Some(device1.to_string()));
+        assert_eq!(claims2.device_id, Some(device2.to_string()));
+        assert_ne!(
+            claims1.jti, claims2.jti,
+            "different devices must have different JTI"
+        );
+    }
+
+    // ── verify_device_id ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_verify_device_id_matching() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device_id = "device-123";
+
+        let (token, _, _) = auth
+            .create_token_for_device(&user_id, Some(device_id))
+            .unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        let result = auth.verify_device_id(device_id, &claims);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), device_id);
+    }
+
+    #[test]
+    fn test_verify_device_id_mismatch() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+        let device_id = "device-123";
+
+        let (token, _, _) = auth
+            .create_token_for_device(&user_id, Some(device_id))
+            .unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        let result = auth.verify_device_id("device-456", &claims);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn test_verify_device_id_missing_in_token() {
+        let auth = make_auth_manager_full();
+        let user_id = Uuid::new_v4();
+
+        let (token, _, _) = auth.create_token(&user_id).unwrap();
+        let claims = auth.verify_token(&token).unwrap();
+
+        let result = auth.verify_device_id("device-123", &claims);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing device_id claim")
         );
     }
 }
