@@ -20,6 +20,7 @@ impl SentinelClient {
     }
 
     /// Check if `device_id` is permitted to send to `target_device_id`.
+    /// Pass `sender_user_id` to also enforce user-level aggregate rate limits.
     ///
     /// Returns `(allowed, denial_reason, retry_after_seconds)`.
     /// Fails open: if the sentinel service is unavailable, returns `(true, "", 0)` so
@@ -28,6 +29,17 @@ impl SentinelClient {
         &self,
         device_id: &str,
         target_device_id: &str,
+    ) -> (bool, String, i32) {
+        self.check_send_permission_with_user(device_id, target_device_id, "")
+            .await
+    }
+
+    /// Like `check_send_permission` but also enforces user-level aggregate rate limits.
+    pub async fn check_send_permission_with_user(
+        &self,
+        device_id: &str,
+        target_device_id: &str,
+        sender_user_id: &str,
     ) -> (bool, String, i32) {
         let mut client = SentinelServiceClient::new(self.channel.clone());
 
@@ -38,6 +50,7 @@ impl SentinelClient {
 
         let mut req = tonic::Request::new(CheckSendPermissionRequest {
             target_device_id: target_device_id.to_string(),
+            sender_user_id: sender_user_id.to_string(),
         });
         req.metadata_mut().insert("x-device-id", device_id_val);
 

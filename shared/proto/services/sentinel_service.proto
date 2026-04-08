@@ -156,6 +156,7 @@ message GetTrustStatusResponse {
 
 message CheckSendPermissionRequest {
   string target_device_id = 1; // device the caller wants to send to
+  string sender_user_id = 2;   // user-level aggregate rate-limit check (optional; skipped if empty)
 }
 
 message CheckSendPermissionResponse {

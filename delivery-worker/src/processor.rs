@@ -154,6 +154,13 @@ pub async fn process_kafka_message(
         state.config.delivery_queue_prefix, recipient_id
     );
 
+    // Backpressure: limit concurrent Redis writes to avoid overwhelming Redis under burst load.
+    let _permit = state
+        .redis_write_semaphore
+        .acquire()
+        .await
+        .context("Redis write semaphore closed")?;
+
     push_to_offline_stream_atomic(
         state,
         &stream_key,
@@ -165,6 +172,24 @@ pub async fn process_kafka_message(
     .await
     .context("Failed to atomically push message and mark as processed")?;
 
+    // Check stream depth after write — warn if growing too large.
+    {
+        let mut conn = state.redis_conn.clone();
+        if let Ok(stream_len) = redis::cmd("XLEN")
+            .arg(&stream_key)
+            .query_async::<i64>(&mut conn)
+            .await
+            && stream_len > 50_000
+        {
+            tracing::warn!(
+                stream_key = %stream_key,
+                stream_len,
+                "Redis stream depth critical — possible consumer lag"
+            );
+        }
+    }
+    drop(_permit);
+
     // Publish notification for long polling endpoints
     if let Err(e) = publish_message_notification(state, recipient_id).await {
         debug!(
@@ -174,11 +199,6 @@ pub async fn process_kafka_message(
             "Failed to publish message notification (not critical)"
         );
     }
-
-    let stream_key = format!(
-        "{}:offline:{}",
-        state.config.delivery_queue_prefix, recipient_id
-    );
 
     info!(
         message_id = %message_id,

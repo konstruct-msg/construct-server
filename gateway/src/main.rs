@@ -25,6 +25,15 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Gateway application state: config + optional bundle verification key
+#[derive(Clone)]
+struct GatewayState {
+    config: Arc<Config>,
+    /// Base64-encoded Ed25519 public key for verifying PreKeyBundle server signatures.
+    /// Populated from `BUNDLE_SIGNING_PUBLIC_KEY` env var. Optional — absent in dev.
+    bundle_verification_key: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_env()?;
@@ -37,6 +46,16 @@ async fn main() -> Result<()> {
 
     info!("=== API Gateway Service Starting ===");
     info!("Port: {}", config.port);
+
+    let bundle_verification_key = std::env::var("BUNDLE_SIGNING_PUBLIC_KEY").ok();
+    if bundle_verification_key.is_some() {
+        info!("Bundle verification key loaded — .well-known will advertise it");
+    }
+
+    let state = GatewayState {
+        config: config.clone(),
+        bundle_verification_key,
+    };
 
     // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
     // NOTE: .well-known MUST return 200 — clients use it to detect DPI interference.
@@ -54,7 +73,7 @@ async fn main() -> Result<()> {
             "/.well-known/konstruct",
             axum::routing::get(well_known_construct_server),
         )
-        .with_state(config.clone())
+        .with_state(state)
         .layer(TraceLayer::new_for_http());
 
     // Start plain listener
@@ -317,14 +336,15 @@ where
 /// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
 /// DPI detection, triggering ICE auto-start and adding 5-8 seconds to every connection.
 async fn well_known_construct_server(
-    State(config): State<Arc<Config>>,
+    State(state): State<GatewayState>,
 ) -> (
     StatusCode,
     [(axum::http::header::HeaderName, &'static str); 1],
     Json<serde_json::Value>,
 ) {
+    let config = &state.config;
     let domain = &config.instance_domain;
-    let body = json!({
+    let mut body = json!({
         "version": "1.0",
         "protocol": "grpc",
         "server": {
@@ -353,6 +373,10 @@ async fn well_known_construct_server(
             "supports_grpc_web": true,
         },
     });
+    // Expose bundle verification key when configured so clients can verify server-signed bundles.
+    if let Some(vk) = &state.bundle_verification_key {
+        body["bundle_verification_key"] = json!(vk);
+    }
     (
         StatusCode::OK,
         [(axum::http::header::CACHE_CONTROL, "public, max-age=3600")],

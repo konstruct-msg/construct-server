@@ -267,9 +267,15 @@ impl SentinelService for SentinelServiceImpl {
             return Err(Status::invalid_argument("target_device_id is required"));
         }
 
+        let sender_user_id = if req.sender_user_id.is_empty() {
+            None
+        } else {
+            Some(req.sender_user_id.as_str())
+        };
+
         let perm = self
             .core
-            .check_send_permission(&caller, &req.target_device_id)
+            .check_send_permission(&caller, &req.target_device_id, sender_user_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

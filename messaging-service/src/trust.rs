@@ -13,7 +13,7 @@
 //
 // Redis keys:
 //   trust:{user_id}          — cached account-age in hours (SETEX 3600)
-//   rate:msg:{user_id}:hour  — hourly send counter (INCR + EXPIRE 3600)
+//   rate:msg:{user_id}:hour  — hourly send counter (INCR + EXPIRE 3600); uses Redis hash tag for cluster routing
 //   fanout:{user_id}:{day}   — daily unique-recipient HLL (PFADD, EXPIRE 172800)
 // ============================================================================
 
@@ -137,7 +137,7 @@ pub async fn check_hourly_rate(
     limit: u32,
     config: &MessagingConfig,
 ) -> Result<i64, u32> {
-    let key = format!("rate:msg:{}:hour", user_id);
+    let key = format!("rate:msg:{{{0}}}:hour", user_id);
 
     // Atomic check-then-increment: only INCR when still under the limit so that
     // rate-limited retries do not inflate the counter (and therefore the PoW ratio).
@@ -375,7 +375,7 @@ mod tests {
         async fn test_check_hourly_rate_allows_under_limit() {
             let mut redis = redis_conn().await;
             let user_id = format!("test:trust:{}:hourly", Uuid::new_v4());
-            let key = format!("rate:msg:{}:hour", user_id);
+            let key = format!("rate:msg:{{{0}}}:hour", user_id);
 
             let result = check_hourly_rate(&mut redis, &user_id, 10, &cfg()).await;
             del_key(&mut redis, &key).await;
@@ -389,7 +389,7 @@ mod tests {
         async fn test_check_hourly_rate_blocks_at_limit() {
             let mut redis = redis_conn().await;
             let user_id = format!("test:trust:{}:limit", Uuid::new_v4());
-            let key = format!("rate:msg:{}:hour", user_id);
+            let key = format!("rate:msg:{{{0}}}:hour", user_id);
 
             // Pre-seed the counter past the limit.
             let _: Result<i64, _> = redis::cmd("SET")
@@ -418,7 +418,7 @@ mod tests {
 
             // 5× ratio → difficulty 10
             let user_id_5x = format!("test:trust:{}:pow5x", Uuid::new_v4());
-            let key_5x = format!("rate:msg:{}:hour", user_id_5x);
+            let key_5x = format!("rate:msg:{{{0}}}:hour", user_id_5x);
             let _: Result<i64, _> = redis::cmd("SET")
                 .arg(&key_5x)
                 .arg((limit as i64 * 5) - 1)
@@ -430,7 +430,7 @@ mod tests {
 
             // 3× ratio → difficulty 8
             let user_id_3x = format!("test:trust:{}:pow3x", Uuid::new_v4());
-            let key_3x = format!("rate:msg:{}:hour", user_id_3x);
+            let key_3x = format!("rate:msg:{{{0}}}:hour", user_id_3x);
             let _: Result<i64, _> = redis::cmd("SET")
                 .arg(&key_3x)
                 .arg((limit as i64 * 3) - 1)

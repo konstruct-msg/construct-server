@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sqlx::PgPool;
 
 // ============================================================================
@@ -42,6 +42,9 @@ pub struct PreKeyBundle {
     pub spk_rotation_epoch: u32,
     pub kyber_spk_uploaded_at: Option<DateTime<Utc>>,
     pub kyber_spk_rotation_epoch: u32,
+    /// Ed25519 signature over canonical bundle bytes (see `sign_bundle`).
+    /// `None` when bundle signing key is not configured (dev/test environments).
+    pub bundle_signature: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,11 +127,61 @@ pub fn verify_prekey_signature(
         .map_err(|_| anyhow::anyhow!("Prekey signature verification failed"))
 }
 
+/// Build a canonical byte representation of the bundle for signing.
+///
+/// Canonical format (deterministic, length-prefixed):
+/// `"KonstruktBundle-v1" || identity_key || signed_prekey || [optional: one_time_prekey] || [optional: kyber_pre_key]`
+///
+/// All optional fields are included only when present, each prefixed with a 4-byte big-endian length.
+fn canonical_bundle_bytes(bundle: &PreKeyBundle) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"KonstruktBundle-v1");
+    // identity_key (length-prefixed)
+    let ik_len = bundle.identity_key.len() as u32;
+    buf.extend_from_slice(&ik_len.to_be_bytes());
+    buf.extend_from_slice(&bundle.identity_key);
+    // signed_prekey (length-prefixed)
+    let spk_len = bundle.signed_prekey.len() as u32;
+    buf.extend_from_slice(&spk_len.to_be_bytes());
+    buf.extend_from_slice(&bundle.signed_prekey);
+    // signed_prekey_signature (length-prefixed)
+    let spk_sig_len = bundle.signed_prekey_signature.len() as u32;
+    buf.extend_from_slice(&spk_sig_len.to_be_bytes());
+    buf.extend_from_slice(&bundle.signed_prekey_signature);
+    // one_time_prekey (length-prefixed, present=1 absent=0 marker)
+    if let Some(otp) = &bundle.one_time_prekey {
+        buf.extend_from_slice(&(otp.len() as u32).to_be_bytes());
+        buf.extend_from_slice(otp);
+    } else {
+        buf.extend_from_slice(&0u32.to_be_bytes());
+    }
+    // kyber_pre_key (length-prefixed, present=1 absent=0 marker)
+    if let Some(kpk) = &bundle.kyber_pre_key {
+        buf.extend_from_slice(&(kpk.len() as u32).to_be_bytes());
+        buf.extend_from_slice(kpk);
+    } else {
+        buf.extend_from_slice(&0u32.to_be_bytes());
+    }
+    buf
+}
+
+/// Sign a pre-key bundle with the server's Ed25519 signing key.
+///
+/// Returns a 64-byte signature over the canonical bundle representation.
+/// Clients SHOULD verify this signature against the server's public key
+/// retrieved from `/.well-known/construct-server`.
+pub fn sign_bundle(bundle: &PreKeyBundle, signing_key: &SigningKey) -> Vec<u8> {
+    let canonical = canonical_bundle_bytes(bundle);
+    let signature: Signature = signing_key.sign(&canonical);
+    signature.to_bytes().to_vec()
+}
+
 /// Get pre-key bundle for a device (consumes one-time pre-key if available)
 pub async fn get_prekey_bundle(
     db: &PgPool,
     user_id: &str,
     device_id: Option<&str>,
+    bundle_signing_key: Option<&SigningKey>,
 ) -> Result<Option<PreKeyBundle>> {
     // First, get device info (including Kyber SPK columns added in migration 028)
     let device = if let Some(did) = device_id {
@@ -210,7 +263,7 @@ pub async fn get_prekey_bundle(
     .fetch_optional(db)
     .await?;
 
-    Ok(Some(PreKeyBundle {
+    let mut bundle = PreKeyBundle {
         device_id: device.device_id,
         identity_key: device.identity_public,
         verifying_key: device.verifying_key,
@@ -230,7 +283,10 @@ pub async fn get_prekey_bundle(
         spk_rotation_epoch: device.spk_rotation_epoch as u32,
         kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
         kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
-    }))
+        bundle_signature: None,
+    };
+    bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
+    Ok(Some(bundle))
 }
 
 /// Get pre-key bundles for all devices of a user
@@ -238,6 +294,7 @@ pub async fn get_prekey_bundles(
     db: &PgPool,
     user_id: &str,
     device_ids: Option<&[String]>,
+    bundle_signing_key: Option<&SigningKey>,
 ) -> Result<(Vec<PreKeyBundle>, Vec<String>)> {
     let devices: Vec<DeviceRow> = if let Some(ids) = device_ids {
         sqlx::query_as(
@@ -314,7 +371,7 @@ pub async fn get_prekey_bundles(
         .fetch_optional(db)
         .await?;
 
-        bundles.push(PreKeyBundle {
+        let mut bundle = PreKeyBundle {
             device_id: device.device_id,
             identity_key: device.identity_public,
             verifying_key: device.verifying_key,
@@ -334,7 +391,10 @@ pub async fn get_prekey_bundles(
             spk_rotation_epoch: device.spk_rotation_epoch as u32,
             kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
             kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
-        });
+            bundle_signature: None,
+        };
+        bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
+        bundles.push(bundle);
     }
 
     // Check for requested but unavailable devices
@@ -547,6 +607,25 @@ pub async fn rotate_signed_prekey(
     new_key: &SignedPreKey,
     reason: &str,
 ) -> Result<(DateTime<Utc>, u32)> {
+    // Verify Classic SPK signature before archiving or updating.
+    // Kyber SPK is verified in upload_kyber_signed_prekey via verify_prekey_signature(0x10).
+    // suite_id 0x01 = ClassicX25519 (see verify_prekey_signature header comment).
+    let verifying_key_bytes: Vec<u8> = sqlx::query_scalar(
+        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("Device not found or inactive: {}", device_id))?;
+
+    verify_prekey_signature(
+        &verifying_key_bytes,
+        0x01,
+        &new_key.public_key,
+        &new_key.signature,
+    )
+    .map_err(|e| anyhow::anyhow!("Classic SPK signature verification failed: {}", e))?;
+
     // Get current signed prekey (including its ID) before updating
     let current = sqlx::query_as::<_, SignedPreKeyRow>(
         r#"
