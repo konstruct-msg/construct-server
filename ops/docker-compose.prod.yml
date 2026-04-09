@@ -63,11 +63,6 @@ services:
       - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0s"
       - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0s"
       - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0s"
-      # h2c backend transport: detect dead connections before they cause client-visible RSTs.
-      # readIdleTimeout triggers a PING if no data is received for 30s; pingTimeout is how
-      # long to wait for the PONG before treating the backend connection as dead.
-      - "--serversTransport.http2.readIdleTimeout=30s"
-      - "--serversTransport.http2.pingTimeout=15s"
       # Let's Encrypt ACME (TLS-ALPN-01 — works without Cloudflare)
       - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@konstruct.cc}"
