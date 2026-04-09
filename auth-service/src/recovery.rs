@@ -127,7 +127,7 @@ pub async fn set_recovery_key(
 pub async fn get_recovery_status(db: &PgPool, user_id: Uuid) -> Result<RecoveryStatus> {
     let row = sqlx::query_as::<_, RecoveryStatusRow>(
         r#"
-        SELECT recovery_public_key, created_at, last_recovery_at
+        SELECT recovery_public_key, recovery_setup_at, last_recovery_at
         FROM users
         WHERE id = $1
         "#,
@@ -142,7 +142,7 @@ pub async fn get_recovery_status(db: &PgPool, user_id: Uuid) -> Result<RecoveryS
             Ok(RecoveryStatus {
                 is_setup: r.recovery_public_key.is_some(),
                 fingerprint,
-                setup_at: Some(r.created_at),
+                setup_at: r.recovery_setup_at,
                 last_used_at: r.last_recovery_at,
                 has_backup: false, // TODO: check backup column
             })
@@ -277,7 +277,7 @@ pub fn key_fingerprint(key: &[u8]) -> String {
 #[derive(sqlx::FromRow)]
 struct RecoveryStatusRow {
     recovery_public_key: Option<Vec<u8>>,
-    created_at: DateTime<Utc>,
+    recovery_setup_at: Option<DateTime<Utc>>,
     last_recovery_at: Option<DateTime<Utc>>,
 }
 

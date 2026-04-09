@@ -344,55 +344,48 @@ impl Config {
 
     fn load_jwt_private_key() -> Option<String> {
         std::env::var("JWT_PRIVATE_KEY").ok().map(|key| {
-            let is_pem_in_env = key.starts_with("-----BEGIN")
-                || (!key.contains(std::path::MAIN_SEPARATOR)
-                    && !key.ends_with(".pem")
-                    && !key.ends_with(".key"));
-
-            if is_pem_in_env && key.contains("PRIVATE") {
-                tracing::warn!(
-                    "SECURITY: JWT_PRIVATE_KEY contains PEM data directly in environment variable. \
-                    This is insecure - the key is visible in /proc/*/environ, `ps aux`, and logs. \
-                    Recommended: Store key in a file and set JWT_PRIVATE_KEY=/path/to/private.pem"
-                );
-            }
-
-            if key.contains(std::path::MAIN_SEPARATOR)
-                || key.ends_with(".pem")
-                || key.ends_with(".key")
-            {
-                std::fs::read_to_string(&key).unwrap_or_else(|e| {
+            // Detect PEM data in env var BEFORE any path check.
+            // Base64 uses '/' which would otherwise trigger the path-separator
+            // heuristic and cause the key to be logged as `path = %key`.
+            if key.starts_with("-----BEGIN") {
+                if key.contains("PRIVATE") {
                     tracing::warn!(
-                        error = %e,
-                        path = %key,
-                        "Failed to read JWT_PRIVATE_KEY from file, using as-is"
+                        "SECURITY: JWT_PRIVATE_KEY contains PEM data directly in environment \
+                        variable. This is insecure - the key is visible in /proc/*/environ, \
+                        `ps aux`, and logs. \
+                        Recommended: Store key in a file and set JWT_PRIVATE_KEY=/path/to/private.pem"
                     );
-                    key
-                })
-            } else {
-                key
+                }
+                return key;
             }
+
+            // Value is a file path — read it.
+            std::fs::read_to_string(&key).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %key,
+                    "Failed to read JWT_PRIVATE_KEY from file, using as-is"
+                );
+                key
+            })
         })
     }
 
     fn load_jwt_public_key() -> Option<String> {
         std::env::var("JWT_PUBLIC_KEY").ok().map(|key| {
-            if key.contains(std::path::MAIN_SEPARATOR) || key.starts_with("-----BEGIN") {
-                if key.starts_with("-----BEGIN") {
-                    key
-                } else {
-                    std::fs::read_to_string(&key).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            error = %e,
-                            path = %key,
-                            "Failed to read JWT_PUBLIC_KEY from file, using as-is"
-                        );
-                        key
-                    })
-                }
-            } else {
-                key
+            // Same as private key: detect PEM first to avoid logging key as path.
+            if key.starts_with("-----BEGIN") {
+                return key;
             }
+
+            std::fs::read_to_string(&key).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %key,
+                    "Failed to read JWT_PUBLIC_KEY from file, using as-is"
+                );
+                key
+            })
         })
     }
 }
