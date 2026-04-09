@@ -183,7 +183,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -631,7 +631,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "construct-apns"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "construct-audit"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "chrono",
  "serde",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "construct-broker"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "construct-context"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "construct-apns",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "construct-delivery-ack"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "construct-error"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "construct-extractors"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "construct-federation"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "construct-key-management"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "construct-metrics"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "construct-notification-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pending"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pow"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "argon2",
  "hex",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "construct-queue"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "construct-rate-limit"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "construct-user-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "construct-utils"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
@@ -1337,7 +1337,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "delivery-worker"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "invite-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2556,7 +2556,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2698,7 +2698,7 @@ dependencies = [
 
 [[package]]
 name = "notification-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -5086,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
