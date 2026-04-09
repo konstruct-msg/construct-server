@@ -15,25 +15,41 @@ static_resources:
         socket_address:
           address: 0.0.0.0
           port_value: 8080
+      # Larger per-connection TCP buffer (default 1 MiB) prevents buffer-pressure RSTs
+      # when many concurrent gRPC streams burst data at the same time.
+      per_connection_buffer_limit_bytes: 10485760  # 10 MiB
       filter_chains:
         - filters:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                codec_type: AUTO
+                # Traefik always sends h2c Prior Knowledge — explicit HTTP2 avoids the
+                # AUTO codec-detection overhead and removes one class of "connection
+                # preface" failures when the first bytes arrive fragmented.
+                codec_type: HTTP2
                 stat_prefix: ingress_grpc
                 # Disable stream idle timeout — gRPC streams can be long-lived
                 stream_idle_timeout: 0s
+                # Give open streams up to 5s to drain before the connection is closed.
+                # Without this, Envoy RSTs mid-flight streams when rotating connections.
+                drain_timeout: 5s
+                # Delay the final FIN/RST by 1s so that any data already enqueued in the
+                # kernel send buffer has time to be flushed to the client.
+                delayed_close_timeout: 1s
                 # HTTP/2 keepalive: send PING frames every 30s so mobile clients
                 # (iOS/Android) don't close the connection after 5 min idle.
                 # Enlarged flow-control windows reduce head-of-line blocking for
                 # concurrent gRPC streams sharing the same H2 connection.
+                # max_requests_per_connection: rotating connections after N requests lets
+                # Envoy issue a graceful GOAWAY instead of an abrupt RST when the
+                # connection is retired. Clients transparently reconnect.
                 http2_protocol_options:
                   connection_keepalive:
                     interval: 30s
                     timeout: 10s
                   initial_stream_window_size: 2097152     # 2 MiB (default 64 KiB)
                   initial_connection_window_size: 4194304 # 4 MiB (default 64 KiB)
+                  max_requests_per_connection: 10000      # graceful GOAWAY every 10k reqs
                 route_config:
                   name: grpc_routes
                   virtual_hosts:
