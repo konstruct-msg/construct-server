@@ -40,16 +40,12 @@ static_resources:
                 # (iOS/Android) don't close the connection after 5 min idle.
                 # Enlarged flow-control windows reduce head-of-line blocking for
                 # concurrent gRPC streams sharing the same H2 connection.
-                # max_requests_per_connection: rotating connections after N requests lets
-                # Envoy issue a graceful GOAWAY instead of an abrupt RST when the
-                # connection is retired. Clients transparently reconnect.
                 http2_protocol_options:
                   connection_keepalive:
                     interval: 30s
                     timeout: 10s
                   initial_stream_window_size: 2097152     # 2 MiB (default 64 KiB)
                   initial_connection_window_size: 4194304 # 4 MiB (default 64 KiB)
-                  max_requests_per_connection: 10000      # graceful GOAWAY every 10k reqs
                 route_config:
                   name: grpc_routes
                   virtual_hosts:
