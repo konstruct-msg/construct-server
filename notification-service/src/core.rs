@@ -27,6 +27,7 @@ pub struct SendBlindNotificationInput {
     pub user_id: Uuid,
     pub badge_count: Option<i32>,
     pub activity_type: Option<String>,
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,20 +205,15 @@ pub async fn send_blind_notification(
                 e
             })?;
 
-        // Check notification filter - only send if user allows it
+        // Check notification filter - only send if user has not opted out.
+        // All pushes are silent (content-available: 1, no alert). The client
+        // wakes up, fetches messages, and posts its own local notification.
+        // This prevents APNs from storing any message metadata on Apple servers.
         let filter = token_row.notification_filter.as_str();
-
-        // Determine push type based on user's filter preference:
-        // - "silent" → background wake-up only (content-available: 1, no alert)
-        // - any "visible_*" that matches activity → show visible alert notification
-        let (should_send, use_visible) = match (filter, input.activity_type.as_deref()) {
-            ("silent", _) => (true, false),
-            ("visible_all", _) => (true, true),
-            ("visible_dm", Some("new_message")) => (true, true),
-            ("visible_mentions", Some("mention")) => (true, true),
-            ("visible_contacts", Some("new_message" | "mention")) => (true, true),
-            _ => (false, false),
-        };
+        let should_send = matches!(
+            filter,
+            "silent" | "visible_all" | "visible_dm" | "visible_mentions" | "visible_contacts"
+        );
 
         if !should_send {
             tracing::debug!(
@@ -250,42 +246,26 @@ pub async fn send_blind_notification(
         // Send notification via APNs
         // Note: FCM support can be added here with similar logic
         use construct_server_shared::apns::types::{
-            AlertData, ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
+            ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
         };
 
-        let (push_type, priority, content_available, alert) = if use_visible {
-            // Visible alert: high priority, alert text + content-available to wake app in background
-            (
-                PushType::Visible,
-                NotificationPriority::High,
-                Some(1u8),
-                Some(AlertData {
-                    title: "Construct".to_string(),
-                    body: "New message".to_string(),
-                }),
-            )
-        } else {
-            // Silent background push: low priority, content-available = 1, no alert
-            (PushType::Silent, NotificationPriority::Low, Some(1u8), None)
-        };
-
+        // Always silent: client wakes, fetches, and posts its own local notification.
+        // No alert data is sent via APNs — Apple's push database stores nothing useful.
         let payload = ApnsPayload {
             aps: ApsData {
-                content_available,
-                alert,
-                sound: if use_visible {
-                    Some("default".to_string())
-                } else {
-                    None
-                },
+                content_available: Some(1u8),
+                alert: None,
+                sound: None,
                 badge: input.badge_count.map(|b| b as u32),
             },
             construct: input.activity_type.as_ref().map(|activity| ConstructData {
                 notification_type: activity.clone(),
-                conversation_id: None,
+                conversation_id: input.conversation_id.clone(),
             }),
             construct_call: None,
         };
+        let push_type = PushType::Silent;
+        let priority = NotificationPriority::Low;
 
         // Retry with exponential backoff: 100ms → 300ms → 900ms (3 attempts total).
         // Skip retrying immediately on InvalidToken — APNs won't accept it regardless.

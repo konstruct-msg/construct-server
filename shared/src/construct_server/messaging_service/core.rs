@@ -196,6 +196,7 @@ async fn send_blind_notification(
             user_id: recipient_id.to_string(),
             badge_count: None,
             activity_type: Some("new_message".to_string()),
+            conversation_id: None,
         })
         .await?;
     if resp.into_inner().success {
