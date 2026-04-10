@@ -321,6 +321,21 @@ impl MessageQueue {
             .await
     }
 
+    /// Atomically rotate refresh token: consume old JTI and store new JTI in one
+    /// Redis Lua script.  Eliminates the crash window between consume and store.
+    /// Returns Some(user_id) on success, None if old token not found (already used).
+    pub async fn rotate_refresh_token(
+        &mut self,
+        old_jti: &str,
+        new_jti: &str,
+        user_id: &str,
+        ttl_seconds: i64,
+    ) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .rotate_refresh_token(old_jti, new_jti, user_id, ttl_seconds)
+            .await
+    }
+
     pub async fn revoke_all_user_tokens(&mut self, user_id: &str) -> Result<()> {
         tokens::TokenManager::new(&mut self.client)
             .revoke_all_user_tokens(user_id)

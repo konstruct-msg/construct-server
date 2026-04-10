@@ -79,6 +79,61 @@ impl<'a> TokenManager<'a> {
         }
     }
 
+    /// Atomically rotate a refresh token: consume the old JTI and store the new one
+    /// in a single Lua script (one Redis round-trip, no crash window between the two).
+    ///
+    /// Returns `Some(user_id)` on success, `None` if the old token was not found
+    /// (already consumed or revoked).  The reverse index (`user_tokens:{user_id}`) is
+    /// updated within the same script so logout-all always sees the current token.
+    pub(crate) async fn rotate_refresh_token(
+        &mut self,
+        old_jti: &str,
+        new_jti: &str,
+        user_id: &str,
+        ttl_seconds: i64,
+    ) -> Result<Option<String>> {
+        let old_key = format!("refresh_token:{}", old_jti);
+        let new_key = format!("refresh_token:{}", new_jti);
+        let index_key = format!("user_tokens:{}", user_id);
+
+        // Lua script:
+        // 1. GET the old token — if absent, return nil (already consumed).
+        // 2. DEL old token.
+        // 3. SET new token with TTL.
+        // 4. SADD + EXPIRE on the per-user reverse index.
+        // All operations are serialised by Redis's single-threaded command executor.
+        let script = redis::Script::new(
+            r#"
+            local val = redis.call('GET', KEYS[1])
+            if not val then
+                return false
+            end
+            redis.call('DEL', KEYS[1])
+            redis.call('SETEX', KEYS[2], ARGV[1], ARGV[2])
+            redis.call('SADD',  KEYS[3], ARGV[3])
+            redis.call('EXPIRE', KEYS[3], ARGV[1])
+            return val
+            "#,
+        );
+
+        let result: redis::Value = script
+            .key(&old_key)
+            .key(&new_key)
+            .key(&index_key)
+            .arg(ttl_seconds)
+            .arg(user_id)
+            .arg(new_jti)
+            .invoke_async(self.client.connection_mut())
+            .await?;
+
+        match result {
+            redis::Value::BulkString(bytes) => {
+                Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Revoke all refresh tokens for a user (logout from all devices).
     /// Uses the per-user reverse index user_tokens:{user_id} (populated by store_refresh_token)
     /// to avoid a KEYS scan which blocks the Redis event loop.
