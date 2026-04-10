@@ -82,6 +82,7 @@ impl NotificationService for NotificationGrpcService {
             user_id,
             badge_count: req.badge_count,
             activity_type: req.activity_type,
+            conversation_id: req.conversation_id,
         };
 
         let output = core::send_blind_notification(&self.context, input)

@@ -675,6 +675,7 @@ async fn maybe_notify_low_prekeys(
                 user_id: user_id.to_string(),
                 badge_count: None,
                 activity_type: Some("replenish_prekeys".to_string()),
+                conversation_id: None,
             })
             .await
         {
