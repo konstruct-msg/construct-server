@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use construct_crypto::UploadableKeyBundle;
+use construct_crypto::{UploadableKeyBundle, envelope_decrypt, envelope_encrypt, hmac_sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
@@ -199,6 +199,18 @@ pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Check if `user_id` has enabled discoverable search (`searchable = TRUE`).
+pub async fn is_user_searchable(pool: &DbPool, user_id: &Uuid) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND searchable = TRUE)",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check user searchable flag")?;
+    Ok(exists)
 }
 
 /// Add or update a user in caller's blocklist.
@@ -1267,4 +1279,258 @@ pub async fn cleanup_expired_invites(pool: &DbPool) -> Result<u64> {
 /// Trait for types that provide a database pool
 pub trait HasDbPool {
     fn db_pool(&self) -> &std::sync::Arc<DbPool>;
+}
+
+// ============================================================================
+// Privacy-preserving contact requests
+// ============================================================================
+
+/// A contact request as returned to the authenticated recipient.
+#[derive(Debug, Clone)]
+pub struct IncomingContactRequest {
+    pub id: Uuid,
+    /// Decrypted from `from_enc` — returned only to the authenticated recipient.
+    pub from_user_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A sent contact request as returned to the sender (no recipient ID revealed).
+#[derive(Debug, Clone)]
+pub struct SentContactRequest {
+    pub id: Uuid,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Raw DB row — used internally before decryption.
+#[derive(sqlx::FromRow)]
+#[allow(dead_code)]
+struct RawContactRequest {
+    id: Uuid,
+    from_enc: Vec<u8>,
+    status: String,
+    created_at: DateTime<Utc>,
+    resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SentRow {
+    id: Uuid,
+    status: String,
+    created_at: DateTime<Utc>,
+}
+
+/// Insert a new contact request.
+///
+/// - `from_user_id` and `to_user_id` are HMAC-blinded with `hmac_secret`.
+/// - `from_user_id` is envelope-encrypted with `envelope_key` for at-rest protection.
+/// - `to_user_id` is **not stored** — caller must deliver the push notification before calling this.
+///
+/// Returns `Ok(request_id)` on success, or an error if a pending request already exists
+/// (UNIQUE constraint on `(from_hmac, to_hmac)`).
+pub async fn create_contact_request(
+    pool: &DbPool,
+    from_user_id: Uuid,
+    to_user_id: Uuid,
+    hmac_secret: &[u8],
+    envelope_key: &[u8],
+) -> Result<Uuid> {
+    let from_hmac = hmac_sha256(hmac_secret, from_user_id.as_bytes());
+    let to_hmac = hmac_sha256(hmac_secret, to_user_id.as_bytes());
+    let from_enc = envelope_encrypt(envelope_key, from_user_id.as_bytes())
+        .map_err(|e| anyhow::anyhow!("envelope_encrypt failed: {}", e))?;
+
+    let id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO contact_requests (from_hmac, to_hmac, from_enc)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (from_hmac, to_hmac) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(&from_hmac[..])
+    .bind(&to_hmac[..])
+    .bind(&from_enc)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to insert contact request")?
+    .ok_or_else(|| anyhow::anyhow!("contact request already exists (duplicate)"))?;
+
+    Ok(id)
+}
+
+/// Fetch all pending incoming contact requests for `recipient_user_id`.
+/// Decrypts `from_enc` server-side and returns the sender UUID.
+pub async fn get_pending_contact_requests(
+    pool: &DbPool,
+    recipient_user_id: Uuid,
+    hmac_secret: &[u8],
+    envelope_key: &[u8],
+) -> Result<Vec<IncomingContactRequest>> {
+    let to_hmac = hmac_sha256(hmac_secret, recipient_user_id.as_bytes());
+
+    let rows: Vec<RawContactRequest> = sqlx::query_as(
+        r#"
+        SELECT id, from_enc, status, created_at, resolved_at
+        FROM contact_requests
+        WHERE to_hmac = $1 AND status = 'pending'
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(&to_hmac[..])
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch pending contact requests")?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        let from_bytes = envelope_decrypt(envelope_key, &row.from_enc).map_err(|e| {
+            anyhow::anyhow!("envelope_decrypt failed for request {}: {}", row.id, e)
+        })?;
+        let from_arr: [u8; 16] = from_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("decrypted from_enc is not 16 bytes"))?;
+        let from_user_id = Uuid::from_bytes(from_arr);
+        result.push(IncomingContactRequest {
+            id: row.id,
+            from_user_id,
+            created_at: row.created_at,
+        });
+    }
+    Ok(result)
+}
+
+/// Fetch all sent contact requests for `sender_user_id` (status only, no recipient ID).
+pub async fn get_sent_contact_requests(
+    pool: &DbPool,
+    sender_user_id: Uuid,
+    hmac_secret: &[u8],
+) -> Result<Vec<SentContactRequest>> {
+    let from_hmac = hmac_sha256(hmac_secret, sender_user_id.as_bytes());
+
+    let rows: Vec<SentRow> = sqlx::query_as(
+        r#"
+        SELECT id, status, created_at
+        FROM contact_requests
+        WHERE from_hmac = $1
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(&from_hmac[..])
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch sent contact requests")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| SentContactRequest {
+            id: r.id,
+            status: r.status,
+            created_at: r.created_at,
+        })
+        .collect())
+}
+
+/// Check if a pending request from `from_user_id` to `to_user_id` exists.
+/// Used by `send_contact_request` handler to detect duplicates without exposing IDs.
+pub async fn has_pending_contact_request(
+    pool: &DbPool,
+    from_user_id: Uuid,
+    to_user_id: Uuid,
+    hmac_secret: &[u8],
+) -> Result<bool> {
+    let from_hmac = hmac_sha256(hmac_secret, from_user_id.as_bytes());
+    let to_hmac = hmac_sha256(hmac_secret, to_user_id.as_bytes());
+
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM contact_requests
+            WHERE from_hmac = $1 AND to_hmac = $2 AND status = 'pending'
+        )
+        "#,
+    )
+    .bind(&from_hmac[..])
+    .bind(&to_hmac[..])
+    .fetch_one(pool)
+    .await
+    .context("Failed to check pending contact request")?;
+
+    Ok(exists)
+}
+
+/// Respond to a contact request.
+///
+/// `actor_user_id` must be the recipient (to_hmac must match) — enforced DB-side.
+/// Returns `Ok(())` on success, error if request not found or actor is not the recipient.
+pub async fn respond_to_contact_request(
+    pool: &DbPool,
+    request_id: Uuid,
+    actor_user_id: Uuid,
+    new_status: &str,
+    hmac_secret: &[u8],
+) -> Result<()> {
+    let actor_to_hmac = hmac_sha256(hmac_secret, actor_user_id.as_bytes());
+
+    let rows_affected = sqlx::query(
+        r#"
+        UPDATE contact_requests
+        SET status = $1, resolved_at = NOW()
+        WHERE id = $2
+          AND to_hmac = $3
+          AND status = 'pending'
+        "#,
+    )
+    .bind(new_status)
+    .bind(request_id)
+    .bind(&actor_to_hmac[..])
+    .execute(pool)
+    .await
+    .context("Failed to update contact request")?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        anyhow::bail!(
+            "contact request {} not found, already resolved, or actor is not the recipient",
+            request_id
+        );
+    }
+    Ok(())
+}
+
+/// Fetch the raw (unencrypted) from_enc for a specific request — used internally to get
+/// the sender's user_id when establishing contact_links after ACCEPT.
+pub async fn get_contact_request_sender(
+    pool: &DbPool,
+    request_id: Uuid,
+    actor_user_id: Uuid,
+    hmac_secret: &[u8],
+    envelope_key: &[u8],
+) -> Result<Uuid> {
+    let actor_to_hmac = hmac_sha256(hmac_secret, actor_user_id.as_bytes());
+
+    let from_enc: Vec<u8> = sqlx::query_scalar(
+        r#"
+        SELECT from_enc FROM contact_requests
+        WHERE id = $1 AND to_hmac = $2
+        "#,
+    )
+    .bind(request_id)
+    .bind(&actor_to_hmac[..])
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch contact request sender")?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "request {} not found or actor is not the recipient",
+            request_id
+        )
+    })?;
+
+    let from_bytes = envelope_decrypt(envelope_key, &from_enc)
+        .map_err(|e| anyhow::anyhow!("envelope_decrypt failed: {}", e))?;
+    let arr: [u8; 16] = from_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("decrypted from_enc is not 16 bytes"))?;
+    Ok(Uuid::from_bytes(arr))
 }

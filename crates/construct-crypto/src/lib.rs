@@ -27,6 +27,11 @@ pub use username::hash_username;
 pub mod hmac_hash;
 pub use hmac_hash::hmac_sha256;
 
+/// Server-side envelope encryption (ChaCha20Poly1305) for at-rest protection of user identifiers.
+/// Used to encrypt `from_user_id` in contact_requests without storing plaintext UUIDs.
+pub mod envelope;
+pub use envelope::{envelope_decrypt, envelope_encrypt};
+
 /// End-to-end encryption primitives (Signal Protocol)
 #[cfg(feature = "e2ee")]
 pub mod e2e;

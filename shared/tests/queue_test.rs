@@ -79,6 +79,7 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
             pow_difficulty: 1, // Low difficulty for tests
             username_hmac_secret: vec![0u8; 32],
             contact_hmac_secret: vec![0u8; 32],
+            request_envelope_key: vec![0u8; 32],
         },
         kafka: construct_config::KafkaConfig {
             enabled: false,

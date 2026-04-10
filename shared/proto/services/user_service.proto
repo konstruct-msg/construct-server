@@ -46,6 +46,22 @@ service UserService {
   // Returns identical NOT_FOUND for "user doesn't exist" and "user not discoverable"
   // to prevent username existence oracle attacks.
   rpc FindUser(FindUserRequest) returns (FindUserResponse);
+
+  // SendContactRequest - Send a contact request to a discoverable user (requires auth)
+  // Rate-limited. Idempotent if a pending request already exists.
+  // Returns ALREADY_EXISTS if a pending request was already sent.
+  // Returns NOT_FOUND if the target user is not discoverable or does not exist.
+  // Returns PERMISSION_DENIED if the target has blocked the sender.
+  rpc SendContactRequest(SendContactRequestRequest) returns (SendContactRequestResponse);
+
+  // GetContactRequests - Fetch incoming pending contact requests (requires auth)
+  // Also returns outgoing sent requests (status only, no recipient ID revealed).
+  rpc GetContactRequests(GetContactRequestsRequest) returns (GetContactRequestsResponse);
+
+  // RespondToContactRequest - Accept or block an incoming contact request (requires auth)
+  // ACCEPT: creates mutual contact_links, request resolved.
+  // DECLINE_BLOCK / SPAM_BLOCK: blocks sender + resolves request.
+  rpc RespondToContactRequest(RespondToContactRequestRequest) returns (RespondToContactRequestResponse);
 }
 
 // UserProfile - User profile information
@@ -395,4 +411,89 @@ message FindUserResponse {
   // The user_id (UUID) of the found user.
   string user_id = 1;
 }
+
+// ============================================================================
+// Contact Request Messages
+// ============================================================================
+
+// Action enum for responding to a contact request.
+enum ContactRequestAction {
+  CONTACT_REQUEST_ACTION_UNSPECIFIED  = 0;
+  CONTACT_REQUEST_ACTION_ACCEPT       = 1;  // Accept; creates mutual contact_link
+  CONTACT_REQUEST_ACTION_DECLINE_BLOCK = 2; // Decline + block sender
+  CONTACT_REQUEST_ACTION_SPAM_BLOCK   = 3;  // Report spam + block sender
+}
+
+// A contact request as seen by the recipient.
+message IncomingContactRequest {
+  // Opaque request ID (UUID).
+  string request_id = 1;
+
+  // User ID of the sender (decrypted server-side from from_enc, returned only to auth'd recipient).
+  string from_user_id = 2;
+
+  // Display name of the sender at time of request (fetched from profile, may be empty).
+  string from_display_name = 3;
+
+  // Username of the sender (may be empty if not set).
+  string from_username = 4;
+
+  // Unix timestamp (seconds) when the request was created.
+  int64 created_at = 5;
+}
+
+// A sent contact request as seen by the sender.
+// Note: to_user_id is intentionally NOT included — sender sees only their own status.
+message SentContactRequest {
+  // Opaque request ID.
+  string request_id = 1;
+
+  // Current status: "pending", "accepted", "declined_blocked", "spam_blocked".
+  string status = 2;
+
+  // Unix timestamp when sent.
+  int64 created_at = 3;
+}
+
+// SendContactRequest
+message SendContactRequestRequest {
+  // User ID of the target (must be discoverable).
+  string to_user_id = 1;
+}
+
+message SendContactRequestResponse {
+  // Opaque request ID assigned by the server.
+  string request_id = 1;
+
+  // Status immediately after sending: always "pending".
+  string status = 2;
+}
+
+// GetContactRequests
+message GetContactRequestsRequest {
+  // No fields — returns all pending incoming + all outgoing for the caller.
+}
+
+message GetContactRequestsResponse {
+  // Incoming pending requests (recipient = caller).
+  repeated IncomingContactRequest incoming = 1;
+
+  // Outgoing sent requests (sender = caller). Status only; no recipient ID.
+  repeated SentContactRequest sent = 2;
+}
+
+// RespondToContactRequest
+message RespondToContactRequestRequest {
+  // Request ID to respond to.
+  string request_id = 1;
+
+  // Action to take.
+  ContactRequestAction action = 2;
+}
+
+message RespondToContactRequestResponse {
+  // Final status after the action: "accepted", "declined_blocked", or "spam_blocked".
+  string status = 1;
+}
+
 

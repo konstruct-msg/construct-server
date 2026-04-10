@@ -70,6 +70,15 @@ pub struct SecurityConfig {
     ///
     /// Set via `CONTACT_HMAC_SECRET` env var (32 bytes hex recommended).
     pub contact_hmac_secret: Vec<u8>,
+
+    /// ChaCha20Poly1305 key for envelope-encrypting `from_user_id` in contact_requests.
+    ///
+    /// Protects sender identity at rest: even if the table is dumped, the sender UUID
+    /// is opaque without this key. Decrypted server-side only for the authenticated recipient.
+    ///
+    /// Set via `REQUEST_ENVELOPE_KEY` env var (exactly 32 bytes hex = 64 hex chars).
+    /// **Do not rotate** — rotating invalidates all pending contact requests.
+    pub request_envelope_key: Vec<u8>,
 }
 
 impl SecurityConfig {
@@ -210,6 +219,32 @@ impl SecurityConfig {
                             Set it in production: openssl rand -hex 32"
                         );
                         b"construct-insecure-contact-hmac".to_vec()
+                    }
+                }
+            },
+            request_envelope_key: {
+                match std::env::var("REQUEST_ENVELOPE_KEY") {
+                    Ok(hex) => {
+                        let bytes = hex::decode(&hex).unwrap_or_else(|_| {
+                            tracing::warn!("REQUEST_ENVELOPE_KEY is not valid hex — falling back to insecure default");
+                            b"construct-insecure-envelope-key!!".to_vec()
+                        });
+                        if bytes.len() != 32 {
+                            tracing::warn!(
+                                "REQUEST_ENVELOPE_KEY must be exactly 32 bytes (got {}) — falling back to insecure default",
+                                bytes.len()
+                            );
+                            b"construct-insecure-envelope-key!!".to_vec()
+                        } else {
+                            bytes
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "REQUEST_ENVELOPE_KEY not set — using insecure default. \
+                            Set it in production: openssl rand -hex 32"
+                        );
+                        b"construct-insecure-envelope-key!!".to_vec()
                     }
                 }
             },
