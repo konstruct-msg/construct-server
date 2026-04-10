@@ -22,7 +22,11 @@ use axum::{
 };
 use construct_config::Config;
 use construct_crypto::hash_username;
-use construct_db as db_agility;
+use construct_db::{
+    self as db_agility, create_contact_request, get_contact_request_sender,
+    get_pending_contact_requests, get_sent_contact_requests, has_pending_contact_request,
+    is_user_searchable, respond_to_contact_request,
+};
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
@@ -552,6 +556,243 @@ impl UserService for UserGrpcService {
             Ok(None) => Err(Status::not_found("user not found")),
             Err(e) => Err(Status::internal(e.to_string())),
         }
+    }
+
+    async fn send_contact_request(
+        &self,
+        request: Request<proto::SendContactRequestRequest>,
+    ) -> Result<Response<proto::SendContactRequestResponse>, Status> {
+        let caller_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+
+        let req = request.into_inner();
+        let to_user_id = uuid::Uuid::parse_str(&req.to_user_id)
+            .map_err(|_| Status::invalid_argument("Invalid to_user_id"))?;
+
+        if caller_id == to_user_id {
+            return Err(Status::invalid_argument("Cannot send request to yourself"));
+        }
+
+        // Rate limit: 5 contact requests per day per sender.
+        const MAX_REQUESTS_PER_DAY: i64 = 5;
+        const WINDOW_SECONDS: i64 = 86400;
+        let rate_key = format!("rate:contact_request:{}:day", caller_id);
+        {
+            let mut queue = self.context.queue.lock().await;
+            let count = queue
+                .increment_rate_limit(&rate_key, WINDOW_SECONDS)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if count > MAX_REQUESTS_PER_DAY {
+                return Err(Status::resource_exhausted(
+                    "Contact request rate limit exceeded. Try again later.",
+                ));
+            }
+        }
+
+        // Verify recipient is discoverable (searchable flag).
+        let searchable = is_user_searchable(&self.context.db_pool, &to_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !searchable {
+            // Return not_found to avoid leaking discoverability status.
+            return Err(Status::not_found("user not found"));
+        }
+
+        // Check that caller is not blocked by recipient.
+        use construct_server_shared::db;
+        let is_blocked = db::is_blocked_by(&self.context.db_pool, &to_user_id, &caller_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if is_blocked {
+            return Err(Status::not_found("user not found"));
+        }
+
+        // Check for duplicate pending request (idempotent response for client retries).
+        let sec = &self.context.config.security;
+        let already_pending = has_pending_contact_request(
+            &self.context.db_pool,
+            caller_id,
+            to_user_id,
+            &sec.contact_hmac_secret,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        if already_pending {
+            return Ok(Response::new(proto::SendContactRequestResponse {
+                request_id: String::new(),
+                status: "pending".to_string(),
+            }));
+        }
+
+        let request_id = create_contact_request(
+            &self.context.db_pool,
+            caller_id,
+            to_user_id,
+            &sec.contact_hmac_secret,
+            &sec.request_envelope_key,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::SendContactRequestResponse {
+            request_id: request_id.to_string(),
+            status: "pending".to_string(),
+        }))
+    }
+
+    async fn get_contact_requests(
+        &self,
+        request: Request<proto::GetContactRequestsRequest>,
+    ) -> Result<Response<proto::GetContactRequestsResponse>, Status> {
+        let caller_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+
+        let sec = &self.context.config.security;
+
+        let incoming_raw = get_pending_contact_requests(
+            &self.context.db_pool,
+            caller_id,
+            &sec.contact_hmac_secret,
+            &sec.request_envelope_key,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut incoming = Vec::with_capacity(incoming_raw.len());
+        for cr in incoming_raw {
+            // Server is privacy-preserving: display_name and plaintext username are not stored.
+            // The client resolves display info from its local cache or via key bundle.
+            incoming.push(proto::IncomingContactRequest {
+                request_id: cr.id.to_string(),
+                from_user_id: cr.from_user_id.to_string(),
+                from_display_name: String::new(),
+                from_username: String::new(),
+                created_at: cr.created_at.timestamp(),
+            });
+        }
+
+        let sent_raw =
+            get_sent_contact_requests(&self.context.db_pool, caller_id, &sec.contact_hmac_secret)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        let sent = sent_raw
+            .into_iter()
+            .map(|cr| proto::SentContactRequest {
+                request_id: cr.id.to_string(),
+                status: cr.status,
+                created_at: cr.created_at.timestamp(),
+            })
+            .collect();
+
+        Ok(Response::new(proto::GetContactRequestsResponse {
+            incoming,
+            sent,
+        }))
+    }
+
+    async fn respond_to_contact_request(
+        &self,
+        request: Request<proto::RespondToContactRequestRequest>,
+    ) -> Result<Response<proto::RespondToContactRequestResponse>, Status> {
+        let caller_id = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+
+        let req = request.into_inner();
+        let request_id = uuid::Uuid::parse_str(&req.request_id)
+            .map_err(|_| Status::invalid_argument("Invalid request_id"))?;
+
+        let action = proto::ContactRequestAction::try_from(req.action)
+            .map_err(|_| Status::invalid_argument("Invalid action"))?;
+
+        let db_status = match action {
+            proto::ContactRequestAction::Accept => "accepted",
+            proto::ContactRequestAction::DeclineBlock => "declined_blocked",
+            proto::ContactRequestAction::SpamBlock => "spam_blocked",
+            proto::ContactRequestAction::Unspecified => {
+                return Err(Status::invalid_argument("Action must be specified"));
+            }
+        };
+
+        let sec = &self.context.config.security;
+
+        // Get sender ID before updating status (needed for accept flow).
+        let from_user_id = if action == proto::ContactRequestAction::Accept {
+            Some(
+                get_contact_request_sender(
+                    &self.context.db_pool,
+                    request_id,
+                    caller_id,
+                    &sec.contact_hmac_secret,
+                    &sec.request_envelope_key,
+                )
+                .await
+                .map_err(|e| Status::not_found(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        respond_to_contact_request(
+            &self.context.db_pool,
+            request_id,
+            caller_id,
+            db_status,
+            &sec.contact_hmac_secret,
+        )
+        .await
+        .map_err(|e| Status::not_found(e.to_string()))?;
+
+        use construct_crypto::hmac_sha256;
+        use construct_server_shared::db;
+
+        if action == proto::ContactRequestAction::Accept {
+            if let Some(sender_id) = from_user_id {
+                let caller_hmac = hmac_sha256(&sec.contact_hmac_secret, caller_id.as_bytes());
+                let sender_hmac = hmac_sha256(&sec.contact_hmac_secret, sender_id.as_bytes());
+                db::add_contact_link(&self.context.db_pool, &caller_hmac, &sender_hmac)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                db::add_contact_link(&self.context.db_pool, &sender_hmac, &caller_hmac)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
+        } else {
+            // Block/spam: add block entry.
+            // We decrypt from_enc to get sender_id for blocking.
+            let sender_id = get_contact_request_sender(
+                &self.context.db_pool,
+                request_id,
+                caller_id,
+                &sec.contact_hmac_secret,
+                &sec.request_envelope_key,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            db::block_user(&self.context.db_pool, &caller_id, &sender_id, None)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+
+        Ok(Response::new(proto::RespondToContactRequestResponse {
+            status: db_status.to_string(),
+        }))
     }
 }
 

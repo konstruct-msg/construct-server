@@ -126,6 +126,7 @@ XQIDAQAB
                 pow_difficulty: 1,
                 username_hmac_secret: vec![0u8; 32],
                 contact_hmac_secret: vec![0u8; 32],
+                request_envelope_key: vec![0u8; 32],
             },
             kafka: KafkaConfig {
                 enabled: false,
