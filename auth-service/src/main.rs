@@ -30,6 +30,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose as b64};
+use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey, Verifier};
 use construct_config::Config;
 use construct_server_shared::auth_service::AuthServiceContext;
 use construct_server_shared::db::DbPool;
@@ -438,6 +439,9 @@ impl AuthService for AuthGrpcService {
         )
         .unwrap_or(public_keys.signed_prekey_signature.as_bytes().to_vec());
 
+        // Verify SPK signature before registering (recovery path)
+        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+
         construct_server_shared::db::create_device(
             self.context.db_pool.as_ref(),
             construct_server_shared::db::CreateDeviceData {
@@ -663,6 +667,9 @@ impl AuthService for AuthGrpcService {
         } else {
             req.crypto_suite
         };
+
+        // Verify SPK signature before registering (device-join path)
+        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.pending_device_id.clone(),
@@ -1077,6 +1084,9 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
         )?;
 
         let hostname = self.context.config.instance_domain.clone();
+
+        // Verify SPK signature before registering (device-link path)
+        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.device_id.clone(),
@@ -1601,4 +1611,28 @@ async fn main() -> Result<()> {
         .context("Failed to start server")?;
 
     Ok(())
+}
+
+/// Verify the Ed25519 SPK signature.
+/// Message = "KonstruktX3DH-v1" || [0x00, 0x01] (ClassicX25519) || signed_prekey_public
+fn verify_spk_signature(
+    verifying_key: &[u8],
+    signed_prekey_public: &[u8],
+    signed_prekey_signature: &[u8],
+) -> Result<(), Status> {
+    let vk_bytes: [u8; 32] = verifying_key
+        .try_into()
+        .map_err(|_| Status::invalid_argument("verifying_key must be 32 bytes"))?;
+    let vk = VerifyingKey::from_bytes(&vk_bytes)
+        .map_err(|_| Status::invalid_argument("verifying_key is not a valid Ed25519 key"))?;
+    let sig_bytes: [u8; 64] = signed_prekey_signature
+        .try_into()
+        .map_err(|_| Status::invalid_argument("signed_prekey_signature must be 64 bytes"))?;
+    let sig = Ed25519Signature::from_bytes(&sig_bytes);
+    let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
+    msg.extend_from_slice(b"KonstruktX3DH-v1");
+    msg.extend_from_slice(&[0x00, 0x01]); // ClassicX25519
+    msg.extend_from_slice(signed_prekey_public);
+    vk.verify(&msg, &sig)
+        .map_err(|_| Status::invalid_argument("signed_prekey_signature verification failed"))
 }
