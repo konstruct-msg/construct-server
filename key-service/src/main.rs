@@ -259,10 +259,21 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::UploadPreKeysRequest>,
     ) -> Result<Response<proto::UploadPreKeysResponse>, Status> {
+        // Validate that the device_id in the request body matches the authenticated device.
+        // x-device-id is injected by the gateway after JWT verification — trust it as the
+        // source of truth and reject any request claiming a different device identity.
+        let authed_device_id = extract_device_id(&request)
+            .ok_or_else(|| Status::unauthenticated("x-device-id header missing"))?;
+
         let req = request.into_inner();
 
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
+        }
+        if req.device_id != authed_device_id {
+            return Err(Status::permission_denied(
+                "device_id does not match authenticated device",
+            ));
         }
         if req.pre_keys.is_empty() && req.kyber_pre_keys.is_empty() {
             return Err(Status::invalid_argument(
@@ -365,10 +376,18 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::RotateSignedPreKeyRequest>,
     ) -> Result<Response<proto::RotateSignedPreKeyResponse>, Status> {
+        let authed_device_id = extract_device_id(&request)
+            .ok_or_else(|| Status::unauthenticated("x-device-id header missing"))?;
+
         let req = request.into_inner();
 
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
+        }
+        if req.device_id != authed_device_id {
+            return Err(Status::permission_denied(
+                "device_id does not match authenticated device",
+            ));
         }
 
         let new_key = req

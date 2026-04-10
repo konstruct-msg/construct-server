@@ -250,6 +250,12 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::SendMessageRequest>,
     ) -> Result<Response<proto::SendMessageResponse>, Status> {
+        // Authenticate the caller before consuming the request body.
+        // For sealed-sender, sender identity is intentionally hidden — skip auth
+        // (dispatch_sealed_sender enforces its own authentication internally).
+        let authed_user_id =
+            extract_authed_user_id(request.metadata(), &self.context).await;
+
         let req = request.into_inner();
         let attempt_id = req.attempt_id.clone();
         let envelope = req
@@ -270,6 +276,16 @@ impl MessagingService for MessagingGrpcService {
             .ok_or_else(|| Status::invalid_argument("sender is required"))?;
         let sender_id = uuid::Uuid::parse_str(&sender.user_id)
             .map_err(|_| Status::invalid_argument("invalid sender.user_id"))?;
+
+        // Verify that the sender in the envelope matches the authenticated user.
+        // Prevents a device from spoofing another user's identity in the message body.
+        let authed_id = authed_user_id
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
+        if authed_id != sender_id {
+            return Err(Status::permission_denied(
+                "sender.user_id does not match authenticated user",
+            ));
+        }
 
         let recipient = envelope
             .recipient
