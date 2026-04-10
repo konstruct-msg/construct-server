@@ -21,7 +21,7 @@ mod core;
 use anyhow::{Context, Result};
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey as Ed25519VerifyingKey};
 use redis::aio::ConnectionManager as RedisConnectionManager;
 use serde_json::json;
 use std::env;
@@ -56,6 +56,9 @@ struct KeyServiceContext {
     /// Optional server Ed25519 key for signing pre-key bundles.
     /// `None` when `BUNDLE_SIGNING_KEY` env var is not set (dev/test).
     bundle_signing_key: Option<SigningKey>,
+    /// Base64-encoded verifying key for `/.well-known/construct-server`.
+    /// `None` when bundle signing is disabled.
+    bundle_verifying_key_b64: Option<String>,
 }
 
 impl KeyServiceContext {
@@ -119,6 +122,9 @@ impl KeyServiceContext {
             db,
             notification_client,
             redis,
+            bundle_verifying_key_b64: bundle_signing_key
+                .as_ref()
+                .map(|sk| BASE64.encode(Ed25519VerifyingKey::from(sk).to_bytes())),
             bundle_signing_key,
         })
     }
@@ -714,6 +720,34 @@ async fn readiness_check(ctx: axum::extract::State<Arc<KeyServiceContext>>) -> i
     }
 }
 
+/// `GET /.well-known/construct-server`
+///
+/// Returns server metadata including the Ed25519 public key used to sign pre-key bundles.
+/// Clients use this to verify `bundle_signature` on every received bundle.
+async fn well_known(ctx: axum::extract::State<Arc<KeyServiceContext>>) -> impl IntoResponse {
+    let domain = env::var("INSTANCE_DOMAIN").unwrap_or_else(|_| "construct.cc".to_string());
+    match &ctx.bundle_verifying_key_b64 {
+        Some(vk_b64) => (
+            StatusCode::OK,
+            Json(json!({
+                "domain": domain,
+                "bundle_signing_key": vk_b64,
+                "bundle_signing_algorithm": "Ed25519",
+                "version": env!("CARGO_PKG_VERSION")
+            })),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(json!({
+                "domain": domain,
+                "bundle_signing_key": null,
+                "bundle_signing_algorithm": null,
+                "version": env!("CARGO_PKG_VERSION")
+            })),
+        ),
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -762,6 +796,7 @@ async fn main() -> Result<()> {
     let http_app = Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
+        .route("/.well-known/construct-server", get(well_known))
         .route(
             "/metrics",
             get(construct_server_shared::metrics::metrics_handler),
