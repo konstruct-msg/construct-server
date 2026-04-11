@@ -456,7 +456,14 @@ impl AuthService for AuthGrpcService {
             Some(user_id),
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("IDENTITY_KEY_CONFLICT") {
+                Status::already_exists("Identity key already registered by another device")
+            } else {
+                Status::internal(msg)
+            }
+        })?;
 
         // 5. Generate tokens for new device
         let (access_token, _, exp_timestamp) = app_context
@@ -683,7 +690,14 @@ impl AuthService for AuthGrpcService {
 
         construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))
             .await
-            .map_err(|e| Status::internal(format!("Failed to create device: {e}")))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("IDENTITY_KEY_CONFLICT") {
+                    Status::already_exists("Identity key already registered by another device")
+                } else {
+                    Status::internal(format!("Failed to create device: {msg}"))
+                }
+            })?;
 
         // Issue JWT for the new device
         let (access_token, _, exp_timestamp) = self
@@ -1100,9 +1114,16 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
 
         construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))
             .await
-            .map_err(|e| Status::internal(format!("Failed to create device: {e}")))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("IDENTITY_KEY_CONFLICT") {
+                    Status::already_exists("Identity key already registered by another device")
+                } else {
+                    Status::internal(format!("Failed to create device: {msg}"))
+                }
+            })?;
 
-        // Issue JWT for new device
+        // Issue JWT for the new device
         let (access_token, _, exp_timestamp) = self
             .context
             .auth_manager
