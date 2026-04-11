@@ -183,7 +183,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -210,6 +210,7 @@ dependencies = [
  "rand 0.10.0",
  "redis",
  "reqwest",
+ "rsa",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -600,7 +601,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "construct-apns"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -619,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "construct-audit"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "chrono",
  "serde",
@@ -629,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -642,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -674,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "construct-broker"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -711,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "construct-context"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "construct-apns",
@@ -756,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -774,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "construct-delivery-ack"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -797,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "construct-error"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -820,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "construct-extractors"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -837,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "construct-federation"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -875,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "construct-key-management"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -893,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "construct-metrics"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -902,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "construct-notification-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -928,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pending"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -941,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pow"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "argon2",
  "hex",
@@ -951,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "construct-queue"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -971,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "construct-rate-limit"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -994,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -1051,7 +1052,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "rand 0.10.0",
- "rand_core 0.9.5",
+ "rand_core 0.6.4",
  "redis",
  "reqwest",
  "rmp-serde",
@@ -1081,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -1094,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "construct-user-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -1130,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "construct-utils"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "axum",
  "base64",
@@ -1325,7 +1326,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "delivery-worker"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1759,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2272,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "invite-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2583,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -2618,7 +2619,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2760,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "notification-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -3539,15 +3540,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
-]
-
-[[package]]
-name = "rand_core"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
-dependencies = [
- "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -5110,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
