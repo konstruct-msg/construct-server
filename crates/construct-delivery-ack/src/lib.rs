@@ -210,9 +210,7 @@ impl DeliveryAckConfig {
     /// println!("DELIVERY_SECRET_KEY={}", key_hex);
     /// ```
     pub fn generate_secret_key() -> String {
-        use rand::RngCore;
-        let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        let key: [u8; 32] = rand::random();
         hex::encode(key)
     }
 }

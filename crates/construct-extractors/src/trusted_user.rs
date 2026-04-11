@@ -30,7 +30,6 @@
 // ============================================================================
 
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::request::Parts,
     response::{IntoResponse, Response},
@@ -55,8 +54,6 @@ pub struct TrustedUser(pub Uuid);
 /// Header name for user ID propagation
 const USER_ID_HEADER: &str = "x-user-id";
 
-/// Generic implementation that doesn't require specific state type
-#[async_trait]
 impl<S> FromRequestParts<S> for TrustedUser
 where
     S: Send + Sync,
@@ -109,7 +106,6 @@ where
 #[derive(Debug, Clone)]
 pub struct OptionalTrustedUser(pub Option<Uuid>);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for OptionalTrustedUser
 where
     S: Send + Sync,
@@ -140,7 +136,6 @@ pub struct TrustedDeviceId(pub Option<String>);
 /// Header name for device ID propagation
 const DEVICE_ID_HEADER: &str = "x-device-id";
 
-#[async_trait]
 impl<S> FromRequestParts<S> for TrustedDeviceId
 where
     S: Send + Sync,
@@ -167,7 +162,6 @@ pub struct RequestTraceId(pub String);
 /// Header name for request trace ID
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
-#[async_trait]
 impl<S> FromRequestParts<S> for RequestTraceId
 where
     S: Send + Sync,

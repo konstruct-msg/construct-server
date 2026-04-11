@@ -298,9 +298,7 @@ pub async fn confirm_delete(
 
 /// Generate random 32-character hex string
 fn generate_hex_challenge() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
 }
 

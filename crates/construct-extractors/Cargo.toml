@@ -11,7 +11,7 @@ axum         = { workspace = true }
 serde_json   = { workspace = true }
 uuid         = { workspace = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-sha2         = "0.10"
+sha2         = "0.11"
 tracing    = { workspace = true }
 tokio      = { workspace = true }
 hex        = { workspace = true }

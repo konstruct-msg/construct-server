@@ -170,15 +170,14 @@ pub async fn process_kafka_message(
             .arg(&stream_key)
             .query_async::<i64>(&mut conn)
             .await
+            && stream_len > 50_000
         {
-            if stream_len > 50_000 {
-                tracing::warn!(
-                    stream_key = %stream_key,
-                    stream_len,
-                    "Redis stream depth critical — backing off 500 ms before write"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
+            tracing::warn!(
+                stream_key = %stream_key,
+                stream_len,
+                "Redis stream depth critical — backing off 500 ms before write"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
 

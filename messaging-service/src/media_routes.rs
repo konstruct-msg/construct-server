@@ -134,7 +134,7 @@ pub async fn generate_media_token(
 /// Generate a one-time upload token
 /// Format: {timestamp_hex}.{random_hex}.{hmac_hex}
 fn generate_upload_token(secret: &str) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, Mac, digest::KeyInit};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;

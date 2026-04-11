@@ -219,11 +219,7 @@ fn count_leading_zero_bits(hash_bytes: &[u8]) -> u32 {
 /// # Returns
 /// 32-character hex string (128 bits of entropy)
 pub fn generate_challenge() -> String {
-    use rand::RngCore;
-
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 16];
-    rng.fill_bytes(&mut bytes);
+    let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
 }
 

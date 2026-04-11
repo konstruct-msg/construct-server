@@ -147,7 +147,8 @@ impl MessageProducer {
             .send(record, Timeout::After(Duration::from_secs(2)))
             .await
         {
-            Ok((partition, offset)) => {
+            Ok(d) => {
+                let (partition, offset) = (d.partition, d.offset);
                 let latency = start.elapsed();
                 metrics::KAFKA_PRODUCE_SUCCESS.inc();
                 metrics::KAFKA_PRODUCE_LATENCY.observe(latency.as_secs_f64());
@@ -180,7 +181,8 @@ impl MessageProducer {
             .send(record, Timeout::After(Duration::from_secs(2)))
             .await
         {
-            Ok((partition, offset)) => {
+            Ok(d) => {
+                let (partition, offset) = (d.partition, d.offset);
                 let latency = start.elapsed();
                 metrics::KAFKA_PRODUCE_SUCCESS.inc();
                 metrics::KAFKA_PRODUCE_LATENCY.observe(latency.as_secs_f64());
@@ -237,7 +239,7 @@ impl MessageProducer {
             .send(record, Timeout::After(Duration::from_secs(5)))
             .await
         {
-            Ok((partition, offset)) => Ok((partition, offset)),
+            Ok(d) => Ok((d.partition, d.offset)),
             Err((kafka_err, _)) => Err(anyhow::anyhow!(
                 "Failed to send to topic '{}': {}",
                 topic,

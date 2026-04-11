@@ -44,7 +44,7 @@ use construct_server_shared::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures_core::Stream;
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Executor, PgConnection, PgPool};

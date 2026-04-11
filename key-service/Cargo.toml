@@ -9,11 +9,11 @@ license = "MIT"
 # Core runtime
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # gRPC / Tonic
 tonic = "0.14"
-prost = "0.13"
+prost = "0.14"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "uuid", "chrono"] }
@@ -24,7 +24,7 @@ chrono = { version = "0.4", features = ["serde"] }
 redis = { version = "1.0", features = ["tokio-comp", "connection-manager"] }
 
 # Crypto
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 ed25519-dalek = { version = "2.1" }
 base64 = "0.22"
@@ -34,9 +34,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP + Tracing
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

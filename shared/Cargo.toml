@@ -63,10 +63,10 @@ once_cell = "1.21.3"
 
 # Crypto and security
 argon2 = "0.5"  # PoW with Argon2id
-rand = "0.8"
-hmac = "0.12"
-sha2 = "0.10"
-hkdf = "0.12"
+rand = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
+hkdf = "0.13"
 subtle = "2.6"
 chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
@@ -101,6 +101,7 @@ integration-tests = []
 [dev-dependencies]
 serial_test = "3.2"
 tokio-stream = { version = "0.1", features = ["net"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [build-dependencies]
 tonic-build = "0.14.4"

@@ -63,7 +63,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1.0"
+thiserror = "2"
 async-trait = "0.1"
 
 # Database
@@ -81,13 +81,13 @@ sqlx = { version = "0.8", features = [
 redis = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-native-tls-comp"] }
 
 # HTTP
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 reqwest = { version = "0.12", features = ["json"] }
 
 # Auth
-jsonwebtoken = "9.3"
+jsonwebtoken = "10"
 bcrypt = "0.16"
 base64 = "0.22"
 

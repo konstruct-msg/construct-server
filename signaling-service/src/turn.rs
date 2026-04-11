@@ -6,7 +6,7 @@ use base64::Engine;
 use construct_server_shared::shared::proto::signaling::v1::TurnCredentials;
 
 pub(crate) fn generate_turn_credentials(user_id: &str, secret: &str, ttl: u64) -> TurnCredentials {
-    use hmac::{Hmac, Mac};
+    use hmac::{digest::KeyInit, Hmac, Mac};
     use sha1::Sha1;
 
     let expiry = SystemTime::now()

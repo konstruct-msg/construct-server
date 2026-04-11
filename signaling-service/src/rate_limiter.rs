@@ -91,7 +91,7 @@ impl RateLimiter {
     }
 
     fn peer_bucket(&self, peer_id: &str) -> Result<String, anyhow::Error> {
-        use hmac::{Hmac, Mac};
+        use hmac::{digest::KeyInit, Hmac, Mac};
         use sha1::Sha1;
 
         let mut mac = Hmac::<Sha1>::new_from_slice(self.peer_salt.as_bytes())?;

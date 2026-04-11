@@ -13,7 +13,7 @@ use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use uuid::Uuid;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, digest::KeyInit};
 use sha2::Sha256;
 
 use construct_server_shared::{

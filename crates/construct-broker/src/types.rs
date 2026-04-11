@@ -216,7 +216,7 @@ impl KafkaMessageEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
         hasher.update(&sealed_inner);
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id,
@@ -256,7 +256,7 @@ impl KafkaMessageEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
         hasher.update(payload.as_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id,
@@ -291,7 +291,7 @@ impl KafkaMessageEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
         hasher.update(payload.as_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id,
@@ -406,7 +406,7 @@ impl KafkaMessageEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(receipt_id.as_bytes());
         hasher.update(payload.as_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id: receipt_id,
@@ -460,7 +460,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                         .as_ref()
                         .expect("Regular message must have content"),
                 );
-                let content_hash = format!("{:x}", hasher.finalize());
+                let content_hash = hex::encode(hasher.finalize());
 
                 Self {
                     message_id: msg.id.clone(),
@@ -494,7 +494,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
                 hasher.update(msg.id.as_bytes());
                 hasher.update(msg.timestamp.to_string().as_bytes());
                 hasher.update(b"END_SESSION");
-                let content_hash = format!("{:x}", hasher.finalize());
+                let content_hash = hex::encode(hasher.finalize());
 
                 Self {
                     message_id: msg.id.clone(),
@@ -581,7 +581,7 @@ impl KafkaMessageEnvelope {
         let mut hasher = Sha256::new();
         hasher.update(ctx.message_id.as_bytes());
         hasher.update(&ctx.encrypted_payload);
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id: ctx.message_id.clone(),
@@ -627,7 +627,7 @@ impl KafkaMessageEnvelope {
         hasher.update(new_message_id.as_bytes());
         hasher.update(&new_encrypted_payload);
         hasher.update(original_message_id.as_bytes());
-        let content_hash = format!("{:x}", hasher.finalize());
+        let content_hash = hex::encode(hasher.finalize());
 
         Self {
             message_id: new_message_id,

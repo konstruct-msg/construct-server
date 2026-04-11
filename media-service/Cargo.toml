@@ -34,7 +34,7 @@ tonic = "0.14.2"
 tokio-stream = "0.1"
 
 # Media specific
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 subtle = "2.6"
-rand = "0.8"
+rand = "0.10"

@@ -46,7 +46,7 @@ pub fn create_canonical_request_bytes(
 pub fn compute_body_hash(body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 pub fn verify_request_signature(

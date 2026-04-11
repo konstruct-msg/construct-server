@@ -453,7 +453,7 @@ pub async fn confirm_pending_message(
 /// Compute HMAC-SHA256(message_id, salt) as a hex string for delivery_pending lookups.
 /// UUIDs have 122 bits of entropy — brute force is impractical without the salt.
 pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, Mac, digest::KeyInit};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
