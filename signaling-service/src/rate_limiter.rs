@@ -1,6 +1,14 @@
 use base64::Engine;
 use redis::aio::ConnectionManager;
 
+/// Atomic INCR + EXPIRE Lua script — prevents the race where a crash between the two
+/// commands leaves the counter key without a TTL (permanent rate block).
+const INCR_EXPIRE_LUA: &str = r#"
+    local n = redis.call('INCR', KEYS[1])
+    if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+    return n
+"#;
+
 #[derive(Clone)]
 pub(crate) struct RateLimiter {
     redis: ConnectionManager,
@@ -15,14 +23,11 @@ impl RateLimiter {
     pub(crate) async fn check_call_rate(&self, user_id: &str) -> Result<bool, anyhow::Error> {
         let mut conn = self.redis.clone();
         let key = format!("ratelimit:calls:{}", user_id);
-        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE")
-                .arg(&key)
-                .arg(60i64)
-                .query_async(&mut conn)
-                .await?;
-        }
+        let count: i64 = redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&key)
+            .arg(60i64)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(count <= 10)
     }
 
@@ -34,14 +39,11 @@ impl RateLimiter {
         let peer_bucket = self.peer_bucket(peer_id)?;
         let mut conn = self.redis.clone();
         let key = format!("ratelimit:calls:{}:{}", user_id, peer_bucket);
-        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE")
-                .arg(&key)
-                .arg(60i64)
-                .query_async(&mut conn)
-                .await?;
-        }
+        let count: i64 = redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&key)
+            .arg(60i64)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(count <= 3)
     }
 
@@ -80,14 +82,11 @@ impl RateLimiter {
     pub(crate) async fn check_turn_rate(&self, user_id: &str) -> Result<bool, anyhow::Error> {
         let mut conn = self.redis.clone();
         let key = format!("ratelimit:turn:{}", user_id);
-        let count: i64 = redis::cmd("INCR").arg(&key).query_async(&mut conn).await?;
-        if count == 1 {
-            let _: () = redis::cmd("EXPIRE")
-                .arg(&key)
-                .arg(30i64)
-                .query_async(&mut conn)
-                .await?;
-        }
+        let count: i64 = redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&key)
+            .arg(30i64)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(count <= 1)
     }
 
