@@ -253,8 +253,7 @@ impl MessagingService for MessagingGrpcService {
         // Authenticate the caller before consuming the request body.
         // For sealed-sender, sender identity is intentionally hidden — skip auth
         // (dispatch_sealed_sender enforces its own authentication internally).
-        let authed_user_id =
-            extract_authed_user_id(request.metadata(), &self.context).await;
+        let authed_user_id = extract_authed_user_id(request.metadata(), &self.context).await;
 
         let req = request.into_inner();
         let attempt_id = req.attempt_id.clone();

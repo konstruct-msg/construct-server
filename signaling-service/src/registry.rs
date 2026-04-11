@@ -240,7 +240,11 @@ impl CallRegistry {
             }
             // Cap fanout to MAX_DESTINATIONS devices to prevent amplification attacks.
             if sent >= MAX_SIGNAL_DESTINATIONS {
-                tracing::warn!(user_id, sent, "Signal fanout capped at MAX_SIGNAL_DESTINATIONS");
+                tracing::warn!(
+                    user_id,
+                    sent,
+                    "Signal fanout capped at MAX_SIGNAL_DESTINATIONS"
+                );
                 break;
             }
             if tx.send(signal.clone()).is_ok() {
@@ -285,7 +289,11 @@ impl CallRegistry {
                 let devices = self.list_online_devices(user_id).await;
                 for (device_id, instance) in devices {
                     if published >= MAX_SIGNAL_DESTINATIONS {
-                        tracing::warn!(user_id, published, "Remote signal fanout capped at MAX_SIGNAL_DESTINATIONS");
+                        tracing::warn!(
+                            user_id,
+                            published,
+                            "Remote signal fanout capped at MAX_SIGNAL_DESTINATIONS"
+                        );
                         break;
                     }
                     if Some(device_id.as_str()) == except_device_id {
