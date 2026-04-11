@@ -19,8 +19,8 @@ post-quantum = []   # Internal feature for conditional compilation
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 subtle = "2.6"
 
 # Encoding
@@ -42,7 +42,7 @@ prost = "0.14"
 anyhow = "1.0"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
-rand = "0.8"
+rand = "0.10"
 
 # Async runtime
 tokio = { version = "1.0", features = ["sync"] }

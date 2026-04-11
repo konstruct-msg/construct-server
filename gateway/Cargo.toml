@@ -53,9 +53,9 @@ hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 bytes = "1.8"
-rand = "0.8"
-hmac = "0.12"
-sha2 = "0.10"
+rand = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 subtle = "2.6"
 prost = "0.14.3"
 construct-ice = { git = "https://github.com/maximeliseyev/construct-ice.git", branch = "main" }

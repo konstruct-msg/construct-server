@@ -17,7 +17,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use serde_json::json;
 use serial_test::serial;
 use sha2::{Digest, Sha256};

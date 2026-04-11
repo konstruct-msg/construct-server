@@ -1021,11 +1021,7 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
 
         // Generate 32 random bytes encoded as base64url
         use base64::Engine;
-        let mut raw = [0u8; 32];
-        {
-            use rand::RngCore;
-            rand::thread_rng().fill_bytes(&mut raw);
-        }
+        let raw: [u8; 32] = rand::random();
         let link_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
 
         let expires_at = chrono::Utc::now().timestamp() + 15 * 60;

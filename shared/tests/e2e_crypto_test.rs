@@ -38,7 +38,7 @@ use construct_server_shared::shared::proto::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use sha2::Sha256;
 use test_utils::{TestUser, spawn_app};
 use tonic::transport::Channel;
@@ -105,7 +105,7 @@ fn encrypt_message(plaintext: &str, message_key: &[u8; 32]) -> (Vec<u8>, [u8; 12
 
     // Generate random nonce (96 bits)
     let mut nonce_bytes = [0u8; 12];
-    use rand::RngCore;
+    use rand_core::RngCore;
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let nonce = Nonce::from_slice(&nonce_bytes);

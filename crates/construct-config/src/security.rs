@@ -330,11 +330,8 @@ impl CsrfConfig {
                     This means CSRF tokens will be invalidated on restart. \
                     Set CSRF_SECRET in production!"
                 );
-                use rand::Rng;
-                let mut rng = rand::thread_rng();
-                (0..32)
-                    .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
-                    .collect()
+                use rand::distr::SampleString;
+                rand::distr::Alphanumeric.sample_string(&mut rand::rng(), 32)
             }
         };
 

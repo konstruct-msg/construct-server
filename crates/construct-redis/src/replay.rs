@@ -35,7 +35,7 @@ impl<'a> ReplayProtection<'a> {
         hasher.update(message_id.as_bytes());
         hasher.update(content.as_bytes());
         hasher.update(nonce.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
 
         let key = format!("{}{}", self.msg_hash_prefix, hash);
 
@@ -103,7 +103,7 @@ impl<'a> ReplayProtection<'a> {
         hasher.update(message_id.as_bytes());
         hasher.update(content.as_bytes());
         hasher.update(nonce.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
 
         let key = format!("{}{}", self.msg_hash_prefix, hash);
 

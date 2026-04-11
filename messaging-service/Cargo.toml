@@ -51,9 +51,9 @@ tokio-stream = "0.1"
 # Messaging specific
 serde_bytes = "0.11"
 rmp-serde = "1.3"
-hmac = "0.12"
-rand = "0.8"
-sha2 = "0.10"
+hmac = "0.13"
+rand = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 serial_test = "3"

@@ -6,7 +6,7 @@
 //! The goal is deterministic, keyed hashing: the server can check membership/equality
 //! without persisting plaintext identifiers.
 
-use hmac::{Hmac, Mac};
+use hmac::{digest::KeyInit, Hmac, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;

@@ -24,7 +24,6 @@
 // ============================================================================
 
 use axum::{
-    async_trait,
     extract::{FromRequest, Request},
     http::header::HeaderMap,
     response::{IntoResponse, Response},
@@ -69,7 +68,6 @@ pub struct DeviceAuth {
     pub timestamp: i64,
 }
 
-#[async_trait]
 impl<S> FromRequest<Arc<S>> for DeviceAuth
 where
     S: HasDbPool + Send + Sync + 'static,
