@@ -24,6 +24,14 @@ ignore = [
     # Blocker: rustls-pki-types 1.14 (pinned by rustls 0.23) lacks pem feature
     # Action: Remove when upgrading rustls stack to version that includes pem support
     "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0097: rand 0.8.x / 0.10.x unsound with custom global logger
+    # Status: No patched rand 0.8.x available; fix requires sqlx 0.9+ (not yet released)
+    # Risk: NEGLIGIBLE — unsoundness only triggers when a custom global logger itself
+    #       calls rand::rng() during initialisation, a pattern we do not use.
+    #       rand is pulled in transitively by sqlx-postgres and apns-h2.
+    # Action: Remove when sqlx upgrades to a rand version with the fix
+    "RUSTSEC-2026-0097",
 ]
 
 # Don't fail on unmaintained crates (just warn)
