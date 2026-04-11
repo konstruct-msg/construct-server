@@ -658,6 +658,19 @@ where
     .fetch_one(executor)
     .await
     .map_err(|e| {
+        // Detect UNIQUE constraint violation on identity_public: provides a clear error
+        // instead of an opaque "Failed to create device" internal error.
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err
+                    .constraint()
+                    .is_some_and(|c| c.contains("identity_public"))
+            {
+                return anyhow::anyhow!(
+                    "IDENTITY_KEY_CONFLICT: identity key already registered by another device"
+                );
+            }
+        }
         tracing::error!(
             error = %e,
             device_id = %data.device_id,
