@@ -163,9 +163,17 @@ impl<'a> DeliveryManager<'a> {
 
             let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
                 if let (Ok(ts), Ok(seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
-                    // Next ID = same timestamp, seq+1 — preserves messages at same timestamp
-                    // with a higher sequence number (e.g. ack "1707584371151-0" keeps "-1", "-2", …)
-                    format!("{}-{}", ts, seq + 1)
+                    // Next ID: same timestamp, seq+1.  On seq overflow roll over to (ts+1)-0
+                    // because Redis orders IDs as (ts, seq) tuples and ts-MAX < (ts+1)-0.
+                    if let Some(next_seq) = seq.checked_add(1) {
+                        format!("{}-{}", ts, next_seq)
+                    } else if let Some(next_ts) = ts.checked_add(1) {
+                        format!("{}-0", next_ts)
+                    } else {
+                        // Both components at u64::MAX — skip trim (theoretical edge case)
+                        tracing::warn!(stream_key = %stream_key, "Stream ID at u64::MAX, skipping trim");
+                        return Ok(messages);
+                    }
                 } else {
                     // Invalid format, skip deletion
                     tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format");
