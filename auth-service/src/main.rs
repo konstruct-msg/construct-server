@@ -30,11 +30,11 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose as b64};
-use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey, Verifier};
 use construct_config::Config;
 use construct_server_shared::auth_service::AuthServiceContext;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
+use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
@@ -440,7 +440,11 @@ impl AuthService for AuthGrpcService {
         .unwrap_or(public_keys.signed_prekey_signature.as_bytes().to_vec());
 
         // Verify SPK signature before registering (recovery path)
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         construct_server_shared::db::create_device(
             self.context.db_pool.as_ref(),
@@ -676,7 +680,11 @@ impl AuthService for AuthGrpcService {
         };
 
         // Verify SPK signature before registering (device-join path)
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.pending_device_id.clone(),
@@ -1100,7 +1108,11 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
         let hostname = self.context.config.instance_domain.clone();
 
         // Verify SPK signature before registering (device-link path)
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.device_id.clone(),
