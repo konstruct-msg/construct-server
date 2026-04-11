@@ -98,6 +98,64 @@ pub(crate) async fn handle_stream_request(
                     _ => uuid::Uuid::new_v4().to_string(),
                 };
 
+                // ── Sentinel check (ban/block/user-level rate limits) ───────
+                // Must mirror the sentinel check in send_message gRPC so that limits
+                // enforced on one transport are also enforced on the other.
+                // Fails open — sentinel outage does not block message delivery.
+                let sender_device_id = envelope
+                    .sender_device
+                    .as_ref()
+                    .map(|d| d.device_id.as_str())
+                    .unwrap_or("");
+                let recipient_device_id = envelope
+                    .recipient_device
+                    .as_ref()
+                    .map(|d| d.device_id.as_str())
+                    .unwrap_or("");
+
+                if let Some(ref sentinel) = context.sentinel_client
+                    && !sender_device_id.is_empty()
+                {
+                    let target = if !recipient_device_id.is_empty() {
+                        recipient_device_id
+                    } else {
+                        sender_device_id
+                    };
+                    let (allowed, reason, retry_after) = sentinel
+                        .check_send_permission_with_user(
+                            sender_device_id,
+                            target,
+                            &uid.to_string(),
+                        )
+                        .await;
+
+                    if !allowed {
+                        let (error_code, retryable, retry_after_ms) = if retry_after > 0 {
+                            tracing::info!(sender = %uid, retry_after_secs = retry_after, reason = %reason, "Sentinel: stream send denied (rate limited)");
+                            (proto::ErrorCode::RateLimit, true, Some((retry_after * 1000).into()))
+                        } else {
+                            tracing::info!(sender = %uid, reason = %reason, "Sentinel: stream send denied (banned or blocked)");
+                            (proto::ErrorCode::Blocked, false, None)
+                        };
+                        let error = proto::MessageError {
+                            message_id: message_id.clone(),
+                            error_code: error_code.into(),
+                            error_message: reason,
+                            retryable,
+                            retry_after_ms,
+                        };
+                        let response = proto::MessageStreamResponse {
+                            response: Some(proto::message_stream_response::Response::Error(error)),
+                            response_id: Some(req.request_id.clone()),
+                            stream_cursor: None,
+                            rate_limit_challenge: None,
+                            attempt_id,
+                        };
+                        tx.send(Ok(response)).await?;
+                        return Ok(());
+                    }
+                }
+
                 // ── Rate limiting (same policy as send_message gRPC) ────────
                 if let Ok(mut redis_conn) = context.redis_conn().await {
                     let trust =
