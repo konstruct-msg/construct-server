@@ -221,7 +221,8 @@ impl SentinelCore {
 
         let mut conn = self.redis().await?;
         let key = format!("sentinel:rate:msg:{}", device_id);
-        let used: i32 = conn.get(&key).await.unwrap_or(0);
+        // Propagate Redis error rather than failing open (unwrap_or(0) would grant full quota).
+        let used: i32 = conn.get(&key).await?;
 
         Ok(((limit - used).max(0), limit))
     }
@@ -234,7 +235,8 @@ impl SentinelCore {
 
         let mut conn = self.redis().await?;
         let key = format!("sentinel:rate:rcpt:{}", device_id);
-        let used: i32 = conn.get(&key).await.unwrap_or(0);
+        // Propagate Redis error rather than failing open.
+        let used: i32 = conn.get(&key).await?;
 
         Ok(((limit - used).max(0), limit))
     }
@@ -307,8 +309,20 @@ impl SentinelCore {
             });
         }
 
-        // Check device-level hourly message rate
-        let (remaining, _) = self.msg_quota(caller_device_id, trust).await?;
+        // Check device-level hourly message rate.
+        // Fail-closed: if Redis is unavailable, deny the send rather than allowing
+        // unlimited traffic. The client should retry after the backoff.
+        let (remaining, _) = match self.msg_quota(caller_device_id, trust).await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::error!(error = %e, device_id = %caller_device_id, "Redis unavailable in msg_quota — failing closed");
+                return Ok(SendPermission {
+                    allowed: false,
+                    denial_reason: "Rate-limit service temporarily unavailable".into(),
+                    retry_after_seconds: 30,
+                });
+            }
+        };
         if remaining == 0 {
             self.record_violation().await;
             return Ok(SendPermission {
@@ -322,7 +336,17 @@ impl SentinelCore {
         // registers N devices and gets N × per-device limit.
         if let Some(user_id) = caller_user_id {
             if !user_id.is_empty() {
-                let (user_remaining, _) = self.user_msg_quota(user_id, trust).await?;
+                let (user_remaining, _) = match self.user_msg_quota(user_id, trust).await {
+                    Ok(q) => q,
+                    Err(e) => {
+                        tracing::error!(error = %e, user_id = %user_id, "Redis unavailable in user_msg_quota — failing closed");
+                        return Ok(SendPermission {
+                            allowed: false,
+                            denial_reason: "Rate-limit service temporarily unavailable".into(),
+                            retry_after_seconds: 30,
+                        });
+                    }
+                };
                 if user_remaining == 0 {
                     self.record_violation().await;
                     return Ok(SendPermission {
