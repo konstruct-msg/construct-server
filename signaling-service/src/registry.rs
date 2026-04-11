@@ -19,6 +19,10 @@ use crate::forwarded::{
 };
 use crate::time::{unix_millis, unix_seconds};
 
+/// Maximum number of destination devices a single signal may be forwarded to.
+/// Caps fanout to prevent amplification attacks in multi-device scenarios.
+const MAX_SIGNAL_DESTINATIONS: usize = 5;
+
 #[derive(Clone)]
 pub(crate) struct CallState {
     pub(crate) call_id: String,
@@ -234,6 +238,11 @@ impl CallRegistry {
                     continue;
                 }
             }
+            // Cap fanout to MAX_DESTINATIONS devices to prevent amplification attacks.
+            if sent >= MAX_SIGNAL_DESTINATIONS {
+                tracing::warn!(user_id, sent, "Signal fanout capped at MAX_SIGNAL_DESTINATIONS");
+                break;
+            }
             if tx.send(signal.clone()).is_ok() {
                 sent += 1;
             }
@@ -275,6 +284,10 @@ impl CallRegistry {
             None => {
                 let devices = self.list_online_devices(user_id).await;
                 for (device_id, instance) in devices {
+                    if published >= MAX_SIGNAL_DESTINATIONS {
+                        tracing::warn!(user_id, published, "Remote signal fanout capped at MAX_SIGNAL_DESTINATIONS");
+                        break;
+                    }
                     if Some(device_id.as_str()) == except_device_id {
                         continue;
                     }
