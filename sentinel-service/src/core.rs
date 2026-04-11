@@ -16,6 +16,7 @@
 //   sentinel:flag:{device_id}             → "1" (TTL 7d)
 //   sentinel:reports:{device_id}          → counter (TTL = 7 days)
 //   sentinel:rate:msg:{device_id}         → counter (TTL = 3600s, hourly window)
+//   sentinel:rate:msg:user:{user_id}      → counter (TTL = 3600s, hourly window, cross-device ceiling)
 //   sentinel:rate:rcpt:{device_id}        → counter (TTL = 86400s, daily window)
 //   sentinel:blocks:{blocker}             → SET of blocked device_ids (TTL 300s)
 //   sentinel:rate:report:{device_id}      → counter (TTL = 86400s, daily window)
@@ -247,12 +248,21 @@ impl SentinelCore {
             return Ok((0, limit));
         }
 
-        let mut conn = self.redis().await?;
+        // Atomic INCR + EXPIRE via Lua prevents the race where a crash between the two
+        // commands leaves the key without a TTL, making the counter permanent.
+        const LUA: &str = r#"
+            local n = redis.call('INCR', KEYS[1])
+            if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+            return n
+        "#;
         let key = format!("sentinel:rate:msg:user:{}", user_id);
-        let used: i64 = conn.incr(&key, 1i64).await.unwrap_or(1);
-        if used == 1 {
-            let _: Result<(), _> = conn.expire(&key, 3600i64).await;
-        }
+        let mut conn = self.redis().await?;
+        let used: i64 = redis::Script::new(LUA)
+            .key(&key)
+            .arg(3600i64)
+            .invoke_async(&mut conn)
+            .await
+            .unwrap_or(1);
 
         Ok(((limit as i64 - used).max(0) as i32, limit))
     }
