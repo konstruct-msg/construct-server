@@ -161,6 +161,27 @@ pub async fn process_kafka_message(
         .await
         .context("Redis write semaphore closed")?;
 
+    // Pre-write depth check: if stream is already overloaded, backoff before adding more
+    // messages. This gives the consumer time to drain rather than compounding the problem.
+    // The check is best-effort; errors (Redis unavailable) fall through to the write.
+    {
+        let mut conn = state.redis_conn.clone();
+        if let Ok(stream_len) = redis::cmd("XLEN")
+            .arg(&stream_key)
+            .query_async::<i64>(&mut conn)
+            .await
+        {
+            if stream_len > 50_000 {
+                tracing::warn!(
+                    stream_key = %stream_key,
+                    stream_len,
+                    "Redis stream depth critical — backing off 500 ms before write"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+
     push_to_offline_stream_atomic(
         state,
         &stream_key,
@@ -172,22 +193,6 @@ pub async fn process_kafka_message(
     .await
     .context("Failed to atomically push message and mark as processed")?;
 
-    // Check stream depth after write — warn if growing too large.
-    {
-        let mut conn = state.redis_conn.clone();
-        if let Ok(stream_len) = redis::cmd("XLEN")
-            .arg(&stream_key)
-            .query_async::<i64>(&mut conn)
-            .await
-            && stream_len > 50_000
-        {
-            tracing::warn!(
-                stream_key = %stream_key,
-                stream_len,
-                "Redis stream depth critical — possible consumer lag"
-            );
-        }
-    }
     drop(_permit);
 
     // Publish notification for long polling endpoints
