@@ -168,20 +168,25 @@ impl KeyService for KeyGrpcService {
         }
 
         {
+            // Atomic INCR + EXPIRE via Lua — prevents the race condition where a crash
+            // between the two commands leaves the key without a TTL (permanent block).
+            // Fails closed: Redis unavailable → deny the request (OTPK exhaustion safety).
+            const RATE_LIMIT_LUA: &str = r#"
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+                return count
+            "#;
             let mut redis = self.context.redis.clone();
             let rate_key = format!("rate:bundle:{}:{}", caller_device, req.user_id);
-            let count: i64 = redis::cmd("INCR")
-                .arg(&rate_key)
-                .query_async(&mut redis)
+            let count: i64 = redis::Script::new(RATE_LIMIT_LUA)
+                .key(&rate_key)
+                .arg(60i64) // 60-second window
+                .invoke_async(&mut redis)
                 .await
-                .unwrap_or(0);
-            if count == 1 {
-                let _: Result<(), _> = redis::cmd("EXPIRE")
-                    .arg(&rate_key)
-                    .arg(60i64)
-                    .query_async(&mut redis)
-                    .await;
-            }
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "Redis unavailable for bundle rate-limit — failing closed");
+                    Status::unavailable("Service temporarily unavailable")
+                })?;
             if count > 10 {
                 return Err(Status::resource_exhausted(
                     "Too many bundle requests — try again later",
