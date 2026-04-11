@@ -51,3 +51,6 @@ subtle = "2.6"
 
 # ICE transport — bridge cert computation for login response
 construct-ice = { git = "https://github.com/maximeliseyev/construct-ice.git", branch = "main" }
+
+# RSA key parsing for JWKS endpoint
+rsa = { version = "0.9", features = ["pem"] }

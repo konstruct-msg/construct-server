@@ -94,6 +94,39 @@ static_resources:
                         - match: { prefix: "/health" }
                           route: { cluster: discovery_service, timeout: 5s }
                 http_filters:
+                  # Validate Bearer JWT tokens and inject x-user-id from the `sub` claim.
+                  # Envoy fetches the JWKS from auth-service on startup (cached 10 min).
+                  # Public routes (AuthService, DeviceService, health) bypass validation.
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        construct_jwt:
+                          remote_jwks:
+                            http_uri:
+                              uri: http://auth:8081/.well-known/jwks.json
+                              cluster: auth_http
+                              timeout: 5s
+                            cache_duration:
+                              seconds: 600
+                            # Retry JWKS fetch in background — don't hard-fail on cold start
+                            async_fetch:
+                              fast_listener: false
+                          # Extract validated sub claim → x-user-id header for upstream services
+                          claim_to_headers:
+                            - header_name: x-user-id
+                              claim_name: sub
+                          # Keep Authorization header so services can inspect it if needed
+                          forward: true
+                      rules:
+                        # Public routes — no JWT required
+                        - match: { prefix: "/shared.proto.services.v1.AuthService" }
+                        - match: { prefix: "/shared.proto.services.v1.DeviceService" }
+                        - match: { prefix: "/.well-known" }
+                        - match: { prefix: "/health" }
+                        # All other routes require a valid JWT
+                        - match: { prefix: "/" }
+                          requires: { provider_name: construct_jwt }
                   - name: envoy.filters.http.grpc_web
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_web.v3.GrpcWeb
@@ -328,3 +361,17 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: gateway, port_value: 3000 }
+
+    # HTTP/1.1 cluster for JWKS fetch — auth-service exposes its REST API on port 8081
+    - name: auth_http
+      type: STRICT_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: auth_http
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: auth, port_value: 8081 }

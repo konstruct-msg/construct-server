@@ -1317,38 +1317,56 @@ fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Stat
 }
 
 /// GET /.well-known/jwks.json
-/// Returns JSON Web Key Set (JWKS) for RS256 public key
-/// This endpoint is public and doesn't require authentication
+/// Returns a proper JSON Web Key Set (JWKS) for our RS256 public key.
+/// Envoy's `jwt_authn` filter fetches this to validate Bearer tokens and
+/// inject `x-user-id` from the `sub` claim.
 async fn get_jwks() -> impl IntoResponse {
-    // Try to get JWT public key from environment
-    match env::var("JWT_PUBLIC_KEY") {
-        Ok(public_key) => {
-            // Remove PEM headers/footers and newlines for JWKS format
-            let key_content = public_key
-                .replace("-----BEGIN PUBLIC KEY-----", "")
-                .replace("-----END PUBLIC KEY-----", "")
-                .replace("\n", "")
-                .replace("\r", "");
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rsa::pkcs1::DecodeRsaPublicKey as _;
+    use rsa::pkcs8::DecodePublicKey as _;
+    use rsa::traits::PublicKeyParts as _;
+
+    let raw = match env::var("JWT_PUBLIC_KEY") {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "JWT_PUBLIC_KEY not configured"})),
+            );
+        }
+    };
+
+    // Normalize: env files often store newlines as literal \n
+    let pem = raw.replace("\\n", "\n");
+
+    // Accept both PKCS#8 ("BEGIN PUBLIC KEY") and PKCS#1 ("BEGIN RSA PUBLIC KEY")
+    let public_key = rsa::RsaPublicKey::from_public_key_pem(&pem)
+        .or_else(|_| rsa::RsaPublicKey::from_pkcs1_pem(&pem));
+
+    match public_key {
+        Ok(key) => {
+            // Encode modulus and exponent as base64url (no padding) — standard JWK format
+            let n = URL_SAFE_NO_PAD.encode(key.n().to_bytes_be());
+            let e = URL_SAFE_NO_PAD.encode(key.e().to_bytes_be());
 
             let jwks = json!({
                 "keys": [{
                     "kty": "RSA",
                     "use": "sig",
                     "alg": "RS256",
-                    "n": key_content,
-                    "kid": "construct-auth-service-key"
+                    "kid": "construct-auth-key",
+                    "n": n,
+                    "e": e
                 }]
             });
-
             (StatusCode::OK, Json(jwks))
         }
-        Err(_) => {
-            // If no public key, return error
+        Err(e) => {
+            tracing::error!("Failed to parse JWT_PUBLIC_KEY for JWKS endpoint: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "JWT public key not configured"
-                })),
+                Json(json!({"error": "Failed to parse JWT public key"})),
             )
         }
     }
