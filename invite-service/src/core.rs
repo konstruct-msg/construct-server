@@ -332,8 +332,10 @@ pub async fn accept_invite(
     );
 
     // 4. Establish mutual contact links (privacy-preserving: both directions)
+    // Use the canonical lowercase UUID string for HMAC inputs so signaling-service
+    // (which receives user IDs as strings) computes identical values.
     let secret = &context.config.security.contact_hmac_secret;
-    let accepter_hmac = hmac_sha256(secret, input.accepter_user_id.as_bytes());
+    let accepter_hmac = hmac_sha256(secret, input.accepter_user_id.to_string().as_bytes());
     let creator_hmac = hmac_sha256(secret, creator_user_id.as_bytes());
 
     if let Err(e) =

@@ -353,14 +353,16 @@ impl SignalingService for SignalingServiceImpl {
 
         // ── Mutual contacts + block check ─────────────────────────────────
         if let Some(pool) = self.db_pool.as_deref() {
+            // Validate UUIDs, but use the canonical string form for HMAC so the
+            // computed values match what invite-service stores (String::as_bytes()).
             let (Ok(caller_uuid), Ok(callee_uuid)) =
                 (Uuid::parse_str(&caller_id), Uuid::parse_str(callee_user_id))
             else {
                 return Err(Status::invalid_argument("Invalid user_id UUID"));
             };
 
-            let caller_hmac = hmac_sha256(&self.contact_hmac_secret, caller_uuid.as_bytes());
-            let callee_hmac = hmac_sha256(&self.contact_hmac_secret, callee_uuid.as_bytes());
+            let caller_hmac = hmac_sha256(&self.contact_hmac_secret, caller_id.as_bytes());
+            let callee_hmac = hmac_sha256(&self.contact_hmac_secret, callee_user_id.as_bytes());
             match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -528,6 +530,8 @@ async fn handle_outbound_signal(
             let callee_user_id = callee_user_id_from_route(route.as_ref())?;
 
             if let Some(pool) = db_pool {
+                // Validate UUIDs, but use the canonical string form for HMAC so the
+                // computed values match what invite-service stores (String::as_bytes()).
                 let (Ok(caller_uuid), Ok(callee_uuid)) =
                     (Uuid::parse_str(user_id), Uuid::parse_str(callee_user_id))
                 else {
@@ -535,8 +539,8 @@ async fn handle_outbound_signal(
                 };
 
                 // Enforce strict mutual contacts for calls.
-                let caller_hmac = hmac_sha256(contact_hmac_secret, caller_uuid.as_bytes());
-                let callee_hmac = hmac_sha256(contact_hmac_secret, callee_uuid.as_bytes());
+                let caller_hmac = hmac_sha256(contact_hmac_secret, user_id.as_bytes());
+                let callee_hmac = hmac_sha256(contact_hmac_secret, callee_user_id.as_bytes());
                 match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                     Ok(true) => {}
                     Ok(false) => {
