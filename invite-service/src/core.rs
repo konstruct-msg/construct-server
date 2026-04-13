@@ -336,7 +336,7 @@ pub async fn accept_invite(
     // (which receives user IDs as strings) computes identical values.
     let secret = &context.config.security.contact_hmac_secret;
     let accepter_hmac = hmac_sha256(secret, input.accepter_user_id.to_string().as_bytes());
-    let creator_hmac = hmac_sha256(secret, creator_user_id.as_bytes());
+    let creator_hmac = hmac_sha256(secret, creator_user_id.to_string().as_bytes());
 
     if let Err(e) =
         construct_db::add_contact_link(&context.db_pool, &accepter_hmac, &creator_hmac).await
