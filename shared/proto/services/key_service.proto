@@ -114,8 +114,39 @@ message GetPreKeyBundleResponse {
   // Ed25519 public key for verifying device signatures
   bytes verifying_key = 11;
 
+  // Key Transparency inclusion proof for the device's identity key.
+  // Absent in dev/test environments where the KT log is not populated.
+  // Clients SHOULD verify this when non-empty (see KeyTransparencyVerifier).
+  optional KtInclusionProof kt_proof = 20;
+
   // Reserved for future fields
   reserved 4 to 10;
+}
+
+// ============================================================================
+// Key Transparency (Certificate Transparency-style Merkle log)
+// ============================================================================
+
+// RFC 6962-style inclusion proof for a device's identity key in the KT log.
+// The proof allows a client to verify that the identity key it received is
+// permanently recorded in the server's append-only Merkle log.
+message KtInclusionProof {
+  // 0-based position of this device's leaf in the Merkle log
+  uint64 leaf_index = 1;
+
+  // Total number of leaves in the tree at the time of proof generation
+  uint64 tree_size = 2;
+
+  // Merkle root hash (32 bytes, SHA-256)
+  bytes root_hash = 3;
+
+  // Sibling hashes on the path from this leaf to the root (leaf-to-root order).
+  // Each element is 32 bytes (SHA-256).
+  repeated bytes proof_hashes = 4;
+
+  // Ed25519 signature over: "ConstructKT-v1" || tree_size (8 BE) || root_hash (32)
+  // Signed with the server's bundle signing key (same key as bundle_signature).
+  bytes tree_head_signature = 5;
 }
 
 // Pre-key bundle for X3DH key agreement
@@ -219,6 +250,9 @@ message DevicePreKeyBundle {
 
   // Device platform (for UI hints)
   shared.proto.core.v1.DevicePlatform platform = 3;
+
+  // Key Transparency inclusion proof (absent in dev/test environments).
+  optional KtInclusionProof kt_proof = 4;
 }
 
 // ============================================================================
