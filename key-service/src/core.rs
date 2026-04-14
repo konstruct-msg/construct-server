@@ -45,6 +45,9 @@ pub struct PreKeyBundle {
     /// Ed25519 signature over canonical bundle bytes (see `sign_bundle`).
     /// `None` when bundle signing key is not configured (dev/test environments).
     pub bundle_signature: Option<Vec<u8>>,
+    /// Key Transparency inclusion proof. `None` when KT log is not populated
+    /// (dev/test environments or first registration before the leaf is visible).
+    pub kt_proof: Option<crate::kt::KtProof>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,8 +287,17 @@ pub async fn get_prekey_bundle(
         kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
         kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
         bundle_signature: None,
+        kt_proof: None,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
+    if let Some(sk) = bundle_signing_key {
+        match crate::kt::build_kt_proof(db, &bundle.device_id, &bundle.identity_key, sk).await {
+            Ok(proof) => bundle.kt_proof = Some(proof),
+            Err(e) => {
+                tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
+            }
+        }
+    }
     Ok(Some(bundle))
 }
 
@@ -392,8 +404,17 @@ pub async fn get_prekey_bundles(
             kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
             kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
             bundle_signature: None,
+            kt_proof: None,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
+        if let Some(sk) = bundle_signing_key {
+            match crate::kt::build_kt_proof(db, &bundle.device_id, &bundle.identity_key, sk).await {
+                Ok(proof) => bundle.kt_proof = Some(proof),
+                Err(e) => {
+                    tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
+                }
+            }
+        }
         bundles.push(bundle);
     }
 

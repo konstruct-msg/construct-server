@@ -17,6 +17,7 @@
 // ============================================================================
 
 mod core;
+mod kt;
 
 use anyhow::{Context, Result};
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
@@ -235,6 +236,13 @@ impl KeyService for KeyGrpcService {
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
                     verifying_key: b.verifying_key,
+                    kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {
+                        leaf_index: p.leaf_index,
+                        tree_size: p.tree_size,
+                        root_hash: p.root_hash,
+                        proof_hashes: p.proof_hashes,
+                        tree_head_signature: p.tree_head_signature,
+                    }),
                 });
                 if let Some(notif_client) = self.context.notification_client.clone() {
                     let db = self.context.db.clone();
@@ -636,6 +644,13 @@ impl KeyService for KeyGrpcService {
                     bundle_signature: b.bundle_signature.unwrap_or_default(),
                 }),
                 platform: 0, // Unknown
+                kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {
+                    leaf_index: p.leaf_index,
+                    tree_size: p.tree_size,
+                    root_hash: p.root_hash,
+                    proof_hashes: p.proof_hashes,
+                    tree_head_signature: p.tree_head_signature,
+                }),
             })
             .collect();
 
