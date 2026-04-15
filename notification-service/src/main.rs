@@ -445,9 +445,7 @@ async fn main() -> Result<()> {
     // Prepare gRPC server
     let grpc_bind_address = std::env::var("NOTIFICATION_GRPC_BIND_ADDRESS")
         .unwrap_or_else(|_| "[::]:50054".to_string());
-    let grpc_addr = grpc_bind_address
-        .parse()
-        .context("Failed to parse NOTIFICATION_GRPC_BIND_ADDRESS")?;
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
 
     let grpc_service = NotificationGrpcService {
         context: context.clone(),
@@ -460,7 +458,7 @@ async fn main() -> Result<()> {
     // Start both servers concurrently
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     let rest_server = async move {
-        let listener = tokio::net::TcpListener::bind(&config.bind_address)
+        let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
             .await
             .context("Failed to bind REST server")?;
 
@@ -472,7 +470,7 @@ async fn main() -> Result<()> {
     let grpc_server = async move {
         construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(NotificationServiceServer::new(grpc_service))
-            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
+            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
             .context("Failed to start gRPC server")
     };

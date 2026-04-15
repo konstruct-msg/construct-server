@@ -38,7 +38,8 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "50060".into())
         .parse()?;
-    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let grpc_bind_addr = format!("0.0.0.0:{}", port);
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_addr).await?;
 
     let turn_secret = env::var("TURN_SECRET").unwrap_or_else(|_| "changeme".into());
     let turn_ttl: u64 = env::var("TURN_CREDENTIALS_TTL_SECONDS")
@@ -97,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    info!("SignalingService listening on {}", addr);
+    info!("SignalingService listening on {}", grpc_bind_addr);
 
     // Load JWT auth manager for device_id cross-verification (S-C1).
     // If JWT_PUBLIC_KEY is not set, start in degraded mode: trust gateway-injected
@@ -136,7 +137,9 @@ async fn main() -> anyhow::Result<()> {
                 "/metrics",
                 axum::routing::get(construct_server_shared::metrics::metrics_handler),
             );
-        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+        let listener = construct_server_shared::mptcp_or_tcp_listener(&http_addr.to_string())
+            .await
+            .unwrap();
         info!("SignalingService HTTP/metrics listening on {}", http_addr);
         axum::serve(listener, app).await.unwrap();
     });
@@ -181,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
 
     Server::builder()
         .add_service(SignalingServiceServer::new(service))
-        .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
+        .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;
 
     Ok(())

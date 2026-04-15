@@ -1698,9 +1698,7 @@ async fn main() -> Result<()> {
 
     let grpc_bind_address =
         env::var("AUTH_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
-    let grpc_addr = grpc_bind_address
-        .parse()
-        .context("Invalid AUTH_GRPC_BIND_ADDRESS")?;
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = AuthGrpcService {
@@ -1712,7 +1710,7 @@ async fn main() -> Result<()> {
             .add_service(AuthServiceServer::new(service.clone()))
             .add_service(DeviceServiceServer::new(service.clone()))
             .add_service(DeviceLinkServiceServer::new(service))
-            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
+            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "Auth gRPC server failed");
@@ -1758,7 +1756,7 @@ async fn main() -> Result<()> {
     // Start server
     info!("Auth Service listening on {}", config.bind_address);
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
+    let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
 

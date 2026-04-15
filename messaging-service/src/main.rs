@@ -194,9 +194,7 @@ async fn main() -> Result<()> {
     let grpc_context = context.clone();
     let grpc_bind_address =
         env::var("MESSAGING_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50053".to_string());
-    let grpc_addr = grpc_bind_address
-        .parse()
-        .context("Invalid MESSAGING_GRPC_BIND_ADDRESS")?;
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     // Replace bare .serve() with graceful shutdown for gRPC
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
@@ -207,7 +205,7 @@ async fn main() -> Result<()> {
             .add_service(
                 MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
             )
-            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
+            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "Messaging gRPC server failed");
@@ -267,7 +265,7 @@ async fn main() -> Result<()> {
     // Start server
     info!("Messaging Service listening on {}", config.bind_address);
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
+    let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
 
