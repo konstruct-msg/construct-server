@@ -290,4 +290,34 @@ impl<'a> RateLimiter<'a> {
 
         Ok(())
     }
+
+    /// Increment Privacy Pass token issuance count for a user (hourly window).
+    /// Increments by `n` and returns the new total. Callers check against max (20/hr).
+    pub(crate) async fn increment_token_issuance_count(
+        &mut self,
+        user_id: &str,
+        n: u64,
+    ) -> Result<u32> {
+        let hour = chrono::Utc::now().timestamp() / 3600;
+        let key = format!("rate:pp_tokens:{}:{}", user_id, hour);
+
+        let script = redis::Script::new(
+            r"
+            local count = redis.call('INCRBY', KEYS[1], ARGV[2])
+            if count == tonumber(ARGV[2]) then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return count
+            ",
+        );
+
+        let count: u32 = script
+            .key(&key)
+            .arg(SECONDS_PER_HOUR)
+            .arg(n)
+            .invoke_async(self.client.connection_mut())
+            .await?;
+
+        Ok(count)
+    }
 }

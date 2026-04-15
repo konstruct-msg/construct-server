@@ -51,6 +51,13 @@ service AuthService {
   // Client should cache the certificate for up to 24 hours.
   rpc GetSenderCertificate(GetSenderCertificateRequest) returns (GetSenderCertificateResponse);
 
+  // IssueTokens - Issue Privacy Pass blind tokens (OPRF Ristretto255)
+  // Authenticated via JWT. Client sends blinded Ristretto points; server evaluates
+  // k * blinded for each, where k = TOKEN_ISSUER_KEY scalar.
+  // Client unblinds to derive unlinkable one-time tokens for anonymous STEALTH sends.
+  // Rate limited: 20 tokens/hour per user.
+  rpc IssueTokens(IssueTokensRequest) returns (IssueTokensResponse);
+
   // ApproveJoinRequest - Phone approves TUI device link (Flow B)
   // Authenticated: requires valid JWT from the primary/existing device
   // Creates the device in DB and returns auth tokens for the new device
@@ -624,4 +631,29 @@ message ApproveJoinRequestRequest {
 
   // Crypto suite to assign (e.g., "Curve25519+Ed25519")
   string crypto_suite = 2;
+}
+
+// ============================================================================
+// Privacy Pass — Blind Token Issuance (ConstructPrivacyPass, Phase 2)
+// ============================================================================
+
+// IssueTokensRequest - Client sends blinded Ristretto255 points for OPRF evaluation.
+// All blinded points must be valid compressed Ristretto255 encodings (32 bytes each).
+// Maximum 20 points per request (enforced server-side; excess → RESOURCE_EXHAUSTED).
+message IssueTokensRequest {
+  // Each entry is a 32-byte compressed Ristretto255 point: blinded = r * T.
+  // r = random scalar (client secret), T = hash_to_ristretto255(nonce).
+  repeated bytes blinded_points = 1;
+}
+
+// IssueTokensResponse - Server returns evaluated Ristretto255 points.
+// Each evaluated_point[i] = k * blinded_points[i], where k = TOKEN_ISSUER_KEY.
+// Returned in the same order as the request.
+message IssueTokensResponse {
+  // Each entry is a 32-byte compressed Ristretto255 point: Z = k * blinded.
+  // Client unblinds: N = r_inv * Z = k * T, then derives token via HKDF.
+  repeated bytes evaluated_points = 1;
+  // 32-byte compressed Ristretto255 public key: K = k * G.
+  // Client uses this to verify the evaluation (DLEQ proof in future version).
+  bytes server_pubkey = 2;
 }

@@ -58,6 +58,8 @@ struct AuthGrpcService {
     context: Arc<AuthServiceContext>,
     /// Pre-computed obfs4 bridge cert (None when ICE_ENABLED=false or key not set).
     ice_bridge_cert: Option<String>,
+    /// OPRF scalar key for Privacy Pass token issuance (None = feature disabled).
+    token_issuer_key: Option<[u8; 32]>,
 }
 
 /// Data stored in Redis for a join request (Flow B).
@@ -755,6 +757,86 @@ impl AuthService for AuthGrpcService {
             refresh_token,
             expires_at: exp_timestamp,
             ice_bridge_cert: self.ice_bridge_cert.clone(),
+        }))
+    }
+
+    async fn issue_tokens(
+        &self,
+        request: Request<proto::IssueTokensRequest>,
+    ) -> Result<Response<proto::IssueTokensResponse>, Status> {
+        use curve25519_dalek::{
+            RistrettoPoint, Scalar, ristretto::CompressedRistretto, traits::IsIdentity,
+        };
+
+        // 1. Require TOKEN_ISSUER_KEY to be configured.
+        let k_bytes = self
+            .token_issuer_key
+            .ok_or_else(|| Status::unavailable("privacy pass: token issuance not configured"))?;
+        let k = Scalar::from_bytes_mod_order(k_bytes);
+
+        // 2. Authenticate caller.
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|e| Status::unauthenticated(format!("invalid token: {}", e)))?;
+        let user_id = claims.sub.clone();
+
+        // 3. Validate input: 1–20 blinded points, each exactly 32 bytes.
+        let blinded_points = &request.get_ref().blinded_points;
+        if blinded_points.is_empty() || blinded_points.len() > 20 {
+            return Err(Status::invalid_argument(
+                "blinded_points: must have 1–20 entries",
+            ));
+        }
+
+        // 4. Rate-limit: max 20 tokens per hour per user.
+        let count = self
+            .context
+            .queue
+            .lock()
+            .await
+            .increment_token_issuance_count(&user_id, blinded_points.len() as u64)
+            .await
+            .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
+        if count > 20 {
+            return Err(Status::resource_exhausted(
+                "token issuance rate limit exceeded (20/hr)",
+            ));
+        }
+
+        // 5. Evaluate OPRF: Z = k * blinded_point for each input.
+        let mut evaluated_points: Vec<Vec<u8>> = Vec::with_capacity(blinded_points.len());
+        for raw in blinded_points {
+            if raw.len() != 32 {
+                return Err(Status::invalid_argument(
+                    "each blinded point must be exactly 32 bytes",
+                ));
+            }
+            let compressed = CompressedRistretto::from_slice(raw)
+                .map_err(|_| Status::invalid_argument("blinded point: wrong length"))?;
+            let point = compressed
+                .decompress()
+                .ok_or_else(|| Status::invalid_argument("blinded point: not on ristretto255"))?;
+            if point.is_identity() {
+                return Err(Status::invalid_argument(
+                    "blinded point: identity point not allowed",
+                ));
+            }
+            let z: RistrettoPoint = k * point;
+            evaluated_points.push(z.compress().to_bytes().to_vec());
+        }
+
+        // 6. Produce DLEQ proof so client can verify server used the registered key.
+        // For now we return the pubkey bytes alongside evaluated points.
+        // Full batch DLEQ proof is Phase 2.1 (future work).
+        let pubkey_point = curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT * k;
+        let pubkey_bytes = pubkey_point.compress().to_bytes().to_vec();
+
+        Ok(Response::new(proto::IssueTokensResponse {
+            evaluated_points,
+            server_pubkey: pubkey_bytes,
         }))
     }
 }
@@ -1587,6 +1669,33 @@ async fn main() -> Result<()> {
     // Start gRPC AuthService (hard-cut target transport)
     let grpc_context = context.clone();
     let grpc_ice_bridge_cert = ice_bridge_cert.clone();
+
+    // Load Privacy Pass token issuer key (optional — feature disabled if absent).
+    let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
+        Ok(hex) => {
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                .collect::<Result<Vec<u8>, _>>();
+            match bytes {
+                Ok(b) if b.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    info!("Privacy Pass token issuer key loaded — IssueTokens enabled");
+                    Some(arr)
+                }
+                _ => {
+                    tracing::warn!("TOKEN_ISSUER_KEY: must be 64 hex chars — IssueTokens disabled");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            info!("TOKEN_ISSUER_KEY not set — IssueTokens disabled");
+            None
+        }
+    };
+
     let grpc_bind_address =
         env::var("AUTH_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
     let grpc_addr = grpc_bind_address
@@ -1597,6 +1706,7 @@ async fn main() -> Result<()> {
         let service = AuthGrpcService {
             context: grpc_context,
             ice_bridge_cert: grpc_ice_bridge_cert,
+            token_issuer_key,
         };
         if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(AuthServiceServer::new(service.clone()))
