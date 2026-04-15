@@ -465,6 +465,12 @@ message PendingMessage {
   // For regular E2EE messages this will be CONTENT_TYPE_E2EE_SIGNAL (= 11).
   shared.proto.core.v1.ContentType content_type = 9;
 
+  // ConstructSEALED (sealed sender): raw SealedInner proto bytes.
+  // Populated only when the message was sent with stealth mode enabled.
+  // When non-empty, sender_id is empty and encrypted_payload is empty.
+  // The recipient must decrypt this field to recover sender identity and payload.
+  bytes sealed_inner_data = 10;
+
   // Reserved for removed plaintext crypto fields — do not reuse
   reserved 3, 4, 5, 6;
 }
