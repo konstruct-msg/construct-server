@@ -354,6 +354,13 @@ message SealedInner {
   // TTL in seconds (0 = no expiration)
   uint32 ttl = 7;
 
+  // Privacy Pass blind token — anonymous spend credential (optional).
+  // When present, destination server verifies the token against the
+  // Privacy Pass issuer public key before delivering the message.
+  // Sender consumes one token per STEALTH message from their local wallet.
+  bytes token_nonce = 16;
+  bytes token_bytes = 17;
+
   // Reserved for future sealed fields
   reserved 8 to 15;
 }
