@@ -209,6 +209,13 @@ impl MessageQueue {
             .await
     }
 
+    /// Increment Privacy Pass token issuance count for hourly rate limiting.
+    pub async fn increment_token_issuance_count(&mut self, user_id: &str, n: u64) -> Result<u32> {
+        rate_limiting::RateLimiter::new(&mut self.client)
+            .increment_token_issuance_count(user_id, n)
+            .await
+    }
+
     pub async fn increment_password_change_count(&mut self, user_id: &str) -> Result<u32> {
         rate_limiting::RateLimiter::new(&mut self.client)
             .increment_password_change_count(user_id)
