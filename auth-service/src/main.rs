@@ -517,6 +517,82 @@ impl AuthService for AuthGrpcService {
         }))
     }
 
+    // =========================================================================
+    // Social Recovery Bundle RPCs (SLIP-39 Variant A — vault key)
+    // =========================================================================
+
+    async fn store_recovery_bundle(
+        &self,
+        request: Request<proto::StoreRecoveryBundleRequest>,
+    ) -> Result<Response<proto::StoreRecoveryBundleResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let req = request.into_inner();
+
+        if req.bundle_ciphertext.is_empty() {
+            return Err(Status::invalid_argument("bundle_ciphertext is required"));
+        }
+        if req.bundle_ciphertext.len() > 4096 {
+            return Err(Status::invalid_argument(
+                "bundle_ciphertext exceeds maximum size of 4096 bytes",
+            ));
+        }
+
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        sqlx::query(
+            "UPDATE users SET social_recovery_bundle = $1, social_recovery_bundle_set_at = NOW() WHERE id = $2",
+        )
+        .bind(&req.bundle_ciphertext)
+        .bind(user_id)
+        .execute(self.context.db_pool.as_ref())
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::StoreRecoveryBundleResponse {
+            success: true,
+        }))
+    }
+
+    async fn get_recovery_bundle(
+        &self,
+        request: Request<proto::GetRecoveryBundleRequest>,
+    ) -> Result<Response<proto::GetRecoveryBundleResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.username.is_empty() {
+            return Err(Status::invalid_argument("username is required"));
+        }
+
+        let hash = construct_crypto::hash_username(
+            &self.context.config.security.username_hmac_secret,
+            &req.username,
+        );
+
+        let row: Option<(Option<Vec<u8>>,)> =
+            sqlx::query_as("SELECT social_recovery_bundle FROM users WHERE username_hash = $1")
+                .bind(&hash)
+                .fetch_optional(self.context.db_pool.as_ref())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        match row {
+            Some((Some(bundle),)) => Ok(Response::new(proto::GetRecoveryBundleResponse {
+                bundle_ciphertext: bundle,
+                bundle_exists: true,
+            })),
+            _ => Ok(Response::new(proto::GetRecoveryBundleResponse {
+                bundle_ciphertext: vec![],
+                bundle_exists: false,
+            })),
+        }
+    }
+
     async fn get_sender_certificate(
         &self,
         request: Request<proto::GetSenderCertificateRequest>,
