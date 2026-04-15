@@ -777,10 +777,24 @@ impl MessagingService for MessagingGrpcService {
 
                 Some(proto::PendingMessage {
                     message_id: env.message_id,
-                    sender_id: env.sender_id,
-                    encrypted_payload: payload_bytes,
+                    sender_id: if env.is_sealed_sender {
+                        String::new()
+                    } else {
+                        env.sender_id
+                    },
+                    encrypted_payload: if env.is_sealed_sender {
+                        vec![]
+                    } else {
+                        payload_bytes
+                    },
                     timestamp: env.timestamp,
                     content_type: content_type.into(),
+                    sealed_inner_data: env
+                        .sealed_inner_b64
+                        .as_deref()
+                        .filter(|_| env.is_sealed_sender)
+                        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+                        .unwrap_or_default(),
                 })
             })
             .collect();
