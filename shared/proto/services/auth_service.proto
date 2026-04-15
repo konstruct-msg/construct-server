@@ -41,6 +41,15 @@ service AuthService {
   // Proves ownership by signing challenge with recovery key
   // Creates new device, revokes all existing sessions
   rpc RecoverAccount(RecoverAccountRequest) returns (RecoverAccountResponse);
+
+  // StoreRecoveryBundle - Upload encrypted social recovery bundle (authenticated)
+  // Bundle is ChaCha20-Poly1305 encrypted — server never sees plaintext
+  rpc StoreRecoveryBundle(StoreRecoveryBundleRequest) returns (StoreRecoveryBundleResponse);
+
+  // GetRecoveryBundle - Fetch encrypted bundle by username (unauthenticated)
+  // Safe to be public because the bundle is strongly encrypted
+  rpc GetRecoveryBundle(GetRecoveryBundleRequest) returns (GetRecoveryBundleResponse);
+
   // =========================================================================
   // Sealed Sender Certificate Issuance
   // =========================================================================
@@ -516,6 +525,35 @@ enum RecoveryErrorCode {
 
   // Reserved for future errors
   reserved 7 to 15;
+}
+
+// ============================================================================
+// Social Recovery Bundle Messages (SLIP-39 Variant A — vault key)
+// ============================================================================
+
+// StoreRecoveryBundleRequest
+message StoreRecoveryBundleRequest {
+  // Encrypted bundle ciphertext (nonce prepended, ChaCha20-Poly1305)
+  bytes bundle_ciphertext = 1;
+}
+
+// StoreRecoveryBundleResponse
+message StoreRecoveryBundleResponse {
+  bool success = 1;
+}
+
+// GetRecoveryBundleRequest
+message GetRecoveryBundleRequest {
+  // Username to look up (public identifier)
+  string username = 1;
+}
+
+// GetRecoveryBundleResponse
+message GetRecoveryBundleResponse {
+  // Encrypted bundle ciphertext, or empty if not set
+  bytes bundle_ciphertext = 1;
+  // Whether a bundle is set for this account
+  bool bundle_exists = 2;
 }
 
 // ============================================================================
