@@ -472,9 +472,9 @@ async fn main() -> Result<()> {
     });
 
     let grpc_context = context.clone();
-    let grpc_addr = env::var("MEDIA_GRPC_BIND_ADDRESS")
-        .unwrap_or_else(|_| "[::]:50056".to_string())
-        .parse()?;
+    let grpc_bind_address =
+        env::var("MEDIA_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50056".to_string());
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
 
     tokio::spawn(async move {
         let service = MediaGrpcService {
@@ -485,7 +485,10 @@ async fn main() -> Result<()> {
                 .add_service(
                     MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024), // 2 MB per chunk
                 )
-                .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
+                .serve_with_incoming_shutdown(
+                    grpc_incoming,
+                    construct_server_shared::shutdown_signal(),
+                )
                 .await
         {
             tracing::error!(error = %e, "gRPC server failed");
@@ -502,7 +505,8 @@ async fn main() -> Result<()> {
             get(construct_server_shared::metrics::metrics_handler),
         );
 
-    let listener = tokio::net::TcpListener::bind(&media_config.bind_address).await?;
+    let listener =
+        construct_server_shared::mptcp_or_tcp_listener(&media_config.bind_address).await?;
     info!("Media REST listening on {}", media_config.bind_address);
 
     axum::serve(listener, app)

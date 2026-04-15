@@ -404,7 +404,8 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "50059".into())
         .parse()?;
-    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let grpc_bind_addr = format!("0.0.0.0:{}", port);
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_addr).await?;
 
     // Load config for JWT public key
     let config = Config::from_env().map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
@@ -414,7 +415,7 @@ async fn main() -> anyhow::Result<()> {
 
     let core = Arc::new(SentinelCore::new(&database_url, &redis_url).await?);
 
-    info!("SentinelService listening on {}", addr);
+    info!("SentinelService listening on {}", grpc_bind_addr);
 
     // Small HTTP server for /health and /metrics
     let http_port: u16 = env::var("METRICS_PORT")
@@ -428,7 +429,9 @@ async fn main() -> anyhow::Result<()> {
                 "/metrics",
                 axum::routing::get(construct_server_shared::metrics::metrics_handler),
             );
-        let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+        let listener = construct_server_shared::mptcp_or_tcp_listener(&http_addr.to_string())
+            .await
+            .unwrap();
         info!("SentinelService HTTP/metrics listening on {}", http_addr);
         axum::serve(listener, app).await.unwrap();
     });
@@ -438,7 +441,7 @@ async fn main() -> anyhow::Result<()> {
             core,
             auth,
         }))
-        .serve_with_shutdown(addr, construct_server_shared::shutdown_signal())
+        .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;
 
     Ok(())

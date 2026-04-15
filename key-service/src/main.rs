@@ -26,7 +26,6 @@ use ed25519_dalek::{SigningKey, VerifyingKey as Ed25519VerifyingKey};
 use redis::aio::ConnectionManager as RedisConnectionManager;
 use serde_json::json;
 use std::env;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tower::ServiceBuilder;
@@ -810,13 +809,12 @@ async fn main() -> Result<()> {
     };
 
     // gRPC server
-    let grpc_addr: SocketAddr = env::var("KEY_SERVICE_GRPC_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:50057".to_string())
-        .parse()
-        .context("Invalid KEY_SERVICE_GRPC_ADDR")?;
+    let grpc_bind_address =
+        env::var("KEY_SERVICE_GRPC_ADDR").unwrap_or_else(|_| "0.0.0.0:50057".to_string());
 
-    info!("gRPC server listening on {}", grpc_addr);
+    info!("gRPC server listening on {}", grpc_bind_address);
 
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_server = construct_server_shared::grpc_server(
         std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
             .ok()
@@ -824,13 +822,11 @@ async fn main() -> Result<()> {
             .unwrap_or(45),
     )
     .add_service(KeyServiceServer::new(grpc_service))
-    .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal());
+    .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal());
 
     // HTTP health server
-    let http_addr: SocketAddr = env::var("KEY_SERVICE_HTTP_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8057".to_string())
-        .parse()
-        .context("Invalid KEY_SERVICE_HTTP_ADDR")?;
+    let http_bind_address =
+        env::var("KEY_SERVICE_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:8057".to_string());
 
     let http_app = Router::new()
         .route("/health", get(health_check))
@@ -843,9 +839,12 @@ async fn main() -> Result<()> {
         .with_state(context)
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
 
-    info!("HTTP health server listening on {}", http_addr);
+    info!("HTTP health server listening on {}", http_bind_address);
 
-    let http_server = axum::serve(tokio::net::TcpListener::bind(http_addr).await?, http_app);
+    let http_server = axum::serve(
+        construct_server_shared::mptcp_or_tcp_listener(&http_bind_address).await?,
+        http_app,
+    );
 
     // Run both servers, shutdown gracefully on SIGTERM/Ctrl-C
     tokio::select! {

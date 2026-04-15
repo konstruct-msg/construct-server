@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
 
     // Start plain listener
     info!("API Gateway listening on {}", config.bind_address);
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
+    let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
 

@@ -87,7 +87,9 @@ async fn main() -> Result<()> {
                     "/metrics",
                     axum::routing::get(construct_server_shared::metrics::metrics_handler),
                 );
-            let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+            let listener = construct_server_shared::mptcp_or_tcp_listener(&http_addr.to_string())
+                .await
+                .unwrap();
             info!("Delivery Worker HTTP/metrics listening on {}", http_addr);
             axum::serve(listener, app).await.unwrap();
         });

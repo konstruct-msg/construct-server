@@ -253,9 +253,7 @@ async fn main() -> Result<()> {
     let grpc_context = context.clone();
     let grpc_bind_address =
         env::var("INVITE_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50055".to_string());
-    let grpc_addr = grpc_bind_address
-        .parse()
-        .context("Invalid INVITE_GRPC_BIND_ADDRESS")?;
+    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     tokio::spawn(async move {
         let service = InviteGrpcService {
@@ -263,7 +261,7 @@ async fn main() -> Result<()> {
         };
         if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(InviteServiceServer::new(service))
-            .serve_with_shutdown(grpc_addr, construct_server_shared::shutdown_signal())
+            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
         {
             tracing::error!(error = %e, "Invite gRPC server failed");
@@ -284,7 +282,7 @@ async fn main() -> Result<()> {
     // Start REST server
     info!("Invite Service REST listening on {}", config.bind_address);
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
+    let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await
         .context("Failed to bind to address")?;
 
