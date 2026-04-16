@@ -81,8 +81,10 @@ message Envelope {
   // Ephemeral message (disappears after reading)
   optional uint32 ephemeral_seconds = 16;
 
-  // Reply to message ID (for threading)
-  optional string reply_to_message_id = 17;
+  // DEPRECATED: reply_to_message_id was plaintext and leaked reply metadata to the server.
+  // Reply references are now carried inside the E2EE payload as MessageContent.text.quoted.
+  // Field 17 is reserved to prevent accidental reuse.
+  reserved 17;
 
   // Edit of message ID (for message editing)
   optional string edits_message_id = 18;
