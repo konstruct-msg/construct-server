@@ -366,6 +366,11 @@ impl SignalingService for SignalingServiceImpl {
             match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                 Ok(true) => {}
                 Ok(false) => {
+                    tracing::warn!(
+                        caller_id,
+                        callee_user_id,
+                        "InitiateCall denied — not mutual contacts"
+                    );
                     return Err(Status::permission_denied(
                         "Calls allowed only for mutual contacts",
                     ));
@@ -377,11 +382,19 @@ impl SignalingService for SignalingServiceImpl {
             }
 
             match construct_db::is_blocked_by(pool, &callee_uuid, &caller_uuid).await {
-                Ok(true) => return Err(Status::permission_denied("Call not allowed")),
+                Ok(true) => {
+                    tracing::warn!(
+                        caller_id,
+                        callee_user_id,
+                        "InitiateCall denied — caller is blocked"
+                    );
+                    return Err(Status::permission_denied("Call not allowed"));
+                }
                 Ok(false) => {}
                 Err(e) => tracing::warn!(error = %e, "Failed to check user_blocks — proceeding"),
             }
         } else {
+            tracing::warn!("InitiateCall denied — db_pool not configured (DATABASE_URL missing?)");
             return Err(Status::permission_denied(
                 "Calls allowed only for mutual contacts",
             ));
@@ -544,6 +557,11 @@ async fn handle_outbound_signal(
                 match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                     Ok(true) => {}
                     Ok(false) => {
+                        tracing::warn!(
+                            user_id,
+                            callee_user_id,
+                            "Signal/Offer denied — not mutual contacts"
+                        );
                         metrics::SIGNALING_ERRORS_TOTAL
                             .with_label_values(&[signal_error_code_to_str(
                                 SignalErrorCode::Unauthorized,
