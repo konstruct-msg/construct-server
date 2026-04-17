@@ -316,7 +316,6 @@ services:
       TURN_SECRET: ${TURN_SECRET}
       TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
       NOTIFICATION_GRPC_ENDPOINT: "notification:50054"
-      DATABASE_URL: ${DATABASE_URL}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
