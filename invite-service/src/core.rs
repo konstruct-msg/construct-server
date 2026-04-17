@@ -72,13 +72,15 @@ pub async fn verify_invite_signature(
     invite: &InviteToken,
 ) -> Result<(), InviteSignatureError> {
     // 1. Fetch verifying key based on invite version
-    let verifying_key_bytes = if invite.v == 2 {
-        // v2: Use device_id to fetch device
+    // v2+ include device_id — look up the exact signing device.
+    // v1 (legacy) falls back to the user's first registered device.
+    let verifying_key_bytes = if invite.v >= 2 {
+        // v2/v3: Use device_id to fetch the specific signing device
         let device_id = invite
             .device_id
             .as_ref()
             .ok_or(InviteSignatureError::InvalidSignature(
-                "v2 invite missing device_id".to_string(),
+                "v2/v3 invite missing device_id".to_string(),
             ))?;
 
         let device = construct_db::get_device_by_id(pool, device_id)
@@ -88,12 +90,11 @@ pub async fn verify_invite_signature(
 
         device.verifying_key
     } else {
-        // v1: Use user_id to fetch user's primary device
+        // v1: Use user_id to fetch user's primary device (backwards compat)
         let devices = construct_db::get_devices_by_user_id(pool, &invite.uuid)
             .await
             .map_err(|e| InviteSignatureError::DatabaseError(e.to_string()))?;
 
-        // Get the first active device (primary)
         let device = devices
             .into_iter()
             .next()
@@ -303,7 +304,7 @@ pub async fn accept_invite(
     let burn_result = sqlx::query!(
         r#"
         INSERT INTO used_invites (jti, user_id, device_id, expires_at)
-        VALUES ($1, $2, $3, NOW() + INTERVAL '180 seconds')
+        VALUES ($1, $2, $3, NOW() + INTERVAL '600 seconds')
         ON CONFLICT (jti) DO NOTHING
         RETURNING jti
         "#,

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO used_invites (jti, user_id, device_id, expires_at)\n        VALUES ($1, $2, $3, NOW() + INTERVAL '600 seconds')\n        ON CONFLICT (jti) DO NOTHING\n        RETURNING jti\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "jti",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8ed48423d3070dd46d3caeb75c25887c2f714ae6e0e8c2991ab427873af2689a"
+}
