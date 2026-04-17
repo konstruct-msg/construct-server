@@ -27,8 +27,18 @@ impl NotificationClient {
     /// Uses lazy connect — the TCP connection is established on the first RPC call,
     /// not at construction time. This avoids startup warnings when the notification
     /// service is temporarily unavailable or not yet ready.
+    ///
+    /// Accepts both `host:port` and `http://host:port` formats — a bare `host:port`
+    /// is normalised to `http://host:port` so that tonic can resolve it correctly
+    /// (without a scheme, `Endpoint::from_shared` would parse `host` as the scheme
+    /// and fail with `InvalidUri` at connection time).
     pub fn new(endpoint: &str) -> Result<Self, tonic::transport::Error> {
-        let channel = Endpoint::from_shared(endpoint.to_string())?.connect_lazy();
+        let uri = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            endpoint.to_string()
+        } else {
+            format!("http://{endpoint}")
+        };
+        let channel = Endpoint::from_shared(uri)?.connect_lazy();
 
         Ok(Self {
             channel,
