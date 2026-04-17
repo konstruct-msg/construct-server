@@ -178,7 +178,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            _ => None,
+            _ => {
+                tracing::error!(
+                    "DATABASE_URL not set or empty — signaling-service cannot check mutual \
+                     contacts. ALL calls will be denied with permissionDenied. \
+                     Ensure DATABASE_URL is present in app.env and not overridden to empty."
+                );
+                None
+            }
         },
     };
 
