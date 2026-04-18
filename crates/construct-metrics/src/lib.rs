@@ -6,6 +6,10 @@
 //! - Gateway performance
 //! - Circuit breaker states
 //! - Service health
+//! - Session lifecycle (init, END_SESSION, healing)
+//! - OTPK key inventory
+//! - Active gRPC streams
+//! - Key Transparency proof failures
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -237,6 +241,152 @@ pub static TURN_ACTIVE_ALLOCATIONS: Lazy<Gauge> = Lazy::new(|| {
         "Current number of active TURN allocations"
     )
     .expect("Failed to register TURN_ACTIVE_ALLOCATIONS metric")
+});
+
+// ============================================================================
+// Session Lifecycle Metrics
+// ============================================================================
+
+/// Session initialisations that completed successfully.
+/// Label `side`: "initiator" | "responder"
+pub static SESSION_INIT_SUCCESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_session_init_success_total",
+            "Session X3DH initialisations completed successfully"
+        ),
+        &["side"]
+    )
+    .expect("Failed to register SESSION_INIT_SUCCESS_TOTAL metric")
+});
+
+/// Session initialisations that failed.
+/// Label `reason`: "decrypt_failed" | "bundle_fetch_failed" | "otpk_exhausted" | "timeout" | "other"
+pub static SESSION_INIT_FAILURE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_session_init_failure_total",
+            "Session X3DH initialisations that failed"
+        ),
+        &["reason"]
+    )
+    .expect("Failed to register SESSION_INIT_FAILURE_TOTAL metric")
+});
+
+/// END_SESSION signals sent to peers.
+/// Label `reason`: "init_failed" | "manual_reset" | "heal_failed" | "peer_request"
+pub static END_SESSION_SENT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_end_session_sent_total",
+            "END_SESSION signals sent to peers"
+        ),
+        &["reason"]
+    )
+    .expect("Failed to register END_SESSION_SENT_TOTAL metric")
+});
+
+/// Session healing attempts triggered by decrypt failure on msgNum=0.
+pub static SESSION_HEAL_ATTEMPTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_session_heal_attempts_total",
+        "Session healing attempts triggered by decryption failure"
+    ))
+    .expect("Failed to register SESSION_HEAL_ATTEMPTS_TOTAL metric")
+});
+
+/// Session healing attempts that resulted in a recovered session.
+pub static SESSION_HEAL_SUCCESS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_session_heal_success_total",
+        "Session healing attempts that successfully recovered the session"
+    ))
+    .expect("Failed to register SESSION_HEAL_SUCCESS_TOTAL metric")
+});
+
+// ============================================================================
+// OTPK / Key Inventory Metrics
+// ============================================================================
+
+/// Current number of one-time pre-keys available on the server for a device.
+/// Label `service`: the key-service instance (useful when sharded).
+/// This is a Gauge because the value goes both up (upload) and down (consumption).
+pub static OTPK_REMAINING: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "construct_otpk_remaining",
+        "Current number of one-time pre-keys available for the local device"
+    )
+    .expect("Failed to register OTPK_REMAINING metric")
+});
+
+/// Total OTPKs uploaded to the server (cumulative).
+pub static OTPK_UPLOADED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_otpk_uploaded_total",
+        "Total one-time pre-keys uploaded to key service"
+    ))
+    .expect("Failed to register OTPK_UPLOADED_TOTAL metric")
+});
+
+/// Total OTPKs consumed by incoming session initialisations (cumulative).
+pub static OTPK_CONSUMED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_otpk_consumed_total",
+        "Total one-time pre-keys consumed by incoming session initialisations"
+    ))
+    .expect("Failed to register OTPK_CONSUMED_TOTAL metric")
+});
+
+// ============================================================================
+// gRPC Stream Metrics
+// ============================================================================
+
+/// Current number of open gRPC message-stream connections.
+pub static GRPC_STREAMS_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "construct_grpc_streams_active",
+        "Current number of active gRPC message-stream (subscribe) connections"
+    )
+    .expect("Failed to register GRPC_STREAMS_ACTIVE metric")
+});
+
+/// Total gRPC stream reconnections (client reconnected after disconnect).
+pub static GRPC_STREAM_RECONNECTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_grpc_stream_reconnects_total",
+        "Total number of gRPC message-stream reconnections"
+    ))
+    .expect("Failed to register GRPC_STREAM_RECONNECTS_TOTAL metric")
+});
+
+// ============================================================================
+// Security / Key Transparency Metrics
+// ============================================================================
+
+/// Key Transparency inclusion/consistency proof failures.
+/// Label `proof_type`: "inclusion" | "consistency" | "root_mismatch"
+pub static KT_PROOF_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_kt_proof_failures_total",
+            "Key Transparency proof verification failures"
+        ),
+        &["proof_type"]
+    )
+    .expect("Failed to register KT_PROOF_FAILURES_TOTAL metric")
+});
+
+/// Authentication failures (JWT validation, device not found, etc.).
+/// Label `reason`: "invalid_token" | "expired" | "device_not_found" | "permission_denied"
+pub static AUTH_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_auth_failures_total",
+            "Authentication failures by reason"
+        ),
+        &["reason"]
+    )
+    .expect("Failed to register AUTH_FAILURES_TOTAL metric")
 });
 
 // ============================================================================
