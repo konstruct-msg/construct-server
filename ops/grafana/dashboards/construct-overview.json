@@ -1055,7 +1055,7 @@
             "uid": "construct-prometheus"
           },
           "expr": "ice_connections_active",
-          "legendFormat": "{{relay_node}}",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ]
@@ -1104,7 +1104,7 @@
             "uid": "construct-prometheus"
           },
           "expr": "rate(ice_bytes_total{direction=\"in\"}[5m])",
-          "legendFormat": "in {{relay_node}}",
+          "legendFormat": "in {{instance}}",
           "refId": "A"
         },
         {
@@ -1113,7 +1113,7 @@
             "uid": "construct-prometheus"
           },
           "expr": "rate(ice_bytes_total{direction=\"out\"}[5m])",
-          "legendFormat": "out {{relay_node}}",
+          "legendFormat": "out {{instance}}",
           "refId": "B"
         }
       ]
