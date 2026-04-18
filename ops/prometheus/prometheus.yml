@@ -42,3 +42,11 @@ scrape_configs:
   - job_name: mls
     static_configs:
       - targets: ["mls:8091"]
+
+  - job_name: ice-relay
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["ice-relay:9100"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: relay_node
