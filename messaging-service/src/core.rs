@@ -12,6 +12,7 @@ use construct_broker::KafkaMessageEnvelope;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
+use construct_metrics::{MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL};
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::services::v1::SendBlindNotificationRequest;
 use construct_types::message::{ChatMessage, EndSessionData};
@@ -147,6 +148,9 @@ pub async fn dispatch_envelope(
         message_id = %message_id,
         "Message dispatched"
     );
+
+    MESSAGES_SENT_TOTAL.inc();
+    MESSAGE_DELIVERY_TIME.observe(elapsed.as_secs_f64());
 
     // ── Non-critical background tasks ─────────────────────────────────────────
     // DB fallback for receipt routing (survives Redis restarts).
