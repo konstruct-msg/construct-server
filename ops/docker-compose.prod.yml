@@ -132,6 +132,7 @@ services:
     environment:
       PORT: "8081"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: auth
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
@@ -164,6 +165,7 @@ services:
     environment:
       PORT: "8082"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: user
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
@@ -181,6 +183,7 @@ services:
     environment:
       PORT: "8083"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: messaging
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
@@ -213,6 +216,7 @@ services:
     environment:
       PORT: "8084"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: notification
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
@@ -231,6 +235,7 @@ services:
     environment:
       PORT: "8086"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: invite
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -246,6 +251,7 @@ services:
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: key
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -262,6 +268,7 @@ services:
     environment:
       PORT: "8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: media
       MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -294,6 +301,7 @@ services:
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: sentinel
       METRICS_PORT: "8090"
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -309,6 +317,7 @@ services:
         required: true
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: signaling
       PORT: "50060"
       METRICS_PORT: "8091"
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
@@ -331,6 +340,7 @@ services:
     environment:
       PORT: "8085"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: delivery
       DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
       DELIVERY_EXPIRY_DAYS: ${DELIVERY_EXPIRY_DAYS:-7}
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}

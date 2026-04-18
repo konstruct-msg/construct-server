@@ -43,6 +43,7 @@ base64 = {workspace = true}
 hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
+construct-metrics = { path = "../crates/construct-metrics" }
 tonic = "0.14.2"
 prost = "0.14.3"
 futures-core = "0.3"
