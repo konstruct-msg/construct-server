@@ -340,11 +340,24 @@ pub(crate) async fn handle_stream_request(
             //
             // If the subscribe carries a since_cursor, apply it as the resume position
             // so that reconnecting clients don't re-read the entire Redis stream.
+            //
+            // Guard: only advance the cursor — never rewind it.  The initial poll runs
+            // before the stream loop and may already have set last_stream_id to a more
+            // recent position (e.g., "1776522670299-0").  Overwriting that with an older
+            // client cursor would cause the next poll to re-deliver messages that were
+            // just sent in the initial poll.
             if let Some(cursor) = sub.since_cursor
                 && !cursor.is_empty()
             {
-                tracing::debug!(cursor = %cursor, "Resuming stream from client cursor");
-                *last_stream_id = Some(cursor);
+                let advance = match last_stream_id {
+                    None => true,
+                    Some(current) => compare_stream_ids(&cursor, current)
+                        == std::cmp::Ordering::Greater,
+                };
+                if advance {
+                    tracing::debug!(cursor = %cursor, "Resuming stream from client cursor");
+                    *last_stream_id = Some(cursor);
+                }
             }
         }
         Some(StreamReq::Unsubscribe(_)) => {
@@ -363,8 +376,23 @@ pub(crate) async fn handle_stream_request(
     Ok(())
 }
 
-/// Subscribe to `inbox:wakeup:{user_id}` via Redis pub/sub and forward signals
-/// to `tx` so the stream loop can call `poll_messages` immediately on delivery.
+/// Compare two Redis stream IDs lexicographically by (timestamp, sequence).
+/// Returns `Ordering::Greater` if `a` is strictly newer than `b`.
+/// IDs with unexpected formats are treated as "not greater" (safe fallback).
+fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parse(id: &str) -> Option<(u64, u64)> {
+        if let Some((ts, seq)) = id.split_once('-') {
+            Some((ts.parse().ok()?, seq.parse().ok()?))
+        } else {
+            id.parse::<u64>().ok().map(|ts| (ts, 0))
+        }
+    }
+    match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => std::cmp::Ordering::Less, // treat unparseable as "not newer"
+    }
+}
+
 ///
 /// Spawns a background task — exits automatically when the receiver is dropped
 /// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
