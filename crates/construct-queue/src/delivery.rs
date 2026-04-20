@@ -128,26 +128,18 @@ impl<'a> DeliveryManager<'a> {
             }
         };
 
-        if entries.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Convert StreamEntryBinary to Vec<(String, HashMap<String, Vec<u8>>)>
-        let messages: Vec<(String, HashMap<String, Vec<u8>>)> = entries
-            .into_iter()
-            .map(|entry| (entry.id, entry.fields))
-            .collect();
-
-        // After reading new messages, delete old acknowledged messages from the stream
-        // The since_id represents the last message ID the client received in the PREVIOUS request
-        // This means the client is acknowledging receipt of all messages UP TO AND INCLUDING since_id
+        // Trim acknowledged messages BEFORE the early-return so that the trim runs
+        // even when XREAD returns nothing.  Without this, a message whose stream ID
+        // equals the client cursor would never be removed: XREAD > cursor returns
+        // nothing, the old code returned early, and the same message was delivered
+        // again on every reconnect (infinite re-delivery loop).
         //
-        // IMPORTANT: We delete acknowledged messages (≤ since_id), NOT the newly read messages
-        // This allows the client to process messages before they are deleted
-        if let Some(ack_id) = since_id {
-            // Use XTRIM with MINID to efficiently remove old messages
-            // Format: XTRIM stream MINID <id> - keeps messages with ID >= id
-            // We want to keep messages AFTER ack_id, so use next ID after ack_id
+        // The since_id is the last message the client received in the previous
+        // session.  Everything at or before that position is safe to delete.
+        'trim: {
+            let Some(ack_id) = since_id else {
+                break 'trim;
+            };
 
             // Normalize ack_id: bare timestamps like "1772726016" → "1772726016-0"
             let ack_id_normalized;
@@ -157,8 +149,8 @@ impl<'a> DeliveryManager<'a> {
                 ack_id_normalized = format!("{}-0", ts);
                 ack_id_normalized.as_str()
             } else {
-                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash)");
-                return Ok(messages);
+                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash) — skipping trim");
+                break 'trim;
             };
 
             let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
@@ -172,19 +164,17 @@ impl<'a> DeliveryManager<'a> {
                     } else {
                         // Both components at u64::MAX — skip trim (theoretical edge case)
                         tracing::warn!(stream_key = %stream_key, "Stream ID at u64::MAX, skipping trim");
-                        return Ok(messages);
+                        break 'trim;
                     }
                 } else {
-                    // Invalid format, skip deletion
-                    tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format");
-                    return Ok(messages);
+                    tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format — skipping trim");
+                    break 'trim;
                 }
             } else {
-                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash)");
-                return Ok(messages);
+                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash) — skipping trim");
+                break 'trim;
             };
 
-            // Use raw Redis command for XTRIM MINID
             let trim_result: Result<i64, redis::RedisError> = redis::cmd("XTRIM")
                 .arg(stream_key)
                 .arg("MINID")
@@ -211,10 +201,19 @@ impl<'a> DeliveryManager<'a> {
                         ack_id = %ack_id,
                         "Failed to trim acknowledged messages from stream (non-fatal)"
                     );
-                    // Non-fatal - messages will accumulate but delivery still works
                 }
             }
         }
+
+        if entries.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert StreamEntryBinary to Vec<(String, HashMap<String, Vec<u8>>)>
+        let messages: Vec<(String, HashMap<String, Vec<u8>>)> = entries
+            .into_iter()
+            .map(|entry| (entry.id, entry.fields))
+            .collect();
 
         Ok(messages)
     }
