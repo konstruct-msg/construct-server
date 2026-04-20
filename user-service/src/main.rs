@@ -28,6 +28,7 @@ use construct_db::{
     is_user_searchable, respond_to_contact_request,
 };
 use construct_server_shared::auth::AuthManager;
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
 use construct_server_shared::shared::proto::services::v1::{
@@ -48,6 +49,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[derive(Clone)]
 struct UserGrpcService {
     context: Arc<UserServiceContext>,
+    /// gRPC client for notification-service — used to send silent push to User A on acceptance.
+    notification_client: Option<NotificationClient>,
 }
 
 #[tonic::async_trait]
@@ -771,6 +774,38 @@ impl UserService for UserGrpcService {
                 db::add_contact_link(&self.context.db_pool, &sender_hmac, &caller_hmac)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
+
+                // Phase 2: silent push to User A (sender) so they discover acceptance
+                // without waiting for the next time they open the Synaps tab.
+                if let Some(notification_client) = &self.notification_client
+                    && !notification_client.is_circuit_open()
+                {
+                    let mut notif = notification_client.get();
+                    let push_req = proto::SendBlindNotificationRequest {
+                        user_id: sender_id.to_string(),
+                        badge_count: None,
+                        activity_type: Some("contact_request_accepted".to_string()),
+                        conversation_id: Some(req.request_id.clone()),
+                    };
+                    match notif.send_blind_notification(push_req).await {
+                        Ok(_) => {
+                            notification_client.record_success();
+                            tracing::info!(
+                                to_user = %sender_id,
+                                request_id = %req.request_id,
+                                "Sent contact_request_accepted push to User A"
+                            );
+                        }
+                        Err(e) => {
+                            notification_client.record_failure();
+                            tracing::warn!(
+                                error = %e,
+                                to_user = %sender_id,
+                                "Failed to send contact_request_accepted push — User A will discover via polling"
+                            );
+                        }
+                    }
+                }
             }
         } else {
             // Block/spam: add block entry.
@@ -846,7 +881,20 @@ async fn main() -> Result<()> {
     let auth_manager =
         Arc::new(AuthManager::new(&config).context("Failed to initialize auth manager")?);
 
-    // Create service context
+    // Create notification-service gRPC client for contact_request_accepted push.
+    let url = env::var("NOTIFICATION_SERVICE_URL")
+        .unwrap_or_else(|_| "http://notification:50054".to_string());
+    let notification_client = match NotificationClient::new(&url) {
+        Ok(client) => {
+            info!(url = %url, "Notification service gRPC client initialized (user-service)");
+            Some(client)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to create notification gRPC client — contact-accepted push disabled");
+            None
+        }
+    };
+
     let context = Arc::new(UserServiceContext {
         db_pool,
         queue,
@@ -858,6 +906,7 @@ async fn main() -> Result<()> {
 
     // Start gRPC UserService (SVC-2 scaffold)
     let grpc_context = context.clone();
+    let grpc_notification_client = notification_client.clone();
     let grpc_bind_address =
         env::var("USER_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50052".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
@@ -866,6 +915,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let service = UserGrpcService {
             context: grpc_context,
+            notification_client: grpc_notification_client,
         };
         if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
             .add_service(UserServiceServer::new(service))
