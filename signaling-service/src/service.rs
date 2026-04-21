@@ -465,10 +465,38 @@ impl SignalingService for SignalingServiceImpl {
                 call_type: req.call_type,
                 offered_at: unix_millis(),
             });
-            let _ = self
+            let delivered = self
                 .registry
                 .send_to_user(callee_user_id, None, incoming)
                 .await;
+            if delivered == 0 {
+                // Callee was listed as online (non-empty presence) but their signal stream was
+                // already closed (stale presence). Fall back to VoIP push so they are woken up.
+                tracing::warn!(
+                    call_id,
+                    callee_user_id,
+                    "callee had stale presence — signal delivery failed, sending VoIP push as fallback"
+                );
+                if let Some(client) = self.notification_client.clone() {
+                    let push_req = services_proto::SendVoipIncomingCallRequest {
+                        user_id: callee_user_id.to_string(),
+                        call_id: call_id.clone(),
+                        caller_id: caller_id.clone(),
+                        caller_name: caller_name.clone(),
+                        call_type: call_type_to_str(req.call_type).to_string(),
+                        offered_at: unix_millis(),
+                    };
+                    tokio::spawn(async move {
+                        let mut grpc = client.get();
+                        if let Err(e) = grpc
+                            .send_voip_incoming_call(tonic::Request::new(push_req))
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to send VoIP push fallback for stale-presence callee");
+                        }
+                    });
+                }
+            }
         } else if let Some(client) = self.notification_client.clone() {
             // ── VoIP push to wake offline callee (no SDP in payload) ───────
             let push_req = services_proto::SendVoipIncomingCallRequest {
