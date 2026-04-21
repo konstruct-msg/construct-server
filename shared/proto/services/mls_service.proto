@@ -109,6 +109,36 @@ service MLSService {
   rpc MessageStream(stream GroupStreamRequest) returns (stream GroupStreamResponse);
 
   // =========================================================================
+  // Topics (Slack-style channels within a group)
+  // =========================================================================
+
+  // CreateTopic - Admin creates a new topic (channel) within a group
+  // Topic name is encrypted client-side; server stores opaque bytes.
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse);
+
+  // ListTopics - Fetch active (non-archived) topics for a group
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse);
+
+  // ArchiveTopic - Admin archives a topic (hidden from new members; messages kept until TTL)
+  rpc ArchiveTopic(ArchiveTopicRequest) returns (ArchiveTopicResponse);
+
+  // =========================================================================
+  // Invite Links (token-based group join)
+  // =========================================================================
+
+  // CreateInviteLink - Admin creates a shareable token link for the group
+  // Returns a token; share as https://app.konstruct.cc/join/{token}
+  rpc CreateInviteLink(CreateInviteLinkRequest) returns (CreateInviteLinkResponse);
+
+  // RevokeInviteLink - Admin revokes an invite link; token becomes invalid
+  rpc RevokeInviteLink(RevokeInviteLinkRequest) returns (RevokeInviteLinkResponse);
+
+  // ResolveInviteLink - Resolve a token to group_id before initiating join flow
+  // Returns minimal info (group_id, member_count hint); no auth required.
+  // Actual join: ConsumeKeyPackage → InviteToGroup → AcceptGroupInvite
+  rpc ResolveInviteLink(ResolveInviteLinkRequest) returns (ResolveInviteLinkResponse);
+
+  // =========================================================================
   // MLS KeyPackage Management
   // =========================================================================
 
@@ -460,7 +490,11 @@ message SendGroupMessageRequest {
   // Replies reference the same thread_id. Feature gated by threads_enabled.
   optional string thread_id = 5;
 
-  reserved 6 to 15;
+  // Topic ID: route message to a specific topic within the group.
+  // NULL = default topic (first topic or #general equivalent).
+  optional string topic_id = 6;
+
+  reserved 7 to 15;
 }
 
 message SendGroupMessageResponse {
@@ -486,6 +520,9 @@ message FetchGroupMessagesRequest {
 
   // Filter by thread (future use)
   optional string thread_id = 4;
+
+  // Filter by topic (NULL = fetch all topics)
+  optional string topic_id = 5;
 }
 
 message GroupMessageEnvelope {
@@ -504,10 +541,13 @@ message GroupMessageEnvelope {
   // Thread ID if message is part of a thread
   optional string thread_id = 7;
 
+  // Topic ID if message belongs to a specific topic (NULL = default topic)
+  optional string topic_id = 9;
+
   // When this message will be permanently deleted server-side
   int64 expires_at = 8;
 
-  reserved 9 to 15;
+  reserved 10 to 15;
 }
 
 // ============================================================================
@@ -670,4 +710,136 @@ message GetKeyPackageCountResponse {
 
   // True if user has zero KeyPackages (cannot be invited to any group)
   bool cannot_be_invited = 4;
+}
+
+// ============================================================================
+// Topics (Slack-style channels within a group)
+// ============================================================================
+
+message CreateTopicRequest {
+  string group_id = 1;
+
+  // Topic name encrypted with the current group epoch key.
+  // Server cannot read the name.
+  bytes encrypted_name = 2;
+
+  // Position hint (0-based). Server normalises sort_order on creation.
+  uint32 sort_order = 3;
+
+  // Admin proof: Ed25519 sig over "CONSTRUCT_CREATE_TOPIC:{group_id}:{timestamp}"
+  bytes admin_proof = 4;
+
+  int64 signature_timestamp = 5;
+
+  reserved 6 to 15;
+}
+
+message CreateTopicResponse {
+  string topic_id = 1;
+  int64 created_at = 2;
+}
+
+message ListTopicsRequest {
+  string group_id = 1;
+
+  // If true, include archived topics
+  bool include_archived = 2;
+}
+
+message ListTopicsResponse {
+  repeated TopicInfo topics = 1;
+}
+
+message TopicInfo {
+  string topic_id = 1;
+  string group_id = 2;
+
+  // Encrypted name — only group members can decrypt
+  bytes encrypted_name = 3;
+
+  uint32 sort_order = 4;
+
+  int64 created_at = 5;
+
+  // NULL if not archived
+  optional int64 archived_at = 6;
+}
+
+message ArchiveTopicRequest {
+  string group_id = 1;
+  string topic_id = 2;
+
+  // Admin proof: Ed25519 sig over "CONSTRUCT_ARCHIVE_TOPIC:{group_id}:{topic_id}:{timestamp}"
+  bytes admin_proof = 3;
+
+  int64 signature_timestamp = 4;
+}
+
+message ArchiveTopicResponse {
+  bool success = 1;
+  int64 archived_at = 2;
+}
+
+// ============================================================================
+// Invite Links (token-based group join)
+// ============================================================================
+
+message CreateInviteLinkRequest {
+  string group_id = 1;
+
+  // Admin proof: Ed25519 sig over "CONSTRUCT_CREATE_INVITE_LINK:{group_id}:{timestamp}"
+  bytes admin_proof = 2;
+
+  int64 signature_timestamp = 3;
+
+  // Maximum number of times this link can be used (0 = unlimited)
+  uint32 max_uses = 4;
+
+  // Expiry in seconds from now (0 = no expiry)
+  uint32 expires_in_seconds = 5;
+
+  reserved 6 to 15;
+}
+
+message CreateInviteLinkResponse {
+  // 32-char hex token — build URL as https://app.konstruct.cc/join/{token}
+  string token = 1;
+
+  int64 created_at = 2;
+
+  // NULL if no expiry
+  optional int64 expires_at = 3;
+}
+
+message RevokeInviteLinkRequest {
+  string group_id = 1;
+  string token = 2;
+
+  // Admin proof: Ed25519 sig over "CONSTRUCT_REVOKE_INVITE_LINK:{group_id}:{token}:{timestamp}"
+  bytes admin_proof = 3;
+
+  int64 signature_timestamp = 4;
+}
+
+message RevokeInviteLinkResponse {
+  bool success = 1;
+  int64 revoked_at = 2;
+}
+
+message ResolveInviteLinkRequest {
+  // The 32-char hex token from the invite URL
+  string token = 1;
+}
+
+message ResolveInviteLinkResponse {
+  string group_id = 1;
+
+  // Approximate member count (device count, not user count)
+  uint32 member_count = 2;
+
+  // True if link is still valid (not revoked, not expired, not over max_uses)
+  bool valid = 3;
+
+  // NULL if no expiry
+  optional int64 expires_at = 4;
 }

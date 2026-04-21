@@ -160,6 +160,30 @@ pub async fn set_user_searchable(pool: &DbPool, user_id: &Uuid, searchable: bool
     Ok(())
 }
 
+/// Set the group invite policy for a user.
+/// When `allow` is true, contacts can send InviteToGroup for this user.
+/// Default is false (privacy-first: only invite links work).
+pub async fn set_user_group_invite_policy(
+    pool: &DbPool,
+    user_id: &Uuid,
+    allow: bool,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET allow_group_invite = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(allow)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .context("Failed to update allow_group_invite flag")?;
+
+    Ok(())
+}
+
 /// Find a discoverable user by their HMAC username hash.
 ///
 /// Returns `Some(user_id)` only when a matching row exists **and** `searchable = TRUE`.
