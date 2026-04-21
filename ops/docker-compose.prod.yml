@@ -6,6 +6,11 @@
 #     ├→ ams.konstruct.cc              → Envoy (:8080, gRPC API)
 #     ├→ grafana.ams.konstruct.cc      → Grafana (:3000)
 #     └→ prometheus.ams.konstruct.cc   → Prometheus (:9090)
+#   relay-ams — construct-relay on ice.ams.konstruct.cc
+#     Traefik does TCP SNI passthrough (not TLS termination).
+#     relay-ams handles its own TLS (self-signed cert, SPKI-pinned in iOS).
+#     Upstream: loops back to INSTANCE_DOMAIN:443 (Traefik → Envoy).
+#     After first start, read SPKI from relay-ams logs and set in iOS ICEConfig.
 #   Envoy — gRPC-web routing to Rust microservices
 #
 # Secrets management:
@@ -378,7 +383,7 @@ services:
       # Relay addresses advertised in /.well-known/construct-server.
       # Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS on the relay server).
       # Add more relays as comma-separated list: "ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"
-      ICE_RELAY_ADDRESSES: ${ICE_RELAY_ADDRESSES:-ice.msk.konstruct.cc:443}
+      ICE_RELAY_ADDRESSES: ${ICE_RELAY_ADDRESSES:-ice.msk.konstruct.cc:443,ice.ams.konstruct.cc:443}
       # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Traefik terminates TLS.
       # Set these only for deployments where gateway is exposed directly without Traefik.
     ports:
@@ -390,22 +395,46 @@ services:
     networks:
       - internal
     labels:
+      - "traefik.enable=false"
+      # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
+      # ice.INSTANCE_DOMAIN:443 is now handled by relay-ams (TCP passthrough).
+
+  # ─── ICE Relay (construct-relay on ice.INSTANCE_DOMAIN) ─────────────────────
+  # construct-relay manages its own TLS (self-signed cert, SPKI-pinned in iOS).
+  # Traefik does SNI-based TCP passthrough — it does NOT terminate TLS here.
+  # Upstream: INSTANCE_DOMAIN:443 → loops back through Traefik → Envoy (gRPC).
+  #
+  # First-time setup:
+  #   1. docker compose ... up -d relay-ams
+  #   2. docker compose ... logs relay-ams | grep SPKI
+  #   3. Copy the hex SPKI fingerprint into iOS ICEConfig.amsRelayPinnedSPKI
+  #   4. Rebuild and deploy iOS app
+
+  relay-ams:
+    image: ghcr.io/maximeliseyev/construct-relay:latest
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: "0.0.0.0:9444"
+      UPSTREAM: "${INSTANCE_DOMAIN}:443"
+      UPSTREAM_TLS: "true"
+      STATE_DIR: "/data"
+      TLS_SNI_HOST: "ice.${INSTANCE_DOMAIN}"
+      WT_PATH: "/construct-ice"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - relay-ams-state:/data
+    networks:
+      - internal
+    labels:
       - "traefik.enable=true"
-      # ── ICE transport: TLS 1.3 over obfs4 for DPI bypass (Russia/censored regions) ──
-      # Traefik terminates TLS (ACME cert for ice.INSTANCE_DOMAIN), passes plaintext
-      # TCP to gateway:9443. Gateway does obfs4 handshake on the plaintext stream.
-      # DNS prerequisite: ice.INSTANCE_DOMAIN A record → same server IP as INSTANCE_DOMAIN.
+      # TCP SNI passthrough — relay-ams handles its own TLS (SPKI-pinned by iOS).
+      # HostSNI matching requires passthrough=true in Traefik v3.
       - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
       - "traefik.tcp.routers.ice.entrypoints=websecure"
-      - "traefik.tcp.routers.ice.service=ice"
-      - "traefik.tcp.routers.ice.tls=true"
-      - "traefik.tcp.routers.ice.tls.certresolver=letsencrypt"
-      # Explicit domain required for Traefik v3 TCP ACME — unlike HTTP routers,
-      # TCP routers do NOT auto-infer the domain from HostSNI rule.
-      - "traefik.tcp.routers.ice.tls.domains[0].main=ice.${INSTANCE_DOMAIN}"
-      - "traefik.tcp.services.ice.loadbalancer.server.port=9443"
+      - "traefik.tcp.routers.ice.tls.passthrough=true"
+      - "traefik.tcp.services.ice.loadbalancer.server.port=9444"
 
-  # ─── Monitoring ──────────────────────────────────────────────────────────
+
 
   prometheus:
     image: prom/prometheus:v3.2.1
@@ -457,6 +486,7 @@ volumes:
   traefik-certs:
   prometheus-data:
   grafana-data:
+  relay-ams-state:
 
 networks:
   internal:
