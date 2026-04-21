@@ -62,6 +62,12 @@ service UserService {
   // ACCEPT: creates mutual contact_links, request resolved.
   // DECLINE_BLOCK / SPAM_BLOCK: blocks sender + resolves request.
   rpc RespondToContactRequest(RespondToContactRequestRequest) returns (RespondToContactRequestResponse);
+
+  // SetGroupInvitePolicy - Control who can invite this user to groups (requires auth)
+  // Default: false (no one can invite you without your consent via an invite link).
+  // When true: contacts can send you a group invite via InviteToGroup.
+  // Invite links (ResolveInviteLink flow) always work regardless of this setting.
+  rpc SetGroupInvitePolicy(SetGroupInvitePolicyRequest) returns (SetGroupInvitePolicyResponse);
 }
 
 // UserProfile - User profile information
@@ -512,4 +518,19 @@ message RespondToContactRequestRequest {
 message RespondToContactRequestResponse {
   // Final status after the action.
   ContactRequestStatus status = 1;
+}
+
+// ============================================================================
+// SetGroupInvitePolicy Messages
+// ============================================================================
+
+message SetGroupInvitePolicyRequest {
+  // true = contacts can invite you to groups via InviteToGroup
+  // false (default) = only invite links work
+  bool allow_contact_invites = 1;
+}
+
+message SetGroupInvitePolicyResponse {
+  // Current state after the update
+  bool allow_contact_invites = 1;
 }

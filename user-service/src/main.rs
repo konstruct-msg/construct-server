@@ -565,6 +565,7 @@ impl UserService for UserGrpcService {
         }
     }
 
+<<<<<<< HEAD
     async fn send_contact_request(
         &self,
         request: Request<proto::SendContactRequestRequest>,
@@ -843,6 +844,28 @@ impl UserService for UserGrpcService {
                 proto::ContactRequestAction::SpamBlock => proto::ContactRequestStatus::SpamBlocked,
                 proto::ContactRequestAction::Unspecified => unreachable!("already handled above"),
             } as i32,
+        }))
+    }
+
+    async fn set_group_invite_policy(
+        &self,
+        request: Request<proto::SetGroupInvitePolicyRequest>,
+    ) -> Result<Response<proto::SetGroupInvitePolicyResponse>, Status> {
+        let user_id: uuid::Uuid = request
+            .metadata()
+            .get("x-user-id")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let allow = request.into_inner().allow_contact_invites;
+
+        use construct_server_shared::db;
+        db::set_user_group_invite_policy(&self.context.db_pool, &user_id, allow)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(proto::SetGroupInvitePolicyResponse {
+            allow_contact_invites: allow,
         }))
     }
 }

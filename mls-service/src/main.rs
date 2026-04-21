@@ -214,6 +214,64 @@ impl MlsService for MlsServiceImpl {
             "MLSService group chat — planned for v2",
         ))
     }
+
+    // ── Topics ────────────────────────────────────────────────────────────
+
+    async fn create_topic(
+        &self,
+        _request: Request<proto::CreateTopicRequest>,
+    ) -> Result<Response<proto::CreateTopicResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
+
+    async fn list_topics(
+        &self,
+        _request: Request<proto::ListTopicsRequest>,
+    ) -> Result<Response<proto::ListTopicsResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
+
+    async fn archive_topic(
+        &self,
+        _request: Request<proto::ArchiveTopicRequest>,
+    ) -> Result<Response<proto::ArchiveTopicResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
+
+    // ── Invite Links ──────────────────────────────────────────────────────
+
+    async fn create_invite_link(
+        &self,
+        _request: Request<proto::CreateInviteLinkRequest>,
+    ) -> Result<Response<proto::CreateInviteLinkResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
+
+    async fn revoke_invite_link(
+        &self,
+        _request: Request<proto::RevokeInviteLinkRequest>,
+    ) -> Result<Response<proto::RevokeInviteLinkResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
+
+    async fn resolve_invite_link(
+        &self,
+        _request: Request<proto::ResolveInviteLinkRequest>,
+    ) -> Result<Response<proto::ResolveInviteLinkResponse>, Status> {
+        Err(Status::unimplemented(
+            "MLSService group chat — planned for v2",
+        ))
+    }
 }
 
 // ============================================================================
