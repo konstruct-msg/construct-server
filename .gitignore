@@ -61,3 +61,7 @@ DEPLOY_*.md
 .aider*
 
 fuzz/
+
+# Relay manifest private signing key — NEVER commit
+tools/relay_signing_key.hex
+*relay_signing_key*
