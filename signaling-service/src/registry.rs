@@ -789,7 +789,7 @@ impl CallRegistry {
 
                 if state.ringing_at_ms.is_none()
                     && state.answered_at_ms.is_none()
-                    && now_ms.saturating_sub(state.offered_at_ms) > 5_000
+                    && now_ms.saturating_sub(state.offered_at_ms) > 15_000
                 {
                     actions.push(CleanupAction::ErrorToCaller {
                         call_id: state.call_id.clone(),
