@@ -22,8 +22,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.8"
 serde_json = "1"
 
+# Database
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+sha2 = "0.10"
+
 # Shared
 construct-server-shared = { path = "../shared" }
+construct-db = { path = "../crates/construct-db" }
+construct-config = { path = "../crates/construct-config" }
 
 [[bin]]
 name = "mls-service"
