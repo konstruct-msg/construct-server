@@ -402,7 +402,10 @@ services:
   # ─── ICE Relay (construct-relay on ice.INSTANCE_DOMAIN) ─────────────────────
   # construct-relay manages its own TLS (self-signed cert, SPKI-pinned in iOS).
   # Traefik does SNI-based TCP passthrough — it does NOT terminate TLS here.
-  # Upstream: INSTANCE_DOMAIN:443 → loops back through Traefik → Envoy (gRPC).
+  # Upstream: envoy:8080 (h2c, same internal Docker network).
+  # Using envoy:8080 directly avoids hairpin NAT (INSTANCE_DOMAIN:443 → Traefik
+  # → internal network from inside Docker often fails on cloud VMs).
+  # Envoy accepts cleartext H2 (h2c) on port 8080 per traefik h2c scheme label.
   #
   # First-time setup:
   #   1. docker compose ... up -d relay-ams
@@ -415,8 +418,8 @@ services:
     restart: unless-stopped
     environment:
       LISTEN_ADDR: "0.0.0.0:9444"
-      UPSTREAM: "${INSTANCE_DOMAIN}:443"
-      UPSTREAM_TLS: "true"
+      UPSTREAM: "envoy:8080"
+      UPSTREAM_TLS: "false"
       STATE_DIR: "/data"
       TLS_SNI_HOST: "ice.${INSTANCE_DOMAIN}"
       WT_PATH: "/construct-ice"
