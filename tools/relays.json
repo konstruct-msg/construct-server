@@ -1,15 +1,13 @@
 [
   {
-    "id": "msk-yc-1",
-    "addr": "158.160.140.67",
+    "id": "ams-het-1",
+    "addr": "ice.ams.konstruct.cc",
     "port": 443,
-    "domain": "msk-yc-1.relay.konstruct.cc",
-    "sni": "storage.yandexcloud.net",
-    "spki_sha256": "ce2bbfcac1fffab1f4f41ee540aee2dea92c523f7768264aeb87184bf8bfa723",
-    "bridge_cert": "IZKOsDNS5gld2g1PH4Uo4Yna/ltepGKpzDQTbSJll9OqzMin6yZaNx4gFbiLTvuGbABpcA",
+    "domain": "ams-het-1.relay.konstruct.cc",
+    "sni": "ice.ams.konstruct.cc",
+    "spki_sha256": "510d465a5c4736548e3386570ede6ba24600c4c9a2e369d24dde1ad7915eeebd",
+    "bridge_cert": "voFt3ilLSKx2xYuZsjxOnXtHTktUE4EaExIYRG+Bh89frHzI5QVrBNvT41zdS7Maiu6gPA",
     "wt_path": "/construct-ice",
-    "wt_host_header": "storage.yandexcloud.net",
-    "region": "RU",
-    "as_name": "Yandex Cloud"
+    "region": "NL"
   }
 ]
