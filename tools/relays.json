@@ -9,5 +9,16 @@
     "bridge_cert": "voFt3ilLSKx2xYuZsjxOnXtHTktUE4EaExIYRG+Bh89frHzI5QVrBNvT41zdS7Maiu6gPA",
     "wt_path": "/construct-ice",
     "region": "NL"
+  },
+  {
+    "id": "spb-mt-1",
+    "addr": "45.135.233.5",
+    "port": 9894,
+    "domain": "spb-mt-1.relay.konstruct.cc",
+    "sni": "s3.vkcs.cloud",
+    "spki_sha256": "bd2da0c781a0fc98d85640bd87d2d4709c709a50b6bee06f90282ca6237f3410",
+    "bridge_cert": "vkHsS7HOg1e8D9UPfLCQ4G8oLFfy6t/6oBXdAU4oUvPTMWTWZo0kiw6dq28cssjE24OUOw",
+    "wt_path": null,
+    "region": "RU"
   }
 ]
