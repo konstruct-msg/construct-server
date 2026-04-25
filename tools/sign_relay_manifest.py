@@ -167,7 +167,7 @@ def cmd_sign(args):
     payload = {
         "version": new_version,
         "signed_at": int(time.time()),
-        "bundle_signing_key": None,  # populated by server from env; clients ignore here
+        "bundle_signing_key": args.bundle_signing_key or None,
         "ice": {
             "relays": relays
         },
@@ -180,12 +180,16 @@ def cmd_sign(args):
 
     print(f"✅ Signed manifest written to: {out_path}")
     print(f"   version={new_version}, relays={len(relays)}, signed_at={payload['signed_at']}")
+    print(f"   bundle_signing_key={'set' if payload['bundle_signing_key'] else 'null'}")
     print(f"   Public key: {pub_hex}")
     print()
     print("Next steps:")
     print(f"  1. git add {out_path} && git commit -m 'relay: update manifest v{new_version}'")
     print(f"  2. Push to construct-relay GitHub repo (IceCertFetcher mirror)")
-    print(f"  3. Deploy to konstructs.cc/.well-known/construct-server")
+    print(f"  3. Copy to construct-landing/.well-known/construct-server and push")
+    print()
+    print("Tip: pass --bundle-signing-key <base64> to embed the server bundle verification key")
+    print("     (get it from the current manifest or 'BUNDLE_SIGNING_PUBLIC_KEY' env var)")
 
 
 def cmd_verify(args):
@@ -249,6 +253,12 @@ def main():
     p_sign.add_argument("relays_json", help="Path to relays.json (list of relay objects)")
     p_sign.add_argument("--key", required=True, help="Path to private key hex file")
     p_sign.add_argument("--out", help="Output path (default: .well-known/construct-server)")
+    p_sign.add_argument(
+        "--bundle-signing-key",
+        dest="bundle_signing_key",
+        default=None,
+        help="Base64 Ed25519 public key to embed as bundle_signing_key (for client bundle verification)",
+    )
 
     # verify
     p_verify = sub.add_parser("verify", help="Verify and inspect a signed manifest")
