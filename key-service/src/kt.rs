@@ -167,29 +167,45 @@ pub fn tree_head_signable(tree_size: u64, root: &[u8; 32]) -> Vec<u8> {
 // Database helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Append a leaf for `device_id` if one does not already exist (idempotent).
-/// Returns the 0-based `leaf_index` of this device in the log.
+/// Append a leaf for `device_id` if the identity key has changed since the last entry.
+///
+/// Behaviour:
+/// - First registration: inserts the leaf, returns its 0-based index.
+/// - Same key seen again: idempotent — returns the existing index without inserting.
+/// - Key rotation: appends a **new** row so the rotation is permanently recorded in
+///   the append-only log, then returns the new 0-based index.
+///
+/// Requires migration 047 (UNIQUE constraint on device_id dropped).
 pub async fn db_ensure_leaf(db: &PgPool, device_id: &str, lhash: [u8; 32]) -> Result<u64> {
-    // Try to insert; ignore conflict (device already has a leaf).
-    sqlx::query(
-        r#"
-        INSERT INTO kt_leaves (device_id, leaf_hash)
-        VALUES ($1, $2)
-        ON CONFLICT (device_id) DO NOTHING
-        "#,
+    // Find the most recent leaf for this device (if any).
+    let latest: Option<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, leaf_hash FROM kt_leaves WHERE device_id = $1 ORDER BY id DESC LIMIT 1",
     )
     .bind(device_id)
-    .bind(lhash.as_slice())
-    .execute(db)
+    .fetch_optional(db)
     .await
-    .context("kt_ensure_leaf: insert failed")?;
+    .context("kt_ensure_leaf: fetch latest failed")?;
 
-    // Fetch the (1-based) id and convert to 0-based index.
-    let row: (i64,) = sqlx::query_as("SELECT id FROM kt_leaves WHERE device_id = $1")
-        .bind(device_id)
-        .fetch_one(db)
-        .await
-        .context("kt_ensure_leaf: fetch id failed")?;
+    if let Some((existing_id, existing_hash)) = latest {
+        if existing_hash.as_slice() == lhash.as_slice() {
+            // Same key — idempotent, return existing index.
+            return Ok((existing_id - 1) as u64);
+        }
+        // Hash differs — identity key rotated; append new leaf and log the event.
+        tracing::warn!(
+            device_id = %device_id,
+            "KT: identity key rotation detected — appending new leaf"
+        );
+    }
+
+    // Insert new leaf (either first registration or key rotation).
+    let row: (i64,) =
+        sqlx::query_as("INSERT INTO kt_leaves (device_id, leaf_hash) VALUES ($1, $2) RETURNING id")
+            .bind(device_id)
+            .bind(lhash.as_slice())
+            .fetch_one(db)
+            .await
+            .context("kt_ensure_leaf: insert failed")?;
 
     Ok((row.0 - 1) as u64)
 }
