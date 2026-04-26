@@ -147,6 +147,22 @@ enum ContentType {
   // any other E2EE message.
   CONTENT_TYPE_CALL_SIGNAL = 12;
 
+  // HEARTBEAT — silent liveness probe sent via Double Ratchet with content_type=13.
+  // Recipient attempts to decrypt; a decrypt failure triggers proactive session heal
+  // before the user's next real message. No UI shown, no notification fired.
+  // Server treats identically to E2EE_SIGNAL (opaque bytes).
+  CONTENT_TYPE_HEARTBEAT = 13;
+
+  // DELIVERY_RECEIPT — end-to-end encrypted delivery confirmation (Variant 2).
+  // Sent from recipient to original sender as a regular DR message with content_type=14.
+  // Payload is JSON: {"type":"delivery_receipt","message_ids":["<uuid>",...]}
+  // Hides communication metadata from the server (unlike the legacy relay-receipt path).
+  // If stealth mode is active, sealed sender is applied — server cannot correlate
+  // the receipt sender with the original sealed message recipient.
+  // Backward compat: both this and the legacy stream receipt are sent; receiving side
+  // deduplicates (guard message.deliveryStatus != .delivered).
+  CONTENT_TYPE_DELIVERY_RECEIPT = 14;
+
   // === Control Messages ===
 
   // Key exchange initiation (X3DH handshake)
@@ -176,7 +192,7 @@ enum ContentType {
   CONTENT_TYPE_SESSION_RESET_INIT = 24;
 
   // Reserved for future types
-  reserved 3 to 9, 13 to 19, 25 to 100;
+  reserved 3 to 9, 15 to 19, 25 to 100;
 }
 
 // MessagePriority - Delivery priority
