@@ -6,7 +6,7 @@
 /// Output (ready to paste into docker-compose or .env):
 ///   ICE_SERVER_KEY=<base64>
 ///   Bridge cert: <cert>
-///   Bridge line: Bridge obfs4 <YOUR_IP>:<PORT> cert=<cert> iat-mode=0
+///   Bridge line: Bridge obfs4 <YOUR_IP>:<PORT> cert=<cert> iat-mode=1
 fn main() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -28,7 +28,7 @@ fn main() {
     println!("  {cert}");
     println!();
     println!("Example bridge line (replace <YOUR_IP> and <PORT>):");
-    println!("  Bridge obfs4 <YOUR_IP>:9443 cert={cert} iat-mode=0");
+    println!("  Bridge obfs4 <YOUR_IP>:9443 cert={cert} iat-mode=1");
     println!();
     println!("⚠  Keep ICE_SERVER_KEY secret. Regenerating it invalidates all");
     println!("   existing client bridge certs.");
