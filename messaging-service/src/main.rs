@@ -202,12 +202,16 @@ async fn main() -> Result<()> {
         let service = MessagingGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-            .add_service(
-                MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
-            )
-            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-            .await
+        if let Err(e) =
+            construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
+                .add_service(
+                    MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
+                )
+                .serve_with_incoming_shutdown(
+                    grpc_incoming,
+                    construct_server_shared::shutdown_signal(),
+                )
+                .await
         {
             tracing::error!(error = %e, "Messaging gRPC server failed");
         }

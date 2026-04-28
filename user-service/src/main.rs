@@ -918,10 +918,14 @@ async fn main() -> Result<()> {
             context: grpc_context,
             notification_client: grpc_notification_client,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-            .add_service(UserServiceServer::new(service))
-            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-            .await
+        if let Err(e) =
+            construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
+                .add_service(UserServiceServer::new(service))
+                .serve_with_incoming_shutdown(
+                    grpc_incoming,
+                    construct_server_shared::shutdown_signal(),
+                )
+                .await
         {
             tracing::error!(error = %e, "User gRPC server failed");
         }
