@@ -1776,13 +1776,14 @@ async fn main() -> Result<()> {
         env::var("AUTH_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
+    let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     tokio::spawn(async move {
         let service = AuthGrpcService {
             context: grpc_context,
             ice_bridge_cert: grpc_ice_bridge_cert,
             token_issuer_key,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
             .add_service(AuthServiceServer::new(service.clone()))
             .add_service(DeviceServiceServer::new(service.clone()))
             .add_service(DeviceLinkServiceServer::new(service))

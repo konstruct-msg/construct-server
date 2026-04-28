@@ -912,12 +912,13 @@ async fn main() -> Result<()> {
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     // Replace bare .serve() with graceful shutdown for gRPC
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
+    let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     tokio::spawn(async move {
         let service = UserGrpcService {
             context: grpc_context,
             notification_client: grpc_notification_client,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
             .add_service(UserServiceServer::new(service))
             .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await

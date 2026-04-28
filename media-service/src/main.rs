@@ -481,7 +481,7 @@ async fn main() -> Result<()> {
             context: grpc_context,
         };
         if let Err(e) =
-            construct_server_shared::grpc_server(main_config.grpc_keepalive_interval_secs)
+            construct_server_shared::grpc_server(main_config.grpc_keepalive_interval_secs, main_config.grpc_keepalive_timeout_secs)
                 .add_service(
                     MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024), // 2 MB per chunk
                 )
