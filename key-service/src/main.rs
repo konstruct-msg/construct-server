@@ -820,6 +820,10 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(45),
+        std::env::var("GRPC_KEEPALIVE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5),
     )
     .add_service(KeyServiceServer::new(grpc_service))
     .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal());

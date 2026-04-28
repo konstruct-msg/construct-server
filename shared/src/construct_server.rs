@@ -424,12 +424,12 @@ pub async fn mptcp_incoming(addr: &str) -> Result<tokio_stream::wrappers::TcpLis
 ///   RTTs for window updates.
 /// - tcp_keepalive probes the underlying TCP connection every 30s; prevents the OS from
 ///   silently dropping idle connections behind NAT/firewalls.
-pub fn grpc_server(keepalive_interval_secs: u64) -> tonic::transport::Server {
+pub fn grpc_server(keepalive_interval_secs: u64, keepalive_timeout_secs: u64) -> tonic::transport::Server {
     tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(std::time::Duration::from_secs(
             keepalive_interval_secs,
         )))
-        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(keepalive_timeout_secs)))
         .initial_connection_window_size(4 * 1024 * 1024) // 4 MB (default 64 KB)
         .initial_stream_window_size(2 * 1024 * 1024) // 2 MB (default 64 KB)
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
