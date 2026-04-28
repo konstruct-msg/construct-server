@@ -260,10 +260,14 @@ async fn main() -> Result<()> {
         let service = InviteGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-            .add_service(InviteServiceServer::new(service))
-            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-            .await
+        if let Err(e) =
+            construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
+                .add_service(InviteServiceServer::new(service))
+                .serve_with_incoming_shutdown(
+                    grpc_incoming,
+                    construct_server_shared::shutdown_signal(),
+                )
+                .await
         {
             tracing::error!(error = %e, "Invite gRPC server failed");
         }

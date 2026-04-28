@@ -93,6 +93,7 @@ XQIDAQAB
             delivery_queue_prefix: "delivery:".to_string(),
             delivery_poll_interval_ms: 100,
             grpc_keepalive_interval_secs: 45,
+            grpc_keepalive_timeout_secs: 5,
             rust_log: "info".to_string(),
             logging: LoggingConfig {
                 enable_message_metadata: false,
