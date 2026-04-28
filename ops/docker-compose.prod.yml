@@ -109,7 +109,7 @@ services:
       - signaling
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`) || HeaderRegexp(`content-type`, `application/grpc`)"
       - "traefik.http.routers.envoy.entrypoints=websecure"
       - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
       - "traefik.http.services.envoy.loadbalancer.server.port=8080"
