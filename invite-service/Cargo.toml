@@ -29,7 +29,7 @@ redis = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-reqwest = { workspace = true }
+
 jsonwebtoken = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
@@ -43,3 +43,6 @@ sha2 = "0.11"
 rand = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
+[dev-dependencies]
+reqwest = { workspace = true }
