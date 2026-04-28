@@ -1052,24 +1052,3 @@ pub async fn send_test_message(
         .await
         .expect("Failed to parse send response")
 }
-
-/// Get all messages for a user
-/// Returns array of message JSONs
-pub async fn get_all_messages(ctx: &TestApp, user: &TestUser) -> Vec<serde_json::Value> {
-    let client = reqwest::Client::new();
-
-    let response = client
-        .get(format!("http://{}/api/v1/messages", ctx.messaging_address))
-        .header("Authorization", format!("Bearer {}", user.access_token))
-        .query(&[("limit", "100")])
-        .send()
-        .await
-        .expect("Failed to get messages");
-
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .expect("Failed to parse messages response");
-
-    body["messages"].as_array().unwrap_or(&vec![]).clone()
-}
