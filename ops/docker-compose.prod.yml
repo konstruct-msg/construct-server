@@ -414,7 +414,7 @@ services:
   #   4. Rebuild and deploy iOS app
 
   relay-ams:
-    image: ghcr.io/maximeliseyev/construct-relay:latest
+    image: ghcr.io/maximeliseyev/construct-relay:${IMAGE_TAG:-0.3.5}
     restart: unless-stopped
     environment:
       LISTEN_ADDR: "0.0.0.0:9444"
@@ -436,8 +436,6 @@ services:
       - "traefik.tcp.routers.ice.entrypoints=websecure"
       - "traefik.tcp.routers.ice.tls.passthrough=true"
       - "traefik.tcp.services.ice.loadbalancer.server.port=9444"
-
-
 
   prometheus:
     image: prom/prometheus:v3.2.1
