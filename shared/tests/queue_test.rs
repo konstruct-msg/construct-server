@@ -39,6 +39,7 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         session_ttl_days: 30,
         refresh_token_ttl_days: 90,
         grpc_keepalive_interval_secs: 45,
+        grpc_keepalive_timeout_secs: 5,
         jwt_issuer: "construct-test".to_string(),
         online_channel: "test-online-channel".to_string(),
         offline_queue_prefix: "test_queue:".to_string(),
