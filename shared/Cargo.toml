@@ -47,7 +47,6 @@ redis = {workspace = true}
 axum = {workspace = true}
 tower = {workspace = true}
 tower-http = {workspace = true}
-reqwest = {workspace = true}
 jsonwebtoken = {workspace = true}
 bcrypt = {workspace = true}
 base64 = {workspace = true}
@@ -101,6 +100,7 @@ default = []
 integration-tests = []
 
 [dev-dependencies]
+reqwest = { workspace = true }
 serial_test = "3.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
