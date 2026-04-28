@@ -92,6 +92,9 @@ pub struct Config {
     /// HTTP/2 keepalive PING interval for gRPC servers (seconds).
     /// Applied to all microservices via `grpc_server()`. Default: 45
     pub grpc_keepalive_interval_secs: u64,
+    /// HTTP/2 keepalive timeout: how long to wait for a PING ACK before closing
+    /// the connection. Detection latency = interval + timeout. Default: 5
+    pub grpc_keepalive_timeout_secs: u64,
     pub rust_log: String,
 
     // Sub-configurations
@@ -289,6 +292,11 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(45),
+
+            grpc_keepalive_timeout_secs: std::env::var("GRPC_KEEPALIVE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5),
 
             rust_log: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
 

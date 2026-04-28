@@ -197,11 +197,12 @@ async fn main() -> Result<()> {
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     // Replace bare .serve() with graceful shutdown for gRPC
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
+    let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     tokio::spawn(async move {
         let service = MessagingGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
             .add_service(
                 MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
             )

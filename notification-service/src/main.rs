@@ -457,6 +457,7 @@ async fn main() -> Result<()> {
 
     // Start both servers concurrently
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
+    let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     let rest_server = async move {
         let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
             .await
@@ -468,7 +469,7 @@ async fn main() -> Result<()> {
     };
 
     let grpc_server = async move {
-        construct_server_shared::grpc_server(grpc_keepalive_secs)
+        construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
             .add_service(NotificationServiceServer::new(grpc_service))
             .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await

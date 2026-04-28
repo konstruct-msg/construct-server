@@ -255,11 +255,12 @@ async fn main() -> Result<()> {
         env::var("INVITE_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50055".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
+    let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     tokio::spawn(async move {
         let service = InviteGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs)
+        if let Err(e) = construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
             .add_service(InviteServiceServer::new(service))
             .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
