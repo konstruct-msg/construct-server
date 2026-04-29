@@ -81,6 +81,12 @@ service MLSService {
   // Creator admin can always resign but cannot be stripped by others.
   rpc DelegateAdmin(DelegateAdminRequest) returns (DelegateAdminResponse);
 
+  // TransferOwnership - Transfer group creator rights to another admin
+  // Double consent: current owner signs, new owner must accept within 5 min.
+  // After transfer: original owner becomes FULL admin (not creator).
+  // New owner cannot be stripped (only self-resign).
+  rpc TransferOwnership(TransferOwnershipRequest) returns (TransferOwnershipResponse);
+
   // =========================================================================
   // MLS State Synchronization
   // =========================================================================
@@ -409,6 +415,37 @@ enum AdminRole {
 message DelegateAdminResponse {
   bool success = 1;
   int64 delegated_at = 2;
+}
+
+// ============================================================================
+// Ownership Transfer
+// ============================================================================
+
+message TransferOwnershipRequest {
+  string group_id = 1;
+
+  // Device ID of the new owner (must be current FULL admin)
+  string new_owner_device_id = 2;
+
+  // Current owner's signature: Ed25519.sign(
+  //   "CONSTRUCT_TRANSFER_OWNERSHIP:{group_id}:{new_owner_device_id}:{timestamp}"
+  // )
+  bytes owner_signature = 3;
+
+  // New owner's acceptance signature: Ed25519.sign(
+  //   "CONSTRUCT_ACCEPT_OWNERSHIP:{group_id}:{previous_owner_device_id}:{timestamp}"
+  // )
+  // Proves new owner agrees to be creator (cannot be stripped by others)
+  bytes new_owner_acceptance = 4;
+
+  int64 signature_timestamp = 5;
+
+  reserved 6 to 15;
+}
+
+message TransferOwnershipResponse {
+  bool success = 1;
+  int64 transferred_at = 2;
 }
 
 // ============================================================================
