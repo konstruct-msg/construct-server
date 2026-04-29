@@ -55,23 +55,19 @@ pub(crate) async fn create_group(
 
     let now = chrono::Utc::now();
 
-    // 6. Insert group into mls_groups
-    sqlx::query(
-        r#"
-            INSERT INTO mls_groups
-                (group_id, epoch, ratchet_tree, encrypted_group_context,
-                 max_members, message_retention_days, threads_enabled, created_at)
-            VALUES ($1, 0, $2, $3, $4, $5, $6, $7)
-            "#,
+    db_mls::create_group_with_creator(
+        svc.db.as_ref(),
+        db_mls::NewGroup {
+            group_id,
+            creator_device_id: &device_id,
+            initial_ratchet_tree: &req.initial_ratchet_tree,
+            encrypted_group_context: &req.encrypted_group_context,
+            max_members: req.max_members as i16,
+            message_retention_days: retention_days as i16,
+            threads_enabled: req.threads_enabled,
+            created_at: now,
+        },
     )
-    .bind(group_id)
-    .bind(&req.initial_ratchet_tree)
-    .bind(&req.encrypted_group_context)
-    .bind(req.max_members as i16)
-    .bind(retention_days as i16)
-    .bind(req.threads_enabled)
-    .bind(now)
-    .execute(svc.db.as_ref())
     .await
     .map_err(|e| {
         if e.to_string().contains("duplicate key") {
@@ -80,35 +76,6 @@ pub(crate) async fn create_group(
             Status::internal(format!("Failed to create group: {}", e))
         }
     })?;
-
-    // 7. Insert creator as first member
-    sqlx::query(
-        r#"
-            INSERT INTO group_members (group_id, device_id, leaf_index, joined_at)
-            VALUES ($1, $2, 0, $3)
-            "#,
-    )
-    .bind(group_id)
-    .bind(&device_id)
-    .bind(now)
-    .execute(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("Failed to add creator to group: {}", e)))?;
-
-    // 8. Insert creator as admin (creator role)
-    sqlx::query(
-        r#"
-            INSERT INTO group_admins
-                (group_id, device_id, role, is_creator, granted_by_device_id, granted_at)
-            VALUES ($1, $2, 1, TRUE, NULL, $3)
-            "#,
-    )
-    .bind(group_id)
-    .bind(&device_id)
-    .bind(now)
-    .execute(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("Failed to set creator as admin: {}", e)))?;
 
     info!(
         group_id = %group_id,
