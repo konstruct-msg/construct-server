@@ -49,6 +49,49 @@ pub struct NewGroupCommit<'a> {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewGroup<'a> {
+    pub group_id: Uuid,
+    pub creator_device_id: &'a str,
+    pub initial_ratchet_tree: &'a [u8],
+    pub encrypted_group_context: &'a [u8],
+    pub max_members: i16,
+    pub message_retention_days: i16,
+    pub threads_enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewGroupInvite<'a> {
+    pub invite_id: Uuid,
+    pub group_id: Uuid,
+    pub target_device_id: &'a str,
+    pub mls_welcome: &'a [u8],
+    pub key_package_ref: &'a [u8],
+    pub epoch: i64,
+    pub invited_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewGroupMember<'a> {
+    pub group_id: Uuid,
+    pub device_id: &'a str,
+    pub leaf_index: i32,
+    pub acceptance_signature: Option<&'a [u8]>,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewGroupKeyPackage<'a> {
+    pub user_id: Uuid,
+    pub device_id: &'a str,
+    pub key_package: &'a [u8],
+    pub key_package_ref: &'a [u8],
+    pub published_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InviteAcceptanceRecord {
     pub target_device_id: String,
@@ -66,12 +109,84 @@ pub struct PendingInviteRecord {
     pub invited_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ConsumedKeyPackageRecord {
+    pub key_package: Vec<u8>,
+    pub device_id: String,
+    pub key_package_ref: Vec<u8>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct KeyPackageCountRecord {
+    pub count: i64,
+    pub last_published_at: Option<DateTime<Utc>>,
+}
+
 pub async fn get_device_verifying_key(pool: &DbPool, device_id: &str) -> Result<Option<Vec<u8>>> {
     sqlx::query_scalar("SELECT verifying_key FROM devices WHERE device_id = $1")
         .bind(device_id)
         .fetch_optional(pool)
         .await
         .context("Failed to load device verifying key")
+}
+
+pub async fn create_group_with_creator(pool: &DbPool, group: NewGroup<'_>) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to start MLS group creation transaction")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO mls_groups
+            (group_id, epoch, ratchet_tree, encrypted_group_context,
+             max_members, message_retention_days, threads_enabled, created_at)
+        VALUES ($1, 0, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(group.group_id)
+    .bind(group.initial_ratchet_tree)
+    .bind(group.encrypted_group_context)
+    .bind(group.max_members)
+    .bind(group.message_retention_days)
+    .bind(group.threads_enabled)
+    .bind(group.created_at)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to insert MLS group")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO group_members (group_id, device_id, leaf_index, joined_at)
+        VALUES ($1, $2, 0, $3)
+        "#,
+    )
+    .bind(group.group_id)
+    .bind(group.creator_device_id)
+    .bind(group.created_at)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to insert MLS group creator membership")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO group_admins
+            (group_id, device_id, role, is_creator, granted_by_device_id, granted_at)
+        VALUES ($1, $2, 1, TRUE, NULL, $3)
+        "#,
+    )
+    .bind(group.group_id)
+    .bind(group.creator_device_id)
+    .bind(group.created_at)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to insert MLS group creator admin role")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit MLS group creation transaction")?;
+
+    Ok(())
 }
 
 pub async fn get_group_admin_access(
@@ -260,6 +375,30 @@ pub async fn upsert_group_admin_role(
     Ok(())
 }
 
+pub async fn insert_group_invite(pool: &DbPool, invite: NewGroupInvite<'_>) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO group_invites
+            (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+             epoch, invited_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(invite.invite_id)
+    .bind(invite.group_id)
+    .bind(invite.target_device_id)
+    .bind(invite.mls_welcome)
+    .bind(invite.key_package_ref)
+    .bind(invite.epoch)
+    .bind(invite.invited_at)
+    .bind(invite.expires_at)
+    .execute(pool)
+    .await
+    .context("Failed to insert MLS group invite")?;
+
+    Ok(())
+}
+
 pub async fn transfer_group_ownership(
     tx: &mut Transaction<'_, Postgres>,
     group_id: Uuid,
@@ -352,6 +491,26 @@ pub async fn get_next_group_leaf_index(pool: &DbPool, group_id: Uuid) -> Result<
     .context("Failed to load next MLS group leaf index")?;
 
     Ok(max_leaf_index.map(|value| value + 1).unwrap_or(0))
+}
+
+pub async fn insert_group_member(pool: &DbPool, member: NewGroupMember<'_>) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO group_members
+            (group_id, device_id, leaf_index, acceptance_signature, joined_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(member.group_id)
+    .bind(member.device_id)
+    .bind(member.leaf_index)
+    .bind(member.acceptance_signature)
+    .bind(member.joined_at)
+    .execute(pool)
+    .await
+    .context("Failed to insert MLS group member")?;
+
+    Ok(())
 }
 
 pub async fn delete_group_invite(pool: &DbPool, invite_id: Uuid) -> Result<()> {
@@ -515,4 +674,127 @@ pub async fn is_key_package_valid_for_device(
     .fetch_one(&mut **tx)
     .await
     .context("Failed to validate key package reference for device")
+}
+
+pub async fn insert_group_key_package(
+    pool: &DbPool,
+    key_package: NewGroupKeyPackage<'_>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO group_key_packages
+            (user_id, device_id, key_package, key_package_ref, published_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (key_package_ref) DO NOTHING
+        "#,
+    )
+    .bind(key_package.user_id)
+    .bind(key_package.device_id)
+    .bind(key_package.key_package)
+    .bind(key_package.key_package_ref)
+    .bind(key_package.published_at)
+    .bind(key_package.expires_at)
+    .execute(pool)
+    .await
+    .context("Failed to insert MLS key package")?;
+
+    Ok(())
+}
+
+pub async fn count_key_packages_for_device(pool: &DbPool, device_id: &str) -> Result<i64> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM group_key_packages
+        WHERE device_id = $1
+          AND expires_at > NOW()
+        "#,
+    )
+    .bind(device_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to count MLS key packages for device")
+}
+
+pub async fn consume_key_package_for_user(
+    pool: &DbPool,
+    user_id: Uuid,
+    preferred_device_id: Option<&str>,
+) -> Result<Option<ConsumedKeyPackageRecord>> {
+    if let Some(device_id) = preferred_device_id {
+        sqlx::query_as::<_, ConsumedKeyPackageRecord>(
+            r#"
+            DELETE FROM group_key_packages
+            WHERE id = (
+                SELECT id FROM group_key_packages
+                WHERE user_id = $1
+                  AND device_id = $2
+                  AND expires_at > NOW()
+                ORDER BY published_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_package, device_id, key_package_ref
+            "#,
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to consume preferred MLS key package")
+    } else {
+        sqlx::query_as::<_, ConsumedKeyPackageRecord>(
+            r#"
+            DELETE FROM group_key_packages
+            WHERE id = (
+                SELECT id FROM group_key_packages
+                WHERE user_id = $1
+                  AND expires_at > NOW()
+                ORDER BY published_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_package, device_id, key_package_ref
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to consume MLS key package")
+    }
+}
+
+pub async fn get_key_package_count(
+    pool: &DbPool,
+    user_id: Uuid,
+    device_id: Option<&str>,
+) -> Result<KeyPackageCountRecord> {
+    if let Some(device_id) = device_id {
+        sqlx::query_as::<_, KeyPackageCountRecord>(
+            r#"
+            SELECT COUNT(*) AS count, MAX(published_at) AS last_published_at
+            FROM group_key_packages
+            WHERE user_id = $1
+              AND device_id = $2
+              AND expires_at > NOW()
+            "#,
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to count MLS key packages for user device")
+    } else {
+        sqlx::query_as::<_, KeyPackageCountRecord>(
+            r#"
+            SELECT COUNT(*) AS count, MAX(published_at) AS last_published_at
+            FROM group_key_packages
+            WHERE user_id = $1
+              AND expires_at > NOW()
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to count MLS key packages for user")
+    }
 }

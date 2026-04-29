@@ -1,3 +1,4 @@
+use construct_db::mls as db_mls;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use tonic::{Request, Response, Status};
 use tracing::info;
@@ -28,36 +29,24 @@ pub(crate) async fn publish_key_package(
 
     for kp in &req.key_packages {
         let kp_ref = sha256_bytes(kp);
-        sqlx::query(
-            r#"
-            INSERT INTO group_key_packages
-                (user_id, device_id, key_package, key_package_ref, published_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (key_package_ref) DO NOTHING
-            "#,
+        db_mls::insert_group_key_package(
+            svc.db.as_ref(),
+            db_mls::NewGroupKeyPackage {
+                user_id,
+                device_id: &device_id,
+                key_package: kp.as_slice(),
+                key_package_ref: kp_ref.as_slice(),
+                published_at: now,
+                expires_at,
+            },
         )
-        .bind(user_id)
-        .bind(&device_id)
-        .bind(kp.as_slice())
-        .bind(kp_ref.as_slice())
-        .bind(now)
-        .bind(expires_at)
-        .execute(svc.db.as_ref())
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
     }
 
-    let count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*) FROM group_key_packages
-        WHERE device_id = $1
-          AND expires_at > NOW()
-        "#,
-    )
-    .bind(&device_id)
-    .fetch_one(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    let count = db_mls::count_key_packages_for_device(svc.db.as_ref(), &device_id)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
     info!(
         device_id = %device_id,
@@ -82,63 +71,28 @@ pub(crate) async fn consume_key_package(
     let user_id =
         Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("invalid user_id"))?;
 
-    let row: Option<(Vec<u8>, String, Vec<u8>)> =
-        if let Some(ref preferred) = req.preferred_device_id {
-            sqlx::query_as(
-                r#"
-            DELETE FROM group_key_packages
-            WHERE id = (
-                SELECT id FROM group_key_packages
-                WHERE user_id = $1
-                  AND device_id = $2
-                  AND expires_at > NOW()
-                ORDER BY published_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING key_package, device_id, key_package_ref
-            "#,
-            )
-            .bind(user_id)
-            .bind(preferred)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-        } else {
-            sqlx::query_as(
-                r#"
-            DELETE FROM group_key_packages
-            WHERE id = (
-                SELECT id FROM group_key_packages
-                WHERE user_id = $1
-                  AND expires_at > NOW()
-                ORDER BY published_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING key_package, device_id, key_package_ref
-            "#,
-            )
-            .bind(user_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-        };
+    let row = db_mls::consume_key_package_for_user(
+        svc.db.as_ref(),
+        user_id,
+        req.preferred_device_id.as_deref(),
+    )
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
 
     match row {
         None => Err(Status::not_found(
             "no KeyPackage available for this user; they must publish more",
         )),
-        Some((key_package, device_id, key_package_ref)) => {
+        Some(consumed) => {
             info!(
                 target_user_id = %user_id,
-                device_id = %device_id,
+                device_id = %consumed.device_id,
                 "KeyPackage consumed"
             );
             Ok(Response::new(proto::ConsumeKeyPackageResponse {
-                key_package,
-                device_id,
-                key_package_ref,
+                key_package: consumed.key_package,
+                device_id: consumed.device_id,
+                key_package_ref: consumed.key_package_ref,
             }))
         }
     }
@@ -153,41 +107,14 @@ pub(crate) async fn get_key_package_count(
     let user_id =
         Uuid::parse_str(&req.user_id).map_err(|_| Status::invalid_argument("invalid user_id"))?;
 
-    let (count, last_published_at): (i64, Option<chrono::DateTime<chrono::Utc>>) =
-        if let Some(ref device_id) = req.device_id {
-            sqlx::query_as(
-                r#"
-                SELECT COUNT(*), MAX(published_at)
-                FROM group_key_packages
-                WHERE user_id = $1
-                  AND device_id = $2
-                  AND expires_at > NOW()
-                "#,
-            )
-            .bind(user_id)
-            .bind(device_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT COUNT(*), MAX(published_at)
-                FROM group_key_packages
-                WHERE user_id = $1
-                  AND expires_at > NOW()
-                "#,
-            )
-            .bind(user_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-        };
+    let stats = db_mls::get_key_package_count(svc.db.as_ref(), user_id, req.device_id.as_deref())
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
     Ok(Response::new(proto::GetKeyPackageCountResponse {
-        count: count as u32,
+        count: stats.count as u32,
         recommended_minimum: 20,
-        last_published_at: last_published_at.map(|t| t.timestamp()).unwrap_or(0),
-        cannot_be_invited: count == 0,
+        last_published_at: stats.last_published_at.map(|t| t.timestamp()).unwrap_or(0),
+        cannot_be_invited: stats.count == 0,
     }))
 }

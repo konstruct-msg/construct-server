@@ -584,7 +584,8 @@ Subsequent commenters:
 - Start with repeated lookups/checks (`group membership`, `admin access`, `device ownership`, `group state flags`) before extracting complex transactional write flows.
 - Keep transaction orchestration in the service layer until a write workflow becomes clearly reusable and atomic enough to merit a higher-level DB primitive.
 - Current extracted surfaces include shared group state reads, invite reads/deletes, admin-role updates, member/admin removals, ownership transfer, and commit persistence helpers.
-- Remaining raw MLS SQL is now concentrated in `create_group`, duplicate-sensitive invite/member inserts, and `key_packages`-specific handlers.
+- `mls-service` handlers/helpers no longer issue direct `sqlx::query*` calls; MLS DB access now flows through `construct-db::mls`.
+- Remaining direct MLS SQL is intentionally concentrated in `construct-db::mls` and in test fixtures.
 
 ---
 
@@ -607,6 +608,7 @@ Subsequent commenters:
 
 | Date | Change |
 |------|--------|
+| 2026-04-29 | Completed handler-level DB extraction: `mls-service` handlers/helpers now call `construct-db::mls` exclusively for MLS database access |
 | 2026-04-29 | Extended DB access refactor: moved MLS state/invite/admin/member/commit helpers into `construct-db::mls`; remaining raw SQL narrowed to create-group, duplicate-sensitive inserts, and key-packages |
 | 2026-04-29 | Started DB access refactor: documenting and moving repeated MLS lookups into `construct-db::mls` |
 | 2026-04-29 | Phase 4 complete: DelegateAdmin, TransferOwnership, SubmitCommit, FetchCommits |
