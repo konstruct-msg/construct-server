@@ -497,44 +497,643 @@ impl MlsService for MlsServiceImpl {
 
     async fn invite_to_group(
         &self,
-        _request: Request<proto::InviteToGroupRequest>,
+        request: Request<proto::InviteToGroupRequest>,
     ) -> Result<Response<proto::InviteToGroupResponse>, Status> {
-        Err(Status::unimplemented("InviteToGroup — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // 1. Parse group_id
+        let group_id = Uuid::parse_str(&req.group_id)
+            .map_err(|_| Status::invalid_argument("Invalid group_id (must be UUID)"))?;
+
+        // 2. Verify caller is admin of the group
+        let (is_creator, is_admin) =
+            check_group_admin(self.db.as_ref(), group_id, &device_id).await?;
+
+        if !is_creator && !is_admin {
+            return Err(Status::permission_denied("NOT_ADMIN"));
+        }
+
+        // 3. Check group not dissolved
+        let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_optional(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?
+                .flatten();
+
+        if dissolved_at.is_some() {
+            return Err(Status::not_found("Group dissolved"));
+        }
+
+        // 4. Validate mls_welcome is not empty
+        if req.mls_welcome.is_empty() {
+            return Err(Status::invalid_argument("mls_welcome is required"));
+        }
+
+        // 5. Validate key_package_ref is not empty
+        if req.key_package_ref.is_empty() {
+            return Err(Status::invalid_argument("key_package_ref is required"));
+        }
+
+        // 6. Validate expires_in_seconds (max 7 days = 604800 seconds)
+        let expires_in_seconds = if req.expires_in_seconds == 0 {
+            604800 // default: 7 days
+        } else if req.expires_in_seconds > 604800 {
+            return Err(Status::invalid_argument(
+                "expires_in_seconds cannot exceed 604800 (7 days)",
+            ));
+        } else {
+            req.expires_in_seconds
+        };
+
+        // 7. Extract target_device_id from the key_package_ref
+        // The client must send the target device's ID in the mls_welcome or key_package_ref.
+        // For now, we need to look it up from the consumed KeyPackage.
+        // Since we're using key_package_ref as SHA-256 hash, we can find the device_id from that.
+        let consumed: Option<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT device_id, user_id::text FROM group_key_packages
+            WHERE key_package_ref = $1 AND expires_at > NOW()
+            "#,
+        )
+        .bind(&req.key_package_ref)
+        .fetch_optional(self.db.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        let (target_device_id, _target_user_id) = consumed.ok_or_else(|| {
+            Status::not_found(
+                "KeyPackage not found or expired; target must publish a KeyPackage first",
+            )
+        })?;
+
+        // 8. Check if device is already a member
+        let already_member =
+            check_group_member(self.db.as_ref(), group_id, &target_device_id).await?;
+
+        if already_member {
+            return Err(Status::already_exists(
+                "Device is already a member of this group",
+            ));
+        }
+
+        // 9. Check max_members limit
+        let member_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_one(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        let max_members: i16 =
+            sqlx::query_scalar("SELECT max_members FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_one(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        if member_count >= max_members as i64 {
+            return Err(Status::resource_exhausted(
+                "GROUP_FULL: max_members reached",
+            ));
+        }
+
+        // 10. Check if there's already a pending invite for this device
+        let existing_invite: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM group_invites
+                WHERE group_id = $1 AND target_device_id = $2 AND expires_at > NOW()
+            )
+            "#,
+        )
+        .bind(group_id)
+        .bind(&target_device_id)
+        .fetch_one(self.db.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        if existing_invite {
+            return Err(Status::already_exists(
+                "Device already has a pending invite for this group",
+            ));
+        }
+
+        // 11. Insert invite
+        let invite_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(expires_in_seconds as i64);
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_invites
+                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                 epoch, invited_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .bind(&target_device_id)
+        .bind(&req.mls_welcome)
+        .bind(&req.key_package_ref)
+        .bind(req.epoch as i64)
+        .bind(now)
+        .bind(expires_at)
+        .execute(self.db.as_ref())
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("group_invites_unique_pending") {
+                Status::already_exists("Device already has a pending invite for this group")
+            } else {
+                Status::internal(format!("Failed to create invite: {}", e))
+            }
+        })?;
+
+        info!(
+            group_id = %group_id,
+            invite_id = %invite_id,
+            target_device_id = %target_device_id,
+            admin_device_id = %device_id,
+            expires_at = %expires_at,
+            "Group invite created"
+        );
+
+        Ok(Response::new(proto::InviteToGroupResponse {
+            invite_id: invite_id.to_string(),
+            expires_at: expires_at.timestamp(),
+        }))
     }
 
     async fn accept_group_invite(
         &self,
-        _request: Request<proto::AcceptGroupInviteRequest>,
+        request: Request<proto::AcceptGroupInviteRequest>,
     ) -> Result<Response<proto::AcceptGroupInviteResponse>, Status> {
-        Err(Status::unimplemented("AcceptGroupInvite — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let user_id = extract_user_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // 1. Parse group_id and invite_id
+        let group_id = Uuid::parse_str(&req.group_id)
+            .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
+        let invite_id = Uuid::parse_str(&req.invite_id)
+            .map_err(|_| Status::invalid_argument("Invalid invite_id"))?;
+
+        // 2. Fetch invite
+        let invite_row: Option<(String, String, Vec<u8>, Vec<u8>, i64)> = sqlx::query_as(
+            r#"
+            SELECT invite_id::text, target_device_id, mls_welcome, key_package_ref, epoch
+            FROM group_invites
+            WHERE invite_id = $1 AND group_id = $2 AND expires_at > NOW()
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .fetch_optional(self.db.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        let (_invite_id_str, target_device_id, _mls_welcome, _key_package_ref, _epoch) =
+            invite_row.ok_or_else(|| Status::not_found("Invite not found or expired"))?;
+
+        // 3. Verify invite belongs to the calling device
+        if target_device_id != device_id {
+            return Err(Status::permission_denied(
+                "Invite belongs to a different device",
+            ));
+        }
+
+        // 4. Validate acceptance signature
+        let signature_timestamp = req.signature_timestamp;
+
+        // Message: "CONSTRUCT_GROUP_JOIN:{group_id}:{invite_id}:{timestamp}"
+        let message = format!(
+            "CONSTRUCT_GROUP_JOIN:{}:{}:{}",
+            req.group_id, req.invite_id, signature_timestamp
+        );
+
+        verify_admin_proof(
+            self.db.as_ref(),
+            &device_id,
+            "CONSTRUCT_GROUP_JOIN",
+            &req.acceptance_signature,
+            signature_timestamp,
+            &message,
+        )
+        .await?;
+
+        // 5. Verify device belongs to user
+        let device_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND user_id = $2)",
+        )
+        .bind(&device_id)
+        .bind(user_id)
+        .fetch_one(self.db.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        if !device_exists {
+            return Err(Status::permission_denied(
+                "Device does not belong to authenticated user",
+            ));
+        }
+
+        // 6. Check if already a member
+        let already_member = check_group_member(self.db.as_ref(), group_id, &device_id).await?;
+
+        if already_member {
+            return Err(Status::already_exists("Already a member of this group"));
+        }
+
+        // 7. Get next leaf_index
+        let max_leaf_index: Option<i32> =
+            sqlx::query_scalar("SELECT MAX(leaf_index) FROM group_members WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_optional(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        let next_leaf_index = max_leaf_index.map(|v| v + 1).unwrap_or(0);
+
+        // 8. Insert into group_members with acceptance signature
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_members
+                (group_id, device_id, leaf_index, acceptance_signature, joined_at)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(group_id)
+        .bind(&device_id)
+        .bind(next_leaf_index)
+        .bind(&req.acceptance_signature)
+        .bind(now)
+        .execute(self.db.as_ref())
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("duplicate key") {
+                Status::already_exists("Device is already a member of this group")
+            } else {
+                Status::internal(format!("Failed to add member: {}", e))
+            }
+        })?;
+
+        // 9. Delete invite (hard delete — no history)
+        sqlx::query("DELETE FROM group_invites WHERE invite_id = $1")
+            .bind(invite_id)
+            .execute(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("Failed to delete invite: {}", e)))?;
+
+        // 10. Get current epoch
+        let current_epoch: i64 =
+            sqlx::query_scalar("SELECT epoch FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_one(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        info!(
+            group_id = %group_id,
+            device_id = %device_id,
+            user_id = %user_id,
+            leaf_index = next_leaf_index,
+            epoch = current_epoch,
+            "Group invite accepted"
+        );
+
+        Ok(Response::new(proto::AcceptGroupInviteResponse {
+            success: true,
+            new_epoch: current_epoch as u64,
+            joined_at: now.timestamp(),
+        }))
     }
 
     async fn decline_group_invite(
         &self,
-        _request: Request<proto::DeclineGroupInviteRequest>,
+        request: Request<proto::DeclineGroupInviteRequest>,
     ) -> Result<Response<proto::DeclineGroupInviteResponse>, Status> {
-        Err(Status::unimplemented("DeclineGroupInvite — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // 1. Parse group_id and invite_id
+        let group_id = Uuid::parse_str(&req.group_id)
+            .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
+        let invite_id = Uuid::parse_str(&req.invite_id)
+            .map_err(|_| Status::invalid_argument("Invalid invite_id"))?;
+
+        // 2. Fetch invite and verify it belongs to the calling device
+        let target_device_id: Option<String> = sqlx::query_scalar(
+            "SELECT target_device_id FROM group_invites WHERE invite_id = $1 AND group_id = $2",
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .fetch_optional(self.db.as_ref())
+        .await
+        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        match target_device_id {
+            None => return Err(Status::not_found("Invite not found")),
+            Some(ref target) if *target != device_id => {
+                return Err(Status::permission_denied(
+                    "Invite belongs to a different device",
+                ));
+            }
+            _ => {}
+        }
+
+        // 3. Hard delete invite (no history stored)
+        sqlx::query("DELETE FROM group_invites WHERE invite_id = $1")
+            .bind(invite_id)
+            .execute(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("Failed to delete invite: {}", e)))?;
+
+        info!(
+            group_id = %group_id,
+            invite_id = %invite_id,
+            device_id = %device_id,
+            "Group invite declined"
+        );
+
+        Ok(Response::new(proto::DeclineGroupInviteResponse {
+            success: true,
+        }))
     }
 
     async fn get_pending_invites(
         &self,
-        _request: Request<proto::GetPendingInvitesRequest>,
+        request: Request<proto::GetPendingInvitesRequest>,
     ) -> Result<Response<proto::GetPendingInvitesResponse>, Status> {
-        Err(Status::unimplemented("GetPendingInvites — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // Use device_id from request if provided, otherwise from metadata
+        let target_device_id = if req.device_id.is_empty() {
+            device_id
+        } else {
+            req.device_id
+        };
+
+        // 1. Determine limit (default 50, max 100)
+        let limit = if req.limit == 0 {
+            50
+        } else {
+            req.limit.min(100)
+        };
+
+        // 2. Query invites (with optional cursor)
+        let cursor = req.cursor.as_deref();
+        let invites: Vec<(
+            Uuid,
+            Uuid,
+            Vec<u8>,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = if let Some(cursor_id) = cursor {
+            let cursor_uuid = Uuid::parse_str(cursor_id)
+                .map_err(|_| Status::invalid_argument("Invalid cursor"))?;
+
+            sqlx::query_as(
+                r#"
+                    SELECT invite_id, group_id, mls_welcome, expires_at, invited_at
+                    FROM group_invites
+                    WHERE target_device_id = $1
+                      AND expires_at > NOW()
+                      AND invite_id > $2
+                    ORDER BY invite_id ASC
+                    LIMIT $3
+                    "#,
+            )
+            .bind(&target_device_id)
+            .bind(cursor_uuid)
+            .bind(limit as i64)
+            .fetch_all(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
+        } else {
+            sqlx::query_as(
+                r#"
+                    SELECT invite_id, group_id, mls_welcome, expires_at, invited_at
+                    FROM group_invites
+                    WHERE target_device_id = $1
+                      AND expires_at > NOW()
+                    ORDER BY invite_id ASC
+                    LIMIT $2
+                    "#,
+            )
+            .bind(&target_device_id)
+            .bind(limit as i64)
+            .fetch_all(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
+        };
+
+        // 3. Build next_cursor
+        let next_cursor = if invites.len() == limit as usize {
+            invites.last().map(|(id, _, _, _, _)| id.to_string())
+        } else {
+            None
+        };
+
+        // 4. Convert to proto
+        let proto_invites: Vec<proto::PendingGroupInvite> = invites
+            .into_iter()
+            .map(
+                |(invite_id, group_id, mls_welcome, expires_at, invited_at)| {
+                    proto::PendingGroupInvite {
+                        invite_id: invite_id.to_string(),
+                        group_id: group_id.to_string(),
+                        mls_welcome,
+                        expires_at: expires_at.timestamp(),
+                        invited_at: invited_at.timestamp(),
+                    }
+                },
+            )
+            .collect();
+
+        Ok(Response::new(proto::GetPendingInvitesResponse {
+            invites: proto_invites,
+            next_cursor,
+        }))
     }
 
     async fn leave_group(
         &self,
-        _request: Request<proto::LeaveGroupRequest>,
+        request: Request<proto::LeaveGroupRequest>,
     ) -> Result<Response<proto::LeaveGroupResponse>, Status> {
-        Err(Status::unimplemented("LeaveGroup — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // 1. Parse group_id
+        let group_id = Uuid::parse_str(&req.group_id)
+            .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
+
+        // 2. Check group not dissolved
+        let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_optional(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?
+                .flatten();
+
+        if dissolved_at.is_some() {
+            return Err(Status::not_found("Group dissolved"));
+        }
+
+        // 3. Verify membership
+        let is_member = check_group_member(self.db.as_ref(), group_id, &device_id).await?;
+        if !is_member {
+            return Err(Status::permission_denied("NOT_MEMBER"));
+        }
+
+        // 4. Check if member is creator (creator cannot leave — they must dissolve)
+        let (is_creator, _) = check_group_admin(self.db.as_ref(), group_id, &device_id).await?;
+        if is_creator {
+            return Err(Status::failed_precondition(
+                "Creator cannot leave group; use DissolveGroup instead",
+            ));
+        }
+
+        // 5. Hard delete from group_members (no history)
+        let now = chrono::Utc::now();
+
+        sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND device_id = $2")
+            .bind(group_id)
+            .bind(&device_id)
+            .execute(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
+
+        // 6. Also remove from group_admins if present
+        sqlx::query("DELETE FROM group_admins WHERE group_id = $1 AND device_id = $2")
+            .bind(group_id)
+            .bind(&device_id)
+            .execute(self.db.as_ref())
+            .await
+            .ok(); // Ignore if not admin
+
+        info!(
+            group_id = %group_id,
+            device_id = %device_id,
+            "Member left group"
+        );
+
+        Ok(Response::new(proto::LeaveGroupResponse {
+            success: true,
+            left_at: now.timestamp(),
+        }))
     }
 
     async fn remove_member(
         &self,
-        _request: Request<proto::RemoveMemberRequest>,
+        request: Request<proto::RemoveMemberRequest>,
     ) -> Result<Response<proto::RemoveMemberResponse>, Status> {
-        Err(Status::unimplemented("RemoveMember — Phase 3"))
+        let device_id = extract_device_id(request.metadata())?;
+        let req = request.into_inner();
+
+        // 1. Parse group_id
+        let group_id = Uuid::parse_str(&req.group_id)
+            .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
+
+        // 2. Verify caller is admin
+        let (is_creator, is_admin) =
+            check_group_admin(self.db.as_ref(), group_id, &device_id).await?;
+
+        if !is_creator && !is_admin {
+            return Err(Status::permission_denied("NOT_ADMIN"));
+        }
+
+        // 3. Verify admin proof
+        let signature_timestamp = req.signature_timestamp;
+        let message = format!(
+            "CONSTRUCT_REMOVE_MEMBER:{}:{}:{}",
+            req.group_id, req.target_device_id, signature_timestamp
+        );
+
+        verify_admin_proof(
+            self.db.as_ref(),
+            &device_id,
+            "CONSTRUCT_REMOVE_MEMBER",
+            &req.admin_proof,
+            signature_timestamp,
+            &message,
+        )
+        .await?;
+
+        // 4. Check group not dissolved
+        let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_optional(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?
+                .flatten();
+
+        if dissolved_at.is_some() {
+            return Err(Status::not_found("Group dissolved"));
+        }
+
+        // 5. Verify target is a member
+        let target_is_member =
+            check_group_member(self.db.as_ref(), group_id, &req.target_device_id).await?;
+
+        if !target_is_member {
+            return Err(Status::not_found("Target is not a member of this group"));
+        }
+
+        // 6. Cannot remove creator
+        let (target_is_creator, _) =
+            check_group_admin(self.db.as_ref(), group_id, &req.target_device_id).await?;
+
+        if target_is_creator {
+            return Err(Status::failed_precondition("Cannot remove group creator"));
+        }
+
+        // 7. Hard delete from group_members
+        let now = chrono::Utc::now();
+
+        sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND device_id = $2")
+            .bind(group_id)
+            .bind(&req.target_device_id)
+            .execute(self.db.as_ref())
+            .await
+            .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
+
+        // 8. Also remove from group_admins
+        sqlx::query("DELETE FROM group_admins WHERE group_id = $1 AND device_id = $2")
+            .bind(group_id)
+            .bind(&req.target_device_id)
+            .execute(self.db.as_ref())
+            .await
+            .ok();
+
+        // 9. Get current epoch
+        let current_epoch: i64 =
+            sqlx::query_scalar("SELECT epoch FROM mls_groups WHERE group_id = $1")
+                .bind(group_id)
+                .fetch_one(self.db.as_ref())
+                .await
+                .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+
+        info!(
+            group_id = %group_id,
+            admin_device_id = %device_id,
+            removed_device_id = %req.target_device_id,
+            epoch = current_epoch,
+            "Member removed from group"
+        );
+
+        Ok(Response::new(proto::RemoveMemberResponse {
+            success: true,
+            new_epoch: current_epoch as u64,
+            removed_at: now.timestamp(),
+        }))
     }
 
     // ── Admin ─────────────────────────────────────────────────────────────
@@ -544,6 +1143,13 @@ impl MlsService for MlsServiceImpl {
         _request: Request<proto::DelegateAdminRequest>,
     ) -> Result<Response<proto::DelegateAdminResponse>, Status> {
         Err(Status::unimplemented("DelegateAdmin — Phase 4"))
+    }
+
+    async fn transfer_ownership(
+        &self,
+        _request: Request<proto::TransferOwnershipRequest>,
+    ) -> Result<Response<proto::TransferOwnershipResponse>, Status> {
+        Err(Status::unimplemented("TransferOwnership — Phase 4"))
     }
 
     // ── MLS Sync ──────────────────────────────────────────────────────────
@@ -1387,5 +1993,631 @@ mod tests {
         let result = service.dissolve_group(request).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Phase 3: Membership Management Tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Helper: publish a KeyPackage for a device and return key_package_ref
+    async fn publish_test_key_package(
+        db: &sqlx::PgPool,
+        user_id: Uuid,
+        device_id: &str,
+    ) -> Vec<u8> {
+        let kp = vec![1u8, 2, 3, 4, 5]; // dummy key package
+        let kp_ref = sha256_bytes(&kp);
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_key_packages
+                (user_id, device_id, key_package, key_package_ref, published_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .bind(&kp)
+        .bind(&kp_ref)
+        .bind(now)
+        .bind(now + chrono::Duration::days(30))
+        .execute(db)
+        .await
+        .expect("Failed to publish test KeyPackage");
+
+        kp_ref
+    }
+
+    // ── InviteToGroup ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_invite_to_group_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&invitee_user_id, &admin_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::InviteToGroupRequest {
+                group_id: group_id.to_string(),
+                mls_welcome: vec![10, 20, 30],
+                key_package_ref: kp_ref,
+                epoch: 0,
+                expires_in_seconds: 3600, // 1 hour
+            },
+        );
+
+        let response = service
+            .invite_to_group(request)
+            .await
+            .expect("InviteToGroup should succeed");
+        let inner = response.into_inner();
+
+        assert!(!inner.invite_id.is_empty());
+        assert!(inner.expires_at > 0);
+    }
+
+    #[tokio::test]
+    async fn test_invite_to_group_non_admin() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create non-admin member
+        let (member_user_id, member_device_id, _) = create_test_device(&db).await;
+        sqlx::query(
+            "INSERT INTO group_members (group_id, device_id, leaf_index, joined_at) VALUES ($1, $2, 1, $3)",
+        )
+        .bind(group_id)
+        .bind(&member_device_id)
+        .bind(Utc::now())
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to add member");
+
+        let kp_ref = publish_test_key_package(&db, member_user_id, &member_device_id).await;
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&member_user_id, &member_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::InviteToGroupRequest {
+                group_id: group_id.to_string(),
+                mls_welcome: vec![10, 20, 30],
+                key_package_ref: kp_ref,
+                epoch: 0,
+                expires_in_seconds: 3600,
+            },
+        );
+
+        let result = service.invite_to_group(request).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    // ── AcceptGroupInvite ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_accept_group_invite_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, invitee_signing_key) =
+            create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        // Create invite directly in DB
+        let invite_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_invites
+                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                 epoch, invited_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .bind(&invitee_device_id)
+        .bind(vec![10, 20, 30])
+        .bind(&kp_ref)
+        .bind(now)
+        .bind(now + chrono::Duration::hours(1))
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to create invite");
+
+        // Sign acceptance
+        let timestamp = Utc::now().timestamp();
+        let message = format!(
+            "CONSTRUCT_GROUP_JOIN:{}:{}:{}",
+            group_id, invite_id, timestamp
+        );
+        let signature = invitee_signing_key.sign(message.as_bytes());
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&invitee_user_id, &invitee_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::AcceptGroupInviteRequest {
+                group_id: group_id.to_string(),
+                invite_id: invite_id.to_string(),
+                acceptance_signature: signature.to_bytes().to_vec(),
+                signature_timestamp: timestamp,
+                mls_commit: vec![],
+                new_ratchet_tree: vec![],
+            },
+        );
+
+        let response = service
+            .accept_group_invite(request)
+            .await
+            .expect("AcceptGroupInvite should succeed");
+        let inner = response.into_inner();
+
+        assert!(inner.success);
+        assert!(inner.joined_at > 0);
+    }
+
+    #[tokio::test]
+    async fn test_accept_group_invite_wrong_device() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        // Create a second device (wrong one)
+        let (_, wrong_device_id, wrong_signing_key) = create_test_device(&db).await;
+
+        // Create invite for invitee_device_id
+        let invite_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_invites
+                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                 epoch, invited_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .bind(&invitee_device_id) // invite is for invitee
+        .bind(vec![10, 20, 30])
+        .bind(&kp_ref)
+        .bind(now)
+        .bind(now + chrono::Duration::hours(1))
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to create invite");
+
+        // Sign with wrong key
+        let timestamp = Utc::now().timestamp();
+        let message = format!(
+            "CONSTRUCT_GROUP_JOIN:{}:{}:{}",
+            group_id, invite_id, timestamp
+        );
+        let signature = wrong_signing_key.sign(message.as_bytes());
+
+        let service = MlsServiceImpl { db };
+        // Use wrong_device_id in metadata
+        let meta = create_metadata(&invitee_user_id, &wrong_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::AcceptGroupInviteRequest {
+                group_id: group_id.to_string(),
+                invite_id: invite_id.to_string(),
+                acceptance_signature: signature.to_bytes().to_vec(),
+                signature_timestamp: timestamp,
+                mls_commit: vec![],
+                new_ratchet_tree: vec![],
+            },
+        );
+
+        let result = service.accept_group_invite(request).await;
+        assert!(result.is_err());
+        // Should fail because wrong_device_id is not the invitee
+        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    // ── DeclineGroupInvite ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_decline_group_invite_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        // Create invite
+        let invite_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_invites
+                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                 epoch, invited_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .bind(&invitee_device_id)
+        .bind(vec![10, 20, 30])
+        .bind(&kp_ref)
+        .bind(now)
+        .bind(now + chrono::Duration::hours(1))
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to create invite");
+
+        let service = MlsServiceImpl { db: db.clone() };
+        let meta = create_metadata(&invitee_user_id, &invitee_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::DeclineGroupInviteRequest {
+                group_id: group_id.to_string(),
+                invite_id: invite_id.to_string(),
+            },
+        );
+
+        let response = service
+            .decline_group_invite(request)
+            .await
+            .expect("DeclineGroupInvite should succeed");
+        assert!(response.into_inner().success);
+
+        // Verify invite is deleted
+        let invite_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM group_invites WHERE invite_id = $1)")
+                .bind(invite_id)
+                .fetch_optional(db.as_ref())
+                .await
+                .expect("Failed to query")
+                .flatten()
+                .unwrap_or(false);
+
+        assert!(!invite_exists);
+    }
+
+    #[tokio::test]
+    async fn test_decline_group_invite_wrong_device() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        // Create a different device
+        let (other_user_id, other_device_id, _) = create_test_device(&db).await;
+
+        // Create invite for invitee
+        let invite_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO group_invites
+                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                 epoch, invited_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+            "#,
+        )
+        .bind(invite_id)
+        .bind(group_id)
+        .bind(&invitee_device_id) // invite for invitee
+        .bind(vec![10, 20, 30])
+        .bind(&kp_ref)
+        .bind(now)
+        .bind(now + chrono::Duration::hours(1))
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to create invite");
+
+        let service = MlsServiceImpl { db };
+        // Use other device to decline
+        let meta = create_metadata(&other_user_id, &other_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::DeclineGroupInviteRequest {
+                group_id: group_id.to_string(),
+                invite_id: invite_id.to_string(),
+            },
+        );
+
+        let result = service.decline_group_invite(request).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    // ── GetPendingInvites ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_pending_invites_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create invitee
+        let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
+        let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+        // Create 3 invites
+        for i in 0..3 {
+            let invite_id = Uuid::new_v4();
+            let now = Utc::now() + chrono::Duration::seconds(i);
+
+            sqlx::query(
+                r#"
+                INSERT INTO group_invites
+                    (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
+                     epoch, invited_at, expires_at)
+                VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+                "#,
+            )
+            .bind(invite_id)
+            .bind(group_id)
+            .bind(&invitee_device_id)
+            .bind(vec![10, 20, 30])
+            .bind(&kp_ref)
+            .bind(now)
+            .bind(now + chrono::Duration::hours(1))
+            .execute(db.as_ref())
+            .await
+            .expect("Failed to create invite");
+        }
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&invitee_user_id, &invitee_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::GetPendingInvitesRequest {
+                device_id: "".to_string(), // empty = use from metadata
+                cursor: None,
+                limit: 50,
+            },
+        );
+
+        let response = service
+            .get_pending_invites(request)
+            .await
+            .expect("GetPendingInvites should succeed");
+        let inner = response.into_inner();
+
+        assert_eq!(inner.invites.len(), 3);
+        assert!(inner.next_cursor.is_none());
+    }
+
+    // ── LeaveGroup ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_leave_group_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create a regular member
+        let (member_user_id, member_device_id, _) = create_test_device(&db).await;
+        sqlx::query(
+            "INSERT INTO group_members (group_id, device_id, leaf_index, joined_at) VALUES ($1, $2, 1, $3)",
+        )
+        .bind(group_id)
+        .bind(&member_device_id)
+        .bind(Utc::now())
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to add member");
+
+        let service = MlsServiceImpl { db: db.clone() };
+        let meta = create_metadata(&member_user_id, &member_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::LeaveGroupRequest {
+                group_id: group_id.to_string(),
+                mls_remove_proposal: vec![],
+            },
+        );
+
+        let response = service
+            .leave_group(request)
+            .await
+            .expect("LeaveGroup should succeed");
+        assert!(response.into_inner().success);
+
+        // Verify member is removed
+        let is_member: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND device_id = $2)",
+        )
+        .bind(group_id)
+        .bind(&member_device_id)
+        .fetch_optional(db.as_ref())
+        .await
+        .expect("Failed to query")
+        .flatten()
+        .unwrap_or(false);
+
+        assert!(!is_member);
+    }
+
+    #[tokio::test]
+    async fn test_leave_group_creator_cannot_leave() {
+        let db = get_test_db().await;
+        let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&admin_user_id, &admin_device_id);
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::LeaveGroupRequest {
+                group_id: group_id.to_string(),
+                mls_remove_proposal: vec![],
+            },
+        );
+
+        let result = service.leave_group(request).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::FailedPrecondition);
+    }
+
+    // ── RemoveMember ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_member_success() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, admin_signing_key) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create a regular member
+        let (_member_user_id, member_device_id, _) = create_test_device(&db).await;
+        sqlx::query(
+            "INSERT INTO group_members (group_id, device_id, leaf_index, joined_at) VALUES ($1, $2, 1, $3)",
+        )
+        .bind(group_id)
+        .bind(&member_device_id)
+        .bind(Utc::now())
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to add member");
+
+        let service = MlsServiceImpl { db: db.clone() };
+        let meta = create_metadata(&_admin_user_id, &admin_device_id);
+
+        // Sign admin proof
+        let timestamp = Utc::now().timestamp();
+        let message = format!(
+            "CONSTRUCT_REMOVE_MEMBER:{}:{}:{}",
+            group_id, member_device_id, timestamp
+        );
+        let signature = admin_signing_key.sign(message.as_bytes());
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::RemoveMemberRequest {
+                group_id: group_id.to_string(),
+                target_device_id: member_device_id.clone(),
+                mls_remove_proposal: vec![],
+                admin_proof: signature.to_bytes().to_vec(),
+                signature_timestamp: timestamp,
+                encrypted_reason: None,
+            },
+        );
+
+        let response = service
+            .remove_member(request)
+            .await
+            .expect("RemoveMember should succeed");
+        assert!(response.into_inner().success);
+
+        // Verify member is removed
+        let is_member: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND device_id = $2)",
+        )
+        .bind(group_id)
+        .bind(&member_device_id)
+        .fetch_optional(db.as_ref())
+        .await
+        .expect("Failed to query")
+        .flatten()
+        .unwrap_or(false);
+
+        assert!(!is_member);
+    }
+
+    #[tokio::test]
+    async fn test_remove_member_cannot_remove_creator() {
+        let db = get_test_db().await;
+        let (_admin_user_id, admin_device_id, admin_signing_key) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+        // Create a second admin
+        let (other_admin_user_id, other_admin_device_id, _) = create_test_device(&db).await;
+        sqlx::query(
+            "INSERT INTO group_members (group_id, device_id, leaf_index, joined_at) VALUES ($1, $2, 1, $3)",
+        )
+        .bind(group_id)
+        .bind(&other_admin_device_id)
+        .bind(Utc::now())
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to add other admin as member");
+
+        sqlx::query(
+            "INSERT INTO group_admins (group_id, device_id, role, is_creator, granted_at) VALUES ($1, $2, 1, false, $3)",
+        )
+        .bind(group_id)
+        .bind(&other_admin_device_id)
+        .bind(Utc::now())
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to add other admin");
+
+        let service = MlsServiceImpl { db };
+        let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
+
+        // Try to remove creator
+        let timestamp = Utc::now().timestamp();
+        let message = format!(
+            "CONSTRUCT_REMOVE_MEMBER:{}:{}:{}",
+            group_id, admin_device_id, timestamp
+        );
+        let signature = admin_signing_key.sign(message.as_bytes());
+
+        let request = Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::RemoveMemberRequest {
+                group_id: group_id.to_string(),
+                target_device_id: admin_device_id.clone(),
+                mls_remove_proposal: vec![],
+                admin_proof: signature.to_bytes().to_vec(),
+                signature_timestamp: timestamp,
+                encrypted_reason: None,
+            },
+        );
+
+        let result = service.remove_member(request).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
 }
