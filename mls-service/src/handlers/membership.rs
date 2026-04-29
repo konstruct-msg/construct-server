@@ -108,26 +108,22 @@ pub(crate) async fn invite_to_group(
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(expires_in_seconds as i64);
 
-    sqlx::query(
-        r#"
-            INSERT INTO group_invites
-                (invite_id, group_id, target_device_id, mls_welcome, key_package_ref,
-                 epoch, invited_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
+    db_mls::insert_group_invite(
+        svc.db.as_ref(),
+        db_mls::NewGroupInvite {
+            invite_id,
+            group_id,
+            target_device_id: &target_device_id,
+            mls_welcome: &req.mls_welcome,
+            key_package_ref: &req.key_package_ref,
+            epoch: req.epoch as i64,
+            invited_at: now,
+            expires_at,
+        },
     )
-    .bind(invite_id)
-    .bind(group_id)
-    .bind(&target_device_id)
-    .bind(&req.mls_welcome)
-    .bind(&req.key_package_ref)
-    .bind(req.epoch as i64)
-    .bind(now)
-    .bind(expires_at)
-    .execute(svc.db.as_ref())
     .await
     .map_err(|e| {
-        if e.to_string().contains("group_invites_unique_pending") {
+        if e.to_string().contains("duplicate key") {
             Status::already_exists("Device already has a pending invite for this group")
         } else {
             Status::internal(format!("Failed to create invite: {}", e))
@@ -222,19 +218,16 @@ pub(crate) async fn accept_group_invite(
     // 8. Insert into group_members with acceptance signature
     let now = chrono::Utc::now();
 
-    sqlx::query(
-        r#"
-            INSERT INTO group_members
-                (group_id, device_id, leaf_index, acceptance_signature, joined_at)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
+    db_mls::insert_group_member(
+        svc.db.as_ref(),
+        db_mls::NewGroupMember {
+            group_id,
+            device_id: &device_id,
+            leaf_index: next_leaf_index,
+            acceptance_signature: Some(&req.acceptance_signature),
+            joined_at: now,
+        },
     )
-    .bind(group_id)
-    .bind(&device_id)
-    .bind(next_leaf_index)
-    .bind(&req.acceptance_signature)
-    .bind(now)
-    .execute(svc.db.as_ref())
     .await
     .map_err(|e| {
         if e.to_string().contains("duplicate key") {
