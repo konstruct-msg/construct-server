@@ -1,23 +1,14 @@
+use construct_db::mls as db_mls;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::helpers::{
-    check_group_admin, check_group_member, extract_device_id, extract_user_id, verify_admin_proof,
+    check_device_belongs_to_user, check_group_admin, check_group_member, extract_device_id,
+    extract_user_id, get_group_dissolved_at, get_group_member_count, verify_admin_proof,
 };
 use crate::service::MlsServiceImpl;
-
-type GroupStateRow = (
-    i64,
-    Vec<u8>,
-    Vec<u8>,
-    i16,
-    bool,
-    chrono::DateTime<chrono::Utc>,
-);
-
-type PendingCommitRow = (i64, i64, Vec<u8>, Vec<u8>);
 
 pub(crate) async fn create_group(
     svc: &MlsServiceImpl,
@@ -56,16 +47,7 @@ pub(crate) async fn create_group(
     };
 
     // 5. Check device_id belongs to user_id (security: prevent impersonation)
-    let device_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND user_id = $2)",
-    )
-    .bind(&device_id)
-    .bind(user_id)
-    .fetch_one(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    if !device_exists {
+    if !check_device_belongs_to_user(svc.db.as_ref(), &device_id, user_id).await? {
         return Err(Status::permission_denied(
             "Device does not belong to authenticated user",
         ));
@@ -162,18 +144,9 @@ pub(crate) async fn get_group_state(
     }
 
     // 3. Fetch group state (only non-dissolved groups)
-    let group_row: Option<GroupStateRow> = sqlx::query_as(
-        r#"
-                SELECT epoch, ratchet_tree, encrypted_group_context,
-                       message_retention_days, threads_enabled, created_at
-                FROM mls_groups
-                WHERE group_id = $1 AND dissolved_at IS NULL
-                "#,
-    )
-    .bind(group_id)
-    .fetch_optional(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let group_row = db_mls::get_active_group_state(svc.db.as_ref(), group_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to fetch group state: {}", e)))?;
 
     let (
         epoch,
@@ -182,15 +155,30 @@ pub(crate) async fn get_group_state(
         retention_days,
         threads_enabled,
         created_at,
-    ) = group_row.ok_or_else(|| Status::not_found("Group not found or dissolved"))?;
+    ) = group_row
+        .map(
+            |db_mls::GroupStateRecord {
+                 epoch,
+                 ratchet_tree,
+                 encrypted_group_context,
+                 message_retention_days,
+                 threads_enabled,
+                 created_at,
+             }| {
+                (
+                    epoch,
+                    ratchet_tree,
+                    encrypted_group_context,
+                    message_retention_days,
+                    threads_enabled,
+                    created_at,
+                )
+            },
+        )
+        .ok_or_else(|| Status::not_found("Group not found or dissolved"))?;
 
     // 4. Get member count
-    let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
 
     // 5. Build settings
     let settings = proto::GroupSettings {
@@ -205,28 +193,21 @@ pub(crate) async fn get_group_state(
     // 6. If known_epoch provided and recent enough, return commits instead
     let response = if let Some(known_epoch) = req.known_epoch {
         if known_epoch < epoch as u64 {
-            let commits: Vec<PendingCommitRow> = sqlx::query_as(
-                r#"
-                    SELECT epoch_from, epoch_to, mls_commit, ratchet_tree_snapshot
-                    FROM group_commits
-                    WHERE group_id = $1 AND epoch_from >= $2 AND expires_at > NOW()
-                    ORDER BY epoch_from ASC
-                    "#,
-            )
-            .bind(group_id)
-            .bind(known_epoch as i64)
-            .fetch_all(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+            let commits =
+                db_mls::get_pending_commits_since(svc.db.as_ref(), group_id, known_epoch as i64)
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("Failed to fetch pending commits: {}", e))
+                    })?;
 
             let pending_commits: Vec<proto::CommitEnvelope> = commits
                 .into_iter()
-                .map(|(from, to, commit, tree)| proto::CommitEnvelope {
+                .map(|commit| proto::CommitEnvelope {
                     group_id: group_id.to_string(),
-                    epoch_from: from as u64,
-                    epoch_to: to as u64,
-                    mls_commit: commit,
-                    ratchet_tree: tree,
+                    epoch_from: commit.epoch_from as u64,
+                    epoch_to: commit.epoch_to as u64,
+                    mls_commit: commit.mls_commit,
+                    ratchet_tree: commit.ratchet_tree_snapshot,
                     mls_welcome: None,
                     committed_at: 0,
                 })
@@ -294,34 +275,21 @@ pub(crate) async fn dissolve_group(
     .await?;
 
     // 4. Check group not already dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group already dissolved"));
     }
 
     // 5. Soft-delete (set dissolved_at)
     let now = chrono::Utc::now();
-    sqlx::query("UPDATE mls_groups SET dissolved_at = $1 WHERE group_id = $2")
-        .bind(now)
-        .bind(group_id)
-        .execute(svc.db.as_ref())
+    db_mls::set_group_dissolved_at(svc.db.as_ref(), group_id, now)
         .await
         .map_err(|e| Status::internal(format!("Failed to dissolve group: {}", e)))?;
 
     // 6. Log the dissolve
-    let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
 
     info!(
         group_id = %group_id,

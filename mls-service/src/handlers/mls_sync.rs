@@ -1,14 +1,14 @@
+use construct_db::mls as db_mls;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use futures_util::stream::iter;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::helpers::{check_group_member, extract_device_id};
+use crate::helpers::{check_group_member, extract_device_id, get_group_dissolved_at};
 use crate::service::MlsServiceImpl;
 
 pub(crate) type FetchCommitsStream = tonic::codegen::BoxStream<proto::CommitEnvelope>;
-type CommitRow = (i64, i64, Vec<u8>, Vec<u8>, chrono::DateTime<chrono::Utc>);
 
 pub(crate) async fn submit_commit(
     svc: &MlsServiceImpl,
@@ -37,15 +37,10 @@ pub(crate) async fn submit_commit(
     }
 
     // 4. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
@@ -58,12 +53,9 @@ pub(crate) async fn submit_commit(
         .map_err(|e| Status::internal(format!("Failed to start transaction: {}", e)))?;
 
     // Lock group row for update (CAS)
-    let current_epoch: i64 =
-        sqlx::query_scalar("SELECT epoch FROM mls_groups WHERE group_id = $1 FOR UPDATE")
-            .bind(group_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let current_epoch = db_mls::lock_group_epoch_for_update(&mut tx, group_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to lock group epoch: {}", e)))?;
 
     // Validate epoch continuity
     if req.epoch != current_epoch as u64 {
@@ -76,51 +68,41 @@ pub(crate) async fn submit_commit(
     // 6. Store commit in group_commits (30-day TTL)
     let commit_expires = now + chrono::Duration::days(30);
 
-    sqlx::query(
-        r#"
-        INSERT INTO group_commits
-            (group_id, epoch_from, epoch_to, mls_commit, ratchet_tree_snapshot, committed_at, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
+    db_mls::insert_group_commit(
+        &mut tx,
+        db_mls::NewGroupCommit {
+            group_id,
+            epoch_from: current_epoch,
+            epoch_to: new_epoch,
+            mls_commit: &req.mls_commit,
+            ratchet_tree_snapshot: &req.new_ratchet_tree,
+            committed_at: now,
+            expires_at: commit_expires,
+        },
     )
-    .bind(group_id)
-    .bind(current_epoch)
-    .bind(new_epoch)
-    .bind(&req.mls_commit)
-    .bind(&req.new_ratchet_tree)
-    .bind(now)
-    .bind(commit_expires)
-    .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(format!("Failed to store commit: {}", e)))?;
 
     // 7. Update group state (ratchet_tree + epoch)
-    sqlx::query("UPDATE mls_groups SET ratchet_tree = $1, epoch = $2 WHERE group_id = $3")
-        .bind(&req.new_ratchet_tree)
-        .bind(new_epoch)
-        .bind(group_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Status::internal(format!("Failed to update group state: {}", e)))?;
+    db_mls::update_group_epoch_and_ratchet_tree(
+        &mut tx,
+        group_id,
+        &req.new_ratchet_tree,
+        new_epoch,
+    )
+    .await
+    .map_err(|e| Status::internal(format!("Failed to update group state: {}", e)))?;
 
     // 8. Process Welcome deliveries (if commit adds members)
     for delivery in &req.welcome_deliveries {
         // Verify the KeyPackage ref is valid and belongs to target device
-        let kp_valid: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM group_key_packages
-                WHERE key_package_ref = $1 AND device_id = $2 AND expires_at > NOW()
-            )
-            "#,
+        let kp_valid = db_mls::is_key_package_valid_for_device(
+            &mut tx,
+            &delivery.key_package_ref,
+            &delivery.device_id,
         )
-        .bind(&delivery.key_package_ref)
-        .bind(&delivery.device_id)
-        .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-        .flatten()
-        .unwrap_or(false);
+        .map_err(|e| Status::internal(format!("Failed to validate key package: {}", e)))?;
 
         if !kp_valid {
             warn!(
@@ -169,47 +151,32 @@ pub(crate) async fn fetch_commits(
     }
 
     // 3. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
     // 4. Fetch commits since given epoch
     let since_epoch = req.since_epoch as i64;
 
-    let commits: Vec<CommitRow> = sqlx::query_as(
-        r#"
-            SELECT epoch_from, epoch_to, mls_commit, ratchet_tree_snapshot, committed_at
-            FROM group_commits
-            WHERE group_id = $1 AND epoch_from >= $2 AND expires_at > NOW()
-            ORDER BY epoch_from ASC
-            "#,
-    )
-    .bind(group_id)
-    .bind(since_epoch)
-    .fetch_all(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let commits = db_mls::get_group_commits_since(svc.db.as_ref(), group_id, since_epoch)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to fetch commits: {}", e)))?;
 
     // 5. Convert to proto stream
     let envelopes: Vec<Result<proto::CommitEnvelope, Status>> = commits
         .into_iter()
-        .map(|(from, to, commit, tree, committed_at)| {
+        .map(|commit| {
             Ok(proto::CommitEnvelope {
                 group_id: group_id.to_string(),
-                epoch_from: from as u64,
-                epoch_to: to as u64,
-                mls_commit: commit,
-                ratchet_tree: tree,
+                epoch_from: commit.epoch_from as u64,
+                epoch_to: commit.epoch_to as u64,
+                mls_commit: commit.mls_commit,
+                ratchet_tree: commit.ratchet_tree_snapshot,
                 mls_welcome: None,
-                committed_at: committed_at.timestamp(),
+                committed_at: commit.committed_at.timestamp(),
             })
         })
         .collect();

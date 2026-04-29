@@ -1,10 +1,12 @@
+use construct_db::mls as db_mls;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::helpers::{
-    check_group_admin, check_group_member, extract_device_id, verify_admin_proof,
+    check_group_admin, check_group_member, extract_device_id, get_group_dissolved_at,
+    verify_admin_proof,
 };
 use crate::service::MlsServiceImpl;
 
@@ -44,15 +46,10 @@ pub(crate) async fn delegate_admin(
     .await?;
 
     // 4. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
@@ -82,26 +79,19 @@ pub(crate) async fn delegate_admin(
     // 8. Insert or update admin role
     let now = chrono::Utc::now();
 
-    sqlx::query(
-        r#"
-        INSERT INTO group_admins
-            (group_id, device_id, role, is_creator, encrypted_admin_token, granted_by_device_id, granted_at)
-        VALUES ($1, $2, $3, FALSE, $4, $5, $6)
-        ON CONFLICT (group_id, device_id)
-        DO UPDATE SET
-            role = EXCLUDED.role,
-            encrypted_admin_token = EXCLUDED.encrypted_admin_token,
-            granted_by_device_id = EXCLUDED.granted_by_device_id,
-            granted_at = EXCLUDED.granted_at
-        "#,
+    db_mls::upsert_group_admin_role(
+        svc.db.as_ref(),
+        group_id,
+        &req.target_device_id,
+        role_value,
+        if req.encrypted_admin_token.is_empty() {
+            None
+        } else {
+            Some(req.encrypted_admin_token.as_slice())
+        },
+        &device_id,
+        now,
     )
-    .bind(group_id)
-    .bind(&req.target_device_id)
-    .bind(role_value)
-    .bind(if req.encrypted_admin_token.is_empty() { None } else { Some(&req.encrypted_admin_token) })
-    .bind(&device_id)
-    .bind(now)
-    .execute(svc.db.as_ref())
     .await
     .map_err(|e| Status::internal(format!("Failed to delegate admin: {}", e)))?;
 
@@ -194,25 +184,9 @@ pub(crate) async fn transfer_ownership(
         .await
         .map_err(|e| Status::internal(format!("Failed to start transaction: {}", e)))?;
 
-    // Old owner: set is_creator = FALSE, keep role = 1 (FULL)
-    sqlx::query(
-        "UPDATE group_admins SET is_creator = FALSE WHERE group_id = $1 AND device_id = $2",
-    )
-    .bind(group_id)
-    .bind(&device_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| Status::internal(format!("Failed to update old owner: {}", e)))?;
-
-    // New owner: set is_creator = TRUE, role = 1 (FULL)
-    sqlx::query(
-        "UPDATE group_admins SET is_creator = TRUE, role = 1 WHERE group_id = $1 AND device_id = $2",
-    )
-    .bind(group_id)
-    .bind(&req.new_owner_device_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| Status::internal(format!("Failed to update new owner: {}", e)))?;
+    db_mls::transfer_group_ownership(&mut tx, group_id, &device_id, &req.new_owner_device_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to transfer ownership: {}", e)))?;
 
     tx.commit()
         .await

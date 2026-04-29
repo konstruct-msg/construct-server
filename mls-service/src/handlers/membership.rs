@@ -1,22 +1,15 @@
+use construct_db::mls as db_mls;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
 use crate::helpers::{
-    check_group_admin, check_group_member, extract_device_id, extract_user_id, verify_admin_proof,
+    check_device_belongs_to_user, check_group_admin, check_group_member, extract_device_id,
+    extract_user_id, get_group_dissolved_at, get_group_epoch, get_group_max_members,
+    get_group_member_count, verify_admin_proof,
 };
 use crate::service::MlsServiceImpl;
-
-type AcceptInviteRow = (String, String, Vec<u8>, Vec<u8>, i64);
-
-type PendingInviteRow = (
-    Uuid,
-    Uuid,
-    Vec<u8>,
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-);
 
 pub(crate) async fn invite_to_group(
     svc: &MlsServiceImpl,
@@ -37,15 +30,10 @@ pub(crate) async fn invite_to_group(
     }
 
     // 3. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
@@ -74,20 +62,15 @@ pub(crate) async fn invite_to_group(
     // The client must send the target device's ID in the mls_welcome or key_package_ref.
     // For now, we need to look it up from the consumed KeyPackage.
     // Since we're using key_package_ref as SHA-256 hash, we can find the device_id from that.
-    let consumed: Option<(String, String)> = sqlx::query_as(
-        r#"
-            SELECT device_id, user_id::text FROM group_key_packages
-            WHERE key_package_ref = $1 AND expires_at > NOW()
-            "#,
-    )
-    .bind(&req.key_package_ref)
-    .fetch_optional(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    let (target_device_id, _target_user_id) = consumed.ok_or_else(|| {
-        Status::not_found("KeyPackage not found or expired; target must publish a KeyPackage first")
-    })?;
+    let target_device_id =
+        db_mls::get_key_package_device_by_ref(svc.db.as_ref(), &req.key_package_ref)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to resolve key package: {}", e)))?
+            .ok_or_else(|| {
+                Status::not_found(
+                    "KeyPackage not found or expired; target must publish a KeyPackage first",
+                )
+            })?;
 
     // 8. Check if device is already a member
     let already_member = check_group_member(svc.db.as_ref(), group_id, &target_device_id).await?;
@@ -99,19 +82,8 @@ pub(crate) async fn invite_to_group(
     }
 
     // 9. Check max_members limit
-    let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    let max_members: i16 =
-        sqlx::query_scalar("SELECT max_members FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_one(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
+    let max_members = get_group_max_members(svc.db.as_ref(), group_id).await?;
 
     if member_count >= max_members as i64 {
         return Err(Status::resource_exhausted(
@@ -120,19 +92,10 @@ pub(crate) async fn invite_to_group(
     }
 
     // 10. Check if there's already a pending invite for this device
-    let existing_invite: bool = sqlx::query_scalar(
-        r#"
-            SELECT EXISTS(
-                SELECT 1 FROM group_invites
-                WHERE group_id = $1 AND target_device_id = $2 AND expires_at > NOW()
-            )
-            "#,
-    )
-    .bind(group_id)
-    .bind(&target_device_id)
-    .fetch_one(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let existing_invite =
+        db_mls::has_pending_group_invite(svc.db.as_ref(), group_id, &target_device_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to check pending invite: {}", e)))?;
 
     if existing_invite {
         return Err(Status::already_exists(
@@ -201,21 +164,15 @@ pub(crate) async fn accept_group_invite(
         .map_err(|_| Status::invalid_argument("Invalid invite_id"))?;
 
     // 2. Fetch invite
-    let invite_row: Option<AcceptInviteRow> = sqlx::query_as(
-        r#"
-            SELECT invite_id::text, target_device_id, mls_welcome, key_package_ref, epoch
-            FROM group_invites
-            WHERE invite_id = $1 AND group_id = $2 AND expires_at > NOW()
-            "#,
-    )
-    .bind(invite_id)
-    .bind(group_id)
-    .fetch_optional(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    let (_invite_id_str, target_device_id, _mls_welcome, _key_package_ref, _epoch) =
-        invite_row.ok_or_else(|| Status::not_found("Invite not found or expired"))?;
+    let db_mls::InviteAcceptanceRecord {
+        target_device_id,
+        mls_welcome: _mls_welcome,
+        key_package_ref: _key_package_ref,
+        epoch: _epoch,
+    } = db_mls::get_group_invite_for_accept(svc.db.as_ref(), invite_id, group_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to load invite: {}", e)))?
+        .ok_or_else(|| Status::not_found("Invite not found or expired"))?;
 
     // 3. Verify invite belongs to the calling device
     if target_device_id != device_id {
@@ -244,16 +201,7 @@ pub(crate) async fn accept_group_invite(
     .await?;
 
     // 5. Verify device belongs to user
-    let device_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND user_id = $2)",
-    )
-    .bind(&device_id)
-    .bind(user_id)
-    .fetch_one(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    if !device_exists {
+    if !check_device_belongs_to_user(svc.db.as_ref(), &device_id, user_id).await? {
         return Err(Status::permission_denied(
             "Device does not belong to authenticated user",
         ));
@@ -267,14 +215,9 @@ pub(crate) async fn accept_group_invite(
     }
 
     // 7. Get next leaf_index
-    let max_leaf_index: Option<i32> =
-        sqlx::query_scalar("SELECT MAX(leaf_index) FROM group_members WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    let next_leaf_index = max_leaf_index.map(|v| v + 1).unwrap_or(0);
+    let next_leaf_index = db_mls::get_next_group_leaf_index(svc.db.as_ref(), group_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to get next leaf index: {}", e)))?;
 
     // 8. Insert into group_members with acceptance signature
     let now = chrono::Utc::now();
@@ -302,18 +245,12 @@ pub(crate) async fn accept_group_invite(
     })?;
 
     // 9. Delete invite (hard delete — no history)
-    sqlx::query("DELETE FROM group_invites WHERE invite_id = $1")
-        .bind(invite_id)
-        .execute(svc.db.as_ref())
+    db_mls::delete_group_invite(svc.db.as_ref(), invite_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to delete invite: {}", e)))?;
 
     // 10. Get current epoch
-    let current_epoch: i64 = sqlx::query_scalar("SELECT epoch FROM mls_groups WHERE group_id = $1")
-        .bind(group_id)
-        .fetch_one(svc.db.as_ref())
-        .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let current_epoch = get_group_epoch(svc.db.as_ref(), group_id).await?;
 
     info!(
         group_id = %group_id,
@@ -345,14 +282,10 @@ pub(crate) async fn decline_group_invite(
         .map_err(|_| Status::invalid_argument("Invalid invite_id"))?;
 
     // 2. Fetch invite and verify it belongs to the calling device
-    let target_device_id: Option<String> = sqlx::query_scalar(
-        "SELECT target_device_id FROM group_invites WHERE invite_id = $1 AND group_id = $2",
-    )
-    .bind(invite_id)
-    .bind(group_id)
-    .fetch_optional(svc.db.as_ref())
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let target_device_id =
+        db_mls::get_group_invite_target_device(svc.db.as_ref(), invite_id, group_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to load invite target: {}", e)))?;
 
     match target_device_id {
         None => return Err(Status::not_found("Invite not found")),
@@ -365,9 +298,7 @@ pub(crate) async fn decline_group_invite(
     }
 
     // 3. Hard delete invite (no history stored)
-    sqlx::query("DELETE FROM group_invites WHERE invite_id = $1")
-        .bind(invite_id)
-        .execute(svc.db.as_ref())
+    db_mls::delete_group_invite(svc.db.as_ref(), invite_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to delete invite: {}", e)))?;
 
@@ -406,48 +337,24 @@ pub(crate) async fn get_pending_invites(
 
     // 2. Query invites (with optional cursor)
     let cursor = req.cursor.as_deref();
-    let invites: Vec<PendingInviteRow> = if let Some(cursor_id) = cursor {
-        let cursor_uuid =
-            Uuid::parse_str(cursor_id).map_err(|_| Status::invalid_argument("Invalid cursor"))?;
+    let cursor_uuid = cursor
+        .map(|cursor_id| {
+            Uuid::parse_str(cursor_id).map_err(|_| Status::invalid_argument("Invalid cursor"))
+        })
+        .transpose()?;
 
-        sqlx::query_as(
-            r#"
-                    SELECT invite_id, group_id, mls_welcome, expires_at, invited_at
-                    FROM group_invites
-                    WHERE target_device_id = $1
-                      AND expires_at > NOW()
-                      AND invite_id > $2
-                    ORDER BY invite_id ASC
-                    LIMIT $3
-                    "#,
-        )
-        .bind(&target_device_id)
-        .bind(cursor_uuid)
-        .bind(limit as i64)
-        .fetch_all(svc.db.as_ref())
-        .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-    } else {
-        sqlx::query_as(
-            r#"
-                    SELECT invite_id, group_id, mls_welcome, expires_at, invited_at
-                    FROM group_invites
-                    WHERE target_device_id = $1
-                      AND expires_at > NOW()
-                    ORDER BY invite_id ASC
-                    LIMIT $2
-                    "#,
-        )
-        .bind(&target_device_id)
-        .bind(limit as i64)
-        .fetch_all(svc.db.as_ref())
-        .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-    };
+    let invites = db_mls::list_pending_group_invites(
+        svc.db.as_ref(),
+        &target_device_id,
+        cursor_uuid,
+        limit as i64,
+    )
+    .await
+    .map_err(|e| Status::internal(format!("Failed to list pending invites: {}", e)))?;
 
     // 3. Build next_cursor
     let next_cursor = if invites.len() == limit as usize {
-        invites.last().map(|(id, _, _, _, _)| id.to_string())
+        invites.last().map(|invite| invite.invite_id.to_string())
     } else {
         None
     };
@@ -455,17 +362,13 @@ pub(crate) async fn get_pending_invites(
     // 4. Convert to proto
     let proto_invites: Vec<proto::PendingGroupInvite> = invites
         .into_iter()
-        .map(
-            |(invite_id, group_id, mls_welcome, expires_at, invited_at)| {
-                proto::PendingGroupInvite {
-                    invite_id: invite_id.to_string(),
-                    group_id: group_id.to_string(),
-                    mls_welcome,
-                    expires_at: expires_at.timestamp(),
-                    invited_at: invited_at.timestamp(),
-                }
-            },
-        )
+        .map(|invite| proto::PendingGroupInvite {
+            invite_id: invite.invite_id.to_string(),
+            group_id: invite.group_id.to_string(),
+            mls_welcome: invite.mls_welcome,
+            expires_at: invite.expires_at.timestamp(),
+            invited_at: invite.invited_at.timestamp(),
+        })
         .collect();
 
     Ok(Response::new(proto::GetPendingInvitesResponse {
@@ -486,15 +389,10 @@ pub(crate) async fn leave_group(
         Uuid::parse_str(&req.group_id).map_err(|_| Status::invalid_argument("Invalid group_id"))?;
 
     // 2. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
@@ -515,20 +413,14 @@ pub(crate) async fn leave_group(
     // 5. Hard delete from group_members (no history)
     let now = chrono::Utc::now();
 
-    sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND device_id = $2")
-        .bind(group_id)
-        .bind(&device_id)
-        .execute(svc.db.as_ref())
+    db_mls::remove_group_member(svc.db.as_ref(), group_id, &device_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
 
     // 6. Also remove from group_admins if present
-    sqlx::query("DELETE FROM group_admins WHERE group_id = $1 AND device_id = $2")
-        .bind(group_id)
-        .bind(&device_id)
-        .execute(svc.db.as_ref())
+    db_mls::remove_group_admin_role(svc.db.as_ref(), group_id, &device_id)
         .await
-        .ok(); // Ignore if not admin
+        .map_err(|e| Status::internal(format!("Failed to remove admin role: {}", e)))?;
 
     info!(
         group_id = %group_id,
@@ -578,15 +470,10 @@ pub(crate) async fn remove_member(
     .await?;
 
     // 4. Check group not dissolved
-    let dissolved_at: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT dissolved_at FROM mls_groups WHERE group_id = $1")
-            .bind(group_id)
-            .fetch_optional(svc.db.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .flatten();
-
-    if dissolved_at.is_some() {
+    if get_group_dissolved_at(svc.db.as_ref(), group_id)
+        .await?
+        .is_some()
+    {
         return Err(Status::not_found("Group dissolved"));
     }
 
@@ -609,27 +496,17 @@ pub(crate) async fn remove_member(
     // 7. Hard delete from group_members
     let now = chrono::Utc::now();
 
-    sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND device_id = $2")
-        .bind(group_id)
-        .bind(&req.target_device_id)
-        .execute(svc.db.as_ref())
+    db_mls::remove_group_member(svc.db.as_ref(), group_id, &req.target_device_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
 
     // 8. Also remove from group_admins
-    sqlx::query("DELETE FROM group_admins WHERE group_id = $1 AND device_id = $2")
-        .bind(group_id)
-        .bind(&req.target_device_id)
-        .execute(svc.db.as_ref())
+    db_mls::remove_group_admin_role(svc.db.as_ref(), group_id, &req.target_device_id)
         .await
-        .ok();
+        .map_err(|e| Status::internal(format!("Failed to remove admin role: {}", e)))?;
 
     // 9. Get current epoch
-    let current_epoch: i64 = sqlx::query_scalar("SELECT epoch FROM mls_groups WHERE group_id = $1")
-        .bind(group_id)
-        .fetch_one(svc.db.as_ref())
-        .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    let current_epoch = get_group_epoch(svc.db.as_ref(), group_id).await?;
 
     info!(
         group_id = %group_id,
