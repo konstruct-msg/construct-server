@@ -34,6 +34,9 @@ hex = "0.4"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 
+# Streaming
+futures-util = "0.3"
+
 # Shared
 construct-server-shared = { path = "../shared" }
 construct-db = { path = "../crates/construct-db" }
