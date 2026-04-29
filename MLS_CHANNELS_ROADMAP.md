@@ -576,6 +576,18 @@ Subsequent commenters:
 
 ---
 
+## Refactor Direction: DB Access Layer
+
+- Move repeated MLS SQL from `mls-service` handlers/helpers into a typed `construct-db::mls` API.
+- Keep business rules, request validation, auth checks, and gRPC `Status` mapping inside `mls-service`.
+- Prefer explicit typed helper functions over a generic SQL builder/DSL.
+- Start with repeated lookups/checks (`group membership`, `admin access`, `device ownership`, `group state flags`) before extracting complex transactional write flows.
+- Keep transaction orchestration in the service layer until a write workflow becomes clearly reusable and atomic enough to merit a higher-level DB primitive.
+- Current extracted surfaces include shared group state reads, invite reads/deletes, admin-role updates, member/admin removals, ownership transfer, and commit persistence helpers.
+- Remaining raw MLS SQL is now concentrated in `create_group`, duplicate-sensitive invite/member inserts, and `key_packages`-specific handlers.
+
+---
+
 ## Related Files
 
 | File | Purpose |
@@ -583,8 +595,10 @@ Subsequent commenters:
 | `shared/proto/services/mls_service.proto` | Group RPC definitions |
 | `shared/proto/messaging/mls.proto` | MLS message types |
 | `shared/migrations/023_mls_groups.sql` | Core MLS schema |
-| `shared/migrations/040_topics_invites.sql` | Topics + invite links schema |
-| `mls-service/src/main.rs` | Current implementation |
+| `shared/migrations/040_group_topics_invite_links.sql` | Topics + invite links schema |
+| `mls-service/src/handlers/*.rs` | MLS business logic + RPC handlers |
+| `mls-service/src/helpers.rs` | MLS service-level validation and DB-to-Status mapping |
+| `crates/construct-db/src/mls.rs` | Shared typed MLS data-access helpers |
 | `GROUP_CHANNEL_SPEC.md` (external) | Full specification |
 
 ---
@@ -593,6 +607,8 @@ Subsequent commenters:
 
 | Date | Change |
 |------|--------|
+| 2026-04-29 | Extended DB access refactor: moved MLS state/invite/admin/member/commit helpers into `construct-db::mls`; remaining raw SQL narrowed to create-group, duplicate-sensitive inserts, and key-packages |
+| 2026-04-29 | Started DB access refactor: documenting and moving repeated MLS lookups into `construct-db::mls` |
 | 2026-04-29 | Phase 4 complete: DelegateAdmin, TransferOwnership, SubmitCommit, FetchCommits |
 | 2026-04-29 | Added TransferOwnership RPC to Phase 4 (proto + stub + spec) |
 | 2026-04-29 | Phase 3 complete: InviteToGroup, AcceptGroupInvite, DeclineGroupInvite, GetPendingInvites, LeaveGroup, RemoveMember |

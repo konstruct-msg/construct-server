@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 pub type DbPool = Pool<Postgres>;
 
+pub mod mls;
+
 // New minimal User struct (passwordless, device-based)
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {

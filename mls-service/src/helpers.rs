@@ -1,3 +1,5 @@
+use chrono::{DateTime, Utc};
+use construct_db::mls as db_mls;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tonic::Status;
 use tracing::warn;
@@ -5,6 +7,10 @@ use uuid::Uuid;
 
 fn get_metadata_str<'a>(meta: &'a tonic::metadata::MetadataMap, key: &str) -> Option<&'a str> {
     meta.get(key).and_then(|v| v.to_str().ok())
+}
+
+fn map_db_error(error: impl std::fmt::Display) -> Status {
+    Status::internal(format!("DB error: {}", error))
 }
 
 pub(crate) fn extract_user_id(meta: &tonic::metadata::MetadataMap) -> Result<Uuid, Status> {
@@ -42,13 +48,10 @@ pub(crate) async fn verify_admin_proof(
     }
 
     // 2. Load device verifying key from DB
-    let verifying_key_bytes: Vec<u8> =
-        sqlx::query_scalar("SELECT verifying_key FROM devices WHERE device_id = $1")
-            .bind(device_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .ok_or_else(|| Status::not_found("Device not found"))?;
+    let verifying_key_bytes = db_mls::get_device_verifying_key(db, device_id)
+        .await
+        .map_err(map_db_error)?
+        .ok_or_else(|| Status::not_found("Device not found"))?;
 
     // 3. Parse Ed25519 public key
     let key_bytes: [u8; 32] = verifying_key_bytes
@@ -87,17 +90,11 @@ pub(crate) async fn check_group_admin(
     device_id: &str,
 ) -> Result<(bool, bool), Status> {
     // Returns (is_creator, is_full_admin)
-    let row: Option<(bool, i16)> = sqlx::query_as(
-        "SELECT is_creator, role FROM group_admins WHERE group_id = $1 AND device_id = $2",
-    )
-    .bind(group_id)
-    .bind(device_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
-
-    match row {
-        Some((is_creator, role)) => Ok((is_creator, role == 1)), // role=1 is FULL
+    match db_mls::get_group_admin_access(db, group_id, device_id)
+        .await
+        .map_err(map_db_error)?
+    {
+        Some(access) => Ok((access.is_creator, access.is_full_admin)),
         None => Ok((false, false)),
     }
 }
@@ -108,16 +105,52 @@ pub(crate) async fn check_group_member(
     group_id: Uuid,
     device_id: &str,
 ) -> Result<bool, Status> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND device_id = $2)",
-    )
-    .bind(group_id)
-    .bind(device_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| Status::internal(format!("DB error: {}", e)))?;
+    db_mls::is_group_member(db, group_id, device_id)
+        .await
+        .map_err(map_db_error)
+}
 
-    Ok(exists)
+pub(crate) async fn check_device_belongs_to_user(
+    db: &sqlx::PgPool,
+    device_id: &str,
+    user_id: Uuid,
+) -> Result<bool, Status> {
+    db_mls::device_belongs_to_user(db, device_id, user_id)
+        .await
+        .map_err(map_db_error)
+}
+
+pub(crate) async fn get_group_dissolved_at(
+    db: &sqlx::PgPool,
+    group_id: Uuid,
+) -> Result<Option<DateTime<Utc>>, Status> {
+    db_mls::get_group_dissolved_at(db, group_id)
+        .await
+        .map_err(map_db_error)
+}
+
+pub(crate) async fn get_group_member_count(
+    db: &sqlx::PgPool,
+    group_id: Uuid,
+) -> Result<i64, Status> {
+    db_mls::get_group_member_count(db, group_id)
+        .await
+        .map_err(map_db_error)
+}
+
+pub(crate) async fn get_group_max_members(
+    db: &sqlx::PgPool,
+    group_id: Uuid,
+) -> Result<i16, Status> {
+    db_mls::get_group_max_members(db, group_id)
+        .await
+        .map_err(map_db_error)
+}
+
+pub(crate) async fn get_group_epoch(db: &sqlx::PgPool, group_id: Uuid) -> Result<i64, Status> {
+    db_mls::get_group_epoch(db, group_id)
+        .await
+        .map_err(map_db_error)
 }
 
 pub(crate) fn sha256_bytes(data: &[u8]) -> Vec<u8> {
