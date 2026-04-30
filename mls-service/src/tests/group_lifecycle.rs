@@ -18,7 +18,10 @@ use construct_server_shared::shared::proto::services::v1::{
 async fn test_create_group_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
 
     let group_id = Uuid::new_v4();
     let meta = create_metadata(&user_id, &device_id);
@@ -51,7 +54,10 @@ async fn test_create_group_success() {
 async fn test_create_group_invalid_group_id() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -77,7 +83,10 @@ async fn test_create_group_invalid_group_id() {
 async fn test_create_group_empty_ratchet_tree() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -103,7 +112,10 @@ async fn test_create_group_empty_ratchet_tree() {
 async fn test_create_group_max_members_exceeded() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -129,7 +141,10 @@ async fn test_create_group_max_members_exceeded() {
 async fn test_create_group_missing_user_id() {
     let db = get_test_db().await;
     let (_, device_id, _) = create_test_device(&db).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let mut meta = tonic::metadata::MetadataMap::new();
     meta.insert("x-device-id", device_id.parse().unwrap());
@@ -159,7 +174,10 @@ async fn test_get_group_state_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &device_id).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -189,7 +207,10 @@ async fn test_get_group_state_non_member() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
     let group_id = Uuid::new_v4();
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -214,7 +235,10 @@ async fn test_dissolve_group_success() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &device_id).await;
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -257,7 +281,10 @@ async fn test_dissolve_group_invalid_signature() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &device_id).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -286,7 +313,10 @@ async fn test_dissolve_group_expired_timestamp() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &device_id).await;
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 
@@ -327,7 +357,10 @@ async fn test_dissolve_group_non_admin() {
     .await
     .expect("Failed to add device2 to group");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id2);
 
@@ -362,7 +395,10 @@ async fn test_dissolve_group_already_dissolved() {
         .await
         .expect("Failed to dissolve group");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
 
     let meta = create_metadata(&user_id, &device_id);
 

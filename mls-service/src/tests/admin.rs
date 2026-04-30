@@ -30,7 +30,10 @@ async fn test_delegate_admin_success() {
     .await
     .expect("Failed to add member");
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     let timestamp = Utc::now().timestamp();
@@ -103,7 +106,10 @@ async fn test_delegate_admin_non_admin() {
     .await
     .expect("Failed to add other member");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
     let timestamp = Utc::now().timestamp();
@@ -162,7 +168,10 @@ async fn test_transfer_ownership_success() {
     .await
     .expect("Failed to add other admin");
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     let timestamp = Utc::now().timestamp();
@@ -257,7 +266,10 @@ async fn test_transfer_ownership_non_creator() {
     .await
     .expect("Failed to add other admin");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 
     let timestamp = Utc::now().timestamp();

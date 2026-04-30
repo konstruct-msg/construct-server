@@ -81,7 +81,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     Server::builder()
-        .add_service(MlsServiceServer::new(MlsServiceImpl { db }))
+        .add_service(MlsServiceServer::new(MlsServiceImpl {
+            db,
+            hub: service::GroupHub::new(),
+        }))
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;
 

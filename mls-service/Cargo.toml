@@ -36,6 +36,7 @@ rand = "0.8"
 
 # Streaming
 futures-util = "0.3"
+tokio-stream = "0.1"
 
 # Shared
 construct-server-shared = { path = "../shared" }
