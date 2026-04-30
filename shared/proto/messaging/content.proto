@@ -184,7 +184,7 @@ message ReactionMessage {
 
 // ReactionAction - Add or remove reaction
 enum ReactionAction {
-  // Uncspecified action (must be 0)
+  // Unspecified action (must be 0)
   REACTION_ACTION_UNSPECIFIED = 0;
 
   // Add reaction
@@ -232,7 +232,7 @@ message DeleteMessage {
 
 // DeleteScope - Who sees the deletion
 enum DeleteScope {
-  // Unscpecified scope (must be 0)
+  // Unspecified scope (must be 0)
   DELETE_SCOPE_UNSPECIFIED = 0;
 
   // Delete for self only (other recipients still see it)

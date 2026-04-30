@@ -10,10 +10,10 @@ service AuthService {
   rpc GetPowChallenge(GetPowChallengeRequest) returns (GetPowChallengeResponse);
 
   // RegisterDevice - Passwordless device registration
-  rpc RegisterDevice(RegisterDeviceRequest) returns (AuthTokensResponse);
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
 
   // AuthenticateDevice - Passwordless device authentication
-  rpc AuthenticateDevice(AuthenticateDeviceRequest) returns (AuthTokensResponse);
+  rpc AuthenticateDevice(AuthenticateDeviceRequest) returns (AuthenticateDeviceResponse);
 
   // RefreshToken - Refresh access token
   rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
@@ -70,7 +70,7 @@ service AuthService {
   // ApproveJoinRequest - Phone approves TUI device link (Flow B)
   // Authenticated: requires valid JWT from the primary/existing device
   // Creates the device in DB and returns auth tokens for the new device
-  rpc ApproveJoinRequest(ApproveJoinRequestRequest) returns (AuthTokensResponse);
+  rpc ApproveJoinRequest(ApproveJoinRequestRequest) returns (ApproveJoinRequestResponse);
 }
 
 // DeviceService - Device management
@@ -91,7 +91,7 @@ service DeviceService {
   rpc VerifyDevice(VerifyDeviceRequest) returns (VerifyDeviceResponse);
 
   // GetDeviceInfo - Get specific device details
-  rpc GetDeviceInfo(GetDeviceInfoRequest) returns (DeviceInfo);
+  rpc GetDeviceInfo(GetDeviceInfoRequest) returns (GetDeviceInfoResponse);
 
   // =========================================================================
   // Device Linking
@@ -106,7 +106,7 @@ service DeviceService {
 service DeviceLinkService {
   // ConfirmDeviceLink - New device completes the link using the QR token (Flow A)
   // NOT authenticated: new device has no JWT yet, uses link_token instead
-  rpc ConfirmDeviceLink(ConfirmDeviceLinkRequest) returns (AuthTokensResponse);
+  rpc ConfirmDeviceLink(ConfirmDeviceLinkRequest) returns (ConfirmDeviceLinkResponse);
 
   // SubmitJoinRequest - TUI device submits a join request (Flow B)
   // NOT authenticated: the TUI device has no JWT yet
@@ -165,6 +165,25 @@ message AuthTokensResponse {
   // ICE (obfs4) bridge cert for transport obfuscation.
   // Populated only when the server has ICE_ENABLED=true.
   optional string ice_bridge_cert = 5;
+}
+
+// Per-RPC response wrappers (buf lint RPC_RESPONSE_STANDARD_NAME)
+// Each wraps AuthTokensResponse so callers get a uniquely-named type
+// while the shared token payload can still evolve independently.
+message RegisterDeviceResponse {
+  AuthTokensResponse tokens = 1;
+}
+
+message AuthenticateDeviceResponse {
+  AuthTokensResponse tokens = 1;
+}
+
+message ApproveJoinRequestResponse {
+  AuthTokensResponse tokens = 1;
+}
+
+message ConfirmDeviceLinkResponse {
+  AuthTokensResponse tokens = 1;
 }
 
 // RefreshTokenRequest - Refresh access token
@@ -258,6 +277,11 @@ message DeviceInfo {
 
 // ListDevicesResponse - wraps a single device in the stream
 message ListDevicesResponse {
+  DeviceInfo device = 1;
+}
+
+// GetDeviceInfoResponse - wraps a single device info response
+message GetDeviceInfoResponse {
   DeviceInfo device = 1;
 }
 

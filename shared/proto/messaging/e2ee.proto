@@ -144,7 +144,7 @@ message SessionResetMessage {
 
 // SessionResetReason - Why session was reset
 enum SessionResetReason {
-  // Unscpecified reason (must be 0)
+  // Unspecified reason (must be 0)
   SESSION_RESET_REASON_UNSPECIFIED = 0;
 
   // Session corruption detected (MAC verification failed)
@@ -234,7 +234,7 @@ message DecryptionErrorMessage {
 
 // DecryptionErrorType - Type of decryption failure
 enum DecryptionErrorType {
-  // Unscpecified error (must be 0)
+  // Unspecified error (must be 0)
   DECRYPTION_ERROR_TYPE_UNSPECIFIED = 0;
 
   // MAC verification failed (message tampered)

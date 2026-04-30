@@ -98,7 +98,7 @@ impl AuthService for AuthGrpcService {
     async fn register_device(
         &self,
         request: Request<proto::RegisterDeviceRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+    ) -> Result<Response<proto::RegisterDeviceResponse>, Status> {
         let req = request.into_inner();
         let public_keys = req
             .public_keys
@@ -132,12 +132,14 @@ impl AuthService for AuthGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(proto::AuthTokensResponse {
-            user_id: response.user_id,
-            access_token: response.access_token,
-            refresh_token: response.refresh_token,
-            expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
-            ice_bridge_cert: self.ice_bridge_cert.clone(),
+        Ok(Response::new(proto::RegisterDeviceResponse {
+            tokens: Some(proto::AuthTokensResponse {
+                user_id: response.user_id,
+                access_token: response.access_token,
+                refresh_token: response.refresh_token,
+                expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+                ice_bridge_cert: self.ice_bridge_cert.clone(),
+            }),
         }))
     }
 
@@ -205,7 +207,7 @@ impl AuthService for AuthGrpcService {
     async fn authenticate_device(
         &self,
         request: Request<proto::AuthenticateDeviceRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+    ) -> Result<Response<proto::AuthenticateDeviceResponse>, Status> {
         let req = request.into_inner();
         let app_context = Arc::new(self.context.to_app_context());
         let (_status, axum::Json(response)) =
@@ -220,12 +222,14 @@ impl AuthService for AuthGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(proto::AuthTokensResponse {
-            user_id: response.user_id,
-            access_token: response.access_token,
-            refresh_token: response.refresh_token,
-            expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
-            ice_bridge_cert: self.ice_bridge_cert.clone(),
+        Ok(Response::new(proto::AuthenticateDeviceResponse {
+            tokens: Some(proto::AuthTokensResponse {
+                user_id: response.user_id,
+                access_token: response.access_token,
+                refresh_token: response.refresh_token,
+                expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+                ice_bridge_cert: self.ice_bridge_cert.clone(),
+            }),
         }))
     }
 
@@ -694,7 +698,7 @@ impl AuthService for AuthGrpcService {
     async fn approve_join_request(
         &self,
         request: Request<proto::ApproveJoinRequestRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+    ) -> Result<Response<proto::ApproveJoinRequestResponse>, Status> {
         let token = request_token(request.metadata())?;
         let req = request.into_inner();
 
@@ -827,12 +831,14 @@ impl AuthService for AuthGrpcService {
             "Join request approved — device linked"
         );
 
-        Ok(Response::new(proto::AuthTokensResponse {
-            user_id: user_id.to_string(),
-            access_token,
-            refresh_token,
-            expires_at: exp_timestamp,
-            ice_bridge_cert: self.ice_bridge_cert.clone(),
+        Ok(Response::new(proto::ApproveJoinRequestResponse {
+            tokens: Some(proto::AuthTokensResponse {
+                user_id: user_id.to_string(),
+                access_token,
+                refresh_token,
+                expires_at: exp_timestamp,
+                ice_bridge_cert: self.ice_bridge_cert.clone(),
+            }),
         }))
     }
 
@@ -1162,7 +1168,7 @@ impl proto::device_service_server::DeviceService for AuthGrpcService {
     async fn get_device_info(
         &self,
         _request: Request<proto::GetDeviceInfoRequest>,
-    ) -> Result<Response<proto::DeviceInfo>, Status> {
+    ) -> Result<Response<proto::GetDeviceInfoResponse>, Status> {
         Err(Status::unimplemented("GetDeviceInfo not implemented"))
     }
 
@@ -1208,7 +1214,7 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
     async fn confirm_device_link(
         &self,
         request: Request<proto::ConfirmDeviceLinkRequest>,
-    ) -> Result<Response<proto::AuthTokensResponse>, Status> {
+    ) -> Result<Response<proto::ConfirmDeviceLinkResponse>, Status> {
         let req = request.into_inner();
 
         if req.link_token.is_empty() {
@@ -1318,12 +1324,14 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
             "Device linked successfully"
         );
 
-        Ok(Response::new(proto::AuthTokensResponse {
-            user_id: user_id_str,
-            access_token,
-            refresh_token,
-            expires_at: exp_timestamp,
-            ice_bridge_cert: self.ice_bridge_cert.clone(),
+        Ok(Response::new(proto::ConfirmDeviceLinkResponse {
+            tokens: Some(proto::AuthTokensResponse {
+                user_id: user_id_str,
+                access_token,
+                refresh_token,
+                expires_at: exp_timestamp,
+                ice_bridge_cert: self.ice_bridge_cert.clone(),
+            }),
         }))
     }
 
