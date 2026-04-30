@@ -4,7 +4,7 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::helpers::{extract_user_id, sha256_bytes};
+use crate::helpers::{check_device_belongs_to_user, extract_user_id, sha256_bytes};
 use crate::service::MlsServiceImpl;
 
 pub(crate) async fn publish_key_package(
@@ -18,6 +18,16 @@ pub(crate) async fn publish_key_package(
     if device_id.is_empty() {
         return Err(Status::invalid_argument("device_id is required"));
     }
+
+    // B4 fix: verify the device_id belongs to the authenticated user.
+    // Without this check, any user could publish KeyPackages under any device_id,
+    // potentially hijacking invite flows for other users' devices.
+    if !check_device_belongs_to_user(svc.db.as_ref(), &device_id, user_id).await? {
+        return Err(Status::permission_denied(
+            "device_id does not belong to authenticated user",
+        ));
+    }
+
     if req.key_packages.is_empty() {
         return Err(Status::invalid_argument(
             "at least one key_package required",

@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::helpers::{
     check_device_belongs_to_user, check_group_admin, check_group_member, extract_device_id,
-    extract_user_id, get_group_dissolved_at, get_group_member_count, verify_admin_proof,
+    extract_user_id, get_group_dissolved_at, get_group_max_members, get_group_member_count,
+    verify_admin_proof,
 };
 use crate::service::MlsServiceImpl;
 
@@ -144,12 +145,13 @@ pub(crate) async fn get_group_state(
         )
         .ok_or_else(|| Status::not_found("Group not found or dissolved"))?;
 
-    // 4. Get member count
+    // 4. Get member count and max members
     let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
+    let max_members = get_group_max_members(svc.db.as_ref(), group_id).await?;
 
     // 5. Build settings
     let settings = proto::GroupSettings {
-        max_members: 2048,
+        max_members: max_members as u32,
         member_count: member_count as u32,
         message_retention_days: retention_days as u32,
         threads_enabled,

@@ -164,7 +164,7 @@ pub(crate) async fn accept_group_invite(
         target_device_id,
         mls_welcome: _mls_welcome,
         key_package_ref: _key_package_ref,
-        epoch: _epoch,
+        epoch: invite_epoch,
     } = db_mls::get_group_invite_for_accept(svc.db.as_ref(), invite_id, group_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to load invite: {}", e)))?
@@ -177,7 +177,15 @@ pub(crate) async fn accept_group_invite(
         ));
     }
 
-    // 4. Validate acceptance signature
+    // 4. Validate mls_commit and new_ratchet_tree are present (B1 fix)
+    if req.mls_commit.is_empty() {
+        return Err(Status::invalid_argument("mls_commit is required"));
+    }
+    if req.new_ratchet_tree.is_empty() {
+        return Err(Status::invalid_argument("new_ratchet_tree is required"));
+    }
+
+    // 5. Validate acceptance signature
     let signature_timestamp = req.signature_timestamp;
 
     // Message: "CONSTRUCT_GROUP_JOIN:{group_id}:{invite_id}:{timestamp}"
@@ -196,26 +204,25 @@ pub(crate) async fn accept_group_invite(
     )
     .await?;
 
-    // 5. Verify device belongs to user
+    // 6. Verify device belongs to user
     if !check_device_belongs_to_user(svc.db.as_ref(), &device_id, user_id).await? {
         return Err(Status::permission_denied(
             "Device does not belong to authenticated user",
         ));
     }
 
-    // 6. Check if already a member
+    // 7. Check if already a member
     let already_member = check_group_member(svc.db.as_ref(), group_id, &device_id).await?;
-
     if already_member {
         return Err(Status::already_exists("Already a member of this group"));
     }
 
-    // 7. Get next leaf_index
+    // 8. Get next leaf_index
     let next_leaf_index = db_mls::get_next_group_leaf_index(svc.db.as_ref(), group_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to get next leaf index: {}", e)))?;
 
-    // 8. Insert into group_members with acceptance signature
+    // 9. Insert member
     let now = chrono::Utc::now();
 
     db_mls::insert_group_member(
@@ -237,26 +244,74 @@ pub(crate) async fn accept_group_invite(
         }
     })?;
 
-    // 9. Delete invite (hard delete — no history)
+    // 10. Atomically: validate epoch CAS, store join commit, advance epoch + ratchet tree
+    let mut tx = svc
+        .db
+        .begin()
+        .await
+        .map_err(|e| Status::internal(format!("Failed to start transaction: {}", e)))?;
+
+    let current_epoch = db_mls::lock_group_epoch_for_update(&mut tx, group_id)
+        .await
+        .map_err(|e| Status::internal(format!("Failed to lock group epoch: {}", e)))?;
+
+    // Validate the invite's epoch matches the current group epoch (staleness check)
+    if invite_epoch != current_epoch {
+        tx.rollback().await.ok();
+        return Err(Status::aborted(
+            "EPOCH_MISMATCH: invite epoch is stale; group has advanced",
+        ));
+    }
+
+    let new_epoch = current_epoch + 1;
+    let commit_expires = now + chrono::Duration::days(30);
+
+    db_mls::insert_group_commit(
+        &mut tx,
+        db_mls::NewGroupCommit {
+            group_id,
+            epoch_from: current_epoch,
+            epoch_to: new_epoch,
+            mls_commit: &req.mls_commit,
+            ratchet_tree_snapshot: &req.new_ratchet_tree,
+            committed_at: now,
+            expires_at: commit_expires,
+        },
+    )
+    .await
+    .map_err(|e| Status::internal(format!("Failed to store join commit: {}", e)))?;
+
+    db_mls::update_group_epoch_and_ratchet_tree(
+        &mut tx,
+        group_id,
+        &req.new_ratchet_tree,
+        new_epoch,
+    )
+    .await
+    .map_err(|e| Status::internal(format!("Failed to advance group epoch: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(format!("Failed to commit transaction: {}", e)))?;
+
+    // 11. Delete invite (hard delete — no history)
     db_mls::delete_group_invite(svc.db.as_ref(), invite_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to delete invite: {}", e)))?;
-
-    // 10. Get current epoch
-    let current_epoch = get_group_epoch(svc.db.as_ref(), group_id).await?;
 
     info!(
         group_id = %group_id,
         device_id = %device_id,
         user_id = %user_id,
         leaf_index = next_leaf_index,
-        epoch = current_epoch,
-        "Group invite accepted"
+        old_epoch = current_epoch,
+        new_epoch = new_epoch,
+        "Group invite accepted, epoch advanced"
     );
 
     Ok(Response::new(proto::AcceptGroupInviteResponse {
         success: true,
-        new_epoch: current_epoch as u64,
+        new_epoch: new_epoch as u64,
         joined_at: now.timestamp(),
     }))
 }
@@ -312,12 +367,19 @@ pub(crate) async fn get_pending_invites(
     request: Request<proto::GetPendingInvitesRequest>,
 ) -> Result<Response<proto::GetPendingInvitesResponse>, Status> {
     let device_id = extract_device_id(request.metadata())?;
+    let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
-    // Use device_id from request if provided, otherwise from metadata
+    // B3 fix: if req.device_id is provided, verify it belongs to the authenticated user.
+    // Without this check, any user could fetch pending invites for any device.
     let target_device_id = if req.device_id.is_empty() {
         device_id
     } else {
+        if !check_device_belongs_to_user(svc.db.as_ref(), &req.device_id, user_id).await? {
+            return Err(Status::permission_denied(
+                "device_id does not belong to authenticated user",
+            ));
+        }
         req.device_id
     };
 
@@ -403,7 +465,14 @@ pub(crate) async fn leave_group(
         ));
     }
 
-    // 5. Hard delete from group_members (no history)
+    // 5. Validate remove proposal is present (B2 fix: required for other members to update ratchet tree)
+    if req.mls_remove_proposal.is_empty() {
+        return Err(Status::invalid_argument(
+            "mls_remove_proposal is required; clients must submit a signed Remove Proposal",
+        ));
+    }
+
+    // 6. Hard delete from group_members (no history)
     let now = chrono::Utc::now();
 
     db_mls::remove_group_member(svc.db.as_ref(), group_id, &device_id)
@@ -470,7 +539,14 @@ pub(crate) async fn remove_member(
         return Err(Status::not_found("Group dissolved"));
     }
 
-    // 5. Verify target is a member
+    // 5. Validate remove proposal is present (B2 fix: required for other members to update ratchet tree)
+    if req.mls_remove_proposal.is_empty() {
+        return Err(Status::invalid_argument(
+            "mls_remove_proposal is required; admin must supply a signed Remove Proposal",
+        ));
+    }
+
+    // 6. Verify target is a member
     let target_is_member =
         check_group_member(svc.db.as_ref(), group_id, &req.target_device_id).await?;
 
