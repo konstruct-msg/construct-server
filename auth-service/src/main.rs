@@ -421,29 +421,10 @@ impl AuthService for AuthGrpcService {
         // 4. Register new device directly (bypass PoW for recovery flow)
         let hostname = env::var("SERVER_HOSTNAME").unwrap_or_else(|_| "construct.cc".to_string());
 
-        let verifying_key = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &public_keys.verifying_key,
-        )
-        .unwrap_or(public_keys.verifying_key.as_bytes().to_vec());
-
-        let identity_public = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &public_keys.identity_public,
-        )
-        .unwrap_or(public_keys.identity_public.as_bytes().to_vec());
-
-        let signed_prekey_public = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &public_keys.signed_prekey_public,
-        )
-        .unwrap_or(public_keys.signed_prekey_public.as_bytes().to_vec());
-
-        let signed_prekey_signature = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &public_keys.signed_prekey_signature,
-        )
-        .unwrap_or(public_keys.signed_prekey_signature.as_bytes().to_vec());
+        let verifying_key = public_keys.verifying_key.clone();
+        let identity_public = public_keys.identity_public.clone();
+        let signed_prekey_public = public_keys.signed_prekey_public.clone();
+        let signed_prekey_signature = public_keys.signed_prekey_signature.clone();
 
         // Verify SPK signature before registering (recovery path)
         verify_spk_signature(
@@ -1248,22 +1229,10 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
             return Err(Status::already_exists("device_id already registered"));
         }
 
-        // Decode keys
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let decode = |s: &str, field: &str| {
-            b64.decode(s)
-                .map_err(|_| Status::invalid_argument(format!("invalid base64 in {}", field)))
-        };
-
-        let verifying_key = decode(&public_keys.verifying_key, "verifying_key")?;
-        let identity_public = decode(&public_keys.identity_public, "identity_public")?;
-        let signed_prekey_public =
-            decode(&public_keys.signed_prekey_public, "signed_prekey_public")?;
-        let signed_prekey_signature = decode(
-            &public_keys.signed_prekey_signature,
-            "signed_prekey_signature",
-        )?;
+        let verifying_key = public_keys.verifying_key;
+        let identity_public = public_keys.identity_public;
+        let signed_prekey_public = public_keys.signed_prekey_public;
+        let signed_prekey_signature = public_keys.signed_prekey_signature;
 
         let hostname = self.context.config.instance_domain.clone();
 

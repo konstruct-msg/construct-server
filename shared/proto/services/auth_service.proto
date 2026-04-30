@@ -129,11 +129,11 @@ message GetPowChallengeResponse {
 }
 
 message DevicePublicKeys {
-  string verifying_key = 1;
-  string identity_public = 2;
-  string signed_prekey_public = 3;
-  string signed_prekey_signature = 4;
-  string crypto_suite = 5;
+  bytes verifying_key = 1;          // Ed25519 verifying key, 32 bytes
+  bytes identity_public = 2;        // Identity public key for E2EE
+  bytes signed_prekey_public = 3;   // Signed prekey public for Double Ratchet
+  bytes signed_prekey_signature = 4; // Ed25519 signature of SPK, 64 bytes
+  string crypto_suite = 5;          // Suite identifier, e.g. "Curve25519+Ed25519"
 }
 
 message PowSolution {
@@ -152,7 +152,7 @@ message RegisterDeviceRequest {
 message AuthenticateDeviceRequest {
   string device_id = 1;
   int64 timestamp = 2;
-  string signature = 3;
+  bytes signature = 3;  // Ed25519 signature of "{device_id}{timestamp}", 64 bytes
 }
 
 // AuthTokensResponse - returned for all device auth/linking operations

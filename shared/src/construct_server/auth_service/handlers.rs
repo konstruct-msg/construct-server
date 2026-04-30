@@ -9,6 +9,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::construct_server::context::AppContext;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
 
@@ -91,6 +92,22 @@ pub async fn register_device(
     headers: axum::http::HeaderMap,
     Json(request): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let verifying_key = BASE64
+        .decode(&request.public_keys.verifying_key)
+        .map_err(|_| AppError::Validation("verifying_key must be valid base64".to_string()))?;
+    let identity_public = BASE64
+        .decode(&request.public_keys.identity_public)
+        .map_err(|_| AppError::Validation("identity_public must be valid base64".to_string()))?;
+    let signed_prekey_public = BASE64
+        .decode(&request.public_keys.signed_prekey_public)
+        .map_err(|_| {
+            AppError::Validation("signed_prekey_public must be valid base64".to_string())
+        })?;
+    let signed_prekey_signature = BASE64
+        .decode(&request.public_keys.signed_prekey_signature)
+        .map_err(|_| {
+            AppError::Validation("signed_prekey_signature must be valid base64".to_string())
+        })?;
     core::register_device(
         app_state(&context).0,
         headers,
@@ -98,10 +115,10 @@ pub async fn register_device(
             username: request.username,
             device_id: request.device_id,
             public_keys: core::DevicePublicKeysInput {
-                verifying_key: request.public_keys.verifying_key,
-                identity_public: request.public_keys.identity_public,
-                signed_prekey_public: request.public_keys.signed_prekey_public,
-                signed_prekey_signature: request.public_keys.signed_prekey_signature,
+                verifying_key,
+                identity_public,
+                signed_prekey_public,
+                signed_prekey_signature,
                 crypto_suite: request.public_keys.crypto_suite,
             },
             pow_solution: core::PowSolutionInput {
@@ -118,12 +135,15 @@ pub async fn authenticate_device(
     State(context): State<Arc<AuthServiceContext>>,
     Json(request): Json<AuthenticateDeviceRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let signature = BASE64
+        .decode(&request.signature)
+        .map_err(|_| AppError::Validation("signature must be valid base64".to_string()))?;
     core::authenticate_device(
         app_state(&context).0,
         core::AuthenticateDeviceInput {
             device_id: request.device_id,
             timestamp: request.timestamp,
-            signature: request.signature,
+            signature,
         },
     )
     .await

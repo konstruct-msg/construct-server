@@ -18,10 +18,10 @@ pub struct RefreshTokenResult {
 
 #[derive(Debug, Clone)]
 pub struct DevicePublicKeysInput {
-    pub verifying_key: String,
-    pub identity_public: String,
-    pub signed_prekey_public: String,
-    pub signed_prekey_signature: String,
+    pub verifying_key: Vec<u8>,
+    pub identity_public: Vec<u8>,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
     pub crypto_suite: String,
 }
 
@@ -44,7 +44,7 @@ pub struct RegisterDeviceInput {
 pub struct AuthenticateDeviceInput {
     pub device_id: String,
     pub timestamp: i64,
-    pub signature: String,
+    pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,25 +164,23 @@ pub async fn register_device(
     ),
     AppError,
 > {
-    devices::register_device_v2(
-        axum::extract::State(app_context),
+    devices::register_device_core(
+        app_context,
         headers,
-        Json(devices::RegisterDeviceRequest {
-            username: input.username,
-            device_id: input.device_id,
-            public_keys: devices::DevicePublicKeys {
-                verifying_key: input.public_keys.verifying_key,
-                identity_public: input.public_keys.identity_public,
-                signed_prekey_public: input.public_keys.signed_prekey_public,
-                signed_prekey_signature: input.public_keys.signed_prekey_signature,
-                crypto_suite: input.public_keys.crypto_suite,
-            },
-            pow_solution: devices::PowSolution {
-                challenge: input.pow_solution.challenge,
-                nonce: input.pow_solution.nonce,
-                hash: input.pow_solution.hash,
-            },
-        }),
+        input.username,
+        input.device_id,
+        devices::DevicePublicKeysBinary {
+            verifying_key: input.public_keys.verifying_key,
+            identity_public: input.public_keys.identity_public,
+            signed_prekey_public: input.public_keys.signed_prekey_public,
+            signed_prekey_signature: input.public_keys.signed_prekey_signature,
+            crypto_suite: input.public_keys.crypto_suite,
+        },
+        devices::PowSolution {
+            challenge: input.pow_solution.challenge,
+            nonce: input.pow_solution.nonce,
+            hash: input.pow_solution.hash,
+        },
     )
     .await
 }
@@ -197,13 +195,11 @@ pub async fn authenticate_device(
     ),
     AppError,
 > {
-    devices::authenticate_device(
-        axum::extract::State(app_context),
-        Json(devices::AuthenticateDeviceRequest {
-            device_id: input.device_id,
-            timestamp: input.timestamp,
-            signature: input.signature,
-        }),
+    devices::authenticate_device_core(
+        app_context,
+        input.device_id,
+        input.timestamp,
+        input.signature,
     )
     .await
 }
