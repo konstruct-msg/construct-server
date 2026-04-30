@@ -634,7 +634,7 @@ impl UserService for UserGrpcService {
         if already_pending {
             return Ok(Response::new(proto::SendContactRequestResponse {
                 request_id: String::new(),
-                status: "pending".to_string(),
+                status: proto::ContactRequestStatus::Pending as i32,
             }));
         }
 
@@ -650,7 +650,7 @@ impl UserService for UserGrpcService {
 
         Ok(Response::new(proto::SendContactRequestResponse {
             request_id: request_id.to_string(),
-            status: "pending".to_string(),
+            status: proto::ContactRequestStatus::Pending as i32,
         }))
     }
 
@@ -698,7 +698,12 @@ impl UserService for UserGrpcService {
             .into_iter()
             .map(|cr| proto::SentContactRequest {
                 request_id: cr.id.to_string(),
-                status: cr.status,
+                status: match cr.status.as_str() {
+                    "accepted" => proto::ContactRequestStatus::Accepted as i32,
+                    "declined_blocked" => proto::ContactRequestStatus::DeclinedBlocked as i32,
+                    "spam_blocked" => proto::ContactRequestStatus::SpamBlocked as i32,
+                    _ => proto::ContactRequestStatus::Pending as i32,
+                },
                 created_at: cr.created_at.timestamp(),
             })
             .collect();
@@ -830,7 +835,14 @@ impl UserService for UserGrpcService {
         }
 
         Ok(Response::new(proto::RespondToContactRequestResponse {
-            status: db_status.to_string(),
+            status: match action {
+                proto::ContactRequestAction::Accept => proto::ContactRequestStatus::Accepted,
+                proto::ContactRequestAction::DeclineBlock => {
+                    proto::ContactRequestStatus::DeclinedBlocked
+                }
+                proto::ContactRequestAction::SpamBlock => proto::ContactRequestStatus::SpamBlocked,
+                proto::ContactRequestAction::Unspecified => unreachable!("already handled above"),
+            } as i32,
         }))
     }
 }
