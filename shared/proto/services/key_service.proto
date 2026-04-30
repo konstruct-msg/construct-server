@@ -93,8 +93,7 @@ message GetPreKeyBundleRequest {
   optional string device_id = 2;
 
   // Preferred crypto suite (optional)
-  // Values: "X25519_CHACHA20", "X25519_AES256", "KYBER_HYBRID"
-  optional string preferred_suite = 3;
+  optional shared.proto.core.v1.CryptoSuite preferred_suite = 3;
 
   // Reserved for future options
   reserved 4 to 10;
@@ -173,7 +172,7 @@ message PreKeyBundle {
   optional uint32 one_time_pre_key_id = 7;
 
   // Crypto suite used
-  string crypto_suite = 8;
+  shared.proto.core.v1.CryptoSuite crypto_suite = 8;
 
   // Key generation timestamp (for staleness detection)
   int64 generated_at = 9;
@@ -230,7 +229,7 @@ message GetPreKeyBundlesRequest {
   repeated string device_ids = 2;
 
   // Preferred crypto suite
-  optional string preferred_suite = 3;
+  optional shared.proto.core.v1.CryptoSuite preferred_suite = 3;
 }
 
 message GetPreKeyBundlesResponse {

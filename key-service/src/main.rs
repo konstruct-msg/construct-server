@@ -34,11 +34,21 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use construct_server_shared::clients::notification::NotificationClient;
+use construct_server_shared::shared::proto::core::v1::CryptoSuite;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
     key_service_server::{KeyService, KeyServiceServer},
     SendBlindNotificationRequest,
 };
+
+/// Map a DB crypto_suite string to the proto CryptoSuite enum value.
+fn proto_crypto_suite(s: &str) -> i32 {
+    match s {
+        "Curve25519+Ed25519" | "X25519_CHACHA20" => CryptoSuite::ClassicX25519Chacha20 as i32,
+        "X25519_AES256" => CryptoSuite::ClassicX25519Aes256 as i32,
+        _ => CryptoSuite::Unspecified as i32,
+    }
+}
 
 /// Notify the device owner to replenish one-time prekeys when supply is low.
 /// - `otp_was_consumed = false` means keys were already exhausted before this request.
@@ -219,7 +229,7 @@ impl KeyService for KeyGrpcService {
                         signed_pre_key_signature: b.signed_prekey_signature,
                         one_time_pre_key: b.one_time_prekey,
                         one_time_pre_key_id: b.one_time_prekey_id,
-                        crypto_suite: b.crypto_suite,
+                        crypto_suite: proto_crypto_suite(&b.crypto_suite),
                         generated_at: b.registered_at.timestamp(),
                         kyber_pre_key: b.kyber_pre_key,
                         kyber_pre_key_id: b.kyber_pre_key_id,
@@ -629,7 +639,7 @@ impl KeyService for KeyGrpcService {
                     signed_pre_key_signature: b.signed_prekey_signature,
                     one_time_pre_key: b.one_time_prekey,
                     one_time_pre_key_id: b.one_time_prekey_id,
-                    crypto_suite: b.crypto_suite,
+                    crypto_suite: proto_crypto_suite(&b.crypto_suite),
                     generated_at: b.registered_at.timestamp(),
                     kyber_pre_key: b.kyber_pre_key,
                     kyber_pre_key_id: b.kyber_pre_key_id,
