@@ -58,7 +58,7 @@ impl UserService for UserGrpcService {
     async fn get_user_profile(
         &self,
         request: Request<proto::GetUserProfileRequest>,
-    ) -> Result<Response<proto::UserProfile>, Status> {
+    ) -> Result<Response<proto::GetUserProfileResponse>, Status> {
         let req = request.into_inner();
         let user_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
@@ -68,26 +68,28 @@ impl UserService for UserGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("user not found"))?;
 
-        Ok(Response::new(proto::UserProfile {
-            user_id: user.id.to_string(),
-            username: None, // server no longer stores plaintext username
-            display_name: None,
-            bio: None,
-            profile_picture_url: None,
-            email: None,
-            phone: None,
-            created_at: 0,
-            last_seen: None,
-            public_key_fingerprint: None,
-            privacy: None,
-            verified: false,
+        Ok(Response::new(proto::GetUserProfileResponse {
+            profile: Some(proto::UserProfile {
+                user_id: user.id.to_string(),
+                username: None, // server no longer stores plaintext username
+                display_name: None,
+                bio: None,
+                profile_picture_url: None,
+                email: None,
+                phone: None,
+                created_at: 0,
+                last_seen: None,
+                public_key_fingerprint: None,
+                privacy: None,
+                verified: false,
+            }),
         }))
     }
 
     async fn update_user_profile(
         &self,
         request: Request<proto::UpdateUserProfileRequest>,
-    ) -> Result<Response<proto::UserProfile>, Status> {
+    ) -> Result<Response<proto::UpdateUserProfileResponse>, Status> {
         let req = request.into_inner();
         let user_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
@@ -139,19 +141,21 @@ impl UserService for UserGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(proto::UserProfile {
-            user_id: updated.id.to_string(),
-            username: None, // server no longer stores plaintext username
-            display_name: None,
-            bio: None,
-            profile_picture_url: None,
-            email: None,
-            phone: None,
-            created_at: 0,
-            last_seen: None,
-            public_key_fingerprint: None,
-            privacy: None,
-            verified: false,
+        Ok(Response::new(proto::UpdateUserProfileResponse {
+            profile: Some(proto::UserProfile {
+                user_id: updated.id.to_string(),
+                username: None, // server no longer stores plaintext username
+                display_name: None,
+                bio: None,
+                profile_picture_url: None,
+                email: None,
+                phone: None,
+                created_at: 0,
+                last_seen: None,
+                public_key_fingerprint: None,
+                privacy: None,
+                verified: false,
+            }),
         }))
     }
 

@@ -154,7 +154,7 @@ message InboxRequest {
 
 // ConversationType - Type of conversation
 enum ConversationType {
-  // Unscpecified type (must be 0)
+  // Unspecified type (must be 0)
   CONVERSATION_TYPE_UNSPECIFIED = 0;
 
   // Direct 1-to-1 conversation

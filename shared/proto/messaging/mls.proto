@@ -61,7 +61,7 @@ message MLSApplicationMessage {
 
 // MLSContentType - Type of application content
 enum MLSContentType {
-  // Unscpecified content (must be 0)
+  // Unspecified content (must be 0)
   MLS_CONTENT_TYPE_UNSPECIFIED = 0;
 
   // Regular text/media message
@@ -115,7 +115,7 @@ message MLSProposal {
 
 // MLSProposalType - Type of group change proposal
 enum MLSProposalType {
-  // Unscpecified proposal (must be 0)
+  // Unspecified proposal (must be 0)
   MLS_PROPOSAL_TYPE_UNSPECIFIED = 0;
 
   // Add member
@@ -344,7 +344,7 @@ message GroupMessageId {
 
 // MLSCipherSuite - Supported MLS cipher suites
 enum MLSCipherSuite {
-  // Unscpecified cipher suite (must be 0)
+  // Unspecified cipher suite (must be 0)
   MLS_CIPHER_SUITE_UNSPECIFIED = 0;
 
   // MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
