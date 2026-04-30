@@ -4,31 +4,30 @@ package shared.proto.services.v1;
 
 import "services/auth_service.proto"; // PushProvider, PushEnvironment
 
-// NotificationService - отвечает за управление push-уведомлениями
-// и отправку "слепых" уведомлений (privacy-preserving notifications).
+// NotificationService - manages push notifications and privacy-preserving blind notifications.
 service NotificationService {
-  // Отправляет обобщенное, сохраняющее приватность уведомление,
-  // чтобы сообщить о новой активности, не раскрывая содержания.
+  // SendBlindNotification - send a generalized, privacy-preserving notification
+  // to inform the recipient about new activity without revealing its content.
   rpc SendBlindNotification(SendBlindNotificationRequest) returns (SendBlindNotificationResponse);
-  
-  // Регистрация device token для push-уведомлений (APNs/FCM)
+
+  // RegisterDeviceToken - register a device push token (APNs/FCM)
   rpc RegisterDeviceToken(RegisterDeviceTokenRequest) returns (RegisterDeviceTokenResponse);
-  
-  // Удаление device token (при выходе с устройства)
+
+  // UnregisterDeviceToken - remove a device push token on logout
   rpc UnregisterDeviceToken(UnregisterDeviceTokenRequest) returns (UnregisterDeviceTokenResponse);
-  
-  // Обновление настроек уведомлений для устройства
+
+  // UpdateNotificationPreferences - update notification settings for a device
   rpc UpdateNotificationPreferences(UpdateNotificationPreferencesRequest) returns (UpdateNotificationPreferencesResponse);
 
-  // Регистрация VoIP token (APNs VoIP) — используется для входящих звонков (CallKit),
-  // когда приложение в фоне/убито.
+  // RegisterVoipToken - register APNs VoIP token (PKPushRegistry)
+  // Used for incoming calls via CallKit when the app is backgrounded or killed.
   rpc RegisterVoipToken(RegisterVoipTokenRequest) returns (RegisterVoipTokenResponse);
 
-  // Удаление VoIP token (при выходе с устройства).
+  // UnregisterVoipToken - remove VoIP token on logout
   rpc UnregisterVoipToken(UnregisterVoipTokenRequest) returns (UnregisterVoipTokenResponse);
 
-  // Внутренний RPC: отправить VoIP push о входящем звонке (APNs VoIP).
-  // Вызывается signaling-service когда callee оффлайн.
+  // SendVoipIncomingCall - internal RPC: deliver an APNs VoIP push for an incoming call.
+  // Called by signaling-service when the callee is offline.
   rpc SendVoipIncomingCall(SendVoipIncomingCallRequest) returns (SendVoipIncomingCallResponse);
 }
 
@@ -36,28 +35,28 @@ service NotificationService {
 // SendBlindNotification Messages
 // ============================================================================
 
-// Запрос на отправку "слепого" уведомления
+// Request to send a blind (privacy-preserving) notification
 message SendBlindNotificationRequest {
-  // ID пользователя-получателя.
+  // Recipient user ID.
   string user_id = 1;
 
-  // Опционально: новое количество для бейджа на иконке приложения.
-  // Показывает число непрочитанных событий, но не их содержание.
+  // Optional: new badge count for the app icon.
+  // Indicates the number of unread events without revealing content.
   optional int32 badge_count = 2;
 
-  // Опционально: Тип активности (например, "new_message", "new_call").
-  // Клиент может использовать это для отображения обобщенного текста,
-  // например "Новое сообщение" или "Входящий вызов", не раскрывая деталей.
+  // Optional: activity type hint (e.g., "new_message", "new_call").
+  // Client may use this to display a generic label such as "New message" or
+  // "Incoming call" without exposing any details.
   optional string activity_type = 3;
 
-  // Опционально: opaque UUID чата для deep-link на конкретный чат.
-  // Не раскрывает контент или участников.
+  // Optional: opaque conversation UUID for deep-linking to a specific chat.
+  // Does not reveal content or participants.
   optional string conversation_id = 4;
 }
 
-// Ответ после постановки уведомления в очередь
+// Response after enqueueing the notification
 message SendBlindNotificationResponse {
-  // true, если уведомление было успешно поставлено в очередь.
+  // true if the notification was successfully enqueued.
   bool success = 1;
 }
 
@@ -65,34 +64,34 @@ message SendBlindNotificationResponse {
 // Device Token Registration Messages
 // ============================================================================
 
-// Запрос на регистрацию device token
+// Request to register a device push token
 message RegisterDeviceTokenRequest {
-  // Device token (APNs для iOS, FCM для Android)
+  // Device token (APNs for iOS, FCM for Android)
   string device_token = 1;
-  
-  // Опционально: имя устройства (для отображения в настройках)
+
+  // Optional: human-readable device name (displayed in settings)
   optional string device_name = 2;
-  
-  // Фильтр уведомлений
+
+  // Notification filter
   NotificationFilter notification_filter = 3;
 
-  // ID устройства из Keychain — стабильный идентификатор для upsert.
-  // Позволяет обновить токен при его ротации, не создавая дубликат.
+  // Stable device ID from Keychain — used as upsert key.
+  // Allows token rotation without creating a duplicate entry.
   string device_id = 4;
 
-  // Провайдер push-уведомлений
+  // Push notification provider
   PushProvider provider = 5;
 
-  // Окружение APNs (sandbox для debug-сборок, production для релиза)
+  // APNs environment (sandbox for debug builds, production for release)
   PushEnvironment environment = 6;
 }
 
-// Ответ на регистрацию device token
+// Response to device token registration
 message RegisterDeviceTokenResponse {
-  // true, если токен успешно зарегистрирован
+  // true if the token was successfully registered
   bool success = 1;
-  
-  // ID зарегистрированного токена (для последующего управления)
+
+  // Assigned token ID (for subsequent management)
   optional string token_id = 2;
 }
 
@@ -100,15 +99,15 @@ message RegisterDeviceTokenResponse {
 // Device Token Unregistration Messages
 // ============================================================================
 
-// Запрос на удаление device token
+// Request to remove a device push token
 message UnregisterDeviceTokenRequest {
-  // Device token для удаления
+  // Device token to remove
   string device_token = 1;
 }
 
-// Ответ на удаление device token
+// Response to device token removal
 message UnregisterDeviceTokenResponse {
-  // true, если токен успешно удалён
+  // true if the token was successfully removed
   bool success = 1;
 }
 
@@ -116,21 +115,21 @@ message UnregisterDeviceTokenResponse {
 // Notification Preferences Messages
 // ============================================================================
 
-// Запрос на обновление настроек уведомлений
+// Request to update notification preferences
 message UpdateNotificationPreferencesRequest {
-  // Device token для которого обновляются настройки
+  // Device token whose preferences are being updated
   string device_token = 1;
-  
-  // Фильтр уведомлений
+
+  // Notification filter
   NotificationFilter notification_filter = 2;
-  
-  // Включены ли уведомления для этого устройства
+
+  // Whether notifications are enabled for this device
   bool enabled = 3;
 }
 
-// Ответ на обновление настроек
+// Response to preference update
 message UpdateNotificationPreferencesResponse {
-  // true, если настройки успешно обновлены
+  // true if preferences were successfully updated
   bool success = 1;
 }
 
@@ -138,24 +137,24 @@ message UpdateNotificationPreferencesResponse {
 // Common Enums and Types
 // ============================================================================
 
-// Фильтр уведомлений - определяет какие события вызывают видимое уведомление
+// NotificationFilter - controls which events trigger a visible notification
 enum NotificationFilter {
-  // Не указан (по умолчанию silent)
+  // Unspecified (defaults to silent)
   NOTIFICATION_FILTER_UNSPECIFIED = 0;
-  
-  // Только "слепые" уведомления (без текста, только бейдж)
+
+  // Silent notifications only (no text, badge only)
   NOTIFICATION_FILTER_SILENT = 1;
-  
-  // Все уведомления видимые
+
+  // All notifications visible
   NOTIFICATION_FILTER_VISIBLE_ALL = 2;
-  
-  // Только direct messages
+
+  // Direct messages only
   NOTIFICATION_FILTER_VISIBLE_DM = 3;
-  
-  // Только упоминания (@mention)
+
+  // Mentions (@mention) only
   NOTIFICATION_FILTER_VISIBLE_MENTIONS = 4;
-  
-  // Только от контактов
+
+  // Messages from contacts only
   NOTIFICATION_FILTER_VISIBLE_CONTACTS = 5;
 }
 
@@ -164,10 +163,10 @@ enum NotificationFilter {
 // ============================================================================
 
 message RegisterVoipTokenRequest {
-  // APNs VoIP token (PKPushRegistry)
+  // APNs VoIP token (from PKPushRegistry)
   string voip_token = 1;
 
-  // Stable device ID for upsert (Keychain UUID).
+  // Stable device ID for upsert (Keychain UUID)
   string device_id = 2;
 
   // Platform string: "ios" | "macos"

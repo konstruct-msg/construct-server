@@ -8,10 +8,10 @@ import "core/pagination.proto";
 // UserService - User profile & contact management
 service UserService {
   // GetUserProfile - Fetch user profile
-  rpc GetUserProfile(GetUserProfileRequest) returns (UserProfile);
+  rpc GetUserProfile(GetUserProfileRequest) returns (GetUserProfileResponse);
 
   // UpdateUserProfile - Update own profile
-  rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UserProfile);
+  rpc UpdateUserProfile(UpdateUserProfileRequest) returns (UpdateUserProfileResponse);
 
   // UpdateProfilePicture - Upload profile picture
   rpc UpdateProfilePicture(UpdateProfilePictureRequest) returns (UpdateProfilePictureResponse);
@@ -27,10 +27,10 @@ service UserService {
 
   // GetBlockedUsers - List blocked users
   rpc GetBlockedUsers(GetBlockedUsersRequest) returns (GetBlockedUsersResponse);
-  
+
   // DeleteAccount - Delete user account (GDPR right to be forgotten)
   rpc DeleteAccount(DeleteAccountRequest) returns (DeleteAccountResponse);
-  
+
   // ExportUserData - Export user data (GDPR data portability)
   rpc ExportUserData(ExportUserDataRequest) returns (ExportUserDataResponse);
 
@@ -136,7 +136,7 @@ message PrivacySettings {
 // PrivacyLevel - Privacy visibility level
 enum PrivacyLevel {
   // Unknown level (must be 0)
-  PRIVACY_LEVEL_UNSPECFIED = 0;
+  PRIVACY_LEVEL_UNSPECIFIED = 0;
 
   // Everyone can see
   PRIVACY_LEVEL_EVERYONE = 1;
@@ -155,6 +155,16 @@ enum PrivacyLevel {
 message GetUserProfileRequest {
   // User ID to fetch
   string user_id = 1;
+}
+
+// GetUserProfileResponse - wraps the fetched profile
+message GetUserProfileResponse {
+  UserProfile profile = 1;
+}
+
+// UpdateUserProfileResponse - wraps the updated profile
+message UpdateUserProfileResponse {
+  UserProfile profile = 1;
 }
 
 // UpdateUserProfileRequest - Update profile
@@ -304,7 +314,6 @@ message DeviceCapability {
   uint32 capabilities = 3;
 }
 
-
 // ============================================================================
 // DeleteAccount Messages
 // ============================================================================
@@ -313,7 +322,7 @@ message DeviceCapability {
 message DeleteAccountRequest {
   // Confirmation token (e.g. "DELETE" or user-entered code)
   string confirmation = 1;
-  
+
   // Optional: reason for deletion (for analytics, not stored)
   optional string reason = 2;
 }
@@ -322,10 +331,10 @@ message DeleteAccountRequest {
 message DeleteAccountResponse {
   // true if account was successfully deleted
   bool success = 1;
-  
+
   // Message for UI
   string message = 2;
-  
+
   // Scheduled deletion timestamp (for grace period)
   optional int64 scheduled_deletion_at = 3;
 }
@@ -338,7 +347,7 @@ message DeleteAccountResponse {
 message ExportUserDataRequest {
   // Format for export (json, csv, etc.)
   optional string format = 1;
-  
+
   // Include message history (if stored)
   optional bool include_messages = 2;
 }
@@ -347,10 +356,10 @@ message ExportUserDataRequest {
 message ExportUserDataResponse {
   // Export data (JSON encoded user profile, devices, etc.)
   string data = 1;
-  
+
   // Export format
   string format = 2;
-  
+
   // Export timestamp
   int64 exported_at = 3;
 }
@@ -418,10 +427,10 @@ message FindUserResponse {
 
 // Action enum for responding to a contact request.
 enum ContactRequestAction {
-  CONTACT_REQUEST_ACTION_UNSPECIFIED  = 0;
-  CONTACT_REQUEST_ACTION_ACCEPT       = 1;  // Accept; creates mutual contact_link
+  CONTACT_REQUEST_ACTION_UNSPECIFIED = 0;
+  CONTACT_REQUEST_ACTION_ACCEPT = 1; // Accept; creates mutual contact_link
   CONTACT_REQUEST_ACTION_DECLINE_BLOCK = 2; // Decline + block sender
-  CONTACT_REQUEST_ACTION_SPAM_BLOCK   = 3;  // Report spam + block sender
+  CONTACT_REQUEST_ACTION_SPAM_BLOCK = 3; // Report spam + block sender
 }
 
 // A contact request as seen by the recipient.
@@ -495,5 +504,3 @@ message RespondToContactRequestResponse {
   // Final status after the action: "accepted", "declined_blocked", or "spam_blocked".
   string status = 1;
 }
-
-
