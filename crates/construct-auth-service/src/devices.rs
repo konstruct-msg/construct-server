@@ -169,6 +169,18 @@ fn default_crypto_suite() -> String {
     "Curve25519+Ed25519".to_string()
 }
 
+/// Binary public keys — used internally after base64 decoding at the REST/JSON boundary,
+/// or received directly from the gRPC path as proto `bytes` fields.
+#[derive(Debug, Clone)]
+pub struct DevicePublicKeysBinary {
+    pub verifying_key: Vec<u8>,
+    pub identity_public: Vec<u8>,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
+    /// Crypto suite identifier (e.g., "Curve25519+Ed25519")
+    pub crypto_suite: String,
+}
+
 /// Request to register a new device (privacy-focused)
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -248,26 +260,24 @@ pub struct UpdateProfileRequest {
 // Registration Endpoint
 // ============================================================================
 
-/// POST /api/v1/register/v2
+/// Core registration logic with binary key inputs.
 ///
-/// Register a new device with passwordless authentication.
-///
-/// Security:
-/// - Validates device_id format (16 hex chars)
-/// - Checks device_id uniqueness
-/// - Validates public keys (base64, correct lengths)
-/// - PoW validation (Argon2id with 8 leading zeros)
-/// - Rate limiting: Configurable via MAX_REGISTRATIONS_PER_HOUR (default: 3)
-pub async fn register_device_v2(
-    State(app_context): State<Arc<AppContext>>,
+/// Called from:
+/// - REST path (via `handlers.rs` which decodes base64 at the JSON boundary)
+/// - gRPC path (proto `bytes` fields are already `Vec<u8>`)
+pub async fn register_device_core(
+    app_context: Arc<AppContext>,
     headers: HeaderMap,
-    Json(request): Json<RegisterDeviceRequest>,
+    username: Option<String>,
+    device_id: String,
+    keys: DevicePublicKeysBinary,
+    pow_solution: PowSolution,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     let client_ip = extract_client_ip(&headers);
 
     tracing::info!(
-        device_id = %request.device_id,
-        username = ?request.username,
+        device_id = %device_id,
+        username = ?username,
         client_ip = %client_ip,
         "Device registration attempt (username will be normalized to lowercase)"
     );
@@ -305,50 +315,43 @@ pub async fn register_device_v2(
     }
 
     // 1. Validate device_id format (32 lowercase hex characters = 16 bytes)
-    if request.device_id.len() != 32 {
+    if device_id.len() != 32 {
         return Err(AppError::Validation(
             "device_id must be exactly 32 characters (16 bytes hex)".to_string(),
         ));
     }
 
-    if !request.device_id.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !device_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::Validation(
             "device_id must be hex characters (0-9a-f)".to_string(),
         ));
     }
 
-    if request.device_id.to_lowercase() != request.device_id {
+    if device_id.to_lowercase() != device_id {
         return Err(AppError::Validation(
             "device_id must be lowercase".to_string(),
         ));
     }
 
     // 2. Validate and normalize username (optional)
-    // - Convert to lowercase (users can type "Ninshi" but it stores as "ninshi")
-    // - Must be 3-20 chars, alphanumeric + underscore only
-    let normalized_username = request.username.as_ref().map(|u| u.to_lowercase());
+    let normalized_username = username.as_ref().map(|u| u.to_lowercase());
 
-    if let Some(ref username) = normalized_username {
-        if username.len() < 3 || username.len() > 20 {
+    if let Some(ref uname) = normalized_username {
+        if uname.len() < 3 || uname.len() > 20 {
             return Err(AppError::Validation(
                 "username must be 3-20 characters".to_string(),
             ));
         }
 
-        if !username
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if !uname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(AppError::Validation(
                 "username can only contain letters, numbers, and underscores".to_string(),
             ));
         }
     }
 
-    // 3. Decode and validate public keys
-    let verifying_key = BASE64
-        .decode(&request.public_keys.verifying_key)
-        .map_err(|_| AppError::Validation("verifying_key must be valid base64".to_string()))?;
+    // 3. Validate public keys (already decoded from base64)
+    let verifying_key = keys.verifying_key;
 
     if verifying_key.len() != 32 {
         return Err(AppError::Validation(
@@ -356,22 +359,9 @@ pub async fn register_device_v2(
         ));
     }
 
-    let identity_public = BASE64
-        .decode(&request.public_keys.identity_public)
-        .map_err(|_| AppError::Validation("identity_public must be valid base64".to_string()))?;
-
-    let signed_prekey_public = BASE64
-        .decode(&request.public_keys.signed_prekey_public)
-        .map_err(|_| {
-            AppError::Validation("signed_prekey_public must be valid base64".to_string())
-        })?;
-
-    // Decode and validate signed_prekey_signature (Ed25519, 64 bytes)
-    let signed_prekey_signature = BASE64
-        .decode(&request.public_keys.signed_prekey_signature)
-        .map_err(|_| {
-            AppError::Validation("signed_prekey_signature must be valid base64".to_string())
-        })?;
+    let identity_public = keys.identity_public;
+    let signed_prekey_public = keys.signed_prekey_public;
+    let signed_prekey_signature = keys.signed_prekey_signature;
 
     if signed_prekey_signature.len() != 64 {
         return Err(AppError::Validation(
@@ -380,7 +370,6 @@ pub async fn register_device_v2(
     }
 
     // Cryptographically verify signed_prekey_signature.
-    // Message = "KonstruktX3DH-v1" || [0x00, 0x01] (ClassicX25519) || signed_prekey_public
     {
         let vk_bytes: [u8; 32] = verifying_key
             .as_slice()
@@ -389,11 +378,11 @@ pub async fn register_device_v2(
         let vk = VerifyingKey::from_bytes(&vk_bytes).map_err(|_| {
             AppError::Validation("verifying_key is not a valid Ed25519 key".to_string())
         })?;
-        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().unwrap(); // already checked len == 64
+        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().unwrap();
         let sig = Ed25519Signature::from_bytes(&sig_bytes);
         let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
         msg.extend_from_slice(b"KonstruktX3DH-v1");
-        msg.extend_from_slice(&[0x00, 0x01]); // ClassicX25519
+        msg.extend_from_slice(&[0x00, 0x01]);
         msg.extend_from_slice(&signed_prekey_public);
         vk.verify(&msg, &sig).map_err(|_| {
             AppError::Validation("signed_prekey_signature verification failed".to_string())
@@ -403,12 +392,12 @@ pub async fn register_device_v2(
     // 4. Verify device_id matches identity_public (SHA256 first 16 bytes = 32 hex chars)
     let computed_device_id = {
         let hash = Sha256::digest(&identity_public);
-        hex::encode(&hash[0..16]) // First 16 bytes = 32 hex chars
+        hex::encode(&hash[0..16])
     };
 
-    if computed_device_id != request.device_id {
+    if computed_device_id != device_id {
         tracing::warn!(
-            provided = %request.device_id,
+            provided = %device_id,
             computed = %computed_device_id,
             "device_id mismatch with identity_public"
         );
@@ -418,12 +407,12 @@ pub async fn register_device_v2(
     }
 
     // 5. Check if device_id already exists
-    if db::device_exists(&app_context.db_pool, &request.device_id)
+    if db::device_exists(&app_context.db_pool, &device_id)
         .await
         .unwrap_or(false)
     {
         tracing::warn!(
-            device_id = %request.device_id,
+            device_id = %device_id,
             "Attempted to register existing device_id"
         );
         return Err(AppError::Conflict("Device already exists".to_string()));
@@ -431,52 +420,47 @@ pub async fn register_device_v2(
 
     // 6. Verify PoW solution
     let pow_challenge =
-        construct_db::get_pow_challenge(&app_context.db_pool, &request.pow_solution.challenge)
+        construct_db::get_pow_challenge(&app_context.db_pool, &pow_solution.challenge)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to fetch PoW challenge: {}", e)))?
             .ok_or_else(|| AppError::Validation("Invalid or expired PoW challenge".to_string()))?;
 
-    // Check challenge not expired
     if pow_challenge.expires_at < chrono::Utc::now() {
         return Err(AppError::Validation("PoW challenge expired".to_string()));
     }
 
-    // Check challenge not already used
     if pow_challenge.used {
         return Err(AppError::Validation(
             "PoW challenge already used".to_string(),
         ));
     }
 
-    // Verify PoW solution
     if !construct_pow::verify_pow_solution(
-        &request.pow_solution.challenge,
-        request.pow_solution.nonce,
-        &request.pow_solution.hash,
+        &pow_solution.challenge,
+        pow_solution.nonce,
+        &pow_solution.hash,
         pow_challenge.difficulty as u32,
     ) {
         tracing::warn!(
-            device_id = %request.device_id,
-            challenge = %request.pow_solution.challenge,
-            nonce = %request.pow_solution.nonce,
+            device_id = %device_id,
+            challenge = %pow_solution.challenge,
+            nonce = %pow_solution.nonce,
             "Invalid PoW solution"
         );
         return Err(AppError::Validation("Invalid PoW solution".to_string()));
     }
 
-    // Mark challenge as used (prevent reuse)
-    construct_db::mark_challenge_used(&app_context.db_pool, &request.pow_solution.challenge)
+    construct_db::mark_challenge_used(&app_context.db_pool, &pow_solution.challenge)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
 
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();
 
-    // Convert suite_id to crypto_suites JSONB format
-    let crypto_suites = format!(r#"["{}"]"#, request.public_keys.crypto_suite);
+    let crypto_suites = format!(r#"["{}"]"#, keys.crypto_suite);
 
     let device_data = CreateDeviceData {
-        device_id: request.device_id.clone(),
+        device_id: device_id.clone(),
         server_hostname: server_hostname.clone(),
         verifying_key,
         identity_public,
@@ -485,22 +469,20 @@ pub async fn register_device_v2(
         crypto_suites,
     };
 
-    // Compute username hash (if username provided) — plaintext is never stored.
     let username_hash_opt: Option<Vec<u8>> = normalized_username
         .as_ref()
         .filter(|s| !s.is_empty())
-        .map(|username| {
+        .map(|uname| {
             let secret = &app_context.config.security.username_hmac_secret;
-            hash_username(secret, username)
+            hash_username(secret, uname)
         });
 
-    // Check if username hash already exists (before attempting DB insert)
     if let Some(ref hash) = username_hash_opt
         && let Ok(Some(_existing_user)) =
             db::get_user_by_username_hash(&app_context.db_pool, hash).await
     {
         tracing::warn!(
-            device_id = %request.device_id,
+            device_id = %device_id,
             "Registration failed: username already taken"
         );
         return Err(AppError::Conflict("Username is already taken".to_string()));
@@ -513,7 +495,6 @@ pub async fn register_device_v2(
     )
     .await
     .map_err(|e| {
-        // Check for unique_identity_public constraint violation (PostgreSQL SQLSTATE 23505)
         if let Some(sqlx::Error::Database(db_err)) = e.downcast_ref::<sqlx::Error>()
             && db_err.code().as_deref() == Some("23505")
             && db_err
@@ -521,7 +502,7 @@ pub async fn register_device_v2(
                 .is_some_and(|c| c.contains("identity_public"))
         {
             tracing::warn!(
-                device_id = %request.device_id,
+                device_id = %device_id,
                 "Registration failed: identity key already registered"
             );
             return AppError::Conflict("Identity key already registered by another device".into());
@@ -532,7 +513,7 @@ pub async fn register_device_v2(
 
     tracing::info!(
         user_id = %user.id,
-        device_id = %request.device_id,
+        device_id = %device_id,
         has_username = user.username_hash.is_some(),
         "User + device registered successfully (passwordless)"
     );
@@ -540,7 +521,7 @@ pub async fn register_device_v2(
     // 8. Generate JWT tokens with device_id
     let (access_token, _, exp_timestamp) = app_context
         .auth_manager
-        .create_token_for_device(&user.id, Some(&request.device_id))
+        .create_token_for_device(&user.id, Some(&device_id))
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create access token");
             AppError::Unknown(e)
@@ -548,13 +529,12 @@ pub async fn register_device_v2(
 
     let (refresh_token, refresh_jti, _) = app_context
         .auth_manager
-        .create_refresh_token_for_device(&user.id, Some(&request.device_id))
+        .create_refresh_token_for_device(&user.id, Some(&device_id))
         .map_err(|e| {
             tracing::error!(error = %e, "Failed to create refresh token");
             AppError::Unknown(e)
         })?;
 
-    // Store refresh token in Redis
     {
         let mut queue = app_context.queue.lock().await;
         let refresh_ttl_seconds =
@@ -565,7 +545,6 @@ pub async fn register_device_v2(
             .await
         {
             tracing::error!(error = %e, "Failed to store refresh token");
-            // Continue anyway - token was created, just not tracked
         }
     }
 
@@ -588,33 +567,20 @@ pub async fn register_device_v2(
 // Device Authentication Endpoint
 // ============================================================================
 
-/// POST /api/v1/auth/device
+/// Core authentication logic with binary signature.
 ///
-/// Authenticate existing device using Ed25519 signature.
-///
-/// Request:
-/// ```json
-/// {
-///   "device_id": "2a68bbf6425855903b7ba45aa570f91a",
-///   "timestamp": 1738700000,
-///   "signature": "base64_ed25519_signature"
-/// }
-/// ```
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthenticateDeviceRequest {
-    pub device_id: String,
-    pub timestamp: i64,
-    pub signature: String, // base64-encoded Ed25519 signature
-}
-
-pub async fn authenticate_device(
-    State(app_context): State<Arc<AppContext>>,
-    Json(request): Json<AuthenticateDeviceRequest>,
+/// Called from:
+/// - REST path (via `handlers.rs` which decodes base64 at the JSON boundary)
+/// - gRPC path (proto `bytes` field is already `Vec<u8>`)
+pub async fn authenticate_device_core(
+    app_context: Arc<AppContext>,
+    device_id: String,
+    timestamp: i64,
+    signature: Vec<u8>,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     // 1. Validate timestamp (±5 minutes window)
     let now = chrono::Utc::now().timestamp();
-    let time_diff = (now - request.timestamp).abs();
+    let time_diff = (now - timestamp).abs();
     if time_diff > 300 {
         return Err(AppError::validation(
             "Timestamp expired (must be within ±5 minutes)",
@@ -624,7 +590,7 @@ pub async fn authenticate_device(
     // 1b. Check if this device_id is temporarily blocked (brute force protection)
     {
         let mut queue = app_context.queue.lock().await;
-        if let Ok(Some(reason)) = queue.is_user_blocked(&request.device_id).await {
+        if let Ok(Some(reason)) = queue.is_user_blocked(&device_id).await {
             return Err(AppError::auth(format!(
                 "Authentication temporarily blocked: {}",
                 reason
@@ -633,7 +599,7 @@ pub async fn authenticate_device(
     }
 
     // 2. Find device in database
-    let device = db::get_device_by_id(&app_context.db_pool, &request.device_id)
+    let device = db::get_device_by_id(&app_context.db_pool, &device_id)
         .await
         .map_err(|e| AppError::internal(format!("Database error: {}", e)))?
         .ok_or_else(|| AppError::auth("Device not found"))?;
@@ -644,14 +610,10 @@ pub async fn authenticate_device(
     }
 
     // 4. Verify Ed25519 signature
-    // Message format: "{device_id}{timestamp}"
-    let message = format!("{}{}", request.device_id, request.timestamp);
+    let message = format!("{}{}", device_id, timestamp);
     let message_bytes = message.as_bytes();
 
-    // Decode signature from base64
-    let signature_bytes = BASE64
-        .decode(&request.signature)
-        .map_err(|_| AppError::validation("Invalid signature encoding"))?;
+    let signature_bytes = signature;
 
     if signature_bytes.len() != 64 {
         return Err(AppError::validation(
@@ -659,7 +621,6 @@ pub async fn authenticate_device(
         ));
     }
 
-    // Verify with verifying_key from database
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     let verifying_key = VerifyingKey::from_bytes(
@@ -680,8 +641,7 @@ pub async fn authenticate_device(
     verifying_key
         .verify(message_bytes, &signature)
         .map_err(|_| {
-            // Track failed authentication attempts for brute force protection
-            let device_id = request.device_id.clone();
+            let did = device_id.clone();
             let max_failed = app_context.config.security.max_failed_login_attempts;
             let block_duration = app_context
                 .config
@@ -690,12 +650,12 @@ pub async fn authenticate_device(
             let queue = app_context.queue.clone();
             tokio::spawn(async move {
                 let mut q = queue.lock().await;
-                if let Ok(count) = q.increment_failed_login_count(&device_id).await
+                if let Ok(count) = q.increment_failed_login_count(&did).await
                     && count >= max_failed
                 {
                     let _ = q
                         .block_user_temporarily(
-                            &device_id,
+                            &did,
                             block_duration,
                             &format!("Too many failed auth attempts ({}/{})", count, max_failed),
                         )
@@ -708,7 +668,7 @@ pub async fn authenticate_device(
     // Reset failed attempt counter on successful authentication
     {
         let mut queue = app_context.queue.lock().await;
-        let _ = queue.reset_failed_login_count(&request.device_id).await;
+        let _ = queue.reset_failed_login_count(&device_id).await;
     }
 
     // 5. Get user_id from device
@@ -733,7 +693,6 @@ pub async fn authenticate_device(
             AppError::Unknown(e)
         })?;
 
-    // Store refresh token in Redis
     {
         let mut queue = app_context.queue.lock().await;
         let refresh_ttl_seconds =
@@ -744,14 +703,13 @@ pub async fn authenticate_device(
             .await
         {
             tracing::error!(error = %e, "Failed to store refresh token");
-            // Continue anyway - token was created, just not tracked
         }
     }
 
     let expires_in = (exp_timestamp - now) as u64;
 
     tracing::info!(
-        device_id = %request.device_id,
+        device_id = %device_id,
         user_id = %user_id,
         "Device authenticated successfully"
     );
