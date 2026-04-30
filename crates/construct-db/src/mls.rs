@@ -942,3 +942,211 @@ pub async fn get_group_retention_days(pool: &DbPool, group_id: Uuid) -> Result<i
 
     Ok(days as i32)
 }
+
+// ============================================================================
+// Group Topics — Phase 6
+// ============================================================================
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TopicRow {
+    pub topic_id: Uuid,
+    pub group_id: Uuid,
+    pub encrypted_name: Vec<u8>,
+    pub sort_order: i16,
+    pub created_at: DateTime<Utc>,
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+/// Returns the count of active (non-archived) topics for a group.
+pub async fn count_active_topics(pool: &DbPool, group_id: Uuid) -> Result<i64> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM group_topics WHERE group_id = $1 AND archived_at IS NULL",
+    )
+    .bind(group_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to count active topics")?;
+    Ok(count)
+}
+
+/// Inserts a new topic. Returns the created row.
+pub async fn create_topic_record(
+    pool: &DbPool,
+    group_id: Uuid,
+    encrypted_name: &[u8],
+    sort_order: i16,
+    device_id: &str,
+) -> Result<TopicRow> {
+    sqlx::query_as::<_, TopicRow>(
+        r#"
+        INSERT INTO group_topics (group_id, encrypted_name, sort_order, created_by_device_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING topic_id, group_id, encrypted_name, sort_order, created_at, archived_at
+        "#,
+    )
+    .bind(group_id)
+    .bind(encrypted_name)
+    .bind(sort_order)
+    .bind(device_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to create topic")
+}
+
+/// Fetches topics for a group, optionally including archived ones.
+pub async fn list_topic_records(
+    pool: &DbPool,
+    group_id: Uuid,
+    include_archived: bool,
+) -> Result<Vec<TopicRow>> {
+    if include_archived {
+        sqlx::query_as::<_, TopicRow>(
+            r#"
+            SELECT topic_id, group_id, encrypted_name, sort_order, created_at, archived_at
+              FROM group_topics
+             WHERE group_id = $1
+             ORDER BY sort_order ASC, created_at ASC
+            "#,
+        )
+        .bind(group_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list topics")
+    } else {
+        sqlx::query_as::<_, TopicRow>(
+            r#"
+            SELECT topic_id, group_id, encrypted_name, sort_order, created_at, archived_at
+              FROM group_topics
+             WHERE group_id = $1
+               AND archived_at IS NULL
+             ORDER BY sort_order ASC, created_at ASC
+            "#,
+        )
+        .bind(group_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list active topics")
+    }
+}
+
+/// Archives a topic. Returns the archived_at timestamp.
+/// Returns an error if topic does not belong to the group or is already archived.
+pub async fn archive_topic_record(
+    pool: &DbPool,
+    group_id: Uuid,
+    topic_id: Uuid,
+) -> Result<DateTime<Utc>> {
+    let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+        r#"
+        UPDATE group_topics
+           SET archived_at = NOW()
+         WHERE topic_id = $1
+           AND group_id  = $2
+           AND archived_at IS NULL
+         RETURNING archived_at
+        "#,
+    )
+    .bind(topic_id)
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to archive topic")?;
+
+    row.map(|(ts,)| ts)
+        .ok_or_else(|| anyhow::anyhow!("Topic not found, wrong group, or already archived"))
+}
+
+// ============================================================================
+// Group Invite Links — Phase 6
+// ============================================================================
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct InviteLinkRow {
+    pub token: String,
+    pub group_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub max_uses: Option<i32>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct InviteLinkResolveRow {
+    pub group_id: Uuid,
+    pub max_uses: Option<i32>,
+    pub use_count: i32,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Creates an invite link with the provided `token`.
+/// The caller is responsible for generating a cryptographically random 32-char hex token.
+pub async fn create_invite_link_record(
+    pool: &DbPool,
+    token: &str,
+    group_id: Uuid,
+    device_id: &str,
+    max_uses: Option<i32>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<InviteLinkRow> {
+    sqlx::query_as::<_, InviteLinkRow>(
+        r#"
+        INSERT INTO group_invite_links
+            (token, group_id, created_by_device_id, max_uses, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING token, group_id, created_at, max_uses, expires_at
+        "#,
+    )
+    .bind(token)
+    .bind(group_id)
+    .bind(device_id)
+    .bind(max_uses)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .context("Failed to create invite link")
+}
+
+/// Marks an invite link as revoked. Returns the revoked_at timestamp.
+/// Errors if token is not found or does not belong to the group.
+pub async fn revoke_invite_link_record(
+    pool: &DbPool,
+    group_id: Uuid,
+    token: &str,
+) -> Result<DateTime<Utc>> {
+    let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+        r#"
+        UPDATE group_invite_links
+           SET revoked_at = NOW()
+         WHERE token    = $1
+           AND group_id  = $2
+           AND revoked_at IS NULL
+         RETURNING revoked_at
+        "#,
+    )
+    .bind(token)
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to revoke invite link")?;
+
+    row.map(|(ts,)| ts)
+        .ok_or_else(|| anyhow::anyhow!("Invite link not found, wrong group, or already revoked"))
+}
+
+/// Looks up an invite link by token. Returns None if token does not exist.
+pub async fn resolve_invite_link_record(
+    pool: &DbPool,
+    token: &str,
+) -> Result<Option<InviteLinkResolveRow>> {
+    sqlx::query_as::<_, InviteLinkResolveRow>(
+        r#"
+        SELECT group_id, max_uses, use_count, expires_at, revoked_at
+          FROM group_invite_links
+         WHERE token = $1
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to resolve invite link")
+}
