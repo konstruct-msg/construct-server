@@ -3,6 +3,7 @@ syntax = "proto3";
 package shared.proto.services.v1;
 
 import "services/auth_service.proto"; // PushProvider, PushEnvironment
+import "signaling/webrtc.proto";     // CallType
 
 // NotificationService - manages push notifications and privacy-preserving blind notifications.
 service NotificationService {
@@ -201,8 +202,7 @@ message SendVoipIncomingCallRequest {
   string call_id = 2;
   string caller_id = 3;
   string caller_name = 4;
-  // "audio" | "video"
-  string call_type = 5;
+  shared.proto.signaling.v1.CallType call_type = 5;
   // Unix ms
   int64 offered_at = 6;
 }

@@ -433,6 +433,15 @@ enum ContactRequestAction {
   CONTACT_REQUEST_ACTION_SPAM_BLOCK = 3; // Report spam + block sender
 }
 
+// Status of a sent contact request.
+enum ContactRequestStatus {
+  CONTACT_REQUEST_STATUS_UNSPECIFIED = 0;
+  CONTACT_REQUEST_STATUS_PENDING = 1;
+  CONTACT_REQUEST_STATUS_ACCEPTED = 2;
+  CONTACT_REQUEST_STATUS_DECLINED_BLOCKED = 3;
+  CONTACT_REQUEST_STATUS_SPAM_BLOCKED = 4;
+}
+
 // A contact request as seen by the recipient.
 message IncomingContactRequest {
   // Opaque request ID (UUID).
@@ -457,8 +466,8 @@ message SentContactRequest {
   // Opaque request ID.
   string request_id = 1;
 
-  // Current status: "pending", "accepted", "declined_blocked", "spam_blocked".
-  string status = 2;
+  // Current status.
+  ContactRequestStatus status = 2;
 
   // Unix timestamp when sent.
   int64 created_at = 3;
@@ -474,8 +483,8 @@ message SendContactRequestResponse {
   // Opaque request ID assigned by the server.
   string request_id = 1;
 
-  // Status immediately after sending: always "pending".
-  string status = 2;
+  // Status immediately after sending: always PENDING.
+  ContactRequestStatus status = 2;
 }
 
 // GetContactRequests
@@ -501,6 +510,6 @@ message RespondToContactRequestRequest {
 }
 
 message RespondToContactRequestResponse {
-  // Final status after the action: "accepted", "declined_blocked", or "spam_blocked".
-  string status = 1;
+  // Final status after the action.
+  ContactRequestStatus status = 1;
 }
