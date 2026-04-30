@@ -483,7 +483,7 @@ impl SignalingService for SignalingServiceImpl {
                         call_id: call_id.clone(),
                         caller_id: caller_id.clone(),
                         caller_name: caller_name.clone(),
-                        call_type: call_type_to_str(req.call_type).to_string(),
+                        call_type: req.call_type,
                         offered_at: unix_millis(),
                     };
                     tokio::spawn(async move {
@@ -504,7 +504,7 @@ impl SignalingService for SignalingServiceImpl {
                 call_id: call_id.clone(),
                 caller_id: caller_id.clone(),
                 caller_name: caller_name.clone(),
-                call_type: call_type_to_str(req.call_type).to_string(),
+                call_type: req.call_type,
                 offered_at: unix_millis(),
             };
             tokio::spawn(async move {
@@ -783,7 +783,7 @@ async fn handle_outbound_signal(
                         call_id: call_id.clone(),
                         caller_id: user_id.to_string(),
                         caller_name: caller_name.clone(),
-                        call_type: call_type_to_str(offer.call_type).to_string(),
+                        call_type: offer.call_type,
                         offered_at: offer.offered_at,
                     };
                     tokio::spawn(async move {

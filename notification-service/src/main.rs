@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 // Import generated proto types
 use construct_server_shared::shared::proto::services::v1 as proto;
+use construct_server_shared::shared::proto::signaling::v1::CallType as SignalingCallType;
 use proto::notification_service_server::{NotificationService, NotificationServiceServer};
 
 mod core;
@@ -242,12 +243,23 @@ impl NotificationService for NotificationGrpcService {
         let user_id = Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("Invalid user_id"))?;
 
+        let call_type_str = match req.call_type() {
+            SignalingCallType::Audio => "audio",
+            SignalingCallType::Video => "video",
+            SignalingCallType::Screen => "screen",
+            SignalingCallType::Group => "group",
+            SignalingCallType::Unspecified => {
+                return Err(Status::invalid_argument("call_type is required"));
+            }
+        }
+        .to_string();
+
         let input = core::SendVoipIncomingCallInput {
             user_id,
             call_id: req.call_id,
             caller_id: req.caller_id,
             caller_name: req.caller_name,
-            call_type: req.call_type,
+            call_type: call_type_str,
             offered_at: req.offered_at,
         };
 
