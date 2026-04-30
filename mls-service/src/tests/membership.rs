@@ -7,6 +7,24 @@ use super::test_helpers::{
     create_metadata, create_test_device, create_test_group_in_db, get_test_db,
     publish_test_key_package,
 };
+
+fn make_accept_invite_request(
+    group_id: uuid::Uuid,
+    invite_id: uuid::Uuid,
+    invitee_signing_key: &ed25519_dalek::SigningKey,
+) -> proto::AcceptGroupInviteRequest {
+    let timestamp = Utc::now().timestamp();
+    let message = format!("CONSTRUCT_GROUP_JOIN:{group_id}:{invite_id}:{timestamp}");
+    let signature = invitee_signing_key.sign(message.as_bytes());
+    proto::AcceptGroupInviteRequest {
+        group_id: group_id.to_string(),
+        invite_id: invite_id.to_string(),
+        acceptance_signature: signature.to_bytes().to_vec(),
+        signature_timestamp: timestamp,
+        mls_commit: vec![],
+        new_ratchet_tree: vec![],
+    }
+}
 use crate::service::MlsServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, mls_service_server::MlsService,
@@ -635,4 +653,179 @@ async fn test_remove_member_cannot_remove_creator() {
     let result = service.remove_member(request).await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::FailedPrecondition);
+}
+
+// ── AcceptGroupInvite: Epoch Continuity ───────────────────────────────────────
+
+/// Verifies that accepting a stale invite (invite.epoch != group.epoch) returns
+/// EPOCH_MISMATCH, while an invite with the current epoch succeeds.
+#[tokio::test]
+async fn test_accept_group_invite_epoch_mismatch_rejected() {
+    let db = get_test_db().await;
+    let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+    let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+    // Advance the group epoch so it no longer matches the invite's epoch=0
+    sqlx::query("UPDATE mls_groups SET epoch = 5 WHERE group_id = $1")
+        .bind(group_id)
+        .execute(db.as_ref())
+        .await
+        .expect("Failed to advance epoch");
+
+    let (invitee_user_id, invitee_device_id, invitee_signing_key) = create_test_device(&db).await;
+    let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+    let invite_id = Uuid::new_v4();
+    let now = Utc::now();
+    sqlx::query(
+        r#"INSERT INTO group_invites
+               (invite_id, group_id, target_device_id, mls_welcome, key_package_ref, epoch, invited_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, 0, $6, $7)"#,
+    )
+    .bind(invite_id)
+    .bind(group_id)
+    .bind(&invitee_device_id)
+    .bind(vec![10u8, 20, 30])
+    .bind(&kp_ref)
+    .bind(now)
+    .bind(now + chrono::Duration::hours(1))
+    .execute(db.as_ref())
+    .await
+    .expect("Failed to create stale invite");
+
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
+    let meta = create_metadata(&invitee_user_id, &invitee_device_id);
+
+    let result = service
+        .accept_group_invite(Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            make_accept_invite_request(group_id, invite_id, &invitee_signing_key),
+        ))
+        .await;
+
+    assert!(result.is_err(), "Stale invite should be rejected");
+    let status = result.unwrap_err();
+    // Server returns FailedPrecondition with EPOCH_MISMATCH message
+    assert_eq!(
+        status.code(),
+        tonic::Code::FailedPrecondition,
+        "Expected FailedPrecondition"
+    );
+    assert!(
+        status.message().contains("EPOCH_MISMATCH") || status.message().contains("epoch"),
+        "Error should mention epoch mismatch, got: {}",
+        status.message()
+    );
+}
+
+/// Fresh invite (epoch matches current group epoch) should succeed.
+#[tokio::test]
+async fn test_accept_group_invite_epoch_match_succeeds() {
+    let db = get_test_db().await;
+    let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
+    let group_id = create_test_group_in_db(&db, &admin_device_id).await;
+
+    let (invitee_user_id, invitee_device_id, invitee_signing_key) = create_test_device(&db).await;
+    let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
+
+    let invite_id = Uuid::new_v4();
+    let now = Utc::now();
+    // Invite epoch=0 matches group epoch=0 (from create_test_group_in_db)
+    sqlx::query(
+        r#"INSERT INTO group_invites
+               (invite_id, group_id, target_device_id, mls_welcome, key_package_ref, epoch, invited_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, 0, $6, $7)"#,
+    )
+    .bind(invite_id)
+    .bind(group_id)
+    .bind(&invitee_device_id)
+    .bind(vec![10u8, 20, 30])
+    .bind(&kp_ref)
+    .bind(now)
+    .bind(now + chrono::Duration::hours(1))
+    .execute(db.as_ref())
+    .await
+    .expect("Failed to create invite");
+
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
+    let meta = create_metadata(&invitee_user_id, &invitee_device_id);
+
+    let response = service
+        .accept_group_invite(Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            make_accept_invite_request(group_id, invite_id, &invitee_signing_key),
+        ))
+        .await
+        .expect("AcceptGroupInvite with matching epoch should succeed");
+
+    let inner = response.into_inner();
+    assert!(inner.success);
+    assert_eq!(
+        inner.new_epoch, 1,
+        "Epoch should increment to 1 after join commit"
+    );
+}
+
+// ── B3 Regression: GetPendingInvites device ownership ────────────────────────
+// B3: if req.device_id differs from authenticated device, server must reject it.
+
+#[tokio::test]
+async fn test_get_pending_invites_cross_device_rejected_in_membership() {
+    let db = get_test_db().await;
+    let (attacker_user_id, attacker_device_id, _) = create_test_device(&db).await;
+    let (_victim_user_id, victim_device_id, _) = create_test_device(&db).await;
+
+    let group_id = create_test_group_in_db(&db, &attacker_device_id).await;
+
+    let now = Utc::now();
+    sqlx::query(
+        r#"INSERT INTO group_invites
+               (invite_id, group_id, target_device_id, mls_welcome, key_package_ref, epoch, invited_at, expires_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, 0, $5, $6)"#,
+    )
+    .bind(group_id)
+    .bind(&victim_device_id)
+    .bind(vec![0xdeu8, 0xad])
+    .bind(vec![0u8; 32])
+    .bind(now)
+    .bind(now + chrono::Duration::hours(1))
+    .execute(db.as_ref())
+    .await
+    .expect("Failed to create invite for victim");
+
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
+    let meta = create_metadata(&attacker_user_id, &attacker_device_id);
+
+    let result = service
+        .get_pending_invites(Request::from_parts(
+            meta,
+            tonic::Extensions::default(),
+            proto::GetPendingInvitesRequest {
+                device_id: victim_device_id.clone(),
+                cursor: None,
+                limit: 10,
+            },
+        ))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "B3: cross-device invite fetch must be rejected"
+    );
+    let code = result.unwrap_err().code();
+    assert!(
+        code == tonic::Code::PermissionDenied || code == tonic::Code::NotFound,
+        "Expected PermissionDenied or NotFound, got {code:?}"
+    );
 }
