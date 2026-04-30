@@ -24,7 +24,10 @@ async fn test_invite_to_group_success() {
     let (invitee_user_id, invitee_device_id, _) = create_test_device(&db).await;
     let kp_ref = publish_test_key_package(&db, invitee_user_id, &invitee_device_id).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&invitee_user_id, &admin_device_id);
 
     let request = Request::from_parts(
@@ -69,7 +72,10 @@ async fn test_invite_to_group_non_admin() {
 
     let kp_ref = publish_test_key_package(&db, member_user_id, &member_device_id).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
     let request = Request::from_parts(
@@ -132,7 +138,10 @@ async fn test_accept_group_invite_success() {
     );
     let signature = invitee_signing_key.sign(message.as_bytes());
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
     let request = Request::from_parts(
@@ -202,7 +211,10 @@ async fn test_accept_group_invite_wrong_device() {
     );
     let signature = wrong_signing_key.sign(message.as_bytes());
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     // Use wrong_device_id in metadata
     let meta = create_metadata(&invitee_user_id, &wrong_device_id);
 
@@ -260,7 +272,10 @@ async fn test_decline_group_invite_success() {
     .await
     .expect("Failed to create invite");
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
     let request = Request::from_parts(
@@ -327,7 +342,10 @@ async fn test_decline_group_invite_wrong_device() {
     .await
     .expect("Failed to create invite");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     // Use other device to decline
     let meta = create_metadata(&other_user_id, &other_device_id);
 
@@ -382,7 +400,10 @@ async fn test_get_pending_invites_success() {
         .expect("Failed to create invite");
     }
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
     let request = Request::from_parts(
@@ -425,7 +446,10 @@ async fn test_leave_group_success() {
     .await
     .expect("Failed to add member");
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
     let request = Request::from_parts(
@@ -464,7 +488,10 @@ async fn test_leave_group_creator_cannot_leave() {
     let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &admin_device_id).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
     let request = Request::from_parts(
@@ -501,7 +528,10 @@ async fn test_remove_member_success() {
     .await
     .expect("Failed to add member");
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     // Sign admin proof
@@ -575,7 +605,10 @@ async fn test_remove_member_cannot_remove_creator() {
     .await
     .expect("Failed to add other admin");
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 
     // Try to remove creator

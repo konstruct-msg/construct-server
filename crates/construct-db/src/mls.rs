@@ -798,3 +798,147 @@ pub async fn get_key_package_count(
         .context("Failed to count MLS key packages for user")
     }
 }
+
+// ============================================================================
+// Group Messages — Phase 5
+// ============================================================================
+
+/// Payload for inserting a new group message.
+pub struct NewGroupMessage {
+    pub group_id: Uuid,
+    pub epoch: i64,
+    pub mls_ciphertext: Vec<u8>,
+    pub sequence_number: i64,
+    pub client_message_id: Option<String>,
+    pub thread_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Row returned from group_messages.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct GroupMessageRow {
+    pub message_id: Uuid,
+    pub group_id: Uuid,
+    pub epoch: i64,
+    pub mls_ciphertext: Vec<u8>,
+    pub sequence_number: i64,
+    pub thread_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
+    pub sent_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Atomically allocates the next sequence number for a group.
+/// Returns the new value (starts at 0 for the first message).
+pub async fn next_group_message_sequence(pool: &DbPool, group_id: Uuid) -> Result<i64> {
+    let (seq,): (i64,) = sqlx::query_as(
+        "UPDATE mls_groups SET last_sequence = last_sequence + 1 \
+         WHERE group_id = $1 RETURNING last_sequence",
+    )
+    .bind(group_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to allocate group message sequence")?;
+
+    Ok(seq)
+}
+
+/// Inserts a group message. Returns the inserted row.
+/// If `client_message_id` was already used for this group, returns the
+/// existing row (idempotent / safe to retry).
+pub async fn insert_group_message(pool: &DbPool, msg: &NewGroupMessage) -> Result<GroupMessageRow> {
+    // ON CONFLICT DO UPDATE with a no-op update lets us use RETURNING to
+    // retrieve the existing row on duplicate client_message_id without error.
+    sqlx::query_as::<_, GroupMessageRow>(
+        r#"
+        INSERT INTO group_messages
+            (group_id, epoch, mls_ciphertext, sequence_number,
+             client_message_id, thread_id, topic_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (group_id, client_message_id)
+            WHERE client_message_id IS NOT NULL
+            DO UPDATE SET group_id = EXCLUDED.group_id
+        RETURNING message_id, group_id, epoch, mls_ciphertext, sequence_number,
+                  thread_id, topic_id, sent_at, expires_at
+        "#,
+    )
+    .bind(msg.group_id)
+    .bind(msg.epoch)
+    .bind(&msg.mls_ciphertext)
+    .bind(msg.sequence_number)
+    .bind(&msg.client_message_id)
+    .bind(msg.thread_id)
+    .bind(msg.topic_id)
+    .bind(msg.expires_at)
+    .fetch_one(pool)
+    .await
+    .context("Failed to insert group message")
+}
+
+/// Fetches messages after `after_sequence` (exclusive) for a group,
+/// ordered by sequence_number ASC, limited to `limit` rows.
+/// Optionally filtered to a specific `topic_id`.
+pub async fn list_group_messages(
+    pool: &DbPool,
+    group_id: Uuid,
+    after_sequence: Option<i64>,
+    limit: i64,
+    topic_id: Option<Uuid>,
+) -> Result<Vec<GroupMessageRow>> {
+    let after = after_sequence.unwrap_or(-1);
+
+    if let Some(tid) = topic_id {
+        sqlx::query_as::<_, GroupMessageRow>(
+            r#"
+            SELECT message_id, group_id, epoch, mls_ciphertext, sequence_number,
+                   thread_id, topic_id, sent_at, expires_at
+              FROM group_messages
+             WHERE group_id        = $1
+               AND sequence_number > $2
+               AND topic_id        = $3
+               AND expires_at      > NOW()
+             ORDER BY sequence_number ASC
+             LIMIT $4
+            "#,
+        )
+        .bind(group_id)
+        .bind(after)
+        .bind(tid)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list group messages by topic")
+    } else {
+        sqlx::query_as::<_, GroupMessageRow>(
+            r#"
+            SELECT message_id, group_id, epoch, mls_ciphertext, sequence_number,
+                   thread_id, topic_id, sent_at, expires_at
+              FROM group_messages
+             WHERE group_id        = $1
+               AND sequence_number > $2
+               AND expires_at      > NOW()
+             ORDER BY sequence_number ASC
+             LIMIT $3
+            "#,
+        )
+        .bind(group_id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list group messages")
+    }
+}
+
+/// Returns the `message_retention_days` for a group (to compute expires_at).
+pub async fn get_group_retention_days(pool: &DbPool, group_id: Uuid) -> Result<i32> {
+    let (days,): (i16,) =
+        sqlx::query_as("SELECT message_retention_days FROM mls_groups WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_one(pool)
+            .await
+            .context("Failed to get group retention days")?;
+
+    Ok(days as i32)
+}
