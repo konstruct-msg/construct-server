@@ -17,7 +17,10 @@ async fn test_submit_commit_success() {
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &admin_device_id).await;
 
-    let service = MlsServiceImpl { db: db.clone() };
+    let service = MlsServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     let request = Request::from_parts(
@@ -72,7 +75,10 @@ async fn test_submit_commit_epoch_mismatch() {
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
     let group_id = create_test_group_in_db(&db, &admin_device_id).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     // Try to submit with wrong epoch (1 instead of 0)
@@ -102,7 +108,10 @@ async fn test_submit_commit_non_member() {
     // Create non-member
     let (non_member_user_id, non_member_device_id, _) = create_test_device(&db).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 
     let request = Request::from_parts(
@@ -152,7 +161,10 @@ async fn test_fetch_commits_success() {
         .expect("Failed to insert commit");
     }
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
     let request = Request::from_parts(
@@ -185,7 +197,10 @@ async fn test_fetch_commits_non_member() {
     // Create non-member
     let (non_member_user_id, non_member_device_id, _) = create_test_device(&db).await;
 
-    let service = MlsServiceImpl { db };
+    let service = MlsServiceImpl {
+        db,
+        hub: crate::service::GroupHub::new(),
+    };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 
     let request = Request::from_parts(
