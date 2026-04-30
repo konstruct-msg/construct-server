@@ -565,7 +565,6 @@ impl UserService for UserGrpcService {
         }
     }
 
-<<<<<<< HEAD
     async fn send_contact_request(
         &self,
         request: Request<proto::SendContactRequestRequest>,
