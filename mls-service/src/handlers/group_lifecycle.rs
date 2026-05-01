@@ -19,6 +19,34 @@ pub(crate) async fn create_group(
     let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
+    // Rate limit: 10 groups per day per user
+    // Note: Full rate limiting requires Redis connection.
+    // This is a simplified check using DB-only approach.
+    let rate_limit_key = format!("rate_limit:group_create:{}", user_id);
+
+    // Check if user has exceeded rate limit in last 24 hours
+    let recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rate_limit_events 
+         WHERE key = $1 AND created_at > NOW() - INTERVAL '24 hours'",
+    )
+    .bind(&rate_limit_key)
+    .fetch_one(svc.db.as_ref())
+    .await
+    .unwrap_or(0);
+
+    if recent_count >= 10 {
+        return Err(Status::resource_exhausted(
+            "Rate limit exceeded: maximum 10 groups per day",
+        ));
+    }
+
+    // Record this attempt
+    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
+        .bind(&rate_limit_key)
+        .execute(svc.db.as_ref())
+        .await
+        .ok();
+
     // 1. Validate group_id (must be valid UUID)
     let group_id = Uuid::parse_str(&req.group_id)
         .map_err(|_| Status::invalid_argument("Invalid group_id (must be UUID)"))?;
