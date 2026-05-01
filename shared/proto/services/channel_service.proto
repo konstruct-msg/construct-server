@@ -1,0 +1,400 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// ============================================================================
+// ChannelService - Public/Private Broadcast Channels
+// ============================================================================
+//
+// Channel model:
+//   - PUBLIC channels: anyone can subscribe, posts visible to all subscribers
+//   - PRIVATE channels: invite-only, requires subscription approval
+//   - Posts encrypted with Sender Keys (one-to-many encryption)
+//   - Comments via MLS groups (each post can have a comment group)
+//
+// Key properties:
+//   - One-to-many broadcast (1 admin, N subscribers)
+//   - Sender Key distribution on subscribe
+//   - Posts auto-deleted after retention period (default 90 days)
+//   - Maximum subscribers: 100,000 per channel
+//   - Comment groups max 500 participants
+//
+// Privacy model:
+//   Server stores: channel metadata (encrypted), sender keys (encrypted)
+//   Server cannot read: post content, comment content (E2EE)
+//   Subscriber list visible to channel admins only
+//
+// ============================================================================
+
+service ChannelService {
+  // =========================================================================
+  // Channel Lifecycle
+  // =========================================================================
+
+  // CreateChannel - Create new channel (PUBLIC or PRIVATE)
+  // Creator becomes owner. Metadata is encrypted (opaque to server).
+  rpc CreateChannel(CreateChannelRequest) returns (CreateChannelResponse);
+
+  // GetChannel - Fetch channel public metadata
+  // PUBLIC: no auth required. PRIVATE: requires subscription.
+  rpc GetChannel(GetChannelRequest) returns (GetChannelResponse);
+
+  // UpdateChannel - Update channel metadata (owner only)
+  rpc UpdateChannel(UpdateChannelRequest) returns (UpdateChannelResponse);
+
+  // SetChannelVisibility - Toggle PUBLIC/PRIVATE (owner only)
+  rpc SetChannelVisibility(SetChannelVisibilityRequest) returns (SetChannelVisibilityResponse);
+
+  // DeleteChannel - Permanently delete channel (owner only)
+  // Deletes all posts, subscriber list, comment groups.
+  rpc DeleteChannel(DeleteChannelRequest) returns (DeleteChannelResponse);
+
+  // =========================================================================
+  // Subscription Management
+  // =========================================================================
+
+  // Subscribe - Subscribe to channel
+  // PUBLIC: instant. PRIVATE: requires invite link or approval.
+  // Returns encrypted Sender Key for post decryption.
+  rpc SubscribeChannel(SubscribeChannelRequest) returns (SubscribeChannelResponse);
+
+  // Unsubscribe - Unsubscribe from channel
+  // Removes from subscriber list. Optionally rotates Sender Key.
+  rpc UnsubscribeChannel(UnsubscribeChannelRequest) returns (UnsubscribeChannelResponse);
+
+  // ListSubscriptions - List channels user is subscribed to
+  rpc ListSubscriptions(ListSubscriptionsRequest) returns (ListSubscriptionsResponse);
+
+  // GetSubscriberCount - Get total subscriber count (public info)
+  rpc GetSubscriberCount(GetSubscriberCountRequest) returns (GetSubscriberCountResponse);
+
+  // =========================================================================
+  // Post Management
+  // =========================================================================
+
+  // PublishPost - Publish encrypted post to channel (admin only)
+  // Encrypted with Sender Key. Fan-out to Redis stream.
+  rpc PublishPost(PublishPostRequest) returns (PublishPostResponse);
+
+  // ListPosts - List posts in channel (subscribers only)
+  // Paginated, cursor-based. Filter by date range optional.
+  rpc ListPosts(ListPostsRequest) returns (ListPostsResponse);
+
+  // GetPost - Fetch single post by ID (subscribers only)
+  rpc GetPost(GetPostRequest) returns (GetPostResponse);
+
+  // DeletePost - Delete post (admin only)
+  rpc DeletePost(DeletePostRequest) returns (DeletePostResponse);
+
+  // =========================================================================
+  // Comment Groups (MLS-based)
+  // =========================================================================
+
+  // GetCommentGroup - Get or create MLS group for post comments
+  // First commenter triggers group creation. Returns group_id.
+  // Client then uses standard MLS join flow.
+  rpc GetCommentGroup(GetCommentGroupRequest) returns (GetCommentGroupResponse);
+
+  // =========================================================================
+  // Admin Management
+  // =========================================================================
+
+  // AddAdmin - Grant admin rights to subscriber (owner only)
+  rpc AddAdmin(AddAdminRequest) returns (AddAdminResponse);
+
+  // RemoveAdmin - Revoke admin rights (owner only)
+  rpc RemoveAdmin(RemoveAdminRequest) returns (RemoveAdminResponse);
+
+  // ListAdmins - List channel admins
+  rpc ListAdmins(ListAdminsRequest) returns (ListAdminsResponse);
+
+  // =========================================================================
+  // Invite Links (for PRIVATE channels)
+  // =========================================================================
+
+  // CreateInviteLink - Generate invite link for PRIVATE channel
+  rpc CreateInviteLink(ChannelServiceCreateInviteLinkRequest) returns (ChannelServiceCreateInviteLinkResponse);
+
+  // RevokeInviteLink - Revoke invite link
+  rpc RevokeInviteLink(ChannelServiceRevokeInviteLinkRequest) returns (ChannelServiceRevokeInviteLinkResponse);
+
+  // ResolveInviteLink - Public resolution (returns channel info + validity)
+  rpc ResolveInviteLink(ChannelServiceResolveInviteLinkRequest) returns (ChannelServiceResolveInviteLinkResponse);
+}
+
+// ============================================================================
+// Channel Lifecycle Messages
+// ============================================================================
+
+message CreateChannelRequest {
+  // PUBLIC or PRIVATE
+  ChannelVisibility visibility = 1;
+  // Encrypted channel metadata (name, description, etc.)
+  bytes encrypted_metadata = 2;
+  // Optional: max subscribers (0 = unlimited, max 100000)
+  uint32 max_subscribers = 3;
+  // Optional: post retention days (0 = default 90)
+  uint32 retention_days = 4;
+}
+
+message CreateChannelResponse {
+  string channel_id = 1;
+  int64 created_at = 2;
+}
+
+message GetChannelRequest {
+  string channel_id = 1;
+}
+
+message GetChannelResponse {
+  string channel_id = 1;
+  ChannelVisibility visibility = 2;
+  bytes encrypted_metadata = 3;
+  uint32 subscriber_count = 4;
+  int64 created_at = 5;
+  int64 updated_at = 6;
+  bool is_subscribed = 7;
+  bool is_admin = 8;
+}
+
+message UpdateChannelRequest {
+  string channel_id = 1;
+  bytes encrypted_metadata = 2;
+}
+
+message UpdateChannelResponse {
+  bool success = 1;
+  int64 updated_at = 2;
+}
+
+message SetChannelVisibilityRequest {
+  string channel_id = 1;
+  ChannelVisibility visibility = 2;
+}
+
+message SetChannelVisibilityResponse {
+  bool success = 1;
+}
+
+message DeleteChannelRequest {
+  string channel_id = 1;
+}
+
+message DeleteChannelResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Subscription Messages
+// ============================================================================
+
+message SubscribeChannelRequest {
+  string channel_id = 1;
+  // For PRIVATE channels: optional invite token
+  string invite_token = 2;
+}
+
+message SubscribeChannelResponse {
+  bool success = 1;
+  // Encrypted Sender Key (encrypted with device's identity key)
+  bytes encrypted_sender_key = 2;
+  int64 subscribed_at = 3;
+}
+
+message UnsubscribeChannelRequest {
+  string channel_id = 1;
+  // Optional: rotate Sender Key after unsubscribe (admin-only feature)
+  bool rotate_sender_key = 2;
+}
+
+message UnsubscribeChannelResponse {
+  bool success = 1;
+}
+
+message ListSubscriptionsRequest {
+  // Pagination cursor
+  string cursor = 1;
+  uint32 limit = 2;
+}
+
+message ListSubscriptionsResponse {
+  repeated ChannelInfo channels = 1;
+  string next_cursor = 2;
+}
+
+message GetSubscriberCountRequest {
+  string channel_id = 1;
+}
+
+message GetSubscriberCountResponse {
+  uint32 count = 1;
+}
+
+// ============================================================================
+// Post Messages
+// ============================================================================
+
+message PublishPostRequest {
+  string channel_id = 1;
+  // Encrypted post content (Sender Key encrypted)
+  bytes ciphertext = 2;
+  // Optional: thread_id for replies
+  string thread_id = 3;
+  // Optional: client-generated message ID for dedup
+  string client_message_id = 4;
+}
+
+message PublishPostResponse {
+  string post_id = 1;
+  int64 sent_at = 2;
+  uint64 sequence_number = 3;
+  int64 expires_at = 4;
+}
+
+message ListPostsRequest {
+  string channel_id = 1;
+  // Pagination cursor (sequence_number)
+  uint64 after_sequence = 2;
+  uint32 limit = 3;
+  // Optional: filter by thread_id
+  string thread_id = 4;
+  // Optional: time range
+  int64 since_timestamp = 5;
+  int64 until_timestamp = 6;
+}
+
+message ListPostsResponse {
+  repeated PostInfo posts = 1;
+  uint64 next_sequence = 2;
+  bool has_more = 3;
+}
+
+message GetPostRequest {
+  string post_id = 1;
+}
+
+message GetPostResponse {
+  PostInfo post = 1;
+}
+
+message DeletePostRequest {
+  string post_id = 1;
+}
+
+message DeletePostResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Comment Group Messages
+// ============================================================================
+
+message GetCommentGroupRequest {
+  string post_id = 1;
+}
+
+message GetCommentGroupResponse {
+  // MLS group_id for comments on this post
+  string group_id = 1;
+  // true if group was just created, false if already exists
+  bool created = 2;
+}
+
+// ============================================================================
+// Admin Messages
+// ============================================================================
+
+message AddAdminRequest {
+  string channel_id = 1;
+  string subscriber_device_id = 2;
+}
+
+message AddAdminResponse {
+  bool success = 1;
+}
+
+message RemoveAdminRequest {
+  string channel_id = 1;
+  string subscriber_device_id = 2;
+}
+
+message RemoveAdminResponse {
+  bool success = 1;
+}
+
+message ListAdminsRequest {
+  string channel_id = 1;
+}
+
+message ListAdminsResponse {
+  repeated string admin_device_ids = 1;
+}
+
+// ============================================================================
+// Invite Link Messages
+// ============================================================================
+
+message ChannelServiceCreateInviteLinkRequest {
+  string channel_id = 1;
+  // Max uses (0 = unlimited)
+  uint32 max_uses = 2;
+  // Expiry in seconds (0 = no expiry)
+  uint32 expires_in_seconds = 3;
+}
+
+message ChannelServiceCreateInviteLinkResponse {
+  string token = 1;
+  int64 created_at = 2;
+  int64 expires_at = 3;
+}
+
+message ChannelServiceRevokeInviteLinkRequest {
+  string channel_id = 1;
+  string token = 2;
+}
+
+message ChannelServiceRevokeInviteLinkResponse {
+  bool success = 1;
+  int64 revoked_at = 2;
+}
+
+message ChannelServiceResolveInviteLinkRequest {
+  string token = 1;
+}
+
+message ChannelServiceResolveInviteLinkResponse {
+  string channel_id = 1;
+  bytes encrypted_metadata = 2;
+  uint32 subscriber_count = 3;
+  bool valid = 4;
+  int64 expires_at = 5;
+}
+
+// ============================================================================
+// Common Types
+// ============================================================================
+
+enum ChannelVisibility {
+  CHANNEL_VISIBILITY_UNSPECIFIED = 0;
+  CHANNEL_VISIBILITY_PUBLIC = 1;
+  CHANNEL_VISIBILITY_PRIVATE = 2;
+}
+
+message ChannelInfo {
+  string channel_id = 1;
+  ChannelVisibility visibility = 2;
+  bytes encrypted_metadata = 3;
+  uint32 subscriber_count = 4;
+  int64 subscribed_at = 5;
+}
+
+message PostInfo {
+  string post_id = 1;
+  string channel_id = 2;
+  bytes ciphertext = 3;
+  uint64 sequence_number = 4;
+  int64 sent_at = 5;
+  int64 expires_at = 6;
+  string thread_id = 7;
+  string sender_device_id = 8;
+}

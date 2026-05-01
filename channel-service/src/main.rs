@@ -1,31 +1,14 @@
 // ============================================================================
-// MLS Service - RFC 9420 Group Messaging
+// Channel Service - Public/Private Broadcast Channels
 // ============================================================================
 //
-// Modularized structure:
-//   service.rs      - MlsServiceImpl struct
-//   helpers.rs      - Utility functions (metadata, Ed25519, admin checks)
-//   handlers/       - RPC handler implementations
-//     mod.rs        - Trait impl delegation
-//     group_lifecycle.rs - CreateGroup, GetGroupState, DissolveGroup
-//     membership.rs - Invite, Accept, Decline, Leave, Remove, Pending
-//     admin.rs      - DelegateAdmin, TransferOwnership
-//     mls_sync.rs   - SubmitCommit, FetchCommits
-//     key_packages.rs - Publish, Consume, Count
-//     messaging.rs  - SendGroupMessage, FetchGroupMessages, MessageStream (stubs)
-//     topics.rs     - Create/List/Archive Topic, Invite Links (stubs)
-//   tests/          - Integration tests
-//
-// Port: 50058
+// Port: 50061
 // ============================================================================
 
-mod cleanup;
 mod handlers;
 mod helpers;
 mod metrics;
 mod service;
-#[cfg(test)]
-mod tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,15 +17,15 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use construct_server_shared::shared::proto::services::v1::mls_service_server::MlsServiceServer;
-use service::MlsServiceImpl;
+use construct_server_shared::shared::proto::services::v1::channel_service_server::ChannelServiceServer;
+use service::ChannelServiceImpl;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mls_service=debug,tower_http=info".into()),
+                .unwrap_or_else(|_| "channel_service=debug,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -55,29 +38,17 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Arc::new(db);
 
-    // Start background cleanup worker
-    let cleanup_interval_hours: u64 = std::env::var("MLS_CLEANUP_INTERVAL_HOURS")
-        .unwrap_or_else(|_| "24".to_string())
-        .parse()
-        .unwrap_or(24);
-
-    let _cleanup_handle = cleanup::start_cleanup_worker((*db).clone(), cleanup_interval_hours);
-    info!(
-        interval_hours = cleanup_interval_hours,
-        "MLS cleanup worker started"
-    );
-
     let port: u16 = std::env::var("PORT")
-        .unwrap_or_else(|_| "50058".to_string())
+        .unwrap_or_else(|_| "50061".to_string())
         .parse()?;
     let grpc_bind_addr = format!("0.0.0.0:{}", port);
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_addr).await?;
 
-    info!("MLSService listening on {}", grpc_bind_addr);
+    info!("ChannelService listening on {}", grpc_bind_addr);
 
     // Small HTTP server for /health and /metrics
     let http_port: u16 = std::env::var("METRICS_PORT")
-        .unwrap_or_else(|_| "8097".into())
+        .unwrap_or_else(|_| "8098".into())
         .parse()?;
     let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
     tokio::spawn(async move {
@@ -90,15 +61,12 @@ async fn main() -> anyhow::Result<()> {
         let listener = construct_server_shared::mptcp_or_tcp_listener(&http_addr.to_string())
             .await
             .unwrap();
-        info!("MLSService HTTP/metrics listening on {}", http_addr);
+        info!("ChannelService HTTP/metrics listening on {}", http_addr);
         axum::serve(listener, app).await.unwrap();
     });
 
     Server::builder()
-        .add_service(MlsServiceServer::new(MlsServiceImpl {
-            db,
-            hub: service::GroupHub::new(),
-        }))
+        .add_service(ChannelServiceServer::new(ChannelServiceImpl { db }))
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;
 
