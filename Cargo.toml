@@ -13,6 +13,7 @@ members = [
     "delivery-worker",
     "key-service",
     "mls-service",
+    "channel-service",
     "sentinel-service",
     "signaling-service",
     # New modular crates

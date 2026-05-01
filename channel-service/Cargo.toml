@@ -1,8 +1,8 @@
 [package]
-name = "mls-service"
+name = "channel-service"
 version = "0.1.0"
 edition = "2021"
-description = "MLS Group Messaging Service for Construct Messenger (RFC 9420)"
+description = "Channel Service for Construct Messenger - Public/Private Broadcast Channels"
 license = "MIT"
 
 [dependencies]
@@ -27,10 +27,9 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Crypto
 sha2 = "0.10"
 hex = "0.4"
-
-# Crypto — Ed25519 for admin proof verification
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 
@@ -50,5 +49,5 @@ construct-rate-limit = { path = "../crates/construct-rate-limit" }
 construct-metrics = { path = "../crates/construct-metrics" }
 
 [[bin]]
-name = "mls-service"
+name = "channel-service"
 path = "src/main.rs"
