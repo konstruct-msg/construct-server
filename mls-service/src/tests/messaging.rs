@@ -1,6 +1,8 @@
 use tonic::Request;
 
-use super::test_helpers::{create_metadata, create_test_device, create_test_group_in_db, get_test_db};
+use super::test_helpers::{
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+};
 use construct_server_shared::shared::proto::services::v1 as proto;
 use construct_server_shared::shared::proto::services::v1::mls_service_server::MlsService;
 

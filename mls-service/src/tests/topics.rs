@@ -2,9 +2,13 @@ use chrono::Utc;
 use ed25519_dalek::Signer;
 use tonic::Request;
 
-use super::test_helpers::{create_metadata, create_test_device, create_test_group_in_db, get_test_db};
+use super::test_helpers::{
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+};
 use crate::service::MlsServiceImpl;
-use construct_server_shared::shared::proto::services::v1::{self as proto, mls_service_server::MlsService};
+use construct_server_shared::shared::proto::services::v1::{
+    self as proto, mls_service_server::MlsService,
+};
 
 // ── CreateTopic ───────────────────────────────────────────────────────
 
@@ -320,7 +324,10 @@ async fn test_archive_topic_success() {
 
     // Archive topic
     let timestamp = Utc::now().timestamp();
-    let message = format!("CONSTRUCT_ARCHIVE_TOPIC:{}:{}:{}", group_id, topic_id, timestamp);
+    let message = format!(
+        "CONSTRUCT_ARCHIVE_TOPIC:{}:{}:{}",
+        group_id, topic_id, timestamp
+    );
     let signature = signing_key.sign(message.as_bytes()).to_bytes();
 
     let archive_req = proto::ArchiveTopicRequest {
@@ -385,7 +392,10 @@ async fn test_archive_topic_non_admin() {
 
     // Try to archive as non-admin
     let timestamp = Utc::now().timestamp();
-    let message = format!("CONSTRUCT_ARCHIVE_TOPIC:{}:{}:{}", group_id, topic_id, timestamp);
+    let message = format!(
+        "CONSTRUCT_ARCHIVE_TOPIC:{}:{}:{}",
+        group_id, topic_id, timestamp
+    );
     let signature = signing_key.sign(message.as_bytes()).to_bytes();
 
     let archive_req = proto::ArchiveTopicRequest {
@@ -460,7 +470,7 @@ async fn test_create_invite_link_no_limits() {
 
     let req = proto::CreateInviteLinkRequest {
         group_id: group_id.to_string(),
-        max_uses: 0, // No limit
+        max_uses: 0,           // No limit
         expires_in_seconds: 0, // No expiry
         admin_proof: signature.to_vec(),
         signature_timestamp: timestamp,
@@ -557,7 +567,10 @@ async fn test_revoke_invite_link_success() {
 
     // Revoke invite link
     let timestamp = Utc::now().timestamp();
-    let message = format!("CONSTRUCT_REVOKE_INVITE_LINK:{}:{}:{}", group_id, token, timestamp);
+    let message = format!(
+        "CONSTRUCT_REVOKE_INVITE_LINK:{}:{}:{}",
+        group_id, token, timestamp
+    );
     let signature = signing_key.sign(message.as_bytes()).to_bytes();
 
     let revoke_req = proto::RevokeInviteLinkRequest {
@@ -590,7 +603,10 @@ async fn test_revoke_invite_link_not_found() {
     };
 
     let timestamp = Utc::now().timestamp();
-    let message = format!("CONSTRUCT_REVOKE_INVITE_LINK:{}:{}:{}", group_id, "nonexistent_token_12345678901234567890", timestamp);
+    let message = format!(
+        "CONSTRUCT_REVOKE_INVITE_LINK:{}:{}:{}",
+        group_id, "nonexistent_token_12345678901234567890", timestamp
+    );
     let signature = signing_key.sign(message.as_bytes()).to_bytes();
 
     let req = proto::RevokeInviteLinkRequest {
