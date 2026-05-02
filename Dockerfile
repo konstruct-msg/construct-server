@@ -31,6 +31,7 @@ COPY key-service ./key-service
 COPY mls-service ./mls-service
 COPY sentinel-service ./sentinel-service
 COPY signaling-service ./signaling-service
+COPY channel-service ./channel-service
 
 # Build all binaries in release mode
 RUN cargo build --release --bins
