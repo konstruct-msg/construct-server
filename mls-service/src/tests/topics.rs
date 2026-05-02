@@ -605,13 +605,13 @@ async fn test_revoke_invite_link_not_found() {
     let timestamp = Utc::now().timestamp();
     let message = format!(
         "CONSTRUCT_REVOKE_INVITE_LINK:{}:{}:{}",
-        group_id, "nonexistent_token_12345678901234567890", timestamp
+        group_id, "deadbeefcafebabe0123456789abcdef", timestamp
     );
     let signature = signing_key.sign(message.as_bytes()).to_bytes();
 
     let req = proto::RevokeInviteLinkRequest {
         group_id: group_id.to_string(),
-        token: "nonexistent_token_12345678901234567890".to_string(),
+        token: "deadbeefcafebabe0123456789abcdef".to_string(),
         admin_proof: signature.to_vec(),
         signature_timestamp: timestamp,
     };
@@ -729,7 +729,7 @@ async fn test_resolve_invite_link_not_found() {
     };
 
     let resolve_req = proto::ResolveInviteLinkRequest {
-        token: "nonexistent_token_12345678901234567890".to_string(),
+        token: "deadbeefcafebabe0123456789abcdef".to_string(),
     };
 
     let request = Request::new(resolve_req);
