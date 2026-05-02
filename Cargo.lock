@@ -206,7 +206,7 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "prost",
  "rand 0.10.1",
  "redis",
@@ -529,7 +529,7 @@ dependencies = [
  "futures-util",
  "hex",
  "lazy_static",
- "prometheus 0.13.4",
+ "prometheus",
  "prost",
  "rand 0.8.6",
  "serde_json",
@@ -715,7 +715,7 @@ dependencies = [
  "construct-types",
  "hex",
  "once_cell",
- "prometheus 0.14.0",
+ "prometheus",
  "rdkafka",
  "serde",
  "serde_json",
@@ -885,8 +885,8 @@ dependencies = [
 
 [[package]]
 name = "construct-ice"
-version = "2.3.0"
-source = "git+https://github.com/maximeliseyev/construct-ice.git?branch=main#e731188a28ce5c111c2f198a24f1169463bfb8bb"
+version = "2.3.1"
+source = "git+https://github.com/maximeliseyev/construct-ice.git?branch=main#4657fca703418b0f6ec237f3465dd049e4d8cf3e"
 dependencies = [
  "base64",
  "bytes",
@@ -929,7 +929,7 @@ version = "0.13.0"
 dependencies = [
  "anyhow",
  "once_cell",
- "prometheus 0.14.0",
+ "prometheus",
 ]
 
 [[package]]
@@ -1078,7 +1078,7 @@ dependencies = [
  "jsonwebtoken 10.3.0",
  "native-tls",
  "once_cell",
- "prometheus 0.14.0",
+ "prometheus",
  "prost",
  "prost-build",
  "prost-types",
@@ -1374,7 +1374,7 @@ dependencies = [
  "futures-util",
  "hex",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "redis",
  "reqwest",
  "rmp-serde",
@@ -1819,7 +1819,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "prost",
  "rand 0.10.1",
  "redis",
@@ -2306,7 +2306,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "rand 0.10.1",
  "redis",
  "reqwest",
@@ -2677,7 +2677,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "prost",
  "rand 0.10.1",
  "redis",
@@ -2740,7 +2740,7 @@ dependencies = [
  "futures-util",
  "hex",
  "lazy_static",
- "prometheus 0.13.4",
+ "prometheus",
  "prost",
  "rand 0.8.6",
  "serde_json",
@@ -2822,7 +2822,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "prost",
  "redis",
  "reqwest",
@@ -3417,21 +3417,6 @@ dependencies = [
 
 [[package]]
 name = "prometheus"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
-dependencies = [
- "cfg-if",
- "fnv",
- "lazy_static",
- "memchr",
- "parking_lot",
- "protobuf 2.28.0",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "prometheus"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ca5326d8d0b950a9acd87e6a3f94745394f62e4dae1b1ee22b2bc0c394af43a"
@@ -3443,7 +3428,7 @@ dependencies = [
  "memchr",
  "parking_lot",
  "procfs",
- "protobuf 3.7.2",
+ "protobuf",
  "thiserror 2.0.18",
 ]
 
@@ -3499,12 +3484,6 @@ checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost",
 ]
-
-[[package]]
-name = "protobuf"
-version = "2.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 
 [[package]]
 name = "protobuf"
@@ -5305,7 +5284,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "jsonwebtoken 10.3.0",
- "prometheus 0.14.0",
+ "prometheus",
  "redis",
  "reqwest",
  "serde",
