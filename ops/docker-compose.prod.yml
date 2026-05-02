@@ -57,8 +57,11 @@ services:
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      # HTTPS entrypoint
+      # HTTPS entrypoint (TCP for TLS/HTTP2 + UDP for QUIC/HTTP3)
       - "--entrypoints.websecure.address=:443"
+      # HTTP/3 (QUIC) — construct-engine connects over QUIC; Traefik terminates QUIC,
+      # forwards to Envoy as h2c (unchanged). Requires UDP 443 exposed below.
+      - "--entrypoints.websecure.http3=true"
       # 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
       # mobile clients that share one persistent connection for heartbeat + unary RPCs.
       # When the limit was exceeded Traefik sent GOAWAY, causing gRPC-swift to enter
@@ -77,7 +80,8 @@ services:
       - "--log.level=INFO"
     ports:
       - "80:80"
-      - "443:443"
+      - "443:443"        # TCP — TLS/HTTP1.1 + HTTP/2
+      - "443:443/udp"    # UDP — QUIC/HTTP3 (construct-engine)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik-certs:/certs
