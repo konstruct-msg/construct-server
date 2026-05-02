@@ -170,8 +170,8 @@ async fn test_accept_group_invite_success() {
             invite_id: invite_id.to_string(),
             acceptance_signature: signature.to_bytes().to_vec(),
             signature_timestamp: timestamp,
-            mls_commit: vec![],
-            new_ratchet_tree: vec![],
+            mls_commit: vec![1, 2, 3],
+            new_ratchet_tree: vec![4, 5, 6],
         },
     );
 
