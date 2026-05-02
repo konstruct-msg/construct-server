@@ -177,6 +177,14 @@ pub(crate) async fn accept_group_invite(
         ));
     }
 
+    // 3.5: Early epoch guard — reject stale invites before doing crypto work.
+    let current_epoch_early = get_group_epoch(svc.db.as_ref(), group_id).await?;
+    if invite_epoch != current_epoch_early {
+        return Err(Status::failed_precondition(
+            "EPOCH_MISMATCH: invite epoch is stale; group has advanced",
+        ));
+    }
+
     // 4. Validate mls_commit and new_ratchet_tree are present (B1 fix)
     if req.mls_commit.is_empty() {
         return Err(Status::invalid_argument("mls_commit is required"));
@@ -258,7 +266,7 @@ pub(crate) async fn accept_group_invite(
     // Validate the invite's epoch matches the current group epoch (staleness check)
     if invite_epoch != current_epoch {
         tx.rollback().await.ok();
-        return Err(Status::aborted(
+        return Err(Status::failed_precondition(
             "EPOCH_MISMATCH: invite epoch is stale; group has advanced",
         ));
     }
@@ -539,14 +547,7 @@ pub(crate) async fn remove_member(
         return Err(Status::not_found("Group dissolved"));
     }
 
-    // 5. Validate remove proposal is present (B2 fix: required for other members to update ratchet tree)
-    if req.mls_remove_proposal.is_empty() {
-        return Err(Status::invalid_argument(
-            "mls_remove_proposal is required; admin must supply a signed Remove Proposal",
-        ));
-    }
-
-    // 6. Verify target is a member
+    // 5. Verify target is a member
     let target_is_member =
         check_group_member(svc.db.as_ref(), group_id, &req.target_device_id).await?;
 
@@ -560,6 +561,13 @@ pub(crate) async fn remove_member(
 
     if target_is_creator {
         return Err(Status::failed_precondition("Cannot remove group creator"));
+    }
+
+    // 7. Validate remove proposal is present (B2 fix: required for other members to update ratchet tree)
+    if req.mls_remove_proposal.is_empty() {
+        return Err(Status::invalid_argument(
+            "mls_remove_proposal is required; admin must supply a signed Remove Proposal",
+        ));
     }
 
     // 7. Hard delete from group_members

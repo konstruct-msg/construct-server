@@ -85,8 +85,8 @@ pub(crate) async fn create_test_group_in_db(db: &sqlx::PgPool, device_id: &str) 
         r#"
             INSERT INTO mls_groups
                 (group_id, epoch, ratchet_tree, encrypted_group_context,
-                 max_members, message_retention_days, threads_enabled, created_at)
-            VALUES ($1, 0, $2, $3, 2048, 90, false, $4)
+                 max_members, message_retention_days, threads_enabled, created_at, last_sequence)
+            VALUES ($1, 0, $2, $3, 2048, 90, false, $4, 0)
             "#,
     )
     .bind(group_id)

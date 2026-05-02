@@ -69,7 +69,10 @@ pub(crate) async fn send_group_message(
     }
 
     // Caller must be a current member.
-    check_group_member(&svc.db, group_id, &device_id).await?;
+    let is_member = check_group_member(&svc.db, group_id, &device_id).await?;
+    if !is_member {
+        return Err(Status::permission_denied("NOT_MEMBER"));
+    }
 
     // Epoch validation: reject stale clients.
     let current_epoch = get_group_epoch(&svc.db, group_id).await?;
@@ -175,7 +178,10 @@ pub(crate) async fn fetch_group_messages(
         .parse::<Uuid>()
         .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
 
-    check_group_member(&svc.db, group_id, &device_id).await?;
+    let is_member = check_group_member(&svc.db, group_id, &device_id).await?;
+    if !is_member {
+        return Err(Status::permission_denied("NOT_MEMBER"));
+    }
 
     let limit = req.limit.clamp(1, 200) as i64;
 
