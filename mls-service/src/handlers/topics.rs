@@ -113,7 +113,10 @@ pub(crate) async fn list_topics(
         .parse::<Uuid>()
         .map_err(|_| Status::invalid_argument("Invalid group_id"))?;
 
-    check_group_member(&svc.db, group_id, &device_id).await?;
+    let is_member = check_group_member(&svc.db, group_id, &device_id).await?;
+    if !is_member {
+        return Err(Status::permission_denied("NOT_MEMBER"));
+    }
 
     let rows = list_topic_records(&svc.db, group_id, req.include_archived)
         .await

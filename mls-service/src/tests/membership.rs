@@ -21,8 +21,8 @@ fn make_accept_invite_request(
         invite_id: invite_id.to_string(),
         acceptance_signature: signature.to_bytes().to_vec(),
         signature_timestamp: timestamp,
-        mls_commit: vec![],
-        new_ratchet_tree: vec![],
+        mls_commit: vec![1, 2, 3],
+        new_ratchet_tree: vec![4, 5, 6],
     }
 }
 use crate::service::MlsServiceImpl;
@@ -475,7 +475,7 @@ async fn test_leave_group_success() {
         tonic::Extensions::default(),
         proto::LeaveGroupRequest {
             group_id: group_id.to_string(),
-            mls_remove_proposal: vec![],
+            mls_remove_proposal: vec![1, 2, 3],
         },
     );
 
@@ -566,7 +566,7 @@ async fn test_remove_member_success() {
         proto::RemoveMemberRequest {
             group_id: group_id.to_string(),
             target_device_id: member_device_id.clone(),
-            mls_remove_proposal: vec![],
+            mls_remove_proposal: vec![1, 2, 3],
             admin_proof: signature.to_bytes().to_vec(),
             signature_timestamp: timestamp,
             encrypted_reason: None,

@@ -292,12 +292,13 @@ async fn test_get_pending_invites_cross_device_rejected() {
     let now = chrono::Utc::now();
     sqlx::query(
         r#"INSERT INTO group_invites
-               (invite_id, group_id, target_device_id, mls_welcome, epoch, expires_at, invited_at)
-           VALUES (gen_random_uuid(), $1, $2, $3, 0, $4, $4)"#,
+               (invite_id, group_id, target_device_id, mls_welcome, key_package_ref, epoch, expires_at, invited_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, 0, $5, $5)"#,
     )
     .bind(group_id)
     .bind(&victim_device_id)
     .bind(b"welcome-blob".to_vec())
+    .bind(vec![0u8; 32])
     .bind(now + chrono::Duration::hours(1))
     .execute(db.as_ref())
     .await
