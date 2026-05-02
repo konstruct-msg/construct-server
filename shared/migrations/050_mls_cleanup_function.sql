@@ -1,4 +1,4 @@
--- Migration 041: MLS Cleanup Function + Rate Limit Events
+-- Migration 050: MLS Cleanup Function + Rate Limit Events
 -- Purpose: Automated cleanup of expired MLS data + Rate limiting support
 -- Run daily via pg_cron or application scheduler
 
@@ -163,6 +163,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Master cleanup function (calls all cleanup functions)
+-- DROP the old version (defined in migration 023 with RETURNS void)
+DROP FUNCTION IF EXISTS cleanup_mls_expired();
 CREATE OR REPLACE FUNCTION cleanup_mls_expired()
 RETURNS TABLE (
     operation TEXT,
