@@ -3,6 +3,7 @@
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -39,6 +40,14 @@ pub(crate) async fn create_test_device(db: &sqlx::PgPool) -> (Uuid, String, Sign
     let mut hasher = Sha256::new();
     hasher.update(verifying_key.as_bytes());
     let hash = hasher.finalize();
+    let _device_id = hex::encode(&hash[..16]);
+
+    // Generate random identity_public (unique per device — migration 041 added UNIQUE constraint)
+    let mut identity_public = vec![0u8; 32];
+    OsRng.fill_bytes(&mut identity_public);
+    let mut hasher = Sha256::new();
+    hasher.update(verifying_key.as_bytes());
+    let hash = hasher.finalize();
     let device_id = hex::encode(&hash[..16]);
 
     // Insert device
@@ -53,7 +62,7 @@ pub(crate) async fn create_test_device(db: &sqlx::PgPool) -> (Uuid, String, Sign
     .bind(&device_id)
     .bind(user_id)
     .bind(verifying_key.as_bytes().to_vec())
-    .bind(vec![0u8; 32])
+    .bind(identity_public)
     .bind(vec![0u8; 32])
     .bind(Utc::now())
     .execute(db)
