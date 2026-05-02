@@ -38,7 +38,7 @@ futures-util = "0.3"
 tokio-stream = "0.1"
 
 # Metrics
-prometheus = "0.13"
+prometheus = "0.14"
 lazy_static = "1.4"
 
 # Shared
