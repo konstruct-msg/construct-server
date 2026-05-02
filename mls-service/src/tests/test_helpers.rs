@@ -3,7 +3,6 @@
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -36,19 +35,14 @@ pub(crate) async fn create_test_device(db: &sqlx::PgPool) -> (Uuid, String, Sign
     .await
     .expect("Failed to insert test user");
 
-    // Generate device_id: SHA256 of verifying_key, first 16 bytes
-    let mut hasher = Sha256::new();
-    hasher.update(verifying_key.as_bytes());
-    let hash = hasher.finalize();
-    let _device_id = hex::encode(&hash[..16]);
-
-    // Generate random identity_public (unique per device — migration 041 added UNIQUE constraint)
-    let mut identity_public = vec![0u8; 32];
-    OsRng.fill_bytes(&mut identity_public);
+    // device_id = SHA256(verifying_key)[0..16], identity_public = verifying_key
+    // Using verifying_key as identity_public mirrors production semantics and is
+    // guaranteed unique per test (each test generates a fresh Ed25519 keypair).
     let mut hasher = Sha256::new();
     hasher.update(verifying_key.as_bytes());
     let hash = hasher.finalize();
     let device_id = hex::encode(&hash[..16]);
+    let identity_public = verifying_key.as_bytes().to_vec();
 
     // Insert device
     sqlx::query(
