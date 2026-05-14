@@ -299,3 +299,47 @@ At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
 7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action on messages (Kafka auto-redelivers on reconnect). Can be removed.
 
 8. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
+
+---
+
+---
+
+## Shared Construct Docs Workflow
+
+These instructions apply to GitHub Copilot, Codex, OpenCode, and similar coding agents.
+
+### Division of labour — read this first
+
+| Role | Tool | Responsibility |
+|------|------|----------------|
+| **Coding agent** (you) | Copilot / Codex | Write code + drop raw session notes into `wiki/sessions/` and `wiki/decisions/`. That is all. |
+| **Wiki pipeline** | `obsidian-llm-wiki-local` (olw) | Reads `raw/`, synthesizes concepts, creates/updates wiki articles, generates cross-links. |
+| **Developer** | Human + Obsidian | Reviews wiki draft articles, approves/rejects. Curates `raw/`. |
+
+**Your job is code.** olw handles article synthesis. Write plain-markdown session notes; let the pipeline do the rest.
+
+### Shared knowledge base
+
+- Vault: `/Users/maximeliseyev/Code/constrcut-docs`
+- `raw/` — source corpus. Do **not** rewrite or reorganize.
+- `wiki/` — canonical curated knowledge base. **Read** from here before architectural work.
+- `wiki/.drafts/` — **reserved for olw**. Never write here manually.
+- `wiki/sessions/` — where coding agents write session notes.
+- `wiki/decisions/` — where coding agents write long-lived decision records.
+
+### Where to save durable reasoning
+
+After any session involving architectural changes, design decisions, API changes, or non-obvious implementation choices:
+
+1. **Always** create or update `wiki/sessions/YYYY-MM-DD-<topic>.md`.
+2. **Always** fill in `# Why` — reasoning, alternatives considered, why rejected. Most important section.
+3. If the decision constrains future work, also create `wiki/decisions/<topic>.md`.
+4. Session notes: plain markdown, **no YAML frontmatter, no `[[wikilinks]]`** — olw adds those.
+
+Required note sections: `# Context`, `# What Changed`, `# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`
+
+### Operational logging
+
+Append a one-line entry to `wiki/log.md` after writing a note.
+Format: `[YYYY-MM-DD HH:MM] note | <topic>`
+
