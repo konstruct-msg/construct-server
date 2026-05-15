@@ -7,6 +7,10 @@ repository.workspace = true
 license.workspace = true
 description = "MASQUE-lite UDP relay — tunnels QUIC datagrams over WebSocket/TLS for iOS clients"
 
+[[bin]]
+name = "masque-service"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
@@ -14,7 +18,3 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 bytes = "1"
-
-[[bin]]
-name = "masque-service"
-path = "src/main.rs"
