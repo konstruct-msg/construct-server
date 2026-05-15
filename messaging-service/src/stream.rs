@@ -367,6 +367,16 @@ pub(crate) async fn handle_stream_request(
             // Not implemented yet
             tracing::debug!("Received unimplemented request type (typing)");
         }
+        Some(StreamReq::P2pHandoffAck(_)) => {
+            // Reserved for MASQUE/P2P direct transport integration.
+            // Currently accepted as a no-op to keep stream protocol forward-compatible.
+            tracing::debug!("Received unimplemented request type (p2p_handoff_ack)");
+        }
+        Some(StreamReq::P2pDisconnect(_)) => {
+            // Reserved for MASQUE/P2P direct transport integration.
+            // Currently accepted as a no-op to keep stream protocol forward-compatible.
+            tracing::debug!("Received unimplemented request type (p2p_disconnect)");
+        }
 
         None => {
             tracing::warn!("Received empty stream request");

@@ -103,4 +103,13 @@ enum DeviceCapabilities {
 
   // Supports background sync - bit 5
   DEVICE_CAPABILITIES_BACKGROUND_SYNC = 32; // 1 << 5
+
+  // Supports direct P2P message transport (QUIC/ICE) - bit 6
+  // Set by desktop clients and mobile clients that support foreground P2P burst mode.
+  // When both peers have this bit, the server MAY send a P2PHandoffRequest.
+  DEVICE_CAPABILITIES_P2P_MESSAGING = 64; // 1 << 6
+
+  // Can act as a Tier-2 relay node for other peers - bit 7
+  // Reserved for future community relay node support.
+  DEVICE_CAPABILITIES_RELAY_NODE = 128; // 1 << 7
 }

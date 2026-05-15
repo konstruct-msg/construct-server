@@ -441,6 +441,45 @@ services:
       - "traefik.tcp.routers.ice.tls.passthrough=true"
       - "traefik.tcp.services.ice.loadbalancer.server.port=9444"
 
+  # ─── MASQUE-lite UDP relay ──────────────────────────────────────────────────
+  # Tunnels iOS QUIC datagrams over WebSocket/TLS to the Traefik QUIC endpoint.
+  # iOS cannot use raw UDP port 443 (blocked by Network.framework), so quinn
+  # connects via this relay instead of directly to Traefik.
+  #
+  # Wire: iOS → WSS (TCP 443, masque.INSTANCE_DOMAIN) → masque-service
+  #              → UDP → traefik:443 (QUIC) → Envoy → microservices
+  #
+  # First-time setup:
+  #   1. Add DNS A record: masque.INSTANCE_DOMAIN → VPS IP
+  #   2. Set MASQUE_AUTH_TOKEN in /opt/construct/secrets/app.env
+  #   3. On iOS: set use_masque=true, masque_host=masque.INSTANCE_DOMAIN in EngineAdapter
+
+  masque:
+    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    command: /usr/local/bin/masque-service
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      SERVICE_NAME: masque
+      MASQUE_LISTEN_ADDR: "0.0.0.0:9200"
+      # Forward UDP to Traefik's QUIC listener (same Docker network — no hairpin NAT)
+      MASQUE_TARGET_HOST: ${MASQUE_TARGET_HOST:-traefik}
+      MASQUE_TARGET_PORT: ${MASQUE_TARGET_PORT:-443}
+      MASQUE_AUTH_TOKEN: ${MASQUE_AUTH_TOKEN:-}
+    networks:
+      - internal
+    labels:
+      - "traefik.enable=true"
+      # HTTP router — Traefik terminates TLS, forwards plain HTTP to masque-service.
+      # axum handles the WebSocket upgrade (Connection: Upgrade, Upgrade: websocket).
+      - "traefik.http.routers.masque.rule=Host(`masque.${INSTANCE_DOMAIN}`)"
+      - "traefik.http.routers.masque.entrypoints=websecure"
+      - "traefik.http.routers.masque.tls.certresolver=letsencrypt"
+      - "traefik.http.services.masque.loadbalancer.server.port=9200"
+
   prometheus:
     image: prom/prometheus:v3.2.1
     container_name: construct-prometheus
