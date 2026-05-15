@@ -21,8 +21,9 @@
 | `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
 | `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
 | `signaling` | `signaling-service` | 50060 | 8091 | WebRTC SDP/ICE signaling |
+| `channel` | `channel-service` | 50061 | 8098 | Broadcast channels (PUBLIC/PRIVATE), Sender Key encryption |
 | `delivery` | `delivery-worker` | — | 8092 | Kafka consumer → Redis stream writer |
-| `mls` | `mls-service` | — | — | **Stub — commented out in prod** |
+| `mls` | `mls-service` | 50058 | 8097 | MLS groups (RFC 9420), topics, invite links |
 
 ---
 
