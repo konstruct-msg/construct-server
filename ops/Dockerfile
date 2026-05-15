@@ -35,6 +35,7 @@ COPY key-service ./key-service
 COPY mls-service ./mls-service
 COPY sentinel-service ./sentinel-service
 COPY signaling-service ./signaling-service
+COPY channel-service ./channel-service
 COPY masque-service ./masque-service
 
 # Build all binaries in release mode
@@ -68,6 +69,7 @@ COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/ke
 COPY --from=builder --chmod=+x /app/target/release/mls-service /usr/local/bin/mls-service
 COPY --from=builder --chmod=+x /app/target/release/sentinel-service /usr/local/bin/sentinel-service
 COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service
+COPY --from=builder --chmod=+x /app/target/release/channel-service /usr/local/bin/channel-service
 COPY --from=builder --chmod=+x /app/target/release/masque-service /usr/local/bin/masque-service
 
 # Copy migrations
