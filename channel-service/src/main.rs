@@ -9,6 +9,8 @@ mod handlers;
 mod helpers;
 mod metrics;
 mod service;
+#[cfg(test)]
+mod tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_server_shared::clients::mls::MlsClient;
 use construct_server_shared::shared::proto::services::v1::channel_service_server::ChannelServiceServer;
 use service::ChannelServiceImpl;
 
@@ -37,6 +40,21 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("../shared/migrations").run(&db).await?;
 
     let db = Arc::new(db);
+
+    // Initialize optional MLS client for comment groups
+    let mls_client =
+        std::env::var("MLS_SERVICE_URL").ok().and_then(|url| {
+            match MlsClient::new(&url) {
+                Ok(c) => {
+                    info!(%url, "MLS client connected for comment groups");
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::warn!(%url, error = %e, "Failed to create MLS client; comment group creation will be unavailable");
+                    None
+                }
+            }
+        });
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "50061".to_string())
@@ -66,7 +84,10 @@ async fn main() -> anyhow::Result<()> {
     });
 
     Server::builder()
-        .add_service(ChannelServiceServer::new(ChannelServiceImpl { db }))
+        .add_service(ChannelServiceServer::new(ChannelServiceImpl {
+            db,
+            mls_client,
+        }))
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;
 
