@@ -291,6 +291,10 @@ message DeletePostResponse {
 
 message GetCommentGroupRequest {
   string post_id = 1;
+  // Required when creating: initial ratchet tree for the new MLS group
+  bytes initial_ratchet_tree = 2;
+  // Required when creating: encrypted group context
+  bytes encrypted_group_context = 3;
 }
 
 message GetCommentGroupResponse {

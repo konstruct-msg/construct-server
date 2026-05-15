@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub type DbPool = Pool<Postgres>;
 
+pub mod channel;
 pub mod mls;
 
 // New minimal User struct (passwordless, device-based)
@@ -712,8 +713,8 @@ where
 /// Get device by device_id
 pub async fn get_device_by_id(pool: &DbPool, device_id: &str) -> Result<Option<Device>> {
     let device = sqlx::query_as::<_, Device>(
-        "SELECT device_id, server_hostname, user_id, verifying_key, identity_public, 
-                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active 
+        "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
+                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active
          FROM devices WHERE device_id = $1",
     )
     .bind(device_id)
@@ -743,8 +744,8 @@ pub async fn get_device_by_id(pool: &DbPool, device_id: &str) -> Result<Option<D
 /// Get all devices for a user
 pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec<Device>> {
     let devices = sqlx::query_as::<_, Device>(
-        "SELECT device_id, server_hostname, user_id, verifying_key, identity_public, 
-                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active 
+        "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
+                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active
          FROM devices WHERE user_id = $1 AND is_active = TRUE ORDER BY registered_at DESC",
     )
     .bind(user_id)
@@ -811,8 +812,8 @@ pub async fn create_user_with_first_device(
     // 3. Update user's primary_device_id (now that device exists)
     sqlx::query(
         r#"
-        UPDATE users 
-        SET primary_device_id = $1 
+        UPDATE users
+        SET primary_device_id = $1
         WHERE id = $2
         "#,
     )
