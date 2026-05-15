@@ -8,6 +8,7 @@ import "core/identity.proto";
 import "core/pagination.proto";
 import "messaging/content.proto";
 import "signaling/presence.proto";
+import "signaling/p2p.proto";
 
 // MessagingService - Core messaging gRPC service
 // Handles sending, receiving, and querying messages
@@ -73,6 +74,15 @@ message MessageStreamRequest {
 
     // Heartbeat/keepalive
     Heartbeat heartbeat = 6;
+
+    // P2P handoff acknowledgment: client reports outcome of P2P establishment attempt.
+    // Sent after receiving P2PHandoffRequest from server.
+    // See: signaling/p2p.proto
+    shared.proto.signaling.v1.P2PHandoffAck p2p_handoff_ack = 7;
+
+    // P2P disconnect: client notifies server it is dropping direct P2P connection.
+    // Server resumes relaying messages for this pair after receiving this.
+    shared.proto.signaling.v1.P2PDisconnect p2p_disconnect = 8;
   }
 
   // Request ID (for correlation)
@@ -84,7 +94,7 @@ message MessageStreamRequest {
   optional string attempt_id = 21;
 
   // Reserved for future request types
-  reserved 7 to 9, 11 to 20;
+  reserved 9 to 9, 11 to 20;
 }
 
 // MessageStreamResponse - Server -> Client in bidirectional stream
@@ -111,6 +121,11 @@ message MessageStreamResponse {
 
     // Heartbeat response
     HeartbeatAck heartbeat_ack = 7;
+
+    // P2P handoff: server instructs client to establish direct connection with peer.
+    // Only sent when both peers have DEVICE_CAPABILITIES_P2P_MESSAGING capability.
+    // See: signaling/p2p.proto
+    shared.proto.signaling.v1.P2PHandoffRequest p2p_handoff = 8;
   }
 
   // Response ID (correlates to request_id)
@@ -130,7 +145,7 @@ message MessageStreamResponse {
   optional string attempt_id = 22;
 
   // Reserved for future response types
-  reserved 8 to 9, 12 to 20;
+  reserved 9 to 9, 12 to 20;
 }
 
 // SubscribeRequest - Subscribe to conversation updates

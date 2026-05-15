@@ -15,6 +15,7 @@ members = [
     "mls-service",
     "sentinel-service",
     "signaling-service",
+    "masque-service",
     # New modular crates
     "crates/construct-types",
     "crates/construct-error",
