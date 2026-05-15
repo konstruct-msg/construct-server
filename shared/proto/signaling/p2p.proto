@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package shared.proto.signaling.v1;
+
+// P2P Messaging Handoff Signaling
+//
+// When both clients are simultaneously online, the server can signal them
+// to upgrade to a direct peer-to-peer QUIC/ICE connection, stepping out
+// of the message relay path entirely.
+//
+// Flow:
+//   1. Server detects both clients online, both have DEVICE_CAPABILITIES_P2P_MESSAGING
+//   2. Server sends P2PHandoffRequest to both via MessageStreamResponse
+//   3. Clients exchange ICE candidates (using existing signaling infrastructure)
+//   4. Direct QUIC/ICE connection established
+//   5. Each client sends P2PHandoffAck(success=true) to server
+//   6. Server exits relay path for this conversation pair
+//   7. If either client disconnects → server automatically resumes relay
+//
+// See: ROADMAP.md — Tier 3 Full P2P
+
+// P2PHandoffRequest - Server instructs both clients to establish a direct connection.
+// Sent by the server to BOTH participants simultaneously.
+message P2PHandoffRequest {
+  // Unique identifier for this P2P session.
+  // Both clients receive the same session_id so they can correlate.
+  string p2p_session_id = 1;
+
+  // Peer's user ID (the other side of the conversation).
+  string peer_user_id = 2;
+
+  // Peer's device ID.
+  string peer_device_id = 3;
+
+  // Conversation ID this handoff applies to.
+  string conversation_id = 4;
+
+  // Pre-gathered ICE candidates from the peer (passed through by server).
+  // Clients SHOULD also initiate their own ICE gathering in parallel.
+  repeated string ice_candidates = 5;
+
+  // QUIC/ICE relay fallback address (Tier 2 relay node).
+  // Used if direct P2P fails (symmetric NAT, firewall, etc.).
+  // Empty if no relay is available — client falls back to server relay.
+  optional string relay_address = 6;
+
+  // Server timestamp (Unix milliseconds).
+  int64 timestamp = 7;
+
+  // Maximum time (ms) client should wait for P2P establishment before
+  // declaring failure and falling back to server relay.
+  // Default: 10000 (10 seconds).
+  optional int32 timeout_ms = 8;
+
+  // Reserved for future features (e.g., multi-party P2P mesh).
+  reserved 9 to 20;
+}
+
+// P2PHandoffAck - Client reports the outcome of a P2P handoff attempt.
+// Sent by each client to the server after attempting to establish P2P.
+message P2PHandoffAck {
+  // Session ID (matches P2PHandoffRequest.p2p_session_id).
+  string p2p_session_id = 1;
+
+  // Whether a P2P connection was successfully established.
+  bool success = 2;
+
+  // Connection type achieved (only meaningful when success=true).
+  P2PConnectionType connection_type = 3;
+
+  // Human-readable error description (only when success=false).
+  optional string error = 4;
+
+  // Client timestamp (Unix milliseconds).
+  int64 timestamp = 5;
+
+  // Round-trip time to peer in milliseconds (only when success=true).
+  // Used by server for routing quality metrics.
+  optional int32 rtt_ms = 6;
+
+  // Reserved for future use.
+  reserved 7 to 15;
+}
+
+// P2PConnectionType - How the P2P connection was established.
+enum P2PConnectionType {
+  // Unspecified (must be 0).
+  P2P_CONNECTION_TYPE_UNSPECIFIED = 0;
+
+  // Direct peer-to-peer (both sides on same LAN or public IPs).
+  P2P_CONNECTION_TYPE_DIRECT = 1;
+
+  // Via a Tier-2 community relay node (TURN-style, still E2EE).
+  P2P_CONNECTION_TYPE_RELAY = 2;
+
+  // Fell back to server relay (Tier 1).
+  P2P_CONNECTION_TYPE_SERVER_FALLBACK = 3;
+
+  // Reserved for future types.
+  reserved 4 to 15;
+}
+
+// P2PDisconnect - Notifies the server that a client is dropping the P2P connection.
+// After receiving this, the server resumes relaying messages for this pair.
+message P2PDisconnect {
+  // Session ID being terminated.
+  string p2p_session_id = 1;
+
+  // Reason for disconnecting.
+  P2PDisconnectReason reason = 2;
+
+  // Client timestamp (Unix milliseconds).
+  int64 timestamp = 3;
+
+  // Reserved for future use.
+  reserved 4 to 10;
+}
+
+// P2PDisconnectReason - Why the P2P session ended.
+enum P2PDisconnectReason {
+  // Unspecified (must be 0).
+  P2P_DISCONNECT_REASON_UNSPECIFIED = 0;
+
+  // Normal close (app backgrounded, user closed chat).
+  P2P_DISCONNECT_REASON_NORMAL = 1;
+
+  // Network changed (WiFi → cellular, etc.).
+  P2P_DISCONNECT_REASON_NETWORK_CHANGE = 2;
+
+  // Connection lost (timeout, ICE failure).
+  P2P_DISCONNECT_REASON_CONNECTION_LOST = 3;
+
+  // Reserved for future reasons.
+  reserved 4 to 10;
+}
