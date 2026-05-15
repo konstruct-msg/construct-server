@@ -16,6 +16,7 @@ members = [
     "sentinel-service",
     "signaling-service",
     "masque-service",
+    "channel-service",
     # New modular crates
     "crates/construct-types",
     "crates/construct-error",
@@ -47,7 +48,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.13.0"
+version = "0.13.1"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/maximeliseyev/construct-server"
