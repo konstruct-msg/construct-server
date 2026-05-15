@@ -35,13 +35,13 @@ scrape_configs:
     static_configs:
       - targets: ["key:8057"]
 
-  - job_name: sentinel
-    static_configs:
-      - targets: ["sentinel:8090"]
-
   - job_name: mls
     static_configs:
-      - targets: ["mls:8091"]
+      - targets: ["mls:8097"]
+
+  - job_name: channel
+    static_configs:
+      - targets: ["channel:8098"]
 
   # Gateway serves both the HTTP API and the ICE (obfs4) relay — relay metrics
   # are published on the same /metrics endpoint (shared Prometheus registry).
