@@ -340,9 +340,9 @@ jobs:
             echo "=== Logging into ghcr.io ==="
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
-            echo "=== Pulling image: ghcr.io/maximeliseyev/construct-server:$VERSION ==="
-            docker pull ghcr.io/maximeliseyev/construct-server:$VERSION
-            docker pull ghcr.io/maximeliseyev/construct-server:latest
+            echo "=== Pulling image: ghcr.io/konstruct-msg/construct-server:$VERSION ==="
+            docker pull ghcr.io/konstruct-msg/construct-server:$VERSION
+            docker pull ghcr.io/konstruct-msg/construct-server:latest
 
             echo "=== Starting services ==="
             # Update IMAGE_TAG in .env to avoid stale tag on manual restarts
@@ -355,7 +355,7 @@ jobs:
             echo "=== Verifying services ==="
             docker compose -f ops/docker-compose.prod.yml --env-file .env ps
 
-            echo "✅ Deploy complete: ghcr.io/maximeliseyev/construct-server:$VERSION"
+            echo "✅ Deploy complete: ghcr.io/konstruct-msg/construct-server:$VERSION"
 
       - name: Notify deploy result
         if: always()
