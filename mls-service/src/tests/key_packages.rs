@@ -19,6 +19,7 @@ async fn test_publish_key_package_success() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -51,6 +52,7 @@ async fn test_publish_key_package_empty_list_rejected() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -87,6 +89,7 @@ async fn test_publish_key_package_wrong_device_rejected() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     // Attacker authenticates as themselves but requests to publish for victim's device
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);
@@ -145,6 +148,7 @@ async fn test_consume_key_package_success() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -175,6 +179,7 @@ async fn test_consume_key_package_not_found() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -207,6 +212,7 @@ async fn test_get_key_package_count_zero() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -238,6 +244,7 @@ async fn test_get_key_package_count_after_publish() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -307,6 +314,7 @@ async fn test_get_pending_invites_cross_device_rejected() {
     let service = MlsServiceImpl {
         db,
         hub: GroupHub::new(),
+        notification_client: None,
     };
     // Attacker authenticates as themselves but requests victim's invites
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);

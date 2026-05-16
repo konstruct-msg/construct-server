@@ -17,6 +17,7 @@ async fn test_create_topic_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -54,6 +55,7 @@ async fn test_create_topic_non_admin() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -87,6 +89,7 @@ async fn test_create_topic_empty_name() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -119,6 +122,7 @@ async fn test_create_topic_invalid_sort_order() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -151,6 +155,7 @@ async fn test_create_topic_max_limit() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create 50 topics
@@ -206,6 +211,7 @@ async fn test_list_topics_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create 3 topics
@@ -251,6 +257,7 @@ async fn test_list_topics_non_member() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;
@@ -280,6 +287,7 @@ async fn test_archive_topic_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create topic
@@ -331,6 +339,7 @@ async fn test_archive_topic_non_admin() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create topic
@@ -386,6 +395,7 @@ async fn test_create_invite_link_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -420,6 +430,7 @@ async fn test_create_invite_link_no_limits() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -453,6 +464,7 @@ async fn test_create_invite_link_non_admin() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;
@@ -489,6 +501,7 @@ async fn test_revoke_invite_link_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create invite link
@@ -540,6 +553,7 @@ async fn test_revoke_invite_link_not_found() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let timestamp = Utc::now().timestamp();
@@ -573,6 +587,7 @@ async fn test_resolve_invite_link_valid() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create invite link
@@ -617,6 +632,7 @@ async fn test_resolve_invite_link_expired() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Create expired invite link (1 second expiry)
@@ -660,6 +676,7 @@ async fn test_resolve_invite_link_not_found() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let resolve_req = proto::ResolveInviteLinkRequest {

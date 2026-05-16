@@ -349,19 +349,19 @@
   - [x] Metrics/logging
 
 ### Notifications
-- [ ] Push notifications for invites (requires notification-service integration)
-- [ ] Push notifications for new messages (respect quiet hours)
-- [ ] Dissolve group notification
+- [x] Push notifications for invites (via notification-service, fire-and-forget)
+- [x] Push notifications for new messages (via messaging-service, already exists)
+- [x] Dissolve group notification (all members notified)
 
 ### Rate Limiting
 - [x] Group creation rate limit (10/day per user)
 - [x] Message send rate limit per group (1000/hour per user)
-- [ ] Invite rate limit
+- [x] Invite rate limit (100/hour per user)
 
 ### Metrics
 - [x] Groups created/deleted
 - [x] Messages sent per group
-- [ ] Average group size
+- [x] Average group size (GROUP_SIZE histogram, observed on create/accept/leave/remove)
 - [x] KeyPackage replenish rate
 - [x] Cleanup operations tracking
 - [x] Rate limit violations
@@ -634,6 +634,7 @@ Subsequent commenters:
 
 | Date | Change |
 |------|--------|
+| 2026-05-15 | **Phase 7 finalized**: Push notifications for invites/dissolve, invite rate limit, group size metric |
 | 2026-05-15 | **Phase C2 COMPLETE**: GetCommentGroup + MlsClient + proto update |
 | 2026-05-15 | **Phase C1 COMPLETE**: All 18 RPCs implemented, 18 integration tests, construct-db channel layer |
 | 2026-05-01 | **Phase 7 COMPLETE**: Cleanup jobs, rate limiting, metrics |

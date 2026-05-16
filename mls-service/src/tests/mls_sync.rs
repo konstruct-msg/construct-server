@@ -20,6 +20,7 @@ async fn test_submit_commit_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -78,6 +79,7 @@ async fn test_submit_commit_epoch_mismatch() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -111,6 +113,7 @@ async fn test_submit_commit_non_member() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 
@@ -164,6 +167,7 @@ async fn test_fetch_commits_success() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -200,6 +204,7 @@ async fn test_fetch_commits_non_member() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 

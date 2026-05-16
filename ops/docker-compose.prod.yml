@@ -298,6 +298,7 @@ services:
       PORT: "50058"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       METRICS_PORT: "8097"
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://notification:50054}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:

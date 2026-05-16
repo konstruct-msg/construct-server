@@ -115,6 +115,9 @@ pub(crate) async fn create_group(
         "Group created"
     );
 
+    crate::metrics::inc_groups_created();
+    crate::metrics::observe_group_size(1);
+
     Ok(Response::new(proto::CreateGroupResponse {
         group_id: group_id.to_string(),
         epoch: 0,
@@ -285,8 +288,38 @@ pub(crate) async fn dissolve_group(
         .await
         .map_err(|e| Status::internal(format!("Failed to dissolve group: {}", e)))?;
 
-    // 6. Log the dissolve
+    // 6. Fire-and-forget push notification to all members
+    if let Some(ref notification_client) = svc.notification_client {
+        let client = notification_client.clone();
+        let db = svc.db.clone();
+        let gid = group_id;
+        tokio::spawn(async move {
+            if let Ok(member_devices) = db_mls::get_group_member_device_ids(&db, gid).await {
+                for device_id in &member_devices {
+                    if let Ok(Some(user_id)) = db_mls::get_user_id_for_device(&db, device_id).await
+                    {
+                        let mut nc = client.get();
+                        let _ = nc
+                            .send_blind_notification(
+                                construct_server_shared::shared::proto::services::v1::SendBlindNotificationRequest {
+                                    user_id: user_id.to_string(),
+                                    badge_count: None,
+                                    activity_type: Some("group_dissolved".to_string()),
+                                    conversation_id: Some(gid.to_string()),
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
+        });
+    }
+
+    // 7. Log the dissolve
     let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
+
+    crate::metrics::inc_groups_dissolved();
+    crate::metrics::observe_group_size(member_count as u64);
 
     info!(
         group_id = %group_id,

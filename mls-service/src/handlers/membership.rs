@@ -16,6 +16,7 @@ pub(crate) async fn invite_to_group(
     request: Request<proto::InviteToGroupRequest>,
 ) -> Result<Response<proto::InviteToGroupResponse>, Status> {
     let device_id = extract_device_id(request.metadata())?;
+    let inviter_user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
     // 1. Parse group_id
@@ -28,6 +29,30 @@ pub(crate) async fn invite_to_group(
     if !is_creator && !is_admin {
         return Err(Status::permission_denied("NOT_ADMIN"));
     }
+
+    // Rate limit: 100 invites per user per hour
+    let rate_limit_key = format!("rate_limit:group_invite:{}", inviter_user_id);
+    let recent_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rate_limit_events
+         WHERE key = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    )
+    .bind(&rate_limit_key)
+    .fetch_one(svc.db.as_ref())
+    .await
+    .unwrap_or(0);
+
+    if recent_count >= 100 {
+        crate::metrics::inc_rate_limit_violations();
+        return Err(Status::resource_exhausted(
+            "RATE_LIMIT: max 100 invites per hour",
+        ));
+    }
+
+    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
+        .bind(&rate_limit_key)
+        .execute(svc.db.as_ref())
+        .await
+        .ok();
 
     // 3. Check group not dissolved
     if get_group_dissolved_at(svc.db.as_ref(), group_id)
@@ -138,6 +163,29 @@ pub(crate) async fn invite_to_group(
         expires_at = %expires_at,
         "Group invite created"
     );
+
+    crate::metrics::inc_group_invites_sent(1);
+
+    // Fire-and-forget push notification to invitee
+    if let Some(ref notification_client) = svc.notification_client {
+        let client = notification_client.clone();
+        let db = svc.db.clone();
+        let tid = target_device_id.clone();
+        let gid = group_id;
+        tokio::spawn(async move {
+            if let Ok(Some(user_id)) = db_mls::get_user_id_for_device(&db, &tid).await {
+                let mut nc = client.get();
+                let _ = nc
+                    .send_blind_notification(proto::SendBlindNotificationRequest {
+                        user_id: user_id.to_string(),
+                        badge_count: None,
+                        activity_type: Some("group_invite".to_string()),
+                        conversation_id: Some(gid.to_string()),
+                    })
+                    .await;
+            }
+        });
+    }
 
     Ok(Response::new(proto::InviteToGroupResponse {
         invite_id: invite_id.to_string(),
@@ -316,6 +364,9 @@ pub(crate) async fn accept_group_invite(
         new_epoch = new_epoch,
         "Group invite accepted, epoch advanced"
     );
+
+    let member_count = get_group_member_count(svc.db.as_ref(), group_id).await?;
+    crate::metrics::observe_group_size(member_count as u64);
 
     Ok(Response::new(proto::AcceptGroupInviteResponse {
         success: true,
@@ -498,6 +549,9 @@ pub(crate) async fn leave_group(
         "Member left group"
     );
 
+    let remaining = get_group_member_count(svc.db.as_ref(), group_id).await?;
+    crate::metrics::observe_group_size(remaining as u64);
+
     Ok(Response::new(proto::LeaveGroupResponse {
         success: true,
         left_at: now.timestamp(),
@@ -592,6 +646,9 @@ pub(crate) async fn remove_member(
         epoch = current_epoch,
         "Member removed from group"
     );
+
+    let remaining = get_group_member_count(svc.db.as_ref(), group_id).await?;
+    crate::metrics::observe_group_size(remaining as u64);
 
     Ok(Response::new(proto::RemoveMemberResponse {
         success: true,

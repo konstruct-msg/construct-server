@@ -45,6 +45,7 @@ async fn test_invite_to_group_success() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &admin_device_id);
 
@@ -93,6 +94,7 @@ async fn test_invite_to_group_non_admin() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -159,6 +161,7 @@ async fn test_accept_group_invite_success() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -232,6 +235,7 @@ async fn test_accept_group_invite_wrong_device() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     // Use wrong_device_id in metadata
     let meta = create_metadata(&invitee_user_id, &wrong_device_id);
@@ -293,6 +297,7 @@ async fn test_decline_group_invite_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -363,6 +368,7 @@ async fn test_decline_group_invite_wrong_device() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     // Use other device to decline
     let meta = create_metadata(&other_user_id, &other_device_id);
@@ -421,6 +427,7 @@ async fn test_get_pending_invites_success() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -467,6 +474,7 @@ async fn test_leave_group_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -509,6 +517,7 @@ async fn test_leave_group_creator_cannot_leave() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -549,6 +558,7 @@ async fn test_remove_member_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -626,6 +636,7 @@ async fn test_remove_member_cannot_remove_creator() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 
@@ -696,6 +707,7 @@ async fn test_accept_group_invite_epoch_mismatch_rejected() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -754,6 +766,7 @@ async fn test_accept_group_invite_epoch_match_succeeds() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -804,6 +817,7 @@ async fn test_get_pending_invites_cross_device_rejected_in_membership() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);
 
