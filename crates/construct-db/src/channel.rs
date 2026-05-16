@@ -344,15 +344,15 @@ pub async fn list_channel_subscriptions(
 }
 
 pub async fn get_channel_subscriber_count(pool: &PgPool, channel_id: Uuid) -> Result<i64> {
-    let (count,): (i64,) = sqlx::query_as(
+    let row: Option<(i32,)> = sqlx::query_as(
         "SELECT subscriber_count FROM channels WHERE channel_id = $1 AND deleted_at IS NULL",
     )
     .bind(channel_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .context("Failed to get subscriber count")?;
 
-    Ok(count)
+    Ok(row.map(|(c,)| c as i64).unwrap_or(0))
 }
 
 // ============================================================================

@@ -1,5 +1,4 @@
 use tonic::Request;
-use uuid::Uuid;
 
 use super::test_helpers::{create_metadata, create_test_device, get_test_db};
 use crate::service::ChannelServiceImpl;
@@ -202,14 +201,30 @@ async fn test_get_post() {
     svc.create_channel(create_req).await.unwrap();
 
     // Create channel + post directly via DB for simplicity
-    let channel_id = Uuid::new_v4();
-    construct_db::channel::create_channel(svc.db.as_ref(), &owner_device, "PUBLIC", &[1], 1000, 30)
-        .await
-        .unwrap();
+    let channel = construct_db::channel::create_channel(
+        svc.db.as_ref(),
+        &owner_device,
+        "PUBLIC",
+        &[1],
+        1000,
+        30,
+    )
+    .await
+    .unwrap();
+
+    // Subscribe owner so permission checks pass
+    construct_db::channel::subscribe_to_channel(
+        svc.db.as_ref(),
+        channel.channel_id,
+        &owner_device,
+        true,
+    )
+    .await
+    .unwrap();
 
     let post = construct_db::channel::insert_channel_post(
         svc.db.as_ref(),
-        channel_id,
+        channel.channel_id,
         &owner_device,
         &[7, 7, 7],
         None,
