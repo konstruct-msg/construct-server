@@ -33,6 +33,7 @@ async fn test_delegate_admin_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -109,6 +110,7 @@ async fn test_delegate_admin_non_admin() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -171,6 +173,7 @@ async fn test_transfer_ownership_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -269,6 +272,7 @@ async fn test_transfer_ownership_non_creator() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 

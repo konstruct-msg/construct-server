@@ -19,6 +19,7 @@ async fn test_send_group_message_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -52,6 +53,7 @@ async fn test_send_group_message_non_member() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;
@@ -85,6 +87,7 @@ async fn test_send_group_message_epoch_mismatch() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -115,6 +118,7 @@ async fn test_send_group_message_dissolved_group() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Dissolve group
@@ -162,6 +166,7 @@ async fn test_send_group_message_empty_ciphertext() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -193,6 +198,7 @@ async fn test_fetch_group_messages_success() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     // Send 3 messages
@@ -245,6 +251,7 @@ async fn test_fetch_group_messages_pagination() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let metadata = create_metadata(&user_id, &device_id);
@@ -319,6 +326,7 @@ async fn test_fetch_group_messages_non_member() {
     let svc = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;

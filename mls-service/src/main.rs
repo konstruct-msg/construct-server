@@ -6,15 +6,6 @@
 //   service.rs      - MlsServiceImpl struct
 //   helpers.rs      - Utility functions (metadata, Ed25519, admin checks)
 //   handlers/       - RPC handler implementations
-//     mod.rs        - Trait impl delegation
-//     group_lifecycle.rs - CreateGroup, GetGroupState, DissolveGroup
-//     membership.rs - Invite, Accept, Decline, Leave, Remove, Pending
-//     admin.rs      - DelegateAdmin, TransferOwnership
-//     mls_sync.rs   - SubmitCommit, FetchCommits
-//     key_packages.rs - Publish, Consume, Count
-//     messaging.rs  - SendGroupMessage, FetchGroupMessages, MessageStream (stubs)
-//     topics.rs     - Create/List/Archive Topic, Invite Links (stubs)
-//   tests/          - Integration tests
 //
 // Port: 50058
 // ============================================================================
@@ -34,6 +25,7 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::services::v1::mls_service_server::MlsServiceServer;
 use service::MlsServiceImpl;
 
@@ -67,6 +59,22 @@ async fn main() -> anyhow::Result<()> {
         "MLS cleanup worker started"
     );
 
+    let notification_client =
+        std::env::var("NOTIFICATION_SERVICE_URL")
+            .ok()
+            .and_then(|url| {
+                match NotificationClient::new(&url) {
+                    Ok(c) => {
+                        info!(%url, "Notification client connected for MLS push notifications");
+                        Some(c)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%url, error = %e, "Failed to create notification client; push notifications disabled");
+                        None
+                    }
+                }
+            });
+
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "50058".to_string())
         .parse()?;
@@ -98,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(MlsServiceServer::new(MlsServiceImpl {
             db,
             hub: service::GroupHub::new(),
+            notification_client,
         }))
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await?;

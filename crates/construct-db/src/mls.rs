@@ -1150,3 +1150,24 @@ pub async fn resolve_invite_link_record(
     .await
     .context("Failed to resolve invite link")
 }
+
+pub async fn get_user_id_for_device(pool: &DbPool, device_id: &str) -> Result<Option<uuid::Uuid>> {
+    sqlx::query_scalar("SELECT user_id FROM devices WHERE device_id = $1")
+        .bind(device_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to resolve user_id from device_id")
+}
+
+pub async fn get_group_member_device_ids(
+    pool: &DbPool,
+    group_id: uuid::Uuid,
+) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT device_id FROM group_members WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_all(pool)
+            .await
+            .context("Failed to list group member device_ids")?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}

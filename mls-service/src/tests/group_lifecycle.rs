@@ -21,6 +21,7 @@ async fn test_create_group_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let group_id = Uuid::new_v4();
@@ -57,6 +58,7 @@ async fn test_create_group_invalid_group_id() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -86,6 +88,7 @@ async fn test_create_group_empty_ratchet_tree() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -115,6 +118,7 @@ async fn test_create_group_max_members_exceeded() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -144,6 +148,7 @@ async fn test_create_group_missing_user_id() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let mut meta = tonic::metadata::MetadataMap::new();
@@ -177,6 +182,7 @@ async fn test_get_group_state_success() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -210,6 +216,7 @@ async fn test_get_group_state_non_member() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -238,6 +245,7 @@ async fn test_dissolve_group_success() {
     let service = MlsServiceImpl {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -284,6 +292,7 @@ async fn test_dissolve_group_invalid_signature() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -316,6 +325,7 @@ async fn test_dissolve_group_expired_timestamp() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -360,6 +370,7 @@ async fn test_dissolve_group_non_admin() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id2);
@@ -398,6 +409,7 @@ async fn test_dissolve_group_already_dissolved() {
     let service = MlsServiceImpl {
         db,
         hub: crate::service::GroupHub::new(),
+        notification_client: None,
     };
 
     let meta = create_metadata(&user_id, &device_id);
