@@ -44,7 +44,7 @@ services:
       retries: 10
 
   auth-service:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: auth-service
     environment:
       PORT: "8081"
@@ -74,7 +74,7 @@ services:
       start_period: 10s
 
   key-service:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: key-service
     environment:
       KEY_SERVICE_GRPC_ADDR: "0.0.0.0:50057"
@@ -92,7 +92,7 @@ services:
       redis: { condition: service_healthy }
 
   messaging-service:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: messaging-service
     environment:
       PORT: "8082"
@@ -117,7 +117,7 @@ services:
       redis: { condition: service_healthy }
 
   gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: gateway
     environment:
       PORT: "8080"
@@ -142,7 +142,7 @@ services:
       start_period: 5s
 
   signaling-service:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: signaling-service
     environment:
       PORT: "50060"

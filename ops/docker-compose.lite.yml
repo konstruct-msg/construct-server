@@ -70,7 +70,7 @@ services:
 
   # ─── Auth Service ────────────────────────────────────────────────────────────
   auth:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     environment:
@@ -99,7 +99,7 @@ services:
 
   # ─── User Service ────────────────────────────────────────────────────────────
   user:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     environment:
@@ -123,7 +123,7 @@ services:
   # In Redis-only mode this service replaces both the old Kafka producer
   # AND the delivery-worker consumer — no other component needed.
   messaging:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     environment:
@@ -150,7 +150,7 @@ services:
 
   # ─── Notification Service ────────────────────────────────────────────────────
   notification:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     environment:
@@ -176,7 +176,7 @@ services:
 
   # ─── Key Service ─────────────────────────────────────────────────────────────
   key:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     environment:
@@ -195,7 +195,7 @@ services:
 
   # ─── Invite Service ──────────────────────────────────────────────────────────
   invite:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     environment:
@@ -215,7 +215,7 @@ services:
 
   # ─── Media Service ───────────────────────────────────────────────────────────
   media:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     environment:
@@ -236,7 +236,7 @@ services:
 
   # ─── MLS Service ─────────────────────────────────────────────────────────────
   mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     environment:
@@ -255,7 +255,7 @@ services:
 
   # ─── Sentinel Service ────────────────────────────────────────────────────────
   sentinel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     environment:
@@ -275,7 +275,7 @@ services:
   # ─── Signaling Service ───────────────────────────────────────────────────────
   # WebRTC call signaling (gRPC-only). Routed via Envoy → ICE gateway.
   signaling:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/signaling-service
     restart: unless-stopped
     environment:
@@ -318,7 +318,7 @@ services:
   # Exposes port 3000. Put nginx/caddy/traefik in front for TLS.
   # ICE port (9443) handles obfs4-encrypted gRPC → proxied to Envoy.
   gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     ports:
