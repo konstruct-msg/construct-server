@@ -12,11 +12,23 @@ pub(crate) async fn publish_post(
     request: Request<proto::PublishPostRequest>,
 ) -> Result<Response<proto::PublishPostResponse>, Status> {
     let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
         .map_err(|_| Status::invalid_argument("Invalid channel_id"))?;
+
+    // Warmup rate limit: 50/hour warmup, 500/hour established
+    crate::helpers::check_warmup_rate_limit(
+        svc.db.as_ref(),
+        user_id,
+        "publish_post",
+        50,
+        1, // warmup: 50 per hour
+        500,
+        1, // established: 500 per hour
+    )
+    .await?;
 
     // Verify caller is admin or subscriber with admin role
     let is_admin = db_channel::is_channel_admin(svc.db.as_ref(), channel_id, &device_id)
