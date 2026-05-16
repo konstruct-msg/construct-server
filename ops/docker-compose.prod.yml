@@ -134,7 +134,7 @@ services:
   #   - Read secrets from /opt/construct/secrets/app.env (managed manually on server)
 
   auth:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -167,7 +167,7 @@ services:
       - internal
 
   user:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -185,7 +185,7 @@ services:
       - internal
 
   messaging:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -218,7 +218,7 @@ services:
       - notification
 
   notification:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/notification-service
     restart: unless-stopped
     env_file:
@@ -237,7 +237,7 @@ services:
       - internal
 
   invite:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/invite-service
     restart: unless-stopped
     env_file:
@@ -254,7 +254,7 @@ services:
       - internal
 
   key:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -270,7 +270,7 @@ services:
       - internal
 
   media:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -288,7 +288,7 @@ services:
 
   # mls-service is no longer a stub — MLS groups are fully implemented.
   mls:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -305,7 +305,7 @@ services:
       - internal
 
   channel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/channel-service
     restart: unless-stopped
     env_file:
@@ -322,7 +322,7 @@ services:
       - internal
 
   sentinel:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -338,7 +338,7 @@ services:
       - internal
 
   signaling:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/signaling-service
     restart: unless-stopped
     env_file:
@@ -360,7 +360,7 @@ services:
       - internal
 
   delivery:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/delivery-worker
     restart: unless-stopped
     env_file:
@@ -390,7 +390,7 @@ services:
       - internal
 
   gateway:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:
@@ -475,7 +475,7 @@ services:
   #   3. On iOS: set use_masque=true, masque_host=masque.INSTANCE_DOMAIN in EngineAdapter
 
   masque:
-    image: ghcr.io/maximeliseyev/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/masque-service
     restart: unless-stopped
     env_file:
