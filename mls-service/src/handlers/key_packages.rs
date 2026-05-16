@@ -99,6 +99,30 @@ pub(crate) async fn consume_key_package(
                 device_id = %consumed.device_id,
                 "KeyPackage consumed"
             );
+
+            // Check remaining count and notify if low
+            if let Some(ref notification_client) = svc.notification_client {
+                let client = notification_client.clone();
+                let db = svc.db.clone();
+                let uid = user_id;
+                let did = consumed.device_id.clone();
+                tokio::spawn(async move {
+                    if let Ok(count) = db_mls::count_key_packages_for_device(&db, &did).await {
+                        if count < 20 {
+                            let mut nc = client.get();
+                            let _ = nc
+                                .send_blind_notification(proto::SendBlindNotificationRequest {
+                                    user_id: uid.to_string(),
+                                    badge_count: None,
+                                    activity_type: Some("replenish_key_packages".to_string()),
+                                    conversation_id: None,
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
+
             Ok(Response::new(proto::ConsumeKeyPackageResponse {
                 key_package: consumed.key_package,
                 device_id: consumed.device_id,

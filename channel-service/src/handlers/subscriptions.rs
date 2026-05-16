@@ -21,6 +21,18 @@ pub(crate) async fn subscribe_channel(
     // Verify device belongs to user
     check_device_belongs_to_user(svc.db.as_ref(), &device_id, user_id).await?;
 
+    // Warmup rate limit: 20/hour warmup, 200/hour established
+    crate::helpers::check_warmup_rate_limit(
+        svc.db.as_ref(),
+        user_id,
+        "subscribe_channel",
+        20,
+        1, // warmup: 20 per hour
+        200,
+        1, // established: 200 per hour
+    )
+    .await?;
+
     // Look up the channel
     let channel = db_channel::get_channel_by_id(svc.db.as_ref(), channel_id)
         .await

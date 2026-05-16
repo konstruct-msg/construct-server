@@ -5,7 +5,9 @@ use rand::Rng;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::helpers::{check_channel_admin, check_channel_owner, extract_device_id};
+use crate::helpers::{
+    check_channel_admin, check_channel_owner, extract_device_id, extract_user_id,
+};
 use crate::service::ChannelServiceImpl;
 
 fn generate_invite_token() -> String {
@@ -19,10 +21,23 @@ pub(crate) async fn create_invite_link(
     request: Request<proto::ChannelServiceCreateInviteLinkRequest>,
 ) -> Result<Response<proto::ChannelServiceCreateInviteLinkResponse>, Status> {
     let device_id = extract_device_id(request.metadata())?;
+    let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
         .map_err(|_| Status::invalid_argument("Invalid channel_id"))?;
+
+    // Warmup rate limit: 5/day warmup, 50/day established
+    crate::helpers::check_warmup_rate_limit(
+        svc.db.as_ref(),
+        user_id,
+        "create_channel_invite",
+        5,
+        24, // warmup: 5 per day
+        50,
+        24, // established: 50 per day
+    )
+    .await?;
 
     // Only admin can create invite links
     check_channel_owner(svc.db.as_ref(), channel_id, &device_id).await?;

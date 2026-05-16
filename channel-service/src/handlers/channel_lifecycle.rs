@@ -12,8 +12,20 @@ pub(crate) async fn create_channel(
     request: Request<proto::CreateChannelRequest>,
 ) -> Result<Response<proto::CreateChannelResponse>, Status> {
     let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
+
+    // Warmup rate limit: 1/day warmup, 10/day established
+    crate::helpers::check_warmup_rate_limit(
+        svc.db.as_ref(),
+        user_id,
+        "create_channel",
+        1,
+        24, // warmup: 1 per day
+        10,
+        24, // established: 10 per day
+    )
+    .await?;
 
     // Validate visibility
     let visibility = match req.visibility() {

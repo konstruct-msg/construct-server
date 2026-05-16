@@ -594,9 +594,26 @@ Subsequent commenters:
 
 3. **Notification content:** What data can be in push notifications for groups/channels? Encrypted or just "new message"?
 
-4. **KeyPackage rotation:** Should server notify clients when KeyPackage count is low?
+4. ~~KeyPackage rotation: should server notify clients when KeyPackage count is low?~~ **RESOLVED (2026-05-16)**
 
-5. **Rate limiting:** What are the specific limits for each operation?
+   **Yes.** Server now sends blind notification with `activity_type = "replenish_key_packages"` after `ConsumeKeyPackage` if remaining count < 20 (fire-and-forget, never blocks RPC). Privacy-preserving: target user does NOT learn who consumed the KeyPackage or for which group.
+
+5. ~~Rate limiting — what are the specific limits for each operation?~~ **RESOLVED (2026-05-15)**
+
+   **Channel rate limits** (warmup/established, via `is_user_in_warmup` PG function):
+   | Operation | Warmup (<48h) | Established (≥48h) |
+   |-----------|--------------|-------------------|
+   | `CreateChannel` | 1/day | 10/day |
+   | `PublishPost` | 50/hour | 500/hour |
+   | `SubscribeChannel` | 20/hour | 200/hour |
+   | `CreateInviteLink` | 5/day | 50/day |
+   
+   **MLS group rate limits** (existing):
+   | Operation | Limit |
+   |-----------|-------|
+   | `CreateGroup` | 10/day |
+   | `InviteToGroup` | 100/hour |
+   | `SendGroupMessage` | 1000/hour |
 
 6. **Backup/restore:** How do groups appear in encrypted backups?
 
