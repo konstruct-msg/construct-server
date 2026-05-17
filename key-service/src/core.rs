@@ -184,6 +184,7 @@ pub fn sign_bundle(bundle: &PreKeyBundle, signing_key: &SigningKey) -> Vec<u8> {
 
 /// Emit a warning when a bundle's SPK is older than `SPK_WARN_AGE_SECS` (8 days).
 /// Clients will hard-reject at 10 days, so this gives a 2-day window to investigate.
+/// Also warns when a PQ device has `kyber_spk_rotation_epoch == 0` (Kyber SPK never uploaded).
 fn warn_if_spk_aging(bundle: &PreKeyBundle) {
     let now = Utc::now();
     let check = |uploaded_at: Option<DateTime<Utc>>, label: &str| {
@@ -201,6 +202,18 @@ fn warn_if_spk_aging(bundle: &PreKeyBundle) {
     };
     check(bundle.spk_uploaded_at, "spk");
     check(bundle.kyber_spk_uploaded_at, "kyber_spk");
+
+    // PQ-hybrid devices (0x10) must always have a non-zero Kyber SPK epoch.
+    // epoch == 0 means the Kyber SPK was never uploaded; the bundle is incomplete.
+    // Clients will refuse to initiate a PQ session against such a bundle.
+    if bundle.crypto_suite == "0x10" && bundle.kyber_spk_rotation_epoch == 0 {
+        tracing::warn!(
+            device_id = %bundle.device_id,
+            crypto_suite = %bundle.crypto_suite,
+            "PQ device has kyber_spk_rotation_epoch=0 — Kyber SPK was never uploaded; \
+             clients will reject this bundle for PQ session init"
+        );
+    }
 }
 
 /// Get pre-key bundle for a device (consumes one-time pre-key if available)
