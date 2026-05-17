@@ -139,10 +139,12 @@ def cmd_sign(args):
     # relays_data can be either a list of relay objects OR a full manifest dict
     if isinstance(relays_data, list):
         relays = relays_data
+        deprecated_ids = []
     elif isinstance(relays_data, dict) and "relays" in relays_data:
         relays = relays_data["relays"]
+        deprecated_ids = relays_data.get("deprecated_ids", [])
     else:
-        print("ERROR: relays.json must be a list of relay objects or {\"relays\": [...]}")
+        print("ERROR: relays.json must be a list of relay objects or {\"relays\": [...], \"deprecated_ids\": [...]}")
         sys.exit(1)
 
     # Validate required fields per relay
@@ -169,7 +171,8 @@ def cmd_sign(args):
         "signed_at": int(time.time()),
         "bundle_signing_key": args.bundle_signing_key or None,
         "ice": {
-            "relays": relays
+            "relays": relays,
+            "deprecated_ids": deprecated_ids if deprecated_ids else None,
         },
     }
 
@@ -209,6 +212,7 @@ def cmd_verify(args):
         print()
 
     relays = payload.get("ice", {}).get("relays", [])
+    deprecated_ids = payload.get("ice", {}).get("deprecated_ids") or []
     version = payload.get("version", "?")
     signed_at = payload.get("signed_at")
 
@@ -222,6 +226,8 @@ def cmd_verify(args):
         wt = f" [WebTunnel: {r.get('wt_path')}]" if r.get("wt_path") else ""
         print(f"  • {r.get('id')}: {r.get('addr')}:{r.get('port')} "
               f"sni={r.get('sni')}{wt}")
+    if deprecated_ids:
+        print(f"Deprecated       : {', '.join(deprecated_ids)}")
 
     if pubkey_hex:
         if verify_manifest(payload, pubkey_hex):
