@@ -19,6 +19,9 @@ pub const KYBER_CIPHERTEXT_SIZE: usize = 1568;
 /// Ed25519 signature size in bytes
 pub const ED25519_SIGNATURE_SIZE: usize = 64;
 
+/// Warn in logs when a served SPK is older than 8 days. Clients will reject at 10 days.
+const SPK_WARN_AGE_SECS: i64 = 8 * 24 * 3600;
+
 #[derive(Debug, Clone)]
 pub struct PreKeyBundle {
     pub device_id: String,
@@ -179,6 +182,27 @@ pub fn sign_bundle(bundle: &PreKeyBundle, signing_key: &SigningKey) -> Vec<u8> {
     signature.to_bytes().to_vec()
 }
 
+/// Emit a warning when a bundle's SPK is older than `SPK_WARN_AGE_SECS` (8 days).
+/// Clients will hard-reject at 10 days, so this gives a 2-day window to investigate.
+fn warn_if_spk_aging(bundle: &PreKeyBundle) {
+    let now = Utc::now();
+    let check = |uploaded_at: Option<DateTime<Utc>>, label: &str| {
+        if let Some(ts) = uploaded_at {
+            let age_secs = (now - ts).num_seconds();
+            if age_secs > SPK_WARN_AGE_SECS {
+                tracing::warn!(
+                    device_id = %bundle.device_id,
+                    age_days = age_secs / 86400,
+                    label,
+                    "SPK aging: client will reject in <2 days if key not rotated"
+                );
+            }
+        }
+    };
+    check(bundle.spk_uploaded_at, "spk");
+    check(bundle.kyber_spk_uploaded_at, "kyber_spk");
+}
+
 /// Get pre-key bundle for a device (consumes one-time pre-key if available)
 pub async fn get_prekey_bundle(
     db: &PgPool,
@@ -298,6 +322,7 @@ pub async fn get_prekey_bundle(
             }
         }
     }
+    warn_if_spk_aging(&bundle);
     Ok(Some(bundle))
 }
 
@@ -415,6 +440,7 @@ pub async fn get_prekey_bundles(
                 }
             }
         }
+        warn_if_spk_aging(&bundle);
         bundles.push(bundle);
     }
 
