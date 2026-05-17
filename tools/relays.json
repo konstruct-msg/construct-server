@@ -1,4 +1,5 @@
-[
+{
+  "relays": [
   {
     "id": "ams-het-1",
     "addr": "ice.ams.konstruct.cc",
@@ -22,4 +23,6 @@
     "wt_host_header": "api.divany-kresla.uk",
     "region": "RU"
   }
-]
+  ],
+  "deprecated_ids": ["spb-mt-1"]
+}
