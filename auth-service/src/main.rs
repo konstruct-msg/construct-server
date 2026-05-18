@@ -35,8 +35,10 @@ use construct_server_shared::auth_service::AuthServiceContext;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Sha256;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -45,6 +47,7 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
@@ -1538,6 +1541,11 @@ async fn well_known_construct_server(
         .as_ref()
         .map(|signer| signer.public_key_base64());
 
+    let token_encryption_key = context
+        .token_enc_pub
+        .as_ref()
+        .map(|bytes| b64::STANDARD.encode(bytes));
+
     let domain = &app_context.config.instance_domain;
     let tls_enabled = public_key.is_some();
 
@@ -1548,6 +1556,11 @@ async fn well_known_construct_server(
             "domain": domain,
             "version": env!("CARGO_PKG_VERSION"),
             "public_key": public_key,
+            // X25519 public key for encrypting Privacy Pass token_bytes in SealedInner.
+            // Clients MUST encrypt token_bytes to this key when sending over ICE relay
+            // to prevent relay operators from reading tokens.
+            // Derived from signing_key_seed via HKDF(info="construct-token-enc-v1").
+            "token_encryption_key": token_encryption_key,
         },
         "grpc_endpoint": format!("{}:443", domain),
         "services": [
@@ -1689,6 +1702,30 @@ async fn main() -> Result<()> {
             .ok()
         });
 
+    // Derive X25519 token-encryption keypair from signing key seed.
+    // Purpose: clients encrypt Privacy Pass token_bytes to this key so relay operators
+    // cannot read tokens in transit (ICE relay sees only opaque ciphertext).
+    // The private key is only used server-side for Phase 2.1 token redemption.
+    let token_enc_pub: Option<[u8; 32]> =
+        config
+            .federation
+            .signing_key_seed
+            .as_ref()
+            .and_then(|seed_b64| {
+                let seed_bytes = b64::STANDARD.decode(seed_b64.trim()).ok()?;
+                let hk = Hkdf::<Sha256>::new(None, &seed_bytes);
+                let mut x25519_seed = [0u8; 32];
+                hk.expand(b"construct-token-enc-v1", &mut x25519_seed)
+                    .ok()?;
+                let priv_key = X25519StaticSecret::from(x25519_seed);
+                let pub_key = X25519PublicKey::from(&priv_key);
+                tracing::info!(
+                    public_key = %b64::STANDARD.encode(pub_key.as_bytes()),
+                    "Token encryption key initialized"
+                );
+                Some(*pub_key.as_bytes())
+            });
+
     // Create service context
     let context = Arc::new(AuthServiceContext {
         db_pool,
@@ -1697,6 +1734,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
         key_management,
         server_signer,
+        token_enc_pub,
     });
 
     // handlers module is local (auth-service/src/handlers.rs)
