@@ -5,6 +5,7 @@ mod grpc;
 mod handlers;
 mod media_routes;
 mod receipts;
+mod spent_tag;
 mod stream;
 mod trust;
 
