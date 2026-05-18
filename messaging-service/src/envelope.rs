@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::context::MessagingServiceContext;
 use crate::core;
+use crate::spent_tag::{DeliveryTagStatus, check_and_mark_delivery_tag};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
 /// Convert KafkaMessageEnvelope to proto Envelope
@@ -160,6 +161,49 @@ pub(crate) async fn dispatch_sealed_sender(
     let recipient_id = sealed_inner.recipient_user_id.clone();
     if recipient_id.is_empty() {
         anyhow::bail!("SealedInner.recipient_user_id is required");
+    }
+
+    // ── Delivery-tag anti-replay (two-layer) ───────────────────────────────
+    // SealedInner.delivery_tag is a per-message random nonce (32 bytes).
+    // We check it against:
+    //   • exact cache (5 min)  — no false positives, catches recent replays
+    //   • seen cache  (24 h)   — long-term dedup (exact keys, not probabilistic)
+    //
+    // If the tag was already seen we return success without re-delivering —
+    // this is intentional: legitimate retries get an idempotent "OK" and
+    // replay attackers learn nothing (same response either way).
+    //
+    // Fail-open on Redis error so a Redis outage cannot silently drop messages.
+    if !sealed_inner.delivery_tag.is_empty() {
+        let mut conn = context.redis_conn.clone();
+        match check_and_mark_delivery_tag(&mut conn, &sealed_inner.delivery_tag).await {
+            Ok(DeliveryTagStatus::New) => {
+                // First time we see this tag — proceed to delivery.
+            }
+            Ok(status) => {
+                tracing::warn!(
+                    tag_prefix = %hex::encode(&sealed_inner.delivery_tag[..4.min(sealed_inner.delivery_tag.len())]),
+                    status = ?status,
+                    "sealed sender: delivery_tag replay — dropping silently"
+                );
+                return Ok(proto::SendMessageResponse {
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    message_number: 0,
+                    server_timestamp: chrono::Utc::now().timestamp_millis(),
+                    success: true,
+                    error: None,
+                    rate_limit_challenge: None,
+                    attempt_id: None,
+                });
+            }
+            Err(e) => {
+                // Fail-open: Redis unavailable → deliver the message, log the error.
+                tracing::error!(
+                    error = %e,
+                    "delivery_tag cache unavailable — delivering without replay check"
+                );
+            }
+        }
     }
 
     let kafka_envelope = KafkaMessageEnvelope::from_sealed_sender(
