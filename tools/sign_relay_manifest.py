@@ -38,9 +38,9 @@ try:
     )
     from cryptography.hazmat.primitives.serialization import (
         Encoding,
-        PublicFormat,
-        PrivateFormat,
         NoEncryption,
+        PrivateFormat,
+        PublicFormat,
     )
 except ImportError:
     print("ERROR: cryptography library not found.")
@@ -49,6 +49,7 @@ except ImportError:
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def load_private_key(path: str) -> Ed25519PrivateKey:
     """Load Ed25519 private key from hex file (32-byte seed)."""
@@ -70,8 +71,9 @@ def sign_manifest(payload: dict, sk: Ed25519PrivateKey) -> dict:
     Canonical = sorted keys, no Unicode escaping, no whitespace.
     """
     payload_copy = {k: v for k, v in payload.items() if k != "signature"}
-    canonical = json.dumps(payload_copy, sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=False).encode("utf-8")
+    canonical = json.dumps(
+        payload_copy, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
     sig_bytes = sk.sign(canonical)
     # base64url, no padding
     sig_b64url = base64.urlsafe_b64encode(sig_bytes).rstrip(b"=").decode()
@@ -84,7 +86,7 @@ def verify_manifest(payload: dict, pubkey_hex: str) -> bool:
     sig_field = payload.get("signature", "")
     if not sig_field.startswith("ed25519:"):
         return False
-    b64url = sig_field[len("ed25519:"):]
+    b64url = sig_field[len("ed25519:") :]
     # restore padding
     pad = 4 - len(b64url) % 4
     if pad != 4:
@@ -92,8 +94,9 @@ def verify_manifest(payload: dict, pubkey_hex: str) -> bool:
     sig_bytes = base64.urlsafe_b64decode(b64url)
 
     payload_copy = {k: v for k, v in payload.items() if k != "signature"}
-    canonical = json.dumps(payload_copy, sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=False).encode("utf-8")
+    canonical = json.dumps(
+        payload_copy, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 
     pub_bytes = bytes.fromhex(pubkey_hex)
     pubkey = Ed25519PublicKey.from_public_bytes(pub_bytes)
@@ -105,6 +108,7 @@ def verify_manifest(payload: dict, pubkey_hex: str) -> bool:
 
 
 # ── subcommands ──────────────────────────────────────────────────────────────
+
 
 def cmd_keygen(args):
     """Generate a new relay manifest signing keypair."""
@@ -144,7 +148,9 @@ def cmd_sign(args):
         relays = relays_data["relays"]
         deprecated_ids = relays_data.get("deprecated_ids", [])
     else:
-        print("ERROR: relays.json must be a list of relay objects or {\"relays\": [...], \"deprecated_ids\": [...]}")
+        print(
+            'ERROR: relays.json must be a list of relay objects or {"relays": [...], "deprecated_ids": [...]}'
+        )
         sys.exit(1)
 
     # Validate required fields per relay
@@ -182,17 +188,25 @@ def cmd_sign(args):
     out_path.write_text(json.dumps(signed, indent=2, ensure_ascii=False) + "\n")
 
     print(f"✅ Signed manifest written to: {out_path}")
-    print(f"   version={new_version}, relays={len(relays)}, signed_at={payload['signed_at']}")
+    print(
+        f"   version={new_version}, relays={len(relays)}, signed_at={payload['signed_at']}"
+    )
     print(f"   bundle_signing_key={'set' if payload['bundle_signing_key'] else 'null'}")
     print(f"   Public key: {pub_hex}")
     print()
     print("Next steps:")
-    print(f"  1. git add {out_path} && git commit -m 'relay: update manifest v{new_version}'")
+    print(
+        f"  1. git add {out_path} && git commit -m 'relay: update manifest v{new_version}'"
+    )
     print(f"  2. Push to construct-relay GitHub repo (IceCertFetcher mirror)")
     print(f"  3. Copy to construct-landing/.well-known/construct-server and push")
     print()
-    print("Tip: pass --bundle-signing-key <base64> to embed the server bundle verification key")
-    print("     (get it from the current manifest or 'BUNDLE_SIGNING_PUBLIC_KEY' env var)")
+    print(
+        "Tip: pass --bundle-signing-key <base64> to embed the server bundle verification key"
+    )
+    print(
+        "     (get it from the current manifest or 'BUNDLE_SIGNING_PUBLIC_KEY' env var)"
+    )
 
 
 def cmd_verify(args):
@@ -219,13 +233,17 @@ def cmd_verify(args):
     print(f"Manifest version : {version}")
     if signed_at:
         import datetime
-        dt = datetime.datetime.utcfromtimestamp(signed_at).strftime("%Y-%m-%d %H:%M UTC")
+
+        dt = datetime.datetime.utcfromtimestamp(signed_at).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
         print(f"Signed at        : {dt}")
     print(f"Relays           : {len(relays)}")
     for r in relays:
         wt = f" [WebTunnel: {r.get('wt_path')}]" if r.get("wt_path") else ""
-        print(f"  • {r.get('id')}: {r.get('addr')}:{r.get('port')} "
-              f"sni={r.get('sni')}{wt}")
+        print(
+            f"  • {r.get('id')}: {r.get('addr')}:{r.get('port')} sni={r.get('sni')}{wt}"
+        )
     if deprecated_ids:
         print(f"Deprecated       : {', '.join(deprecated_ids)}")
 
@@ -241,6 +259,7 @@ def cmd_verify(args):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Construct relay manifest signing tool",
@@ -251,14 +270,22 @@ def main():
 
     # keygen
     p_keygen = sub.add_parser("keygen", help="Generate a new relay signing keypair")
-    p_keygen.add_argument("--out", help="Output path for private key (default: relay_signing_key.hex)")
-    p_keygen.add_argument("--force", action="store_true", help="Overwrite existing key file")
+    p_keygen.add_argument(
+        "--out", help="Output path for private key (default: relay_signing_key.hex)"
+    )
+    p_keygen.add_argument(
+        "--force", action="store_true", help="Overwrite existing key file"
+    )
 
     # sign
     p_sign = sub.add_parser("sign", help="Sign a relays.json and produce the manifest")
-    p_sign.add_argument("relays_json", help="Path to relays.json (list of relay objects)")
+    p_sign.add_argument(
+        "relays_json", help="Path to relays.json (list of relay objects)"
+    )
     p_sign.add_argument("--key", required=True, help="Path to private key hex file")
-    p_sign.add_argument("--out", help="Output path (default: .well-known/construct-server)")
+    p_sign.add_argument(
+        "--out", help="Output path (default: .well-known/construct-server)"
+    )
     p_sign.add_argument(
         "--bundle-signing-key",
         dest="bundle_signing_key",
