@@ -25,6 +25,11 @@ pub struct AuthServiceContext {
     pub config: Arc<Config>,
     pub key_management: Option<Arc<KeyManagementSystem>>,
     pub server_signer: Option<Arc<ServerSigner>>,
+    /// X25519 public key (32 bytes) used to encrypt Privacy Pass token_bytes in SealedInner.
+    /// Clients encrypt tokens to this key so relay operators cannot read them in transit.
+    /// Derived from signing_key_seed via HKDF(info="construct-token-enc-v1").
+    /// Published at /.well-known/construct-server as `token_encryption_key` (base64).
+    pub token_enc_pub: Option<[u8; 32]>,
 }
 
 impl AuthServiceContext {
