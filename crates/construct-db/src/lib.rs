@@ -1478,24 +1478,40 @@ pub async fn has_pending_contact_request(
     to_user_id: Uuid,
     hmac_secret: &[u8],
 ) -> Result<bool> {
+    get_pending_contact_request_id(pool, from_user_id, to_user_id, hmac_secret)
+        .await
+        .map(|opt| opt.is_some())
+}
+
+/// Return the UUID of an existing pending request from `from_user_id` → `to_user_id`,
+/// or `None` if no such pending request exists.
+///
+/// Idempotency contract: callers that receive `Some(id)` MUST return that `id` to the
+/// client unchanged — this allows clients to recover the `request_id` after a reinstall
+/// without creating a duplicate row in the database.
+pub async fn get_pending_contact_request_id(
+    pool: &DbPool,
+    from_user_id: Uuid,
+    to_user_id: Uuid,
+    hmac_secret: &[u8],
+) -> Result<Option<Uuid>> {
     let from_hmac = hmac_sha256(hmac_secret, from_user_id.as_bytes());
     let to_hmac = hmac_sha256(hmac_secret, to_user_id.as_bytes());
 
-    let exists: bool = sqlx::query_scalar(
+    let id: Option<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT EXISTS(
-            SELECT 1 FROM contact_requests
-            WHERE from_hmac = $1 AND to_hmac = $2 AND status = 'pending'
-        )
+        SELECT id FROM contact_requests
+        WHERE from_hmac = $1 AND to_hmac = $2 AND status = 'pending'
+        LIMIT 1
         "#,
     )
     .bind(&from_hmac[..])
     .bind(&to_hmac[..])
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .context("Failed to check pending contact request")?;
+    .context("Failed to fetch pending contact request id")?;
 
-    Ok(exists)
+    Ok(id)
 }
 
 /// Respond to a contact request.

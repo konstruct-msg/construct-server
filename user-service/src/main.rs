@@ -24,7 +24,7 @@ use construct_config::Config;
 use construct_crypto::hash_username;
 use construct_db::{
     self as db_agility, create_contact_request, get_contact_request_sender,
-    get_pending_contact_requests, get_sent_contact_requests, has_pending_contact_request,
+    get_pending_contact_request_id, get_pending_contact_requests, get_sent_contact_requests,
     is_user_searchable, respond_to_contact_request,
 };
 use construct_server_shared::auth::AuthManager;
@@ -620,20 +620,20 @@ impl UserService for UserGrpcService {
             return Err(Status::not_found("user not found"));
         }
 
-        // Check for duplicate pending request (idempotent response for client retries).
+        // Check for duplicate pending request — return existing request_id for idempotency
+        // (client may have lost it on reinstall / UserDefaults wipe).
         let sec = &self.context.config.security;
-        let already_pending = has_pending_contact_request(
+        if let Some(existing_id) = get_pending_contact_request_id(
             &self.context.db_pool,
             caller_id,
             to_user_id,
             &sec.contact_hmac_secret,
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        if already_pending {
+        .map_err(|e| Status::internal(e.to_string()))?
+        {
             return Ok(Response::new(proto::SendContactRequestResponse {
-                request_id: String::new(),
+                request_id: existing_id.to_string(),
                 status: proto::ContactRequestStatus::Pending as i32,
             }));
         }
