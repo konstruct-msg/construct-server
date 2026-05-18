@@ -38,8 +38,6 @@ try:
     )
     from cryptography.hazmat.primitives.serialization import (
         Encoding,
-        NoEncryption,
-        PrivateFormat,
         PublicFormat,
     )
 except ImportError:
@@ -123,8 +121,8 @@ def cmd_keygen(args):
 
     out_path.write_text(seed.hex())
     print(f"✅ Private key (seed) written to: {out_path}")
-    print(f"   Keep this file OFFLINE. Never commit or deploy it.\n")
-    print(f"📢 Public key (hex) — hardcode in ICEConfig.relayConfigSigningKey:")
+    print("   Keep this file OFFLINE. Never commit or deploy it.\n")
+    print("📢 Public key (hex) — hardcode in ICEConfig.relayConfigSigningKey:")
     print(f"   {pub_hex}")
 
 
@@ -198,8 +196,8 @@ def cmd_sign(args):
     print(
         f"  1. git add {out_path} && git commit -m 'relay: update manifest v{new_version}'"
     )
-    print(f"  2. Push to construct-relay GitHub repo (IceCertFetcher mirror)")
-    print(f"  3. Copy to construct-landing/.well-known/construct-server and push")
+    print("  2. Push to construct-relay GitHub repo (IceCertFetcher mirror)")
+    print("  3. Copy to construct-landing/.well-known/construct-server and push")
     print()
     print(
         "Tip: pass --bundle-signing-key <base64> to embed the server bundle verification key"
@@ -251,7 +249,7 @@ def cmd_verify(args):
         if verify_manifest(payload, pubkey_hex):
             print(f"\n✅ Signature VALID (pubkey: {pubkey_hex[:16]}…)")
         else:
-            print(f"\n❌ Signature INVALID")
+            print("\n❌ Signature INVALID")
             sys.exit(1)
     else:
         print("\n⚠️  Signature not checked (no --pubkey provided)")
