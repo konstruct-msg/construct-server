@@ -447,6 +447,7 @@ services:
       STATE_DIR: "/data"
       TLS_SNI_HOST: "ice.${INSTANCE_DOMAIN}"
       WT_PATH: "/construct-ice"
+      TRUSTED_PROXIES: "172.16.0.0/12"
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - relay-ams-state:/data
