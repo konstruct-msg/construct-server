@@ -447,8 +447,13 @@ services:
     restart: unless-stopped
     environment:
       LISTEN_ADDR: "0.0.0.0:9444"
-      UPSTREAM: "${INSTANCE_DOMAIN}:443"
-      UPSTREAM_TLS: "true"
+      # Plain TCP forward to Traefik:443 — the iOS client's TLS stream is
+      # tunneled inside obfs4/WebTunnel and re-emerges here as raw TLS bytes.
+      # Traefik terminates TLS (SNI=${INSTANCE_DOMAIN}) and routes h2c→envoy:8080.
+      # Do NOT set UPSTREAM_TLS=true: that would double-wrap the client's TLS,
+      # turning its ClientHello into application data and closing the upstream.
+      UPSTREAM: "traefik:443"
+      UPSTREAM_TLS: "false"
       STATE_DIR: "/data"
       TLS_SNI_HOST: "ice.${INSTANCE_DOMAIN}"
       WT_PATH: "/construct-ice"
