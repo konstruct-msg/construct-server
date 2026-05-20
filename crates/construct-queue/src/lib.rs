@@ -863,4 +863,24 @@ impl MessageQueue {
         .trim_streams_by_age(max_age_seconds)
         .await
     }
+
+    /// Purge all pending messages from `sender_id` out of `recipient_id`'s delivery
+    /// streams (user-level and all per-device streams).
+    ///
+    /// Call immediately after a block operation to prevent the blocked contact's
+    /// messages from being delivered on the next background fetch.
+    /// Returns the number of stream entries deleted (informational only).
+    pub async fn purge_stream_messages_from_sender(
+        &mut self,
+        recipient_id: &str,
+        sender_id: &str,
+    ) -> Result<u64> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .purge_messages_from_sender(recipient_id, sender_id)
+        .await
+    }
 }

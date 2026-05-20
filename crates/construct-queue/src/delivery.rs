@@ -780,4 +780,121 @@ impl<'a> DeliveryManager<'a> {
 
         Ok(total_trimmed)
     }
+
+    /// Purge all messages from `sender_id` out of `recipient_id`'s Redis streams.
+    ///
+    /// Scans the user-level stream and all per-device streams for `recipient_id`,
+    /// deserialises each MessagePack payload, and XDEL entries where the envelope
+    /// `sender_id` matches.  Sealed-sender entries (empty `sender_id`) are skipped.
+    ///
+    /// Returns the total number of entries deleted.
+    pub(crate) async fn purge_messages_from_sender(
+        &mut self,
+        recipient_id: &str,
+        sender_id: &str,
+    ) -> Result<u64> {
+        let mut total: u64 = 0;
+
+        // 1. User-level stream: {prefix}:offline:{recipient_id}
+        let user_key = format!("{}:offline:{}", self.delivery_queue_prefix, recipient_id);
+        total += self
+            .purge_sender_from_one_stream(&user_key, sender_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(stream_key = %user_key, error = %e, "purge_messages_from_sender: failed on user stream");
+                0
+            });
+
+        // 2. Per-device streams: {prefix}:offline:{recipient_id}:*
+        let pattern = format!("{}:offline:{}:*", self.delivery_queue_prefix, recipient_id);
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100u64)
+                .query_async(self.client.connection_mut())
+                .await
+                .context("SCAN failed during purge_messages_from_sender")?;
+
+            for key in keys {
+                total += self
+                    .purge_sender_from_one_stream(&key, sender_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(stream_key = %key, error = %e, "purge_messages_from_sender: failed on device stream");
+                        0
+                    });
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Scan a single stream and XDEL all entries whose `payload` decodes to an
+    /// envelope with `sender_id` matching `target_sender_id`.
+    async fn purge_sender_from_one_stream(
+        &mut self,
+        stream_key: &str,
+        target_sender_id: &str,
+    ) -> Result<u64> {
+        use construct_broker::types::KafkaMessageEnvelope;
+
+        let entries = self
+            .client
+            .xrange_binary(stream_key, "-", "+")
+            .await
+            .context("XRANGE failed")?;
+
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let ids_to_delete: Vec<String> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let payload = entry.fields.get("payload")?;
+                let envelope: KafkaMessageEnvelope = rmp_serde::from_slice(payload).ok()?;
+                // Skip sealed-sender entries — sender is intentionally hidden.
+                if envelope.is_sealed_sender || envelope.sender_id.is_empty() {
+                    return None;
+                }
+                if envelope.sender_id == target_sender_id {
+                    Some(entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if ids_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        let count = ids_to_delete.len() as u64;
+        let mut cmd = redis::cmd("XDEL");
+        cmd.arg(stream_key);
+        for id in &ids_to_delete {
+            cmd.arg(id.as_str());
+        }
+        let _: i64 = cmd
+            .query_async(self.client.connection_mut())
+            .await
+            .context("XDEL failed")?;
+
+        tracing::info!(
+            stream_key = %stream_key,
+            sender_id = %target_sender_id,
+            deleted = count,
+            "Purged queued messages from blocked sender"
+        );
+        Ok(count)
+    }
 }

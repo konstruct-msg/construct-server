@@ -231,6 +231,36 @@ impl UserService for UserGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
+        // Purge any pending messages from the blocked user out of the blocker's
+        // delivery streams.  Fire-and-forget: a Redis error here must not fail the
+        // block operation itself — the block is already persisted in the DB.
+        {
+            let blocker_str = blocker_user_id.to_string();
+            let blocked_str = blocked_user_id.to_string();
+            let queue = self.context.queue.clone();
+            tokio::spawn(async move {
+                let mut q = queue.lock().await;
+                match q
+                    .purge_stream_messages_from_sender(&blocker_str, &blocked_str)
+                    .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(
+                        blocker_id = %blocker_str,
+                        blocked_id = %blocked_str,
+                        deleted = n,
+                        "Stream purge on block: removed queued messages from blocked sender"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        blocker_id = %blocker_str,
+                        blocked_id = %blocked_str,
+                        error = %e,
+                        "Stream purge on block failed (block still committed)"
+                    ),
+                }
+            });
+        }
+
         Ok(Response::new(proto::BlockUserResponse {
             success: true,
             blocked_at: blocked_at.timestamp_millis(),
