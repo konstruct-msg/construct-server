@@ -178,6 +178,45 @@ impl RedisClient {
         self.connection_mut().xack(stream_key, group, ids).await
     }
 
+    /// XRANGE - Read a range of entries from a stream (binary values).
+    ///
+    /// Use `start = "-"` and `end = "+"` to read all entries.
+    /// Returns raw bytes for each field value.
+    pub async fn xrange_binary(
+        &mut self,
+        stream_key: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<StreamEntryBinary>> {
+        use redis::streams::StreamRangeReply;
+
+        let reply: StreamRangeReply = redis::cmd("XRANGE")
+            .arg(stream_key)
+            .arg(start)
+            .arg(end)
+            .query_async(self.connection_mut())
+            .await?;
+
+        let mut entries = Vec::new();
+        for stream_id in reply.ids {
+            let mut fields = HashMap::new();
+            for (key, value) in stream_id.map.iter() {
+                let value_bytes = match value {
+                    Value::BulkString(bytes) => bytes.clone(),
+                    Value::SimpleString(s) => s.as_bytes().to_vec(),
+                    Value::Int(i) => i.to_string().into_bytes(),
+                    _ => continue,
+                };
+                fields.insert(key.clone(), value_bytes);
+            }
+            entries.push(StreamEntryBinary {
+                id: stream_id.id,
+                fields,
+            });
+        }
+        Ok(entries)
+    }
+
     /// XDEL - Delete stream entries
     pub async fn xdel<K, ID>(&mut self, stream_key: K, ids: &[ID]) -> Result<i64>
     where
