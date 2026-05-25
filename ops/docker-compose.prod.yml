@@ -80,8 +80,8 @@ services:
       - "--log.level=INFO"
     ports:
       - "80:80"
-      - "443:443"        # TCP — TLS/HTTP1.1 + HTTP/2
-      - "443:443/udp"    # UDP — QUIC/HTTP3 (construct-engine)
+      - "443:443" # TCP — TLS/HTTP1.1 + HTTP/2
+      - "443:443/udp" # UDP — QUIC/HTTP3 (construct-engine)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik-certs:/certs
@@ -443,7 +443,7 @@ services:
   #   4. Rebuild and deploy iOS app
 
   relay-ams:
-    image: ghcr.io/maximeliseyev/construct-relay:latest
+    image: ghcr.io/naminohi/construct-relay:latest
     restart: unless-stopped
     environment:
       LISTEN_ADDR: "0.0.0.0:9444"

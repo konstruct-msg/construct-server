@@ -889,7 +889,7 @@ dependencies = [
 [[package]]
 name = "construct-ice"
 version = "2.3.1"
-source = "git+https://github.com/maximeliseyev/construct-ice.git?branch=main#4657fca703418b0f6ec237f3465dd049e4d8cf3e"
+source = "git+https://github.com/naminohi/construct-ice.git?branch=main#4657fca703418b0f6ec237f3465dd049e4d8cf3e"
 dependencies = [
  "base64",
  "bytes",
