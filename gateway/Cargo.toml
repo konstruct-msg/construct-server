@@ -58,7 +58,7 @@ hmac = "0.13"
 sha2 = "0.11"
 subtle = "2.6"
 prost = "0.14.3"
-construct-ice = { git = "https://github.com/maximeliseyev/construct-ice.git", branch = "main" }
+construct-ice = { git = "https://github.com/naminohi/construct-ice.git", branch = "main" }
 
 # TLS for ICE-over-TLS (obfs4 inside TLS to defeat TSPU DPI)
 tokio-rustls = "0.26"

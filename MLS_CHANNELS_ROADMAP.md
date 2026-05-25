@@ -1,6 +1,6 @@
 # MLS Groups & Channels — Implementation Roadmap
 
-> **Source of truth:** `/Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Refactoring/GROUP_CHANNEL_SPEC.md`  
+> **Source of truth:** `~/Code/construct-docs/raw/03_Server_Backend/Refactoring/GROUP_CHANNEL_SPEC.md`  
 > **Last synced:** 2026-04-29  
 > **Status:** Track implementation progress against the specification
 

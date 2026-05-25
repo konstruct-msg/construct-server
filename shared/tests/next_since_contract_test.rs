@@ -246,6 +246,6 @@ fn test_contract_documentation() {
     println!("5. When no messages: echo 'since' or return '0-0'");
     println!();
     println!(
-        "📖 See: /Users/maximeliseyev/Documents/Konstruct/03_Server_Backend/Documentation/NEXT_SINCE_CONTRACT.md"
+        "📖 See: ~/Code/construct-docs/raw/03_Server_Backend/Documentation/NEXT_SINCE_CONTRACT.md"
     );
 }
