@@ -443,7 +443,7 @@ services:
   #   4. Rebuild and deploy iOS app
 
   relay-ams:
-    image: ghcr.io/naminohi/construct-relay:latest
+    image: ghcr.io/konstruct-msg/construct-relay:latest
     restart: unless-stopped
     environment:
       LISTEN_ADDR: "0.0.0.0:9444"
