@@ -48,7 +48,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.13.1"
+version = "0.13.2"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/naminohi/construct-server"
