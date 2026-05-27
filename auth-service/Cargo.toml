@@ -50,7 +50,7 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 subtle = "2.6"
 
 # ICE transport — bridge cert computation for login response
-construct-ice = { git = "https://github.com/naminohi/construct-ice.git", branch = "main" }
+construct-ice = { git = "https://github.com/konstruct-msg/construct-ice.git", branch = "main" }
 
 # RSA key parsing for JWKS endpoint
 rsa = { version = "0.9", features = ["pem"] }
