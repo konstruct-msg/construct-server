@@ -20,6 +20,34 @@ pub(crate) struct MessagingGrpcService {
     pub(crate) context: Arc<MessagingServiceContext>,
 }
 
+fn heartbeat_ack_response() -> proto::MessageStreamResponse {
+    proto::MessageStreamResponse {
+        response_id: None,
+        stream_cursor: None,
+        rate_limit_challenge: None,
+        attempt_id: None,
+        response: Some(proto::message_stream_response::Response::HeartbeatAck(
+            proto::HeartbeatAck {
+                timestamp: 0, // server-initiated; no prior client ping to echo
+                server_timestamp: chrono::Utc::now().timestamp_millis(),
+            },
+        )),
+    }
+}
+
+async fn send_initial_heartbeat_ack(
+    tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
+    stream_conn_id: uuid::Uuid,
+) -> bool {
+    let initial_ack_sent = tx.send(Ok(heartbeat_ack_response())).await.is_ok();
+    tracing::info!(
+        stream_conn_id = %stream_conn_id,
+        initial_ack_sent,
+        "initial HeartbeatAck dispatched"
+    );
+    initial_ack_sent
+}
+
 #[tonic::async_trait]
 impl MessagingService for MessagingGrpcService {
     type MessageStreamStream =
@@ -56,6 +84,14 @@ impl MessagingService for MessagingGrpcService {
                 user_id = user_id.map(|u| u.to_string()).unwrap_or_default(),
                 "MessageStream opened"
             );
+
+            // Immediately emit the first stream item so tonic/h2 sends initial
+            // response HEADERS at accept time. For server-streaming/bidi RPCs,
+            // tonic may otherwise defer HEADERS until the first DATA frame; when
+            // the inbox is empty that can be as late as the heartbeat interval.
+            if !send_initial_heartbeat_ack(&tx, stream_conn_id).await {
+                return;
+            }
 
             // Wakeup channel: Redis pub/sub listener signals us when a new message
             // arrives so we can deliver immediately without waiting for the next poll.
@@ -203,19 +239,7 @@ impl MessagingService for MessagingGrpcService {
                     // stays active and tonic's keepalive PINGs are triggered even during
                     // periods with no user messages (idle chats, background app state).
                     _ = heartbeat_interval.tick() => {
-                        let ack = proto::HeartbeatAck {
-                            timestamp: 0, // server-initiated; no prior client ping to echo
-                            server_timestamp: chrono::Utc::now().timestamp_millis(),
-                        };
-                        if tx.send(Ok(proto::MessageStreamResponse {
-                            response_id: None,
-                            stream_cursor: None,
-                            rate_limit_challenge: None,
-                            attempt_id: None,
-                            response: Some(
-                                proto::message_stream_response::Response::HeartbeatAck(ack),
-                            ),
-                        })).await.is_err() {
+                        if tx.send(Ok(heartbeat_ack_response())).await.is_err() {
                             break 'stream "heartbeat_tx_closed";
                         }
                     }
@@ -934,6 +958,28 @@ async fn extract_authed_user_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_send_initial_heartbeat_ack_dispatches_immediately() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let stream_conn_id = uuid::Uuid::new_v4();
+
+        assert!(send_initial_heartbeat_ack(&tx, stream_conn_id).await);
+
+        let item = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("initial HeartbeatAck must be queued without waiting for heartbeat interval")
+            .expect("channel must contain one item")
+            .expect("initial HeartbeatAck must be Ok");
+
+        match item.response {
+            Some(proto::message_stream_response::Response::HeartbeatAck(ack)) => {
+                assert_eq!(ack.timestamp, 0);
+                assert!(ack.server_timestamp > 0);
+            }
+            other => panic!("expected initial HeartbeatAck, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_payload_size_empty_rejected() {
