@@ -378,13 +378,13 @@ enum PushProvider {
 // PushEnvironment - Push environment
 enum PushEnvironment {
   // Unspecified environment (must be 0)
-  PUSH_ENV_UNSPECIFIED = 0;
+  PUSH_ENVIRONMENT_UNSPECIFIED = 0;
 
   // Sandbox (APNS development / debug builds)
-  PUSH_ENV_SANDBOX = 1;
+  PUSH_ENVIRONMENT_SANDBOX = 1;
 
   // Production (App Store / TestFlight production builds)
-  PUSH_ENV_PRODUCTION = 2;
+  PUSH_ENVIRONMENT_PRODUCTION = 2;
 }
 
 // ============================================================================
@@ -674,10 +674,10 @@ message CheckJoinRequestStatusRequest {
 // CheckJoinRequestStatusResponse - Current status of the join request
 message CheckJoinRequestStatusResponse {
   enum Status {
-    PENDING = 0; // Still waiting for phone approval
-    APPROVED = 1; // Phone approved — tokens included
-    REJECTED = 2; // Phone rejected
-    EXPIRED = 3; // TTL expired before approval
+    STATUS_PENDING = 0; // Still waiting for phone approval
+    STATUS_APPROVED = 1; // Phone approved — tokens included
+    STATUS_REJECTED = 2; // Phone rejected
+    STATUS_EXPIRED = 3; // TTL expired before approval
   }
 
   Status status = 1;
