@@ -2,13 +2,9 @@ syntax = "proto3";
 
 package shared.proto.services.v1;
 
-import "core/crypto.proto";
 import "core/envelope.proto";
-import "core/identity.proto";
-import "core/pagination.proto";
-import "messaging/content.proto";
-import "signaling/presence.proto";
 import "signaling/p2p.proto";
+import "signaling/presence.proto";
 
 // MessagingService - Core messaging gRPC service
 // Handles sending, receiving, and querying messages
@@ -50,7 +46,6 @@ service MessagingService {
   // envelope so the recipient performs a full X3DH re-init with the caller.
   // Use when a broken ratchet is detected and END_SESSION is too disruptive.
   rpc RequestKeySync(RequestKeySyncRequest) returns (RequestKeySyncResponse);
-
 }
 
 // MessageStreamRequest - Client -> Server in bidirectional stream
@@ -305,7 +300,6 @@ message SendMessageResponse {
   // Echoed from SendMessageRequest.attempt_id for client-side tracing.
   optional string attempt_id = 7;
 }
-
 
 // EditMessageRequest - Edit message
 message EditMessageRequest {
