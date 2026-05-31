@@ -787,9 +787,15 @@ impl CallRegistry {
                     continue;
                 }
 
+                // 45s gives enough headroom for the slow paths in production:
+                //   E2EE-direct accept (offer arrives via encrypted messaging, callee
+                //   processes crypto + WebRTC ensureWebRTC + applies SDP + sends ringing
+                //   via signaling stream) can take 10-20s under poor networks before the
+                //   ringing signal arrives. 15s was reaping these calls mid-flight even
+                //   after iceConnectionState already reached `connected`.
                 if state.ringing_at_ms.is_none()
                     && state.answered_at_ms.is_none()
-                    && now_ms.saturating_sub(state.offered_at_ms) > 15_000
+                    && now_ms.saturating_sub(state.offered_at_ms) > 45_000
                 {
                     actions.push(CleanupAction::ErrorToCaller {
                         call_id: state.call_id.clone(),
