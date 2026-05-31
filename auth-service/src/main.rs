@@ -59,8 +59,8 @@ use construct_server_shared::shared::proto::services::v1::{
 #[derive(Clone)]
 struct AuthGrpcService {
     context: Arc<AuthServiceContext>,
-    /// Pre-computed obfs4 bridge cert (None when ICE_ENABLED=false or key not set).
-    ice_bridge_cert: Option<String>,
+    /// Pre-computed obfs4 bridge cert (None when VEIL_ENABLED=false or key not set).
+    veil_bridge_cert: Option<String>,
     /// OPRF scalar key for Privacy Pass token issuance (None = feature disabled).
     token_issuer_key: Option<[u8; 32]>,
 }
@@ -141,7 +141,7 @@ impl AuthService for AuthGrpcService {
                 access_token: response.access_token,
                 refresh_token: response.refresh_token,
                 expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
-                ice_bridge_cert: self.ice_bridge_cert.clone(),
+                veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
         }))
     }
@@ -231,7 +231,7 @@ impl AuthService for AuthGrpcService {
                 access_token: response.access_token,
                 refresh_token: response.refresh_token,
                 expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
-                ice_bridge_cert: self.ice_bridge_cert.clone(),
+                veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
         }))
     }
@@ -496,7 +496,7 @@ impl AuthService for AuthGrpcService {
                 access_token,
                 refresh_token,
                 expires_at: exp_timestamp,
-                ice_bridge_cert: self.ice_bridge_cert.clone(),
+                veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
             devices_revoked,
             recovered_at: now,
@@ -821,7 +821,7 @@ impl AuthService for AuthGrpcService {
                 access_token,
                 refresh_token,
                 expires_at: exp_timestamp,
-                ice_bridge_cert: self.ice_bridge_cert.clone(),
+                veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
         }))
     }
@@ -1302,7 +1302,7 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
                 access_token,
                 refresh_token,
                 expires_at: exp_timestamp,
-                ice_bridge_cert: self.ice_bridge_cert.clone(),
+                veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
         }))
     }
@@ -1410,7 +1410,7 @@ impl proto::device_link_service_server::DeviceLinkService for AuthGrpcService {
                         access_token: parts[0].to_string(),
                         refresh_token: parts[1].to_string(),
                         expires_at: exp_timestamp,
-                        ice_bridge_cert: self.ice_bridge_cert.clone(),
+                        veil_bridge_cert: self.veil_bridge_cert.clone(),
                     }),
                 }));
             }
@@ -1557,7 +1557,7 @@ async fn well_known_construct_server(
             "version": env!("CARGO_PKG_VERSION"),
             "public_key": public_key,
             // X25519 public key for encrypting Privacy Pass token_bytes in SealedInner.
-            // Clients MUST encrypt token_bytes to this key when sending over ICE relay
+            // Clients MUST encrypt token_bytes to this key when sending over veil relay
             // to prevent relay operators from reading tokens.
             // Derived from signing_key_seed via HKDF(info="construct-token-enc-v1").
             "token_encryption_key": token_encryption_key,
@@ -1704,7 +1704,7 @@ async fn main() -> Result<()> {
 
     // Derive X25519 token-encryption keypair from signing key seed.
     // Purpose: clients encrypt Privacy Pass token_bytes to this key so relay operators
-    // cannot read tokens in transit (ICE relay sees only opaque ciphertext).
+    // cannot read tokens in transit (veil relay sees only opaque ciphertext).
     // The private key is only used server-side for Phase 2.1 token redemption.
     let token_enc_pub: Option<[u8; 32]> =
         config
@@ -1739,18 +1739,18 @@ async fn main() -> Result<()> {
 
     // handlers module is local (auth-service/src/handlers.rs)
 
-    // Compute ICE bridge cert once at startup (shared across all gRPC connections).
-    // Requires ICE_ENABLED=true and ICE_SERVER_KEY to be set (same as gateway).
-    let ice_bridge_cert: Option<String> = if config.ice_enabled {
-        config.ice_server_key.as_ref().and_then(|key_b64| {
+    // Compute VEIL bridge cert once at startup (shared across all gRPC connections).
+    // Requires VEIL_ENABLED=true and VEIL_SERVER_KEY to be set (same as gateway).
+    let veil_bridge_cert: Option<String> = if config.veil_enabled {
+        config.veil_server_key.as_ref().and_then(|key_b64| {
             let bytes = b64::STANDARD.decode(key_b64)
-                .map_err(|e| tracing::warn!(error = %e, "ICE_SERVER_KEY: invalid base64 — bridge cert will not be included in auth responses"))
+                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: invalid base64 — bridge cert will not be included in auth responses"))
                 .ok()?;
-            let server_cfg = construct_ice::ServerConfig::from_bytes(&bytes)
-                .map_err(|e| tracing::warn!(error = %e, "ICE_SERVER_KEY: failed to parse — bridge cert will not be included in auth responses"))
+            let server_cfg = construct_veil::ServerConfig::from_bytes(&bytes)
+                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: failed to parse — bridge cert will not be included in auth responses"))
                 .ok()?;
             let cert = server_cfg.bridge_cert();
-            info!(cert = %cert, "ICE bridge cert ready — will be included in auth responses");
+            info!(cert = %cert, "VEIL bridge cert ready — will be included in auth responses");
             Some(cert)
         })
     } else {
@@ -1759,7 +1759,7 @@ async fn main() -> Result<()> {
 
     // Start gRPC AuthService (hard-cut target transport)
     let grpc_context = context.clone();
-    let grpc_ice_bridge_cert = ice_bridge_cert.clone();
+    let grpc_veil_bridge_cert = veil_bridge_cert.clone();
 
     // Load Privacy Pass token issuer key (optional — feature disabled if absent).
     let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
@@ -1795,7 +1795,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let service = AuthGrpcService {
             context: grpc_context,
-            ice_bridge_cert: grpc_ice_bridge_cert,
+            veil_bridge_cert: grpc_veil_bridge_cert,
             token_issuer_key,
         };
         if let Err(e) =

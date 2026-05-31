@@ -127,37 +127,37 @@ pub struct Config {
     /// Deep link base URL (e.g., "https://konstruct.cc")
     pub deep_link_base_url: String,
 
-    // ── construct-ice (ICE transport obfuscation) ────────────────────────────
-    /// Enable ICE (obfs4) listener in addition to the plain listener.
+    // ── construct-veil (VEIL transport obfuscation) ────────────────────────────
+    /// Enable VEIL (obfs4) listener in addition to the plain listener.
     /// Set ICE_ENABLED=true to activate.
-    pub ice_enabled: bool,
+    pub veil_enabled: bool,
 
-    /// Port for the ICE (obfs4) listener (default 9443).
-    pub ice_port: u16,
+    /// Port for the VEIL (obfs4) listener (default 9443).
+    pub veil_port: u16,
 
     /// Base64-encoded 52-byte server identity key (`secret || node_id`).
     /// Generate once with `ServerConfig::generate().to_bytes()` and persist.
     /// If unset, a new ephemeral key is generated on each startup (clients
     /// need a new bridge cert after every restart — not suitable for production).
-    pub ice_server_key: Option<String>,
+    pub veil_server_key: Option<String>,
 
-    /// IAT obfuscation mode for the ICE listener: 0=None, 1=Enabled, 2=Paranoid.
+    /// IAT obfuscation mode for the VEIL listener: 0=None, 1=Enabled, 2=Paranoid.
     /// Paranoid recommended for high-threat environments (China/Iran).
-    pub ice_iat_mode: u8,
+    pub veil_iat_mode: u8,
 
-    /// Upstream address that ICE connections are proxied to after de-obfuscation.
+    /// Upstream address that VEIL connections are proxied to after de-obfuscation.
     /// Defaults to `envoy:8080` (the gRPC routing proxy inside Docker).
-    pub ice_upstream: String,
+    pub veil_upstream: String,
 
-    /// Path to TLS certificate PEM file for ICE-over-TLS listener.
-    /// When set together with `ice_tls_key_path`, the ICE listener wraps
+    /// Path to TLS certificate PEM file for VEIL-over-TLS listener.
+    /// When set together with `veil_tls_key_path`, the VEIL listener wraps
     /// obfs4 inside TLS — traffic looks like HTTPS to DPI.
-    /// Example: `/secrets/tls/ice-cert.pem`
-    pub ice_tls_cert_path: Option<String>,
+    /// Example: `/secrets/tls/veil-cert.pem`
+    pub veil_tls_cert_path: Option<String>,
 
-    /// Path to TLS private key PEM file for ICE-over-TLS listener.
-    /// Must match the certificate in `ice_tls_cert_path`.
-    pub ice_tls_key_path: Option<String>,
+    /// Path to TLS private key PEM file for VEIL-over-TLS listener.
+    /// Must match the certificate in `veil_tls_cert_path`.
+    pub veil_tls_key_path: Option<String>,
 
     /// Upstream address for cover-traffic proxying (Telemt-style active-probe resistance).
     ///
@@ -166,16 +166,16 @@ pub struct Config {
     /// Active probers see a real server response; legitimate obfs4 clients are unaffected.
     ///
     /// Example: `"93.184.216.34:443"` (example.com) or `"real-site.com:443"`.
-    /// Only effective when not using gateway-managed TLS (`ICE_TLS_CERT_PATH` unset),
+    /// Only effective when not using gateway-managed TLS (`VEIL_TLS_CERT_PATH` unset),
     /// i.e. when Traefik handles TLS termination.
-    pub ice_cover_upstream: Option<String>,
+    pub veil_cover_upstream: Option<String>,
 
-    /// Comma-separated list of ICE relay addresses advertised in `/.well-known/construct-server`.
+    /// Comma-separated list of VEIL relay addresses advertised in `/.well-known/construct-server`.
     /// Each entry should be `host:port`.  Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS).
     /// Port 9443 = legacy plain obfs4.
     ///
     /// Example: `"ice.msk.konstruct.cc:443"` — or multiple: `"ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"`
-    pub ice_relay_addresses: Vec<String>,
+    pub veil_relay_addresses: Vec<String>,
 }
 
 impl Config {
@@ -322,25 +322,25 @@ impl Config {
             deep_link_base_url: std::env::var("DEEP_LINK_BASE_URL")
                 .unwrap_or_else(|_| "https://konstruct.cc".to_string()),
 
-            // ICE transport
-            ice_enabled: std::env::var("ICE_ENABLED")
+            // VEIL transport
+            veil_enabled: std::env::var("VEIL_ENABLED")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            ice_port: std::env::var("ICE_PORT")
+            veil_port: std::env::var("VEIL_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(9443),
-            ice_server_key: std::env::var("ICE_SERVER_KEY").ok(),
-            ice_iat_mode: std::env::var("ICE_IAT_MODE")
+            veil_server_key: std::env::var("VEIL_SERVER_KEY").ok(),
+            veil_iat_mode: std::env::var("VEIL_IAT_MODE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            ice_upstream: std::env::var("ICE_UPSTREAM")
+            veil_upstream: std::env::var("VEIL_UPSTREAM")
                 .unwrap_or_else(|_| "envoy:8080".to_string()),
-            ice_tls_cert_path: std::env::var("ICE_TLS_CERT_PATH").ok(),
-            ice_tls_key_path: std::env::var("ICE_TLS_KEY_PATH").ok(),
-            ice_cover_upstream: std::env::var("ICE_COVER_UPSTREAM").ok(),
-            ice_relay_addresses: std::env::var("ICE_RELAY_ADDRESSES")
+            veil_tls_cert_path: std::env::var("VEIL_TLS_CERT_PATH").ok(),
+            veil_tls_key_path: std::env::var("VEIL_TLS_KEY_PATH").ok(),
+            veil_cover_upstream: std::env::var("VEIL_COVER_UPSTREAM").ok(),
+            veil_relay_addresses: std::env::var("VEIL_RELAY_ADDRESSES")
                 .unwrap_or_default()
                 .split(',')
                 .map(str::trim)

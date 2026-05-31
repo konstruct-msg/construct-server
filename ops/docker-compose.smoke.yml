@@ -11,7 +11,7 @@
 # Used by: .github/workflows/ci.yml → smoke job
 # Run from REPO ROOT: docker compose -f ops/docker-compose.smoke.yml up -d
 #
-# NO: Traefik, Vault, Kafka, Envoy, ICE, media-service, mls-service,
+# NO: Traefik, Vault, Kafka, Envoy, VEIL, media-service, mls-service,
 #     sentinel-service, delivery-worker, notification-service, invite-service,
 #     user-service, invite-service
 # YES: signaling-service (added to catch InitiateCall registration regressions)
