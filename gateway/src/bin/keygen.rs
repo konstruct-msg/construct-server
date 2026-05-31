@@ -1,7 +1,7 @@
-/// construct-ice-keygen — generate a persistent ICE_SERVER_KEY for the gateway.
+/// construct-veil-keygen — generate a persistent ICE_SERVER_KEY for the gateway.
 ///
 /// Usage:
-///   cargo run -p gateway --bin construct-ice-keygen
+///   cargo run -p gateway --bin construct-veil-keygen
 ///
 /// Output (ready to paste into docker-compose or .env):
 ///   ICE_SERVER_KEY=<base64>
@@ -10,13 +10,13 @@
 fn main() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-    let cfg = construct_ice::ServerConfig::generate();
+    let cfg = construct_veil::ServerConfig::generate();
     let key_b64 = STANDARD.encode(cfg.to_bytes());
     let cert = cfg.bridge_cert();
 
     println!();
     println!("┌─────────────────────────────────────────────────────────────────┐");
-    println!("│             construct-ice  ·  Key Generator                     │");
+    println!("│             construct-veil  ·  Key Generator                     │");
     println!("└─────────────────────────────────────────────────────────────────┘");
     println!();
     println!("Add both values to docker-compose.yml for gateway AND auth-service:");

@@ -43,7 +43,7 @@ scrape_configs:
     static_configs:
       - targets: ["channel:8098"]
 
-  # Gateway serves both the HTTP API and the ICE (obfs4) relay — relay metrics
+  # Gateway serves both the HTTP API and the VEIL (obfs4) relay — relay metrics
   # are published on the same /metrics endpoint (shared Prometheus registry).
   - job_name: gateway
     static_configs:

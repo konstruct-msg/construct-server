@@ -174,7 +174,7 @@ def cmd_sign(args):
         "version": new_version,
         "signed_at": int(time.time()),
         "bundle_signing_key": args.bundle_signing_key or None,
-        "ice": {
+        "veil": {
             "relays": relays,
             "deprecated_ids": deprecated_ids if deprecated_ids else None,
         },
@@ -223,8 +223,8 @@ def cmd_verify(args):
         print("     ICEConfig.relayConfigSigningKey in Constants.swift")
         print()
 
-    relays = payload.get("ice", {}).get("relays", [])
-    deprecated_ids = payload.get("ice", {}).get("deprecated_ids") or []
+    relays = payload.get("veil", {}).get("relays", [])
+    deprecated_ids = payload.get("veil", {}).get("deprecated_ids") or []
     version = payload.get("version", "?")
     signed_at = payload.get("signed_at")
 
