@@ -77,9 +77,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -163,9 +161,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": "",
           "values": false
         },
@@ -210,10 +206,7 @@
       "id": 4,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
+          "calcs": ["mean", "max"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -260,9 +253,7 @@
       "id": 5,
       "options": {
         "legend": {
-          "calcs": [
-            "mean"
-          ],
+          "calcs": ["mean"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -321,10 +312,7 @@
       "id": 11,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
+          "calcs": ["mean", "max"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -380,10 +368,7 @@
       "id": 12,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
+          "calcs": ["mean", "max"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -503,9 +488,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         }
       },
       "title": "OTPK Remaining",
@@ -561,9 +544,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         }
       },
       "title": "Active gRPC Streams",
@@ -663,9 +644,7 @@
       "id": 22,
       "options": {
         "legend": {
-          "calcs": [
-            "mean"
-          ],
+          "calcs": ["mean"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -861,9 +840,7 @@
       "id": 31,
       "options": {
         "legend": {
-          "calcs": [
-            "sum"
-          ],
+          "calcs": ["sum"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -910,9 +887,7 @@
       "id": 32,
       "options": {
         "legend": {
-          "calcs": [
-            "sum"
-          ],
+          "calcs": ["sum"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -959,10 +934,7 @@
       "id": 33,
       "options": {
         "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
+          "calcs": ["mean", "max"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -1036,9 +1008,7 @@
       "id": 34,
       "options": {
         "legend": {
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -1046,7 +1016,7 @@
           "mode": "multi"
         }
       },
-      "title": "construct-ice: Active Relay Connections",
+      "title": "construct-veil: Active Relay Connections",
       "type": "timeseries",
       "targets": [
         {
@@ -1085,9 +1055,7 @@
       "id": 35,
       "options": {
         "legend": {
-          "calcs": [
-            "mean"
-          ],
+          "calcs": ["mean"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -1095,7 +1063,7 @@
           "mode": "multi"
         }
       },
-      "title": "construct-ice: Bytes Relayed (in/out)",
+      "title": "construct-veil: Bytes Relayed (in/out)",
       "type": "timeseries",
       "targets": [
         {
@@ -1143,9 +1111,7 @@
       "id": 36,
       "options": {
         "legend": {
-          "calcs": [
-            "sum"
-          ],
+          "calcs": ["sum"],
           "displayMode": "table",
           "placement": "bottom"
         },
@@ -1153,7 +1119,7 @@
           "mode": "multi"
         }
       },
-      "title": "construct-ice: Handshakes & Replay Rejections",
+      "title": "construct-veil: Handshakes & Replay Rejections",
       "type": "timeseries",
       "targets": [
         {
@@ -1188,11 +1154,7 @@
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": [
-    "construct",
-    "messaging",
-    "security"
-  ],
+  "tags": ["construct", "messaging", "security"],
   "templating": {
     "list": []
   },

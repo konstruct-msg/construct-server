@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | `traefik` | external | — | 443/80 | TLS termination, HTTPS redirect, CORS |
 | `envoy` | external | 8443 | 8080 | H2 multiplexing, gRPC routing, upstream LB |
-| `gateway` | `gateway` | — | 3000 / 9443 | ICE/obfs4 obfuscation proxy → envoy:8080 |
+| `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → envoy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships |
 | `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Kafka produce |
@@ -193,12 +193,12 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 - Routes by `:authority` header or path prefix to upstream gRPC services
 - H2 multiplexing: clients connect once, all gRPC calls share the connection
 
-## Gateway (ICE/obfs4 proxy)
+## Gateway (veil/obfs4 proxy)
 
 - Listens on `0.0.0.0:9443` (obfuscated port for censorship-resistant clients)
 - Plain gRPC clients connect via Envoy directly (port 8443)
-- ICE/obfs4 clients connect via gateway:9443 → envoy:8080
-- `gateway/src/` — cleaned up, contains only ICE proxy logic (no dead code as of checkpoint 004)
+- veil/obfs4 clients connect via gateway:9443 → envoy:8080
+- `gateway/src/` — cleaned up, contains only veil proxy logic (no dead code as of checkpoint 004)
 
 ---
 

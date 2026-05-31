@@ -273,7 +273,7 @@ services:
         condition: service_healthy
 
   # ─── Signaling Service ───────────────────────────────────────────────────────
-  # WebRTC call signaling (gRPC-only). Routed via Envoy → ICE gateway.
+  # WebRTC call signaling (gRPC-only). Routed via Envoy → VEIL gateway.
   signaling:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/signaling-service
@@ -298,8 +298,8 @@ services:
         condition: service_healthy
 
   # ─── Envoy (gRPC routing) ────────────────────────────────────────────────────
-  # Routes gRPC calls from ICE gateway to individual microservices.
-  # Client → gateway ICE port (obfs4) → envoy:8080 → service:5005x
+  # Routes gRPC calls from VEIL gateway to individual microservices.
+  # Client → gateway VEIL port (obfs4) → envoy:8080 → service:5005x
   envoy:
     image: envoyproxy/envoy:v1.37.0
     restart: unless-stopped
@@ -316,7 +316,7 @@ services:
 
   # ─── Gateway ─────────────────────────────────────────────────────────────────
   # Exposes port 3000. Put nginx/caddy/traefik in front for TLS.
-  # ICE port (9443) handles obfs4-encrypted gRPC → proxied to Envoy.
+  # VEIL port (9443) handles obfs4-encrypted gRPC → proxied to Envoy.
   gateway:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: /usr/local/bin/gateway

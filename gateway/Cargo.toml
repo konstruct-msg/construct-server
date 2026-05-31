@@ -9,7 +9,7 @@ name = "gateway"
 path = "src/main.rs"
 
 [[bin]]
-name = "construct-ice-keygen"
+name = "construct-veil-keygen"
 path = "src/bin/keygen.rs"
 
 [dependencies]
@@ -58,9 +58,9 @@ hmac = "0.13"
 sha2 = "0.11"
 subtle = "2.6"
 prost = "0.14.3"
-construct-ice = { git = "https://github.com/konstruct-msg/construct-ice.git", branch = "main" }
+construct-veil = { git = "https://github.com/konstruct-msg/construct-veil.git", branch = "main" }
 
-# TLS for ICE-over-TLS (obfs4 inside TLS to defeat TSPU DPI)
+# TLS for VEIL-over-TLS (obfs4 inside TLS to defeat TSPU DPI)
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2"

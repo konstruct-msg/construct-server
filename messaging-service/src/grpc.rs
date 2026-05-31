@@ -108,7 +108,7 @@ impl MessagingService for MessagingGrpcService {
 
             // Server-initiated keepalive: send a HeartbeatAck to the client every 30 s
             // when the stream is otherwise idle. This keeps the H2 stream active so that
-            // the HTTP/2 PING frames fire and NAT/firewalls/ICE proxies do not silently
+            // the HTTP/2 PING frames fire and NAT/firewalls/VEIL proxies do not silently
             // drop the connection. tonic 0.14 does not expose keepalive_while_idle, so
             // application-level traffic is the only way to maintain idle streams.
             let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(

@@ -2,7 +2,7 @@
   "version": 3,
   "signed_at": 1779004970,
   "bundle_signing_key": null,
-  "ice": {
+  "veil": {
     "relays": [
       {
         "id": "ams-het-1",
@@ -12,7 +12,7 @@
         "sni": "ice.ams.konstruct.cc",
         "spki_sha256": "510d465a5c4736548e3386570ede6ba24600c4c9a2e369d24dde1ad7915eeebd",
         "bridge_cert": "voFt3ilLSKx2xYuZsjxOnXtHTktUE4EaExIYRG+Bh89frHzI5QVrBNvT41zdS7Maiu6gPA",
-        "wt_path": "/construct-ice",
+        "wt_path": "/construct-veil",
         "region": "NL"
       },
       {
