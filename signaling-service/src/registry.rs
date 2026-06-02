@@ -810,9 +810,20 @@ impl CallRegistry {
                     continue;
                 }
 
+                // In the E2EE-direct flow the callee's Answer SDP is forwarded
+                // to the caller via encrypted messaging, not over the signaling
+                // stream — so `answered_at_ms` stays `None` even for healthy
+                // calls. We can't use it as a liveness signal. Instead, gate
+                // this reaper on signaling-stream silence on either side: a live
+                // call keeps both sides' keepalives fresh; if neither side has
+                // pinged in >15s after 30s of "ringing without answer", the
+                // call really is hung. The 60s keepalive reaper below catches
+                // the remaining dead cases.
                 if state.ringing_at_ms.is_some()
                     && state.answered_at_ms.is_none()
                     && now_ms.saturating_sub(state.ringing_at_ms.unwrap()) > 30_000
+                    && now_s.saturating_sub(state.caller_last_keepalive_at) > 15
+                    && now_s.saturating_sub(state.callee_last_keepalive_at) > 15
                 {
                     actions.push(CleanupAction::HangupBoth {
                         call_id: state.call_id.clone(),
