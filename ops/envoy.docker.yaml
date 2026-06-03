@@ -121,12 +121,18 @@ static_resources:
                           # Keep Authorization header so services can inspect it if needed
                           forward: true
                       rules:
-                        # Public routes — no JWT required
+                        # Public routes — no JWT required.
                         - match: { prefix: "/shared.proto.services.v1.AuthService" }
                         - match: { prefix: "/shared.proto.services.v1.DeviceService" }
                         - match: { prefix: "/.well-known" }
                         - match: { prefix: "/health" }
-                        # All other routes require a valid JWT
+                        # UserService is gated by JWT in general, but
+                        # CheckUsernameAvailability is invoked pre-registration
+                        # (the user has no JWT yet). Carve out the exact path —
+                        # the proto comment declares this RPC as "no auth required".
+                        # Keep this rule BEFORE the catch-all prefix: "/" below.
+                        - match: { path: "/shared.proto.services.v1.UserService/CheckUsernameAvailability" }
+                        # All other routes require a valid JWT.
                         - match: { prefix: "/" }
                           requires: { provider_name: construct_jwt }
                   - name: envoy.filters.http.grpc_web
