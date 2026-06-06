@@ -77,6 +77,21 @@ struct JoinRequestData {
     platform: String,
 }
 
+/// Convert an `AppError` into a gRPC `Status` with the correct code.
+fn app_error_to_status(e: construct_error::AppError) -> Status {
+    use construct_error::AppError;
+    match &e {
+        AppError::Auth(msg) => Status::unauthenticated(msg.clone()),
+        AppError::Validation(msg) => Status::invalid_argument(msg.clone()),
+        AppError::NotFound(msg) => Status::not_found(msg.clone()),
+        AppError::TooManyRequests(msg) => Status::resource_exhausted(msg.clone()),
+        AppError::Forbidden(msg) => Status::permission_denied(msg.clone()),
+        AppError::Conflict(msg) => Status::already_exists(msg.clone()),
+        AppError::Jwt(_) => Status::unauthenticated("Invalid or expired token".to_string()),
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 #[tonic::async_trait]
 impl AuthService for AuthGrpcService {
     async fn get_pow_challenge(
@@ -156,7 +171,7 @@ impl AuthService for AuthGrpcService {
             request.into_inner(),
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(app_error_to_status)?;
 
         Ok(Response::new(response))
     }
