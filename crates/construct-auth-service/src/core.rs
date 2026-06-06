@@ -5,6 +5,7 @@ use axum::Json;
 use chrono::Utc;
 use construct_context::AppContext;
 use construct_error::AppError;
+use construct_metrics::AUTH_FAILURES_TOTAL;
 use construct_utils::log_safe_id;
 use serde::Serialize;
 use uuid::Uuid;
@@ -65,6 +66,9 @@ pub async fn refresh_tokens(
         .verify_token(refresh_token)
         .map_err(|e| {
             tracing::warn!(error = %e, "Invalid refresh token");
+            AUTH_FAILURES_TOTAL
+                .with_label_values(&["invalid_token"])
+                .inc();
             AppError::Auth("Invalid or expired refresh token".to_string())
         })?;
 
@@ -112,12 +116,18 @@ pub async fn refresh_tokens(
                     user_hash = %log_safe_id(&claims.sub, &app_context.config.logging.hash_salt),
                     "Refresh token was already used or revoked"
                 );
+                AUTH_FAILURES_TOTAL
+                    .with_label_values(&["refresh_token_consumed"])
+                    .inc();
                 return Err(AppError::Auth(
                     "Refresh token was already used or revoked".to_string(),
                 ));
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to rotate refresh token — fail closed");
+                AUTH_FAILURES_TOTAL
+                    .with_label_values(&["redis_unavailable"])
+                    .inc();
                 return Err(AppError::Auth("Cannot verify refresh token".to_string()));
             }
         }
@@ -131,6 +141,9 @@ pub async fn refresh_tokens(
             redis_user_id = %user_id_from_token,
             "User ID mismatch between JWT and Redis"
         );
+        AUTH_FAILURES_TOTAL
+            .with_label_values(&["token_validation_failed"])
+            .inc();
         return Err(AppError::Auth("Token validation failed".to_string()));
     }
 
