@@ -378,6 +378,7 @@ pub static KT_PROOF_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 
 /// Authentication failures (JWT validation, device not found, etc.).
 /// Label `reason`: "invalid_token" | "expired" | "device_not_found" | "permission_denied"
+///   | "refresh_token_consumed" | "refresh_token_revoked" | "redis_unavailable"
 pub static AUTH_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         opts!(

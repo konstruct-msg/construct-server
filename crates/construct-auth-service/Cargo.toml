@@ -15,6 +15,7 @@ construct-key-management = { path = "../construct-key-management" }
 construct-queue       = { path = "../construct-queue" }
 construct-apns        = { path = "../construct-apns" }
 construct-error       = { path = "../construct-error", features = ["full"] }
+construct-metrics     = { path = "../construct-metrics" }
 construct-pow         = { path = "../construct-pow" }
 construct-utils       = { path = "../construct-utils" }
 
