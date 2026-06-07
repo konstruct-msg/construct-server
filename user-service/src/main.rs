@@ -23,9 +23,9 @@ use axum::{
 use construct_config::Config;
 use construct_crypto::hash_username;
 use construct_db::{
-    self as db_agility, create_contact_request, get_contact_request_sender,
-    get_pending_contact_request_id, get_pending_contact_requests, get_sent_contact_requests,
-    is_user_searchable, respond_to_contact_request,
+    self as db_agility, ContactIdentitySnapshot, create_contact_request,
+    get_contact_request_sender, get_pending_contact_request_id, get_pending_contact_requests,
+    get_sent_contact_requests, get_user_by_id, is_user_searchable, respond_to_contact_request,
 };
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
@@ -668,15 +668,73 @@ impl UserService for UserGrpcService {
             }));
         }
 
-        let request_id = create_contact_request(
-            &self.context.db_pool,
-            caller_id,
-            to_user_id,
-            &sec.contact_hmac_secret,
-            &sec.request_envelope_key,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let request_id = {
+            // Build optional identity snapshot from client-supplied data.
+            let sec = &self.context.config.security;
+            let from_identity_enc = match req.from_identity {
+                Some(identity) => {
+                    // Validate and normalize username against caller's stored hash.
+                    let normalized_username = identity.username.trim().to_lowercase();
+                    let snapshot_username = if !normalized_username.is_empty() {
+                        // Fetch caller's username_hash and compare.
+                        let caller = get_user_by_id(&self.context.db_pool, &caller_id)
+                            .await
+                            .map_err(|e| Status::internal(e.to_string()))?
+                            .ok_or_else(|| Status::internal("Caller user not found"))?;
+
+                        if let Some(ref stored_hash) = caller.username_hash {
+                            let supplied_hash =
+                                hash_username(&sec.username_hmac_secret, &normalized_username);
+                            if supplied_hash != *stored_hash {
+                                return Err(Status::invalid_argument(
+                                    "from_identity.username does not match caller's username",
+                                ));
+                            }
+                            normalized_username
+                        } else {
+                            // Caller has no username — ignore supplied username.
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+
+                    // Validate display_name: trim, check length, UTF-8 is inherent in String.
+                    let display_name = {
+                        let trimmed = identity.display_name.trim().to_string();
+                        if trimmed.len() > 128 {
+                            return Err(Status::invalid_argument(
+                                "from_identity.display_name too long (max 128 bytes)",
+                            ));
+                        }
+                        trimmed
+                    };
+
+                    let snapshot = ContactIdentitySnapshot {
+                        username: snapshot_username,
+                        display_name,
+                    };
+                    let json_bytes = serde_json::to_vec(&snapshot)
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    let enc =
+                        construct_crypto::envelope_encrypt(&sec.request_envelope_key, &json_bytes)
+                            .map_err(|e| Status::internal(e.to_string()))?;
+                    Some(enc)
+                }
+                None => None,
+            };
+
+            create_contact_request(
+                &self.context.db_pool,
+                caller_id,
+                to_user_id,
+                &sec.contact_hmac_secret,
+                &sec.request_envelope_key,
+                from_identity_enc.as_deref(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+        };
 
         Ok(Response::new(proto::SendContactRequestResponse {
             request_id: request_id.to_string(),
@@ -708,13 +766,11 @@ impl UserService for UserGrpcService {
 
         let mut incoming = Vec::with_capacity(incoming_raw.len());
         for cr in incoming_raw {
-            // Server is privacy-preserving: display_name and plaintext username are not stored.
-            // The client resolves display info from its local cache or via key bundle.
             incoming.push(proto::IncomingContactRequest {
                 request_id: cr.id.to_string(),
                 from_user_id: cr.from_user_id.to_string(),
-                from_display_name: String::new(),
-                from_username: String::new(),
+                from_display_name: cr.from_display_name,
+                from_username: cr.from_username,
                 created_at: cr.created_at.timestamp(),
             });
         }
