@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use construct_crypto::{UploadableKeyBundle, envelope_decrypt, envelope_encrypt, hmac_sha256};
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
@@ -10,6 +11,16 @@ pub type DbPool = Pool<Postgres>;
 
 pub mod channel;
 pub mod mls;
+
+/// Sender identity snapshot captured at contact-request time.
+/// Envelope-encrypted before storage; decrypted server-side for the recipient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactIdentitySnapshot {
+    /// Normalized lowercase username without '@'. Empty if sender has no username.
+    pub username: String,
+    /// Sender-chosen visible name at request time. Empty if unavailable.
+    pub display_name: String,
+}
 
 // New minimal User struct (passwordless, device-based)
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1330,6 +1341,10 @@ pub struct IncomingContactRequest {
     pub id: Uuid,
     /// Decrypted from `from_enc` — returned only to the authenticated recipient.
     pub from_user_id: Uuid,
+    /// Sender username snapshot at request time (from envelope-encrypted identity).
+    pub from_username: String,
+    /// Sender display_name snapshot at request time (from envelope-encrypted identity).
+    pub from_display_name: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1347,6 +1362,7 @@ pub struct SentContactRequest {
 struct RawContactRequest {
     id: Uuid,
     from_enc: Vec<u8>,
+    from_identity_enc: Option<Vec<u8>>,
     status: String,
     created_at: DateTime<Utc>,
     resolved_at: Option<DateTime<Utc>>,
@@ -1364,15 +1380,17 @@ struct SentRow {
 /// - `from_user_id` and `to_user_id` are HMAC-blinded with `hmac_secret`.
 /// - `from_user_id` is envelope-encrypted with `envelope_key` for at-rest protection.
 /// - `to_user_id` is **not stored** — caller must deliver the push notification before calling this.
+/// - `from_identity_enc` is an optional envelope-encrypted identity snapshot (username + display_name).
 ///
 /// Returns `Ok(request_id)` on success, or an error if a pending request already exists
-/// (UNIQUE constraint on `(from_hmac, to_hmac)`).
+/// for this sender→recipient pair.
 pub async fn create_contact_request(
     pool: &DbPool,
     from_user_id: Uuid,
     to_user_id: Uuid,
     hmac_secret: &[u8],
     envelope_key: &[u8],
+    from_identity_enc: Option<&[u8]>,
 ) -> Result<Uuid> {
     let from_hmac = hmac_sha256(hmac_secret, from_user_id.as_bytes());
     let to_hmac = hmac_sha256(hmac_secret, to_user_id.as_bytes());
@@ -1381,8 +1399,8 @@ pub async fn create_contact_request(
 
     let id: Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO contact_requests (from_hmac, to_hmac, from_enc)
-        VALUES ($1, $2, $3)
+        INSERT INTO contact_requests (from_hmac, to_hmac, from_enc, from_identity_enc)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (from_hmac, to_hmac) DO NOTHING
         RETURNING id
         "#,
@@ -1390,6 +1408,7 @@ pub async fn create_contact_request(
     .bind(&from_hmac[..])
     .bind(&to_hmac[..])
     .bind(&from_enc)
+    .bind(from_identity_enc)
     .fetch_optional(pool)
     .await
     .context("Failed to insert contact request")?
@@ -1400,6 +1419,7 @@ pub async fn create_contact_request(
 
 /// Fetch all pending incoming contact requests for `recipient_user_id`.
 /// Decrypts `from_enc` server-side and returns the sender UUID.
+/// Also decrypts `from_identity_enc` if present (identity snapshot).
 pub async fn get_pending_contact_requests(
     pool: &DbPool,
     recipient_user_id: Uuid,
@@ -1410,7 +1430,7 @@ pub async fn get_pending_contact_requests(
 
     let rows: Vec<RawContactRequest> = sqlx::query_as(
         r#"
-        SELECT id, from_enc, status, created_at, resolved_at
+        SELECT id, from_enc, from_identity_enc, status, created_at, resolved_at
         FROM contact_requests
         WHERE to_hmac = $1 AND status = 'pending'
         ORDER BY created_at ASC
@@ -1430,9 +1450,35 @@ pub async fn get_pending_contact_requests(
             .try_into()
             .map_err(|_| anyhow::anyhow!("decrypted from_enc is not 16 bytes"))?;
         let from_user_id = Uuid::from_bytes(from_arr);
+
+        // Decrypt identity snapshot if present; legacy rows have NULL.
+        let (from_username, from_display_name) = match &row.from_identity_enc {
+            Some(enc) => {
+                let json_bytes = envelope_decrypt(envelope_key, enc).map_err(|e| {
+                    anyhow::anyhow!(
+                        "envelope_decrypt failed for identity in request {}: {}",
+                        row.id,
+                        e
+                    )
+                })?;
+                let snapshot: ContactIdentitySnapshot = serde_json::from_slice(&json_bytes)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to parse identity snapshot for request {}: {}",
+                            row.id,
+                            e
+                        )
+                    })?;
+                (snapshot.username, snapshot.display_name)
+            }
+            None => (String::new(), String::new()),
+        };
+
         result.push(IncomingContactRequest {
             id: row.id,
             from_user_id,
+            from_username,
+            from_display_name,
             created_at: row.created_at,
         });
     }
