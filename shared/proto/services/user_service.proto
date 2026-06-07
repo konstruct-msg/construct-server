@@ -479,10 +479,23 @@ message SentContactRequest {
   int64 created_at = 3;
 }
 
+// Sender identity snapshot captured at request time.
+// Server validates username against caller's stored hash; display_name is self-asserted.
+message ContactIdentitySnapshot {
+  // Normalized lowercase username without '@'. Empty if sender has no username.
+  string username = 1;
+
+  // Sender-chosen visible name at request time. Empty if unavailable.
+  string display_name = 2;
+}
+
 // SendContactRequest
 message SendContactRequestRequest {
   // User ID of the target (must be discoverable).
   string to_user_id = 1;
+
+  // Sender identity snapshot at request time. Optional — legacy clients omit this.
+  ContactIdentitySnapshot from_identity = 2;
 }
 
 message SendContactRequestResponse {
