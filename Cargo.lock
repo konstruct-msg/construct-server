@@ -183,7 +183,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -593,8 +593,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b77c319abfd5219629c45c34c89ba945ed3c5e49fcde9d16b6c3885f118a730"
 dependencies = [
  "const-oid 0.9.6",
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
  "x509-cert",
 ]
 
@@ -635,7 +635,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "construct-apns"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "construct-audit"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "chrono",
  "serde",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "construct-broker"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "construct-context"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "construct-apns",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "construct-crypto"
-version = "0.5.11"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -775,8 +775,10 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac 0.13.0",
+ "ml-dsa",
  "prost",
  "rand 0.10.1",
+ "rand_core 0.6.4",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -790,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -809,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "construct-delivery-ack"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -832,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "construct-error"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -855,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "construct-extractors"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -872,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "construct-federation"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -888,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "construct-key-management"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -906,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "construct-metrics"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -915,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "construct-notification-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -941,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pending"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -954,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pow"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "argon2",
  "hex",
@@ -964,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "construct-queue"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -984,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "construct-rate-limit"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1007,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -1095,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -1108,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "construct-user-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -1144,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "construct-utils"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "axum",
  "base64",
@@ -1283,7 +1285,9 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
+ "getrandom 0.4.2",
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1362,7 +1366,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "delivery-worker"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1405,6 +1409,16 @@ dependencies = [
  "der_derive",
  "flagset",
  "pem-rfc7468",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+dependencies = [
+ "const-oid 0.10.2",
  "zeroize",
 ]
 
@@ -1516,8 +1530,8 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8",
- "signature",
+ "pkcs8 0.10.2",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -1796,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2050,6 +2064,7 @@ version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d46837a0ed51fe95bd3b05de33cd64a1ee88fc797477ca48446872504507c5"
 dependencies = [
+ "ctutils",
  "typenum",
 ]
 
@@ -2288,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "invite-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2451,8 +2466,18 @@ dependencies = [
  "pem",
  "serde",
  "serde_json",
- "signature",
+ "signature 2.2.0",
  "simple_asn1",
+]
+
+[[package]]
+name = "keccak"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e24a010dd405bd7ed803e5253182815b41bf2e6a80cc3bfc066658e03a198aa"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -2464,10 +2489,12 @@ dependencies = [
  "base64",
  "chrono",
  "construct-config",
+ "construct-crypto",
  "construct-server-shared",
  "ed25519-dalek",
  "hex",
  "prost",
+ "rand 0.8.6",
  "redis",
  "serde",
  "serde_json",
@@ -2585,7 +2612,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "masque-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2622,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -2657,7 +2684,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2734,6 +2761,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ml-dsa"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add6b9d92e496f16f4526d68ff29da1483aba4b119baeab8bed3b9e3544a6f3d"
+dependencies = [
+ "const-oid 0.10.2",
+ "crypto-common 0.2.1",
+ "ctutils",
+ "hybrid-array",
+ "module-lattice",
+ "pkcs8 0.11.0",
+ "shake",
+ "signature 3.0.0",
+]
+
+[[package]]
 name = "mls-service"
 version = "0.1.0"
 dependencies = [
@@ -2761,6 +2804,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "module-lattice"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
+dependencies = [
+ "ctutils",
+ "hybrid-array",
+ "num-traits",
 ]
 
 [[package]]
@@ -2815,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "notification-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -3026,7 +3080,7 @@ dependencies = [
  "base64",
  "cbc",
  "cms",
- "der",
+ "der 0.7.10",
  "des",
  "hex",
  "hmac 0.12.1",
@@ -3158,9 +3212,9 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
 dependencies = [
- "der",
- "pkcs8",
- "spki",
+ "der 0.7.10",
+ "pkcs8 0.10.2",
+ "spki 0.7.3",
 ]
 
 [[package]]
@@ -3171,9 +3225,9 @@ checksum = "695b3df3d3cc1015f12d70235e35b6b79befc5fa7a9b95b951eab1dd07c9efc2"
 dependencies = [
  "cms",
  "const-oid 0.9.6",
- "der",
+ "der 0.7.10",
  "digest 0.10.7",
- "spki",
+ "spki 0.7.3",
  "x509-cert",
  "zeroize",
 ]
@@ -3186,11 +3240,11 @@ checksum = "e847e2c91a18bfa887dd028ec33f2fe6f25db77db3619024764914affe8b69a6"
 dependencies = [
  "aes",
  "cbc",
- "der",
+ "der 0.7.10",
  "pbkdf2",
  "scrypt",
  "sha2 0.10.9",
- "spki",
+ "spki 0.7.3",
 ]
 
 [[package]]
@@ -3199,8 +3253,18 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der 0.8.0",
+ "spki 0.8.0",
 ]
 
 [[package]]
@@ -3773,10 +3837,10 @@ dependencies = [
  "num-integer",
  "num-traits",
  "pkcs1",
- "pkcs8",
+ "pkcs8 0.10.2",
  "rand_core 0.6.4",
- "signature",
- "spki",
+ "signature 2.2.0",
+ "spki 0.7.3",
  "subtle",
  "zeroize",
 ]
@@ -4205,6 +4269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shake"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09057cb2149ad4cbd2da1e26b351f9a4c354219421229c69c3063e6f61947c4a"
+dependencies = [
+ "digest 0.11.2",
+ "keccak",
+ "sponge-cursor",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4302,6 +4377,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "digest 0.11.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4386,8 +4471,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
 ]
+
+[[package]]
+name = "spki"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
+dependencies = [
+ "base64ct",
+ "der 0.8.0",
+]
+
+[[package]]
+name = "sponge-cursor"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
 name = "sqlx"
@@ -5185,7 +5286,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5889,8 +5990,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1301e935010a701ae5f8655edc0ad17c44bad3ac5ce8c39185f75453b720ae94"
 dependencies = [
  "const-oid 0.9.6",
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
 ]
 
 [[package]]

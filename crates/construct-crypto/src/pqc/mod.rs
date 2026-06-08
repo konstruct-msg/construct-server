@@ -19,6 +19,26 @@
 #[cfg(feature = "post-quantum")]
 pub mod hybrid;
 
+#[cfg(feature = "post-quantum")]
+pub use hybrid::{
+    build_prekey_sign_message,
+    generate_hybrid_signature_keypair,
+    hybrid_sign,
+    verify_hybrid_kyber_key_signature,
+    verify_hybrid_signature,
+    verify_kyber_key_signature,
+    // Size constants
+    ED25519_PUBLIC_KEY_SIZE,
+    ED25519_SECRET_KEY_SIZE,
+    ED25519_SIGNATURE_SIZE,
+    HYBRID_SIGNATURE_SIZE,
+    HYBRID_SIG_PUBLIC_KEY_SIZE,
+    HYBRID_SIG_SECRET_KEY_SIZE,
+    ML_DSA_65_PUBLIC_KEY_SIZE,
+    ML_DSA_65_SECRET_KEY_SIZE,
+    ML_DSA_65_SIGNATURE_SIZE,
+};
+
 /// Post-quantum cryptography types and constants
 pub mod types;
 
