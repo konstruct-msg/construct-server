@@ -175,6 +175,7 @@ impl MessagingService for MessagingGrpcService {
                                     &tx,
                                     &mut user_id,
                                     &mut last_stream_id,
+                                    &mut stream_queue,
                                 ).await {
                                     tracing::warn!(error = %e, "Error handling stream request");
                                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
