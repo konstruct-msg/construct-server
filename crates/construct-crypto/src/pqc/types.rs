@@ -249,7 +249,8 @@ pub mod key_sizes {
 
     /// Hybrid signature private key total size
     /// Format: [ed25519_seed (32)] [mldsa65_seed (32)] [mldsa65_pk (1952)]
-    pub const HYBRID_SIG_SECRET_KEY: usize = ED25519_SECRET_KEY + ML_DSA_65_SECRET_KEY + ML_DSA_65_PUBLIC_KEY; // 2016 bytes
+    pub const HYBRID_SIG_SECRET_KEY: usize =
+        ED25519_SECRET_KEY + ML_DSA_65_SECRET_KEY + ML_DSA_65_PUBLIC_KEY; // 2016 bytes
 
     /// Hybrid signature total size
     pub const HYBRID_SIGNATURE: usize = ED25519_SIGNATURE + ML_DSA_65_SIGNATURE;

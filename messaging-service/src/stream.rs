@@ -17,6 +17,7 @@ pub(crate) async fn handle_stream_request(
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     user_id: &mut Option<uuid::Uuid>,
     last_stream_id: &mut Option<String>,
+    stream_queue: &mut construct_queue::MessageQueue,
 ) -> anyhow::Result<()> {
     use proto::message_stream_request::Request as StreamReq;
 
@@ -349,6 +350,19 @@ pub(crate) async fn handle_stream_request(
             if let Some(cursor) = sub.since_cursor
                 && !cursor.is_empty()
             {
+                // ACK-driven deletion: the client's since_cursor is the last message it
+                // has durably received AND persisted. Only now is it safe to delete
+                // everything ≤ cursor from the offline stream. This is the ONLY place
+                // offline messages are deleted — never by the server's read/send position,
+                // which previously caused silent loss on short/broken recipient sessions.
+                if let Some(uid) = user_id.as_ref()
+                    && let Err(e) = stream_queue
+                        .trim_offline_stream(&uid.to_string(), &cursor)
+                        .await
+                {
+                    tracing::warn!(error = %e, "Failed to trim offline stream on subscribe (non-fatal)");
+                }
+
                 let advance = match last_stream_id {
                     None => true,
                     Some(current) => compare_stream_ids(&cursor, current)
