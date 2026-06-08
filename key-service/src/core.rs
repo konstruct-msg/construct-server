@@ -66,13 +66,23 @@ pub struct SignedPreKey {
     pub signature: Vec<u8>,
 }
 
-/// ML-KEM-1024 one-time pre-key with signature
+/// ML-KEM-1024 one-time pre-key with Ed25519 signature (Phase 1).
 #[derive(Debug, Clone)]
 pub struct KyberOneTimePreKey {
     pub key_id: u32,
     /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1184) bytes
     pub public_key: Vec<u8>,
     /// Ed25519 signature, exactly `ED25519_SIGNATURE_SIZE` (64) bytes
+    pub signature: Vec<u8>,
+}
+
+/// ML-KEM-1024 one-time pre-key with hybrid (Ed25519 + ML-DSA-65) signature (Phase 2).
+#[derive(Debug, Clone)]
+pub struct HybridKyberOneTimePreKey {
+    pub key_id: u32,
+    /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1184) bytes
+    pub public_key: Vec<u8>,
+    /// Hybrid signature: Ed25519 (64) + ML-DSA-65 (3309) = 3373 bytes
     pub signature: Vec<u8>,
 }
 
@@ -84,6 +94,18 @@ pub fn validate_kyber_public_key(key: &[u8]) -> Result<()> {
             "Invalid ML-KEM-1024 public key size: expected {} bytes, got {}",
             KYBER_PUBLIC_KEY_SIZE,
             key.len()
+        );
+    }
+    Ok(())
+}
+
+/// Validate hybrid signature size (Ed25519 + ML-DSA-65 = 3373 bytes).
+pub fn validate_hybrid_signature(sig: &[u8]) -> Result<()> {
+    if sig.len() != construct_crypto::pqc::HYBRID_SIGNATURE_SIZE {
+        anyhow::bail!(
+            "Invalid hybrid signature size: expected {} bytes, got {}",
+            construct_crypto::pqc::HYBRID_SIGNATURE_SIZE,
+            sig.len()
         );
     }
     Ok(())
@@ -590,6 +612,133 @@ pub async fn upload_prekeys(
     Ok((classic_count as u32, kyber_count as u32))
 }
 
+/// Upload one-time pre-keys with **hybrid signatures** (Ed25519 + ML-DSA-65).
+///
+/// This is the Phase 2 post-quantum upgrade path. Instead of verifying Kyber
+/// OTPKs with a plain Ed25519 signature, each key is signed by the hybrid
+/// identity key (both Ed25519 AND ML-DSA-65 must verify).
+///
+/// The hybrid verifying key format is:
+/// `[ed25519_pk (32)] [mldsa65_pk (1952)]` = 1984 bytes
+///
+/// The hybrid signature format is:
+/// `[ed25519_sig (64)] [mldsa65_sig (3309)]` = 3373 bytes
+///
+/// The DB table (`kyber_one_time_pre_keys`) stores the hybrid signature as-is
+/// in the `signature` column. The column must be large enough to hold 3373 bytes.
+pub async fn upload_prekeys_hybrid(
+    db: &PgPool,
+    device_id: &str,
+    prekeys: &[OneTimePreKey],
+    replace_existing: bool,
+    hybrid_kyber_pre_keys: &[HybridKyberOneTimePreKey],
+) -> Result<(u32, u32)> {
+    // Verify device exists
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND is_active = true)",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    if !exists {
+        anyhow::bail!("Device not found or inactive");
+    }
+
+    // Fetch hybrid verifying key (1984 bytes: ed25519_pk + mldsa65_pk)
+    let hybrid_verifying_key: Vec<u8> = sqlx::query_scalar(
+        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await
+    .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
+
+    // Validate hybrid key sizes and verify hybrid signatures
+    for k in hybrid_kyber_pre_keys {
+        validate_kyber_public_key(&k.public_key)?;
+        validate_hybrid_signature(&k.signature)?;
+        // Suite 0x10 = HybridKyber1024X25519
+        construct_crypto::pqc::verify_hybrid_kyber_key_signature(
+            &hybrid_verifying_key,
+            0x10,
+            &k.public_key,
+            &k.signature,
+        )?;
+    }
+
+    // Soft-expire existing keys if requested
+    if replace_existing {
+        sqlx::query(
+            "UPDATE one_time_prekeys
+             SET is_expired = true, expired_at = NOW()
+             WHERE device_id = $1 AND is_expired = false",
+        )
+        .bind(device_id)
+        .execute(db)
+        .await?;
+        sqlx::query(
+            "UPDATE kyber_one_time_pre_keys
+             SET is_expired = true, expired_at = NOW()
+             WHERE device_id = $1 AND is_expired = false",
+        )
+        .bind(device_id)
+        .execute(db)
+        .await?;
+        tracing::info!(device_id = %device_id, "Soft-expired stale OTPK pool (hybrid, replace_existing=true)");
+    }
+
+    // Insert classic pre-keys
+    for prekey in prekeys {
+        sqlx::query(
+            r#"
+            INSERT INTO one_time_prekeys (device_id, key_id, public_key)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (device_id, key_id) DO NOTHING
+            "#,
+        )
+        .bind(device_id)
+        .bind(prekey.key_id as i32)
+        .bind(&prekey.public_key)
+        .execute(db)
+        .await?;
+    }
+
+    // Insert hybrid-signed Kyber OTPKs
+    for kk in hybrid_kyber_pre_keys {
+        sqlx::query(
+            r#"
+            INSERT INTO kyber_one_time_pre_keys (device_id, key_id, public_key, signature)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (device_id, key_id) DO NOTHING
+            "#,
+        )
+        .bind(device_id)
+        .bind(kk.key_id as i32)
+        .bind(&kk.public_key)
+        .bind(&kk.signature)
+        .execute(db)
+        .await?;
+    }
+
+    // Return active counts
+    let classic_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    let kyber_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kyber_one_time_pre_keys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    Ok((classic_count as u32, kyber_count as u32))
+}
+
 /// Get count of remaining one-time pre-keys
 pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, DateTime<Utc>)> {
     let row = sqlx::query_as::<_, PreKeyCountRow>(
@@ -650,6 +799,59 @@ pub async fn upload_kyber_signed_prekey(
     .bind(public_key)
     .bind(key_id as i32)
     .bind(signature)
+    .fetch_one(db)
+    .await?;
+
+    Ok(new_epoch as u32)
+}
+
+/// Upload or replace the Kyber signed pre-key with a **hybrid signature**.
+///
+/// Validates ML-KEM-1024 public key size (1184 bytes) and hybrid signature
+/// size (3373 bytes). Verifies both Ed25519 and ML-DSA-65 signatures.
+pub async fn upload_kyber_signed_prekey_hybrid(
+    db: &PgPool,
+    device_id: &str,
+    key_id: u32,
+    public_key: &[u8],
+    hybrid_signature: &[u8],
+) -> Result<u32> {
+    validate_kyber_public_key(public_key)?;
+    validate_hybrid_signature(hybrid_signature)?;
+
+    let hybrid_verifying_key: Vec<u8> = sqlx::query_scalar(
+        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await
+    .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
+
+    // Suite 0x10 = HybridKyber1024X25519
+    construct_crypto::pqc::verify_hybrid_kyber_key_signature(
+        &hybrid_verifying_key,
+        0x10,
+        public_key,
+        hybrid_signature,
+    )?;
+
+    let new_epoch: i32 = sqlx::query_scalar(
+        r#"
+        UPDATE devices
+        SET kyber_signed_pre_key           = $2,
+            kyber_signed_pre_key_id        = $3,
+            kyber_signed_pre_key_signature = $4,
+            key_updated_at                 = NOW(),
+            kyber_spk_uploaded_at          = NOW(),
+            kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
+        WHERE device_id = $1 AND is_active = true
+        RETURNING kyber_spk_rotation_epoch
+        "#,
+    )
+    .bind(device_id)
+    .bind(public_key)
+    .bind(key_id as i32)
+    .bind(hybrid_signature)
     .fetch_one(db)
     .await?;
 

@@ -1,6 +1,6 @@
 [package]
 name = "construct-crypto"
-version = "0.5.11"
+version = "0.6.0"
 edition = "2021"
 authors = ["Construct Server Team"]
 description = "Cryptographic primitives for Construct secure messaging server"
@@ -12,7 +12,10 @@ full = ["e2ee", "delivery-ack", "pqc"]
 e2ee = []           # End-to-end encryption (Signal Protocol)
 delivery-ack = []   # Privacy-preserving delivery acknowledgments
 pqc = ["post-quantum"]  # Post-quantum cryptography
-post-quantum = []   # Internal feature for conditional compilation
+post-quantum = [
+    "dep:ml-dsa",
+    "dep:rand_core",
+]
 
 [dependencies]
 # Core crypto
@@ -26,6 +29,12 @@ subtle = "2.6"
 # Encoding
 base64 = "0.22"
 hex = "0.4"
+
+# Post-quantum cryptography (ML-DSA-65 for hybrid signatures)
+# RustCrypto `ml-dsa` (maintained) — replaced the archived PQClean-based
+# pqcrypto-mldsa/pqcrypto-traits crates (RUSTSEC-2026-0162/0166).
+ml-dsa = { version = "0.1.1", optional = true }
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
