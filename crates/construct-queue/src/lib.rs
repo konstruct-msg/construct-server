@@ -585,6 +585,19 @@ impl MessageQueue {
         .await
     }
 
+    /// Trim a user's offline stream up to and including `ack_id` (the client's
+    /// acknowledged `since_cursor`). This is the only place offline messages are
+    /// deleted — ack-driven, never by the server's send position. See `DeliveryManager`.
+    pub async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .trim_offline_stream(user_id, ack_id)
+        .await
+    }
+
     pub async fn wait_for_message_notification(
         &self,
         _user_id: &str,

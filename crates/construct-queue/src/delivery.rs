@@ -128,82 +128,12 @@ impl<'a> DeliveryManager<'a> {
             }
         };
 
-        // Trim acknowledged messages BEFORE the early-return so that the trim runs
-        // even when XREAD returns nothing.  Without this, a message whose stream ID
-        // equals the client cursor would never be removed: XREAD > cursor returns
-        // nothing, the old code returned early, and the same message was delivered
-        // again on every reconnect (infinite re-delivery loop).
-        //
-        // The since_id is the last message the client received in the previous
-        // session.  Everything at or before that position is safe to delete.
-        'trim: {
-            let Some(ack_id) = since_id else {
-                break 'trim;
-            };
-
-            // Normalize ack_id: bare timestamps like "1772726016" → "1772726016-0"
-            let ack_id_normalized;
-            let ack_id = if ack_id.contains('-') {
-                ack_id
-            } else if let Ok(ts) = ack_id.parse::<u64>() {
-                ack_id_normalized = format!("{}-0", ts);
-                ack_id_normalized.as_str()
-            } else {
-                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash) — skipping trim");
-                break 'trim;
-            };
-
-            let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
-                if let (Ok(ts), Ok(seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
-                    // Next ID: same timestamp, seq+1.  On seq overflow roll over to (ts+1)-0
-                    // because Redis orders IDs as (ts, seq) tuples and ts-MAX < (ts+1)-0.
-                    if let Some(next_seq) = seq.checked_add(1) {
-                        format!("{}-{}", ts, next_seq)
-                    } else if let Some(next_ts) = ts.checked_add(1) {
-                        format!("{}-0", next_ts)
-                    } else {
-                        // Both components at u64::MAX — skip trim (theoretical edge case)
-                        tracing::warn!(stream_key = %stream_key, "Stream ID at u64::MAX, skipping trim");
-                        break 'trim;
-                    }
-                } else {
-                    tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format — skipping trim");
-                    break 'trim;
-                }
-            } else {
-                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid stream ID format (no dash) — skipping trim");
-                break 'trim;
-            };
-
-            let trim_result: Result<i64, redis::RedisError> = redis::cmd("XTRIM")
-                .arg(stream_key)
-                .arg("MINID")
-                .arg(&next_id_after_ack)
-                .query_async(self.client.connection_mut())
-                .await;
-
-            match trim_result {
-                Ok(deleted_count) => {
-                    if deleted_count > 0 {
-                        tracing::debug!(
-                            stream_key = %stream_key,
-                            ack_id = %ack_id,
-                            min_id_kept = %next_id_after_ack,
-                            deleted_count,
-                            "Trimmed acknowledged messages from Redis stream"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        stream_key = %stream_key,
-                        ack_id = %ack_id,
-                        "Failed to trim acknowledged messages from stream (non-fatal)"
-                    );
-                }
-            }
-        }
+        // NOTE: reads are intentionally side-effect free. Messages are deleted ONLY
+        // via `trim_offline_stream`, driven by the client's acknowledged cursor
+        // (SubscribeRequest.since_cursor) — never by the server's read/send position.
+        // The previous trim-on-read deleted messages that were merely buffered into the
+        // gRPC channel but not yet durably received+persisted by the client, causing
+        // silent message loss on short/broken sessions. See: ack-driven offline delivery.
 
         if entries.is_empty() {
             return Ok(vec![]);
@@ -216,6 +146,81 @@ impl<'a> DeliveryManager<'a> {
             .collect();
 
         Ok(messages)
+    }
+
+    /// Trim a user's offline stream up to and INCLUDING `ack_id`.
+    ///
+    /// This is the ONLY place messages are deleted from the offline stream. Deletion is
+    /// driven by the client's acknowledged cursor (`SubscribeRequest.since_cursor` = the
+    /// last message the client durably received and persisted in a prior session), never
+    /// by the server's read/send position. This guarantees at-least-once delivery: a
+    /// short or broken session can re-deliver but never lose an un-acknowledged message.
+    pub(crate) async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
+        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+
+        // Normalize ack_id: bare timestamps like "1772726016" → "1772726016-0"
+        let ack_id_normalized;
+        let ack_id = if ack_id.contains('-') {
+            ack_id
+        } else if let Ok(ts) = ack_id.parse::<u64>() {
+            ack_id_normalized = format!("{}-0", ts);
+            ack_id_normalized.as_str()
+        } else {
+            tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor (no dash) — skipping trim");
+            return Ok(());
+        };
+
+        // XTRIM MINID = ack_id + 1 deletes everything with ID ≤ ack_id (inclusive),
+        // i.e. exactly the messages the client confirmed it has. Redis orders IDs as
+        // (timestamp, sequence) tuples, so seq overflow rolls over to (ts+1)-0.
+        let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
+            if let (Ok(ts), Ok(seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
+                if let Some(next_seq) = seq.checked_add(1) {
+                    format!("{}-{}", ts, next_seq)
+                } else if let Some(next_ts) = ts.checked_add(1) {
+                    format!("{}-0", next_ts)
+                } else {
+                    tracing::warn!(stream_key = %stream_key, "Stream ID at u64::MAX, skipping trim");
+                    return Ok(());
+                }
+            } else {
+                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor format — skipping trim");
+                return Ok(());
+            }
+        } else {
+            tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor (no dash) — skipping trim");
+            return Ok(());
+        };
+
+        let trim_result: Result<i64, redis::RedisError> = redis::cmd("XTRIM")
+            .arg(&stream_key)
+            .arg("MINID")
+            .arg(&next_id_after_ack)
+            .query_async(self.client.connection_mut())
+            .await;
+
+        match trim_result {
+            Ok(deleted_count) => {
+                if deleted_count > 0 {
+                    tracing::debug!(
+                        stream_key = %stream_key,
+                        ack_id = %ack_id,
+                        min_id_kept = %next_id_after_ack,
+                        deleted_count,
+                        "Trimmed acknowledged messages from Redis stream (ack-driven)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    stream_key = %stream_key,
+                    ack_id = %ack_id,
+                    "Failed to trim acknowledged messages (non-fatal)"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Validate Redis Stream ID format: {timestamp}-{sequence}
