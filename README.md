@@ -1,4 +1,4 @@
-# Construct
+# Konstruct
 
 **Privacy by Architecture. Not by Promise.**
 
@@ -7,9 +7,9 @@
 
 ---
 
-## What is Construct?
+## What is Konstruct?
 
-Construct is an open, federated, end-to-end encrypted messenger built on the principle that **privacy is a technical guarantee, not a policy statement**.
+Konstruct is an open, federated, end-to-end encrypted messenger built on the principle that **privacy is a technical guarantee, not a policy statement**.
 
 We don't ask you to trust us. The cryptography makes trust unnecessary.
 
@@ -23,7 +23,7 @@ Signal's Security  +  Email's Openness  +  Minimal Attack Surface
 
 ### What the server never sees
 
-| Data | Signal | Telegram | **Construct** |
+| Data | Signal | Telegram | **Konstruct** |
 |------|--------|----------|---------------|
 | Message content | ✅ never | ❌ sees | ✅ never |
 | Contact list | ⚠️ sees hashes | ❌ sees | ✅ never stored |
@@ -70,12 +70,15 @@ The server supports two crypto suites simultaneously:
 
 | Suite | Keys | Status |
 |-------|------|--------|
-| `0x01` ClassicX25519 | Ed25519 + X25519 | ✅ Active |
-| `0x10` HybridKyber1024X25519 | Ed25519 + ML-KEM-1024 ⊕ X25519 | ✅ Active |
+| `0x01` ClassicX25519 | Ed25519 + X25519 | Active |
+| `0x10` HybridKyber768X25519 | Ed25519 + ML-KEM-768 ⊕ X25519 | Active |
 
-Hybrid PQC means: even if ML-KEM-1024 has an undiscovered flaw, X25519 still protects you. Even if a quantum computer breaks X25519, ML-KEM-1024 still protects you.
+> The internal suite enum is historically named `HybridKyber1024X25519`, but the actual
+> KEM is **ML-KEM-768** (FIPS 203), not 1024 — the wire and key sizes are ML-KEM-768's.
 
-**Why it matters now:** Nation-states collect encrypted traffic today to decrypt it when quantum computers become capable. "Harvest now, decrypt later" is a documented threat. Construct's PQC protects messages sent today against future quantum attacks.
+Hybrid PQC means: even if ML-KEM-768 has an undiscovered flaw, X25519 still protects you. Even if a quantum computer breaks X25519, ML-KEM-768 still protects you.
+
+**Why it matters now:** Nation-states collect encrypted traffic today to decrypt it when quantum computers become capable. "Harvest now, decrypt later" is a documented threat. Konstruct's PQC protects messages sent today against future quantum attacks.
 
 ### Prekey signature scheme
 
@@ -91,7 +94,7 @@ The server verifies all signatures on upload (RFC 8032 strict). A forged or tamp
 
 | Primitive | Algorithm | Notes |
 |-----------|-----------|-------|
-| Asymmetric encryption | X25519 + ML-KEM-1024 | Hybrid |
+| Asymmetric encryption | X25519 + ML-KEM-768 (FIPS 203) | Hybrid KEM |
 | Identity signatures | Ed25519 (RFC 8032) | Strict verification |
 | Message encryption | ChaCha20-Poly1305 | 256-bit AEAD |
 | Key derivation | HKDF-SHA256 | Per Signal spec |
@@ -120,21 +123,32 @@ alice@your-server.com  ←─ E2E encrypted ─→  bob@another-server.org
 ## Architecture
 
 ```
-Client (iOS)
-  │  gRPC over TLS
+Client (iOS / macOS)
+  │  gRPC over TLS (HTTP/2)
   ▼
-Envoy proxy :8080
+Traefik         — edge TLS termination (Let's Encrypt ACME), SNI routing
+  ▼
+Envoy :8080     — gRPC / gRPC-web routing to microservices
   │
-  ├──► auth-service    :50051   (registration, JWT)
-  ├──► key-service     :50057   (prekey bundles, PQC keys)
-  ├──► messaging-service :50053 (send/receive, streaming)
-  ├──► user-service    :50052   (profiles)
-  ├──► media-service   :50056   (encrypted attachments)
-  └──► invite-service  :50055   (cryptographic invites)
+  ├──► auth-service         :50051  (registration, JWT, recovery)
+  ├──► user-service         :50052  (profiles)
+  ├──► messaging-service    :50053  (send/receive, streaming, receipts)
+  ├──► notification-service :50054  (silent APNs push)
+  ├──► invite-service       :50055  (cryptographic invites)
+  ├──► media-service        :50056  (encrypted attachments)
+  ├──► key-service          :50057  (X3DH prekeys, ML-KEM keys)
+  ├──► mls-service          :50058  (MLS group messaging)
+  ├──► sentinel-service     :50059  (abuse / rate-limit sentinel)
+  ├──► channel-service              (broadcast channels)
+  ├──► signaling-service            (WebRTC call signaling)
+  ├──► masque-service               (MASQUE-lite QUIC datagram relay)
+  └──► gateway              :3000   (HTTP: /health, /.well-known, /federation)
+
+  delivery-worker                   (Kafka → Redis offline-stream bridge; no inbound port)
 
 Message flow:
-  sender → messaging-service → Kafka → Delivery Worker → Redis Stream → recipient
-  (never touches a SQL database — no message persistence)
+  sender → messaging-service → Redpanda(Kafka) → delivery-worker → Redis stream → recipient
+  (never touches a SQL database — no message content persistence)
 ```
 
 **Pure gRPC architecture.** No REST. No WebSockets. Binary protocol end-to-end.
@@ -165,8 +179,13 @@ construct-server/
 ├── media-service/         # Encrypted media upload/download
 ├── invite-service/        # Cryptographic invite tokens
 ├── notification-service/  # Silent APNs push
+├── mls-service/           # MLS group messaging (RFC 9420)
+├── channel-service/       # Public/private broadcast channels
+├── signaling-service/     # WebRTC call signaling relay
+├── masque-service/        # MASQUE-lite QUIC datagram relay (transport)
+├── sentinel-service/      # Abuse / rate-limit sentinel
 ├── gateway/               # Federation, health, discovery
-├── delivery-worker/       # Kafka → Redis delivery bridge
+├── delivery-worker/       # Kafka → Redis offline-stream bridge
 ├── shared/
 │   ├── proto/             # Protobuf definitions (source of truth)
 │   └── migrations/        # PostgreSQL schema (devices & keys only)
@@ -279,4 +298,3 @@ See [LICENSE](LICENSE).
 <p align="center">
   <b>Privacy is a right. Not a feature. Not a setting. Not a subscription tier.</b>
 </p>
-
