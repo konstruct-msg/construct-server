@@ -1,6 +1,6 @@
-# Construct Server: Developer Documentation
+# Konstruct Server: Developer Documentation
 
-**Last Updated:** 2026-06  
+**Last Updated:** 2026-06-09  
 **Status:** Living Document
 
 ---
@@ -21,11 +21,13 @@
 
 ## Architecture Overview
 
-Construct is an end-to-end encrypted messenger with a fully gRPC-first backend. All client traffic enters through an **Envoy proxy** (port 8080) which routes to individual microservices by gRPC service path prefix. There are no REST endpoints for core functionality — authentication, messaging, and key management are all gRPC.
+Konstruct is an end-to-end encrypted messenger with a fully gRPC-first backend. All client traffic terminates TLS at **Traefik** (edge, Let's Encrypt ACME) which forwards to an **Envoy proxy** (port 8080); Envoy routes to individual microservices by gRPC service path prefix. There are no REST endpoints for core functionality — authentication, messaging, and key management are all gRPC.
 
 ```
 Client
   │
+  ▼
+Traefik      (edge TLS termination, ACME, SNI routing)
   ▼
 Envoy :8080  (routes by /shared.proto.services.v1.<ServiceName>/*)
   │
@@ -38,12 +40,15 @@ Envoy :8080  (routes by /shared.proto.services.v1.<ServiceName>/*)
   ├─► key-service         :50057  (KeyService)
   ├─► mls-service         :50058  (MlsService)
   ├─► sentinel-service    :50059  (SentinelService)
+  ├─► channel-service             (ChannelService — broadcast channels)
+  ├─► signaling-service           (SignalingService — WebRTC call signaling)
+  ├─► masque-service              (MASQUE-lite QUIC datagram relay)
   └─► gateway             :3000   (HTTP: /health, /.well-known, /federation)
 ```
 
 **Shared infrastructure:**
 - **Kafka (Redpanda)** — primary message delivery (topic `messages`); Redis is the fallback if Kafka is unavailable
-- **Redis Streams** — message inbox per device (`inbox:{user_id}`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`)
+- **Redis Streams** — per-user offline stream (`delivery:offline:{user_id}`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`)
 - **PostgreSQL** — device registration, keys, `delivery_pending` (receipt routing hashes only — **message content is never stored in PostgreSQL**)
 - **Proto definitions** — `shared/proto/services/*.proto`
 
@@ -69,8 +74,11 @@ Each service is an independent Rust binary. `main()` in each service:
 | key-service | `key-service/src/main.rs` | 50057 | `KEY_GRPC_BIND_ADDRESS` |
 | mls-service | `mls-service/src/main.rs` | 50058 | `MLS_GRPC_BIND_ADDRESS` |
 | sentinel-service | `sentinel-service/src/main.rs` | 50059 | *(PORT env var)* |
+| channel-service | `channel-service/src/main.rs` | (own gRPC port) | — |
+| signaling-service | `signaling-service/src/main.rs` | (own gRPC port) | — |
+| masque-service | `masque-service/src/main.rs` | (UDP/WS relay) | — |
 | gateway | `gateway/src/main.rs` | 3000 (HTTP) | `PORT` |
-| delivery-worker | `delivery-worker/src/main.rs` | *(no server)* | — |
+| delivery-worker | `delivery-worker/src/main.rs` | *(no inbound port)* | — |
 
 ### Required environment variables (all services)
 
@@ -95,6 +103,9 @@ See `crates/construct-config/src/lib.rs` for the full list and defaults.
 | key-service | `KeyService` |
 | mls-service | `MlsService` |
 | sentinel-service | `SentinelService` |
+| channel-service | `ChannelService` |
+| signaling-service | `SignalingService` |
+| masque-service | MASQUE-lite relay (no gRPC service) |
 
 Proto package: `shared.proto.services.v1`  
 Proto sources: `shared/proto/services/`
@@ -127,7 +138,7 @@ Client → KeyService::UploadPreKeys
             ├─ verify Ed25519 signatures on each key
             │   formula: sign("KonstruktX3DH-v1" || [0x00, suite_id] || pubkey_bytes)
             ├─ INSERT INTO one_time_prekeys (suite 0x01 = X25519 OTPKs)
-            └─ INSERT kyber prekeys (suite 0x10 = ML-KEM-1024+X25519 hybrid)
+            └─ INSERT kyber prekeys (suite 0x10 = ML-KEM-768+X25519 hybrid)
 ```
 
 ### 3. Fetch Pre-Key Bundle (X3DH initiation)
@@ -169,11 +180,14 @@ Client → MessagingService::MessageStream
       async fn message_stream(...)
         └─► messaging-service/src/stream.rs
             pub(crate) async fn poll_messages(...)
-              ├─ XREAD inbox:{device_id} (Redis Stream)
+              ├─ read_user_messages_from_stream → XREAD delivery:offline:{user_id} (no delete)
               ├─► messaging-service/src/envelope.rs
               │   pub(crate) fn convert_kafka_envelope_to_proto(...)
               └─► spawn_inbox_wakeup(...)  (subscribes Redis pub/sub for real-time push)
                   channel: inbox:wakeup:{user_id}
+
+  Subscribe(since_cursor) → handle_stream_request → MessageQueue::trim_offline_stream
+    (deletes ≤ since_cursor only — the client's durable ACK; see Offline delivery)
 ```
 
 ### 6. Delivery Receipt
@@ -183,7 +197,7 @@ Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY
   └─► messaging-service/src/receipts.rs
       pub(crate) async fn relay_delivery_receipt(...)
         ├─ compute routing hash (recipient → original sender)
-        ├─ XADD receipt:{sender_device_id}
+        ├─ XADD delivery:offline:{sender_user_id}  (receipt rides the sender's own stream)
         └─ original sender's stream picks it up → green checkmark
 ```
 
@@ -218,14 +232,14 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                │
                      Delivery Worker reads Kafka
                      and writes to Redis:
-                     XADD inbox:{bob_device}
+                     XADD delivery:offline:{bob_user}
                                │
                      PUBLISH inbox:wakeup:{bob_user}
                                │
                     └──────────────────────────────────► stream.rs::poll_messages
                                                               │
                                                     read_user_messages_from_stream
-                                                    (XREAD inbox:{bob_device})
+                                                    (XREAD delivery:offline:{bob_user})
                                                               │
                                                     convert_kafka_envelope_to_proto
                                                               │
@@ -233,12 +247,29 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                                                                        │
                                                         relay_delivery_receipt ◄───────┘
                                                               │
-                                                    XADD inbox:{alice_device}
+                                                    XADD delivery:offline:{alice_user}
                                                               │
                                           Alice stream receives receipt ──────► ✅ delivered
 ```
 
-**Offline delivery:** If Bob is not connected, messages accumulate in the Redis Stream (`inbox:{device_id}`) until consumed. The Stream acts as the durable queue — Redis persistence (AOF/RDB) is the offline guarantee, not PostgreSQL.
+**Offline delivery (ACK-driven).** If Bob is offline, messages accumulate in his Redis
+stream `delivery:offline:{user_id}` (7-day TTL). On reconnect his client subscribes with
+`since_cursor` — the Redis stream ID of the last message it *durably persisted*. The server:
+
+1. reads **forward** from that cursor and streams the backlog to the client
+   (`read_user_messages_from_stream` — side-effect-free, no deletion);
+2. deletes (`XTRIM MINID ack+1`) only messages **≤ `since_cursor`** — i.e. only what the
+   client has acknowledged — in `MessageQueue::trim_offline_stream`, invoked from the
+   `Subscribe` handler in `stream.rs`.
+
+Deletion is driven by the client's durable acknowledgement, **never** by the server's send
+position. A short or broken session re-delivers (the client dedups by `message_id`) but never
+loses an un-acknowledged message. The 7-day TTL and `trim_streams_by_age` are the backstop for
+streams that are never acknowledged.
+
+> **History:** before 2026-06, `read_stream_messages` trimmed the stream by the server's *read
+> position* on every poll. A message buffered into the gRPC channel but not yet received by a
+> short-lived client was deleted on the next poll → silent loss. The trim is now ACK-driven.
 
 ---
 
@@ -249,7 +280,7 @@ SendMessage RPC ──────────► grpc.rs::send_message
 | Suite ID | Name | Keys | Status |
 |----------|------|------|--------|
 | `0x01` | ClassicX25519 | Ed25519 identity + X25519 prekeys | ✅ Active |
-| `0x10` | HybridKyber1024X25519 | Ed25519 identity + ML-KEM-1024⊕X25519 prekeys | ✅ Active |
+| `0x10` | HybridKyber1024X25519 | Ed25519 identity + ML-KEM-768⊕X25519 prekeys | ✅ Active |
 
 Clients negotiate the suite during registration. Hybrid PQC (`0x10`) is available and used when both parties support it.
 
@@ -265,7 +296,7 @@ signature = Ed25519.sign(
 ```
 
 - Suite `0x01` = Classical X25519 SPK
-- Suite `0x10` = Hybrid ML-KEM-1024+X25519
+- Suite `0x10` = Hybrid ML-KEM-768+X25519
 
 Verification uses `ed25519-dalek v2.1` (RFC 8032 strict mode).
 
@@ -307,7 +338,7 @@ Key tables:
 |-------|---------|
 | `devices` | Device records: `user_id`, `identity_key`, `signed_prekey`, `verifying_key`, push tokens |
 | `one_time_prekeys` | X25519 OTPKs; soft-deleted (`deleted_at`) on consumption |
-| `kyber_prekeys` | ML-KEM-1024 OTPKs; same soft-delete pattern |
+| `kyber_prekeys` | ML-KEM-768 OTPKs; same soft-delete pattern |
 | `delivery_pending` | Receipt routing: `message_hash → sender_id` (30-day TTL). **Not message storage** — only used to route delivery receipts back to the original sender. |
 | `media_files` | Upload metadata (actual bytes on CDN/local storage) |
 | `user_blocks` | Block list entries |
@@ -416,17 +447,17 @@ grpcurl -plaintext \
 ```bash
 redis-cli
 
-# List active inbox streams
-KEYS inbox:*
+# List active offline streams
+KEYS delivery:offline:*
 
 # Read messages from a stream
-XRANGE inbox:<device_id> - +
+XRANGE delivery:offline:<user_id> - +
 
 # Watch for wakeup signals
 SUBSCRIBE inbox:wakeup:<user_id>
 
-# Inspect receipt stream
-XRANGE receipt:<device_id> - +
+# Receipts ride the sender's own offline stream (no separate receipt: key)
+XRANGE delivery:offline:<sender_user_id> - +
 ```
 
 ### Inspect PostgreSQL
@@ -465,8 +496,8 @@ curl http://localhost:9901/stats | grep upstream_rq
 
 1. **Send** — add `RUST_LOG=debug` to messaging-service, watch `dispatch_envelope` logs
 2. **Kafka** — check Redpanda topic `messages` for the envelope
-3. **Redis** — `XRANGE inbox:<recipient_device_id> - +` confirms delivery to stream
-4. **Receipt** — `XRANGE receipt:<sender_device_id> - +` confirms delivery receipt arrived
+3. **Redis** — `XRANGE delivery:offline:<recipient_user_id> - +` confirms delivery to stream
+4. **Receipt** — `XRANGE delivery:offline:<sender_user_id> - +` confirms the delivery receipt arrived
 
 > Messages are **never** in PostgreSQL. If a message is missing, check Kafka first, then Redis Stream.
 
@@ -487,14 +518,14 @@ curl http://localhost:9901/stats | grep upstream_rq
 - X3DH key bundles (identity key, signed prekey, OTPKs)
 - Ed25519 prekey signatures (scheme: `KonstruktX3DH-v1` prefix)
 - One-time prekey soft-delete (consumed atomically)
-- Kyber (ML-KEM-1024) hybrid prekeys (suite 0x10)
+- Kyber (ML-KEM-768) hybrid prekeys (suite 0x10)
 - SPK rotation with age tracking
 
 **Messaging:**
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
 - Idempotency via Redis SETNX
-- Offline queue (PostgreSQL pending_messages, 7-day TTL)
+- Offline delivery (Redis stream `delivery:offline:{user_id}`, **ACK-driven** trim, 7-day TTL)
 - Delivery receipts routed back to sender
 - EditMessage RPC
 
@@ -512,7 +543,10 @@ curl http://localhost:9901/stats | grep upstream_rq
 
 ### ⚠️ Stub / partial
 
-- MLS group messaging (`mls-service` — stubs only)
+- MLS group messaging (`mls-service` — RFC 9420, partial)
+- Broadcast channels (`channel-service`)
+- WebRTC call signaling (`signaling-service`)
+- MASQUE-lite QUIC relay (`masque-service` — transport / DPI resistance)
 - Sentinel service (rate-limit sentinel — partial)
 - Multi-device message fan-out (single device delivery only)
 
@@ -525,5 +559,5 @@ curl http://localhost:9901/stats | grep upstream_rq
 
 ---
 
-**Maintainer:** Construct Team  
-**License:** Proprietary
+**Maintainer:** Konstruct Team  
+**License:** MIT (see LICENSE)
