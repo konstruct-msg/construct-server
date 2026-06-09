@@ -402,7 +402,10 @@ mod tests {
         for i in 0..ls.len() {
             let (proof, proof_root) = generate_inclusion_proof(&ls, i).unwrap();
             assert_eq!(root, proof_root);
-            assert!(verify_inclusion(&ls[i], &proof, i, ls.len(), &root), "i={i}");
+            assert!(
+                verify_inclusion(&ls[i], &proof, i, ls.len(), &root),
+                "i={i}"
+            );
         }
     }
 }
