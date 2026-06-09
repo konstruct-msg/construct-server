@@ -242,6 +242,11 @@ impl KeyService for KeyGrpcService {
                         kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                         kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
                         bundle_signature: b.bundle_signature.unwrap_or_default(),
+                        // Hybrid PQ identity signatures — served in server step 2 (store/serve).
+                        hybrid_identity_key: None,
+                        hybrid_identity_signature: None,
+                        signed_pre_key_hybrid_signature: None,
+                        kyber_pre_key_hybrid_signature: None,
                     }),
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
@@ -652,6 +657,11 @@ impl KeyService for KeyGrpcService {
                     kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                     kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
                     bundle_signature: b.bundle_signature.unwrap_or_default(),
+                    // Hybrid PQ identity signatures — served in server step 2 (store/serve).
+                    hybrid_identity_key: None,
+                    hybrid_identity_signature: None,
+                    signed_pre_key_hybrid_signature: None,
+                    kyber_pre_key_hybrid_signature: None,
                 }),
                 platform: 0, // Unknown
                 kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {
