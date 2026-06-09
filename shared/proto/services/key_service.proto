@@ -215,6 +215,29 @@ message PreKeyBundle {
   // Empty when bundle signing is not configured on the server (dev/test environments).
   // Clients SHOULD verify this when non-empty using the public key from /.well-known/construct-server.
   bytes bundle_signature = 19;
+
+  // ---- Hybrid PQ identity signatures (Ed25519 + ML-DSA-65, FIPS 204) ----
+  // All optional: absent for Ed25519-only devices and old clients. Clients MUST NOT
+  // hard-fail a peer that lacks these fields (capability-gated verify only).
+  // Migration is phased & no-flag-day; Ed25519 stays as the classical half indefinitely.
+
+  // Hybrid identity public key, 1984 bytes = [ed25519_pk(32)] [mldsa65_pk(1952)].
+  // INVARIANT: hybrid_identity_key[0..32] == identity_key (Ed25519 half IS the device identity key).
+  // Goes into the Key Transparency leaf alongside the Ed25519 identity key.
+  optional bytes hybrid_identity_key = 20;
+
+  // Ed25519 cross-signature over hybrid_identity_key (64 bytes), signed with identity_key.
+  // Binds the new ML-DSA key to the existing Ed25519 identity (TOFU continuity).
+  optional bytes hybrid_identity_signature = 21;
+
+  // Hybrid signature (3373 bytes = [ed25519_sig(64)] [mldsa65_sig(3309)]) over the SPK
+  // sign-message: "KonstruktX3DH-v1" || [0x00, suite_id] || signed_pre_key — same bytes as
+  // signed_pre_key_signature, but signed/verified with the hybrid key. (scope B)
+  optional bytes signed_pre_key_hybrid_signature = 22;
+
+  // Hybrid signature (3373 bytes) over the Kyber-SPK sign-message
+  // "KonstruktX3DH-v1" || [0x00, suite_id] || kyber_pre_key. (scope B)
+  optional bytes kyber_pre_key_hybrid_signature = 23;
 }
 
 // ============================================================================
@@ -283,6 +306,18 @@ message UploadPreKeysRequest {
   // Optional: also update Kyber signed pre-key
   optional KyberSignedPreKeyUpload kyber_signed_pre_key = 13;
 
+  // ---- Hybrid PQ identity (Ed25519 + ML-DSA-65) — optional ----
+  // Published lazily on first launch of a hybrid-capable client (existing accounts) and
+  // at registration for new devices. Server stores + serves them in PreKeyBundle 20-21,
+  // verifies the cross-sign + the 0..32 invariant on upload, and records the hybrid key
+  // in the Key Transparency leaf.
+
+  // Hybrid identity public key, 1984 bytes. hybrid_identity_key[0..32] == device identity_key.
+  optional bytes hybrid_identity_key = 14;
+
+  // Ed25519 cross-signature over hybrid_identity_key (64 bytes), signed with identity_key.
+  optional bytes hybrid_identity_signature = 15;
+
   // Reserved for future options
   reserved 4 to 10;
 }
@@ -304,6 +339,11 @@ message SignedPreKeyUpload {
 
   // Signature over public_key using identity key
   bytes signature = 3;
+
+  // Optional hybrid (Ed25519+ML-DSA-65) signature over the same SPK sign-message
+  // (3373 bytes). Present once the device has a hybrid identity key. Server verifies
+  // with hybrid_identity_key when both are present; never required.
+  optional bytes hybrid_signature = 4;
 }
 
 // ---- Post-Quantum (ML-KEM-1024) key upload types ----
@@ -330,6 +370,10 @@ message KyberSignedPreKeyUpload {
 
   // Ed25519 signature over public_key (64 bytes)
   bytes signature = 3;
+
+  // Optional hybrid (Ed25519+ML-DSA-65) signature over the Kyber-SPK sign-message
+  // (3373 bytes). Present once the device has a hybrid identity key. Never required.
+  optional bytes hybrid_signature = 4;
 }
 
 message UploadPreKeysResponse {
