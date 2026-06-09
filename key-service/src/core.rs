@@ -1013,7 +1013,8 @@ pub async fn store_hybrid_identity(
     // 2. SPK hybrid signature (over the current classic SPK), if present.
     if let Some(sig) = &upload.signed_prekey_hybrid_signature {
         validate_hybrid_signature(sig)?;
-        let message = construct_crypto::pqc::build_prekey_sign_message(0x01, &row.signed_prekey_public);
+        let message =
+            construct_crypto::pqc::build_prekey_sign_message(0x01, &row.signed_prekey_public);
         construct_crypto::pqc::verify_hybrid_signature(&upload.hybrid_identity_key, &message, sig)
             .map_err(|e| anyhow::anyhow!("SPK hybrid signature verification failed: {}", e))?;
     }
@@ -1506,8 +1507,7 @@ mod tests {
     fn make_crosssigned_hybrid() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let device = SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = device.verifying_key().to_bytes().to_vec();
-        let (_hybrid_sk, hybrid_pk) =
-            construct_crypto::pqc::generate_hybrid_signature_keypair();
+        let (_hybrid_sk, hybrid_pk) = construct_crypto::pqc::generate_hybrid_signature_keypair();
         let mut message = Vec::new();
         message.extend_from_slice(HYBRID_ID_BIND_PROLOGUE);
         message.extend_from_slice(&hybrid_pk);
