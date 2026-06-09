@@ -385,9 +385,7 @@ impl KeyService for KeyGrpcService {
             // Verification failures are client errors (bad cross-sign / prekey sig).
             core::store_hybrid_identity(&self.context.db, &req.device_id, &upload)
                 .await
-                .map_err(|e| {
-                    Status::invalid_argument(format!("hybrid identity rejected: {e}"))
-                })?;
+                .map_err(|e| Status::invalid_argument(format!("hybrid identity rejected: {e}")))?;
         }
 
         Ok(Response::new(proto::UploadPreKeysResponse {
