@@ -319,27 +319,39 @@ These instructions apply to GitHub Copilot, Codex, OpenCode, and similar coding 
 
 **Your job is code.** olw handles article synthesis. Write plain-markdown session notes; let the pipeline do the rest.
 
-### Shared knowledge base
+## Documentation
 
-- Vault: `~/Code/construct-docs`
-- `raw/` — source corpus. Do **not** rewrite or reorganize.
-- `wiki/` — canonical curated knowledge base. **Read** from here before architectural work.
-- `wiki/.drafts/` — **reserved for olw**. Never write here manually.
-- `wiki/sessions/` — where coding agents write session notes.
-- `wiki/decisions/` — where coding agents write long-lived decision records.
+All project documentation: `~/Code/construct-docs` (Obsidian vault).
+**Authoritative map + writing rules: `~/Code/construct-docs/AGENTS.md`** (read it before contributing
+docs). The vault is a flat domain-folder structure — there is no `raw/` or `wiki/` anymore.
+
+### Vault layout (top-level domain folders)
+
+| Folder | Holds |
+|--------|-------|
+| `overview/` | Vision, philosophy, high-level project overview |
+| `architecture/` | Service map, data flows, server infrastructure, design principles |
+| `backend/` | Server service-specific docs (auth, messaging, federation) |
+| `client/` | Client docs (iOS, Android, desktop, shared); specs in `client/specs/` |
+| `cryptocore/` | Crypto protocol specs and key management |
+| `security/` | Security model, threat model, VEIL anti-censorship |
+| `deployment/` · `testing/` · `compliance/` · `whitepaper/` | as named |
+| `sessions/` | Session logs (this is where your session notes go) |
+| `decisions/` | Architectural decision records (ADRs) |
+| `_archive/` | Superseded docs — read-only |
 
 ### Where to save durable reasoning
 
 After any session involving architectural changes, design decisions, API changes, or non-obvious implementation choices:
 
-1. **Always** create or update `wiki/sessions/YYYY-MM-DD-<topic>.md`.
+1. **Always** create or update `sessions/YYYY-MM-DD-<topic>.md`.
 2. **Always** fill in `# Why` — reasoning, alternatives considered, why rejected. Most important section.
-3. If the decision constrains future work, also create `wiki/decisions/<topic>.md`.
+3. If the decision constrains future work, also create `decisions/<topic>.md`.
 4. Session notes: plain markdown, **no YAML frontmatter, no `[[wikilinks]]`** — olw adds those.
 
 Required note sections: `# Context`, `# What Changed`, `# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`
 
 ### Operational logging
 
-Append a one-line entry to `wiki/log.md` after writing a note.
+Append a one-line entry to `log.md` after writing a note.
 Format: `[YYYY-MM-DD HH:MM] note | <topic>`
