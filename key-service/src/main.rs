@@ -242,11 +242,11 @@ impl KeyService for KeyGrpcService {
                         kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                         kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
                         bundle_signature: b.bundle_signature.unwrap_or_default(),
-                        // Hybrid PQ identity signatures — served in server step 2 (store/serve).
-                        hybrid_identity_key: None,
-                        hybrid_identity_signature: None,
-                        signed_pre_key_hybrid_signature: None,
-                        kyber_pre_key_hybrid_signature: None,
+                        // Hybrid PQ identity signatures (Ed25519 + ML-DSA-65), served when present.
+                        hybrid_identity_key: b.hybrid_identity_key,
+                        hybrid_identity_signature: b.hybrid_identity_signature,
+                        signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
+                        kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
                     }),
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
@@ -340,6 +340,16 @@ impl KeyService for KeyGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
+        // Capture the hybrid prekey signatures before the upload messages are consumed.
+        let spk_hybrid_sig = req
+            .signed_pre_key
+            .as_ref()
+            .and_then(|s| s.hybrid_signature.clone());
+        let kyber_spk_hybrid_sig = req
+            .kyber_signed_pre_key
+            .as_ref()
+            .and_then(|k| k.hybrid_signature.clone());
+
         // Handle optional classic signed prekey update
         if let Some(spk) = req.signed_pre_key {
             let signed_key = core::SignedPreKey {
@@ -365,6 +375,24 @@ impl KeyService for KeyGrpcService {
             .await
             .map(|_| ())
             .map_err(|e| Status::internal(e.to_string()))?;
+        }
+
+        // Handle optional hybrid PQ identity (Ed25519 + ML-DSA-65). Capability-gated:
+        // only runs when a hybrid_identity_key is present. Runs AFTER SPK / Kyber SPK
+        // rotation so the hybrid signatures bind the freshly-stored prekeys (lockstep).
+        if let Some(hybrid_key) = req.hybrid_identity_key.filter(|k| !k.is_empty()) {
+            let upload = core::HybridIdentityUpload {
+                hybrid_identity_key: hybrid_key,
+                hybrid_identity_signature: req.hybrid_identity_signature.unwrap_or_default(),
+                signed_prekey_hybrid_signature: spk_hybrid_sig,
+                kyber_pre_key_hybrid_signature: kyber_spk_hybrid_sig,
+            };
+            // Verification failures are client errors (bad cross-sign / prekey sig).
+            core::store_hybrid_identity(&self.context.db, &req.device_id, &upload)
+                .await
+                .map_err(|e| {
+                    Status::invalid_argument(format!("hybrid identity rejected: {e}"))
+                })?;
         }
 
         Ok(Response::new(proto::UploadPreKeysResponse {
@@ -657,11 +685,11 @@ impl KeyService for KeyGrpcService {
                     kyber_spk_uploaded_at: b.kyber_spk_uploaded_at.map(|t| t.timestamp()),
                     kyber_spk_rotation_epoch: b.kyber_spk_rotation_epoch.into(),
                     bundle_signature: b.bundle_signature.unwrap_or_default(),
-                    // Hybrid PQ identity signatures — served in server step 2 (store/serve).
-                    hybrid_identity_key: None,
-                    hybrid_identity_signature: None,
-                    signed_pre_key_hybrid_signature: None,
-                    kyber_pre_key_hybrid_signature: None,
+                    // Hybrid PQ identity signatures (Ed25519 + ML-DSA-65), served when present.
+                    hybrid_identity_key: b.hybrid_identity_key,
+                    hybrid_identity_signature: b.hybrid_identity_signature,
+                    signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
+                    kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
                 }),
                 platform: 0, // Unknown
                 kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {

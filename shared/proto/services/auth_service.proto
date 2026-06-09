@@ -140,10 +140,12 @@ message DevicePublicKeys {
   // these lazily via UploadPreKeys instead. All optional → old clients keep registering.
 
   // Hybrid identity public key, 1984 bytes = [ed25519_pk(32)] [mldsa65_pk(1952)].
-  // INVARIANT: hybrid_identity_key[0..32] == verifying_key (the Ed25519 identity key).
+  // The Ed25519 half is independent; binding is the cross-signature below
+  // (no [0..32]==verifying_key invariant).
   optional bytes hybrid_identity_key = 6;
 
-  // Ed25519 cross-signature over hybrid_identity_key (64 bytes), signed with verifying_key.
+  // Ed25519 cross-signature (64 bytes) over ("KonstruktHybridId-v1" || hybrid_identity_key),
+  // verifiable with verifying_key.
   optional bytes hybrid_identity_signature = 7;
 
   // Hybrid signature over the SPK sign-message (3373 bytes); proves the SPK under the
