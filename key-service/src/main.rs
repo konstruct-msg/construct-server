@@ -251,13 +251,8 @@ impl KeyService for KeyGrpcService {
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
                     verifying_key: b.verifying_key,
-                    kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {
-                        leaf_index: p.leaf_index,
-                        tree_size: p.tree_size,
-                        root_hash: p.root_hash,
-                        proof_hashes: p.proof_hashes,
-                        tree_head_signature: p.tree_head_signature,
-                    }),
+                    kt_proof: b.kt_proof.map(to_proto_kt_proof),
+                    hybrid_kt_proof: b.hybrid_kt_proof.map(to_proto_kt_proof),
                 });
                 if let Some(notif_client) = self.context.notification_client.clone() {
                     let db = self.context.db.clone();
@@ -303,9 +298,15 @@ impl KeyService for KeyGrpcService {
                 "device_id does not match authenticated device",
             ));
         }
-        if req.pre_keys.is_empty() && req.kyber_pre_keys.is_empty() {
+        // Allow a hybrid-identity-only upload (no OTPKs) — the hybrid bundle is published
+        // standalone, decoupled from prekey replenishment.
+        let has_hybrid_identity = req
+            .hybrid_identity_key
+            .as_deref()
+            .is_some_and(|k| !k.is_empty());
+        if req.pre_keys.is_empty() && req.kyber_pre_keys.is_empty() && !has_hybrid_identity {
             return Err(Status::invalid_argument(
-                "pre_keys or kyber_pre_keys cannot both be empty",
+                "pre_keys, kyber_pre_keys, or hybrid identity required",
             ));
         }
 
@@ -340,15 +341,9 @@ impl KeyService for KeyGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Capture the hybrid prekey signatures before the upload messages are consumed.
-        let spk_hybrid_sig = req
-            .signed_pre_key
-            .as_ref()
-            .and_then(|s| s.hybrid_signature.clone());
-        let kyber_spk_hybrid_sig = req
-            .kyber_signed_pre_key
-            .as_ref()
-            .and_then(|k| k.hybrid_signature.clone());
+        // Top-level hybrid prekey signatures (decoupled from rotation; over the CURRENT keys).
+        let spk_hybrid_sig = req.signed_pre_key_hybrid_signature.clone();
+        let kyber_spk_hybrid_sig = req.kyber_signed_pre_key_hybrid_signature.clone();
 
         // Handle optional classic signed prekey update
         if let Some(spk) = req.signed_pre_key {
@@ -692,13 +687,9 @@ impl KeyService for KeyGrpcService {
                     kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
                 }),
                 platform: 0, // Unknown
-                kt_proof: b.kt_proof.map(|p| proto::KtInclusionProof {
-                    leaf_index: p.leaf_index,
-                    tree_size: p.tree_size,
-                    root_hash: p.root_hash,
-                    proof_hashes: p.proof_hashes,
-                    tree_head_signature: p.tree_head_signature,
-                }),
+                kt_proof: b.kt_proof.map(to_proto_kt_proof),
+                verifying_key: b.verifying_key,
+                hybrid_kt_proof: b.hybrid_kt_proof.map(to_proto_kt_proof),
             })
             .collect();
 
@@ -732,6 +723,17 @@ impl KeyService for KeyGrpcService {
 // ============================================================================
 
 /// Sends a `replenish_prekeys` blind notification to `user_id` when their
+/// Map an internal `kt::KtProof` to the proto `KtInclusionProof` (identity or hybrid leaf).
+fn to_proto_kt_proof(p: crate::kt::KtProof) -> proto::KtInclusionProof {
+    proto::KtInclusionProof {
+        leaf_index: p.leaf_index,
+        tree_size: p.tree_size,
+        root_hash: p.root_hash,
+        proof_hashes: p.proof_hashes,
+        tree_head_signature: p.tree_head_signature,
+    }
+}
+
 /// device's one-time prekey supply drops below [`LOW_PREKEY_THRESHOLD`].
 ///
 /// - `otp_was_consumed = false`: the prekey store was already empty before this

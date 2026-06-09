@@ -62,6 +62,9 @@ pub struct PreKeyBundle {
     pub signed_prekey_hybrid_signature: Option<Vec<u8>>,
     /// Hybrid signature over the Kyber SPK X3DH sign-message (3373 bytes).
     pub kyber_pre_key_hybrid_signature: Option<Vec<u8>>,
+    /// KT inclusion proof for the hybrid identity key (leaf kind 1). `None` when the device
+    /// has no hybrid key or the KT log is not populated (dev/test).
+    pub hybrid_kt_proof: Option<crate::kt::KtProof>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +369,7 @@ pub async fn get_prekey_bundle(
         hybrid_identity_signature: device.hybrid_identity_signature,
         signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
         kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
+        hybrid_kt_proof: None,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
     if let Some(sk) = bundle_signing_key {
@@ -375,9 +379,27 @@ pub async fn get_prekey_bundle(
                 tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
             }
         }
+        bundle.hybrid_kt_proof = build_hybrid_kt_proof_if_present(db, &bundle, sk).await;
     }
     warn_if_spk_aging(&bundle);
     Ok(Some(bundle))
+}
+
+/// Build the hybrid KT inclusion proof when the device has a hybrid identity key.
+/// Returns `None` (logged) on absence or error — KT is defense-in-depth, never fatal.
+async fn build_hybrid_kt_proof_if_present(
+    db: &PgPool,
+    bundle: &PreKeyBundle,
+    signing_key: &SigningKey,
+) -> Option<crate::kt::KtProof> {
+    let hybrid_key = bundle.hybrid_identity_key.as_ref()?;
+    match crate::kt::build_hybrid_kt_proof(db, &bundle.device_id, hybrid_key, signing_key).await {
+        Ok(proof) => Some(proof),
+        Err(e) => {
+            tracing::warn!(error = %e, device_id = %bundle.device_id, "Hybrid KT proof generation failed");
+            None
+        }
+    }
 }
 
 /// Get pre-key bundles for all devices of a user
@@ -492,6 +514,7 @@ pub async fn get_prekey_bundles(
             hybrid_identity_signature: device.hybrid_identity_signature,
             signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
             kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
+            hybrid_kt_proof: None,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
         if let Some(sk) = bundle_signing_key {
@@ -501,6 +524,7 @@ pub async fn get_prekey_bundles(
                     tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
                 }
             }
+            bundle.hybrid_kt_proof = build_hybrid_kt_proof_if_present(db, &bundle, sk).await;
         }
         warn_if_spk_aging(&bundle);
         bundles.push(bundle);
