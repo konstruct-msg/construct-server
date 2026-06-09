@@ -660,18 +660,27 @@ impl MessagingService for MessagingGrpcService {
             req.new_encrypted_content.to_vec(),
         );
 
-        let mut queue = self.context.queue.lock().await;
-        queue
-            .write_message_to_user_stream(&req.recipient_user_id, &envelope)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to queue edit: {e}")))?;
+        // Deliver the edit through the same path as a regular message
+        // (dispatch_envelope → Kafka → live push), NOT a raw write_message_to_user_stream.
+        // The direct write is only Kafka's Redis fallback; it bypasses live delivery, so a
+        // connected recipient never received the edit envelope (and thus edits_message_id),
+        // leaving the original message un-updated. dispatch_envelope preserves
+        // edits_message_id (see envelope.rs to_proto) and pushes it live.
+        let app_context = std::sync::Arc::new(self.context.to_app_context());
+        core::dispatch_envelope(
+            &app_context,
+            envelope,
+            self.context.notification_client.clone(),
+        )
+        .await
+        .map_err(|e| Status::internal(format!("Failed to dispatch edit: {e}")))?;
 
         tracing::info!(
             sender = %sender_id,
             recipient = %req.recipient_user_id,
             original_message_id = %req.message_id,
             edit_count = edit_count,
-            "Message edit queued"
+            "Message edit dispatched"
         );
 
         Ok(Response::new(proto::EditMessageResponse {
