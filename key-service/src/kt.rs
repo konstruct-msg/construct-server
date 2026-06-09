@@ -32,6 +32,21 @@ pub fn leaf_hash(device_id: &str, identity_key_raw: &[u8]) -> [u8; 32] {
     sha256(&buf)
 }
 
+/// H(0x02 || device_id_utf8 || hybrid_identity_key)
+/// Domain byte 0x02 separates the hybrid leaf from the identity leaf (0x00) and the
+/// internal node hash (0x01). Used for KT leaf kind 1.
+pub fn hybrid_leaf_hash(device_id: &str, hybrid_identity_key: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(1 + device_id.len() + hybrid_identity_key.len());
+    buf.push(0x02u8);
+    buf.extend_from_slice(device_id.as_bytes());
+    buf.extend_from_slice(hybrid_identity_key);
+    sha256(&buf)
+}
+
+/// KT leaf kinds. Both kinds live in the same Merkle tree (ordered by id).
+pub const LEAF_KIND_IDENTITY: i16 = 0;
+pub const LEAF_KIND_HYBRID: i16 = 1;
+
 fn node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 65];
     buf[0] = 0x01;
@@ -175,13 +190,22 @@ pub fn tree_head_signable(tree_size: u64, root: &[u8; 32]) -> Vec<u8> {
 /// - Key rotation: appends a **new** row so the rotation is permanently recorded in
 ///   the append-only log, then returns the new 0-based index.
 ///
-/// Requires migration 047 (UNIQUE constraint on device_id dropped).
-pub async fn db_ensure_leaf(db: &PgPool, device_id: &str, lhash: [u8; 32]) -> Result<u64> {
-    // Find the most recent leaf for this device (if any).
+/// Requires migration 047 (UNIQUE constraint on device_id dropped) and migration 054
+/// (`leaf_kind` column). `leaf_kind` selects the identity (0) or hybrid (1) leaf series for
+/// this device; both kinds coexist in the same Merkle tree (the returned index is the global
+/// 0-based tree position = id - 1).
+pub async fn db_ensure_leaf(
+    db: &PgPool,
+    device_id: &str,
+    leaf_kind: i16,
+    lhash: [u8; 32],
+) -> Result<u64> {
+    // Find the most recent leaf of this kind for this device (if any).
     let latest: Option<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, leaf_hash FROM kt_leaves WHERE device_id = $1 ORDER BY id DESC LIMIT 1",
+        "SELECT id, leaf_hash FROM kt_leaves WHERE device_id = $1 AND leaf_kind = $2 ORDER BY id DESC LIMIT 1",
     )
     .bind(device_id)
+    .bind(leaf_kind)
     .fetch_optional(db)
     .await
     .context("kt_ensure_leaf: fetch latest failed")?;
@@ -191,21 +215,24 @@ pub async fn db_ensure_leaf(db: &PgPool, device_id: &str, lhash: [u8; 32]) -> Re
             // Same key — idempotent, return existing index.
             return Ok((existing_id - 1) as u64);
         }
-        // Hash differs — identity key rotated; append new leaf and log the event.
+        // Hash differs — key rotated; append new leaf and log the event.
         tracing::warn!(
             device_id = %device_id,
-            "KT: identity key rotation detected — appending new leaf"
+            leaf_kind,
+            "KT: key rotation detected — appending new leaf"
         );
     }
 
     // Insert new leaf (either first registration or key rotation).
-    let row: (i64,) =
-        sqlx::query_as("INSERT INTO kt_leaves (device_id, leaf_hash) VALUES ($1, $2) RETURNING id")
-            .bind(device_id)
-            .bind(lhash.as_slice())
-            .fetch_one(db)
-            .await
-            .context("kt_ensure_leaf: insert failed")?;
+    let row: (i64,) = sqlx::query_as(
+        "INSERT INTO kt_leaves (device_id, leaf_hash, leaf_kind) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(device_id)
+    .bind(lhash.as_slice())
+    .bind(leaf_kind)
+    .fetch_one(db)
+    .await
+    .context("kt_ensure_leaf: insert failed")?;
 
     Ok((row.0 - 1) as u64)
 }
@@ -242,10 +269,35 @@ pub async fn build_kt_proof(
     identity_key: &[u8],
     signing_key: &SigningKey,
 ) -> Result<KtProof> {
+    let lhash = leaf_hash(device_id, identity_key);
+    build_proof_for_leaf(db, device_id, LEAF_KIND_IDENTITY, lhash, signing_key).await
+}
+
+/// Build a `KtProof` for a device's HYBRID identity key (leaf kind 1).
+/// Mirrors `build_kt_proof` but commits to `hybrid_identity_key` via `hybrid_leaf_hash`.
+/// The proof is relative to the same tree (and STH) as the identity proof.
+pub async fn build_hybrid_kt_proof(
+    db: &PgPool,
+    device_id: &str,
+    hybrid_identity_key: &[u8],
+    signing_key: &SigningKey,
+) -> Result<KtProof> {
+    let lhash = hybrid_leaf_hash(device_id, hybrid_identity_key);
+    build_proof_for_leaf(db, device_id, LEAF_KIND_HYBRID, lhash, signing_key).await
+}
+
+/// Shared proof construction: ensure the leaf exists, load the full tree, build the
+/// inclusion proof, and sign the tree head.
+async fn build_proof_for_leaf(
+    db: &PgPool,
+    device_id: &str,
+    leaf_kind: i16,
+    lhash: [u8; 32],
+    signing_key: &SigningKey,
+) -> Result<KtProof> {
     use ed25519_dalek::Signer;
 
-    let lhash = leaf_hash(device_id, identity_key);
-    let leaf_index = db_ensure_leaf(db, device_id, lhash).await?;
+    let leaf_index = db_ensure_leaf(db, device_id, leaf_kind, lhash).await?;
     let all_leaves = db_get_all_leaves(db).await?;
     let tree_size = all_leaves.len() as u64;
 
@@ -325,5 +377,32 @@ mod tests {
         let bytes = tree_head_signable(42, &root);
         assert_eq!(bytes.len(), 54); // 14 + 8 + 32
         assert!(bytes.starts_with(b"ConstructKT-v1"));
+    }
+
+    #[test]
+    fn test_hybrid_leaf_domain_separated() {
+        // Same device_id + same key bytes must hash differently for identity vs hybrid leaves
+        // (domain bytes 0x00 vs 0x02), so a key can never be confused across leaf kinds.
+        let device = "device-abc";
+        let key = [0x42u8; 64];
+        assert_ne!(leaf_hash(device, &key), hybrid_leaf_hash(device, &key));
+    }
+
+    #[test]
+    fn test_mixed_kind_leaves_share_one_tree() {
+        // Identity and hybrid leaves coexist in the same Merkle tree; every leaf still has a
+        // valid inclusion proof regardless of kind.
+        let ls = vec![
+            leaf_hash("dev-0", &[0u8; 32]),
+            hybrid_leaf_hash("dev-0", &[9u8; 1984]),
+            leaf_hash("dev-1", &[1u8; 32]),
+            hybrid_leaf_hash("dev-1", &[7u8; 1984]),
+        ];
+        let root = merkle_root(&ls);
+        for i in 0..ls.len() {
+            let (proof, proof_root) = generate_inclusion_proof(&ls, i).unwrap();
+            assert_eq!(root, proof_root);
+            assert!(verify_inclusion(&ls[i], &proof, i, ls.len(), &root), "i={i}");
+        }
     }
 }
