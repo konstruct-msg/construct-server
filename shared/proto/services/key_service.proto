@@ -222,12 +222,14 @@ message PreKeyBundle {
   // Migration is phased & no-flag-day; Ed25519 stays as the classical half indefinitely.
 
   // Hybrid identity public key, 1984 bytes = [ed25519_pk(32)] [mldsa65_pk(1952)].
-  // INVARIANT: hybrid_identity_key[0..32] == identity_key (Ed25519 half IS the device identity key).
-  // Goes into the Key Transparency leaf alongside the Ed25519 identity key.
+  // The Ed25519 half is INDEPENDENT (a freshly generated key, NOT the device's
+  // existing Ed25519 identity). The binding to the device identity is the
+  // cross-signature in field 21 — there is no [0..32]==identity_key invariant.
   optional bytes hybrid_identity_key = 20;
 
-  // Ed25519 cross-signature over hybrid_identity_key (64 bytes), signed with identity_key.
-  // Binds the new ML-DSA key to the existing Ed25519 identity (TOFU continuity).
+  // Ed25519 cross-signature (64 bytes) over ("KonstruktHybridId-v1" || hybrid_identity_key),
+  // produced by the device's Ed25519 identity key and verifiable with verifying_key (field 11).
+  // Binds the new hybrid key to the existing Ed25519 identity (TOFU continuity).
   optional bytes hybrid_identity_signature = 21;
 
   // Hybrid signature (3373 bytes = [ed25519_sig(64)] [mldsa65_sig(3309)]) over the SPK
@@ -312,10 +314,12 @@ message UploadPreKeysRequest {
   // verifies the cross-sign + the 0..32 invariant on upload, and records the hybrid key
   // in the Key Transparency leaf.
 
-  // Hybrid identity public key, 1984 bytes. hybrid_identity_key[0..32] == device identity_key.
+  // Hybrid identity public key, 1984 bytes. Independent Ed25519 half, bound to the
+  // device identity by the cross-signature below (no [0..32] key-reuse invariant).
   optional bytes hybrid_identity_key = 14;
 
-  // Ed25519 cross-signature over hybrid_identity_key (64 bytes), signed with identity_key.
+  // Ed25519 cross-signature (64 bytes) over ("KonstruktHybridId-v1" || hybrid_identity_key),
+  // verifiable with the device's verifying_key.
   optional bytes hybrid_identity_signature = 15;
 
   // Reserved for future options

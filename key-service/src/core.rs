@@ -51,6 +51,17 @@ pub struct PreKeyBundle {
     /// Key Transparency inclusion proof. `None` when KT log is not populated
     /// (dev/test environments or first registration before the leaf is visible).
     pub kt_proof: Option<crate::kt::KtProof>,
+    // ---- Hybrid PQ identity signatures (Ed25519 + ML-DSA-65) — migration 053 ----
+    // All `None` for Ed25519-only devices. Served in PreKeyBundle proto fields 20-23.
+    /// Hybrid identity public key (1984 bytes). Independent Ed25519 half bound to the
+    /// device identity by `hybrid_identity_signature` (cross-sign, no 0..32 invariant).
+    pub hybrid_identity_key: Option<Vec<u8>>,
+    /// Ed25519 cross-signature over `"KonstruktHybridId-v1" || hybrid_identity_key` (64 bytes).
+    pub hybrid_identity_signature: Option<Vec<u8>>,
+    /// Hybrid signature over the SPK X3DH sign-message (3373 bytes).
+    pub signed_prekey_hybrid_signature: Option<Vec<u8>>,
+    /// Hybrid signature over the Kyber SPK X3DH sign-message (3373 bytes).
+    pub kyber_pre_key_hybrid_signature: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,7 +263,9 @@ pub async fn get_prekey_bundle(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
-                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
+                   hybrid_identity_key, hybrid_identity_signature,
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -268,7 +281,9 @@ pub async fn get_prekey_bundle(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
-                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
+                   hybrid_identity_key, hybrid_identity_signature,
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -347,6 +362,10 @@ pub async fn get_prekey_bundle(
         kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
         bundle_signature: None,
         kt_proof: None,
+        hybrid_identity_key: device.hybrid_identity_key,
+        hybrid_identity_signature: device.hybrid_identity_signature,
+        signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
+        kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
     if let Some(sk) = bundle_signing_key {
@@ -374,7 +393,9 @@ pub async fn get_prekey_bundles(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
-                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
+                   hybrid_identity_key, hybrid_identity_signature,
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -389,7 +410,9 @@ pub async fn get_prekey_bundles(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
-                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch
+                   spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
+                   hybrid_identity_key, hybrid_identity_signature,
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -465,6 +488,10 @@ pub async fn get_prekey_bundles(
             kyber_spk_rotation_epoch: device.kyber_spk_rotation_epoch as u32,
             bundle_signature: None,
             kt_proof: None,
+            hybrid_identity_key: device.hybrid_identity_key,
+            hybrid_identity_signature: device.hybrid_identity_signature,
+            signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
+            kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
         if let Some(sk) = bundle_signing_key {
@@ -788,6 +815,9 @@ pub async fn upload_kyber_signed_prekey(
         SET kyber_signed_pre_key           = $2,
             kyber_signed_pre_key_id        = $3,
             kyber_signed_pre_key_signature = $4,
+            -- A new Kyber SPK invalidates any prior hybrid signature; cleared here and
+            -- re-set by store_hybrid_identity in the same UploadPreKeys call (lockstep).
+            kyber_signed_pre_key_hybrid_signature = NULL,
             key_updated_at                 = NOW(),
             kyber_spk_uploaded_at          = NOW(),
             kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
@@ -856,6 +886,150 @@ pub async fn upload_kyber_signed_prekey_hybrid(
     .await?;
 
     Ok(new_epoch as u32)
+}
+
+// ============================================================================
+// Hybrid PQ Identity (Ed25519 + ML-DSA-65) — migration 053
+// ============================================================================
+
+/// Domain-separation prologue for the Ed25519 cross-signature that binds a
+/// device's hybrid identity key to its existing Ed25519 identity.
+/// The cross-signed message is `HYBRID_ID_BIND_PROLOGUE || hybrid_identity_key`.
+/// The client MUST sign the identical bytes with its device identity key.
+const HYBRID_ID_BIND_PROLOGUE: &[u8] = b"KonstruktHybridId-v1";
+
+/// Fields a client publishes (via UploadPreKeys) to register its hybrid PQ identity.
+pub struct HybridIdentityUpload {
+    /// Hybrid identity public key, 1984 bytes (required).
+    pub hybrid_identity_key: Vec<u8>,
+    /// Ed25519 cross-signature over the bind-message, 64 bytes (required).
+    pub hybrid_identity_signature: Vec<u8>,
+    /// Optional hybrid signature over the current SPK X3DH sign-message, 3373 bytes.
+    pub signed_prekey_hybrid_signature: Option<Vec<u8>>,
+    /// Optional hybrid signature over the current Kyber SPK X3DH sign-message, 3373 bytes.
+    pub kyber_pre_key_hybrid_signature: Option<Vec<u8>>,
+}
+
+/// Verify the Ed25519 cross-signature binding `hybrid_identity_key` to the device's
+/// existing Ed25519 identity (`verifying_key`). There is no `[0..32]` key-reuse
+/// invariant: the hybrid key's Ed25519 half is independent and the binding is the
+/// cross-signature alone.
+fn verify_hybrid_identity_crosssign(
+    verifying_key_bytes: &[u8],
+    hybrid_identity_key: &[u8],
+    cross_signature: &[u8],
+) -> Result<()> {
+    let vk_array: [u8; 32] = verifying_key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("verifying_key must be 32 bytes"))?;
+    let vk = VerifyingKey::from_bytes(&vk_array)
+        .map_err(|e| anyhow::anyhow!("Invalid verifying key: {}", e))?;
+
+    let sig_array: [u8; 64] = cross_signature
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("hybrid_identity_signature must be 64 bytes"))?;
+    let sig = Signature::from_bytes(&sig_array);
+
+    let mut message = Vec::with_capacity(HYBRID_ID_BIND_PROLOGUE.len() + hybrid_identity_key.len());
+    message.extend_from_slice(HYBRID_ID_BIND_PROLOGUE);
+    message.extend_from_slice(hybrid_identity_key);
+
+    vk.verify(&message, &sig)
+        .map_err(|_| anyhow::anyhow!("Hybrid identity cross-signature verification failed"))
+}
+
+/// Verify and persist a device's hybrid PQ identity key and (optionally) the hybrid
+/// signatures over its current signed pre-keys.
+///
+/// Capability-gated: only invoked when the client sends a `hybrid_identity_key`.
+/// Verification performed before any write:
+/// - `hybrid_identity_key` is exactly 1984 bytes;
+/// - the Ed25519 cross-signature is valid under the device's `verifying_key`;
+/// - if a SPK hybrid signature is present, it verifies against the CURRENT
+///   `signed_prekey_public` under the hybrid key;
+/// - if a Kyber SPK hybrid signature is present, it verifies against the CURRENT
+///   `kyber_signed_pre_key` under the hybrid key.
+///
+/// Call AFTER any SPK / Kyber SPK rotation in the same request so the hybrid
+/// signatures bind the freshly-stored prekeys (lockstep).
+pub async fn store_hybrid_identity(
+    db: &PgPool,
+    device_id: &str,
+    upload: &HybridIdentityUpload,
+) -> Result<()> {
+    if upload.hybrid_identity_key.len() != construct_crypto::pqc::HYBRID_SIG_PUBLIC_KEY_SIZE {
+        anyhow::bail!(
+            "Invalid hybrid_identity_key size: expected {} bytes, got {}",
+            construct_crypto::pqc::HYBRID_SIG_PUBLIC_KEY_SIZE,
+            upload.hybrid_identity_key.len()
+        );
+    }
+    validate_ed25519_signature(&upload.hybrid_identity_signature)?;
+
+    // Fetch the device's Ed25519 identity and current signed pre-keys for verification.
+    let row = sqlx::query_as::<_, HybridVerifyRow>(
+        r#"
+        SELECT verifying_key, signed_prekey_public, kyber_signed_pre_key
+        FROM devices
+        WHERE device_id = $1 AND is_active = true
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("Device not found or inactive: {}", device_id))?;
+
+    // 1. Cross-signature binds the hybrid key to the device identity.
+    verify_hybrid_identity_crosssign(
+        &row.verifying_key,
+        &upload.hybrid_identity_key,
+        &upload.hybrid_identity_signature,
+    )?;
+
+    // 2. SPK hybrid signature (over the current classic SPK), if present.
+    if let Some(sig) = &upload.signed_prekey_hybrid_signature {
+        validate_hybrid_signature(sig)?;
+        let message = construct_crypto::pqc::build_prekey_sign_message(0x01, &row.signed_prekey_public);
+        construct_crypto::pqc::verify_hybrid_signature(&upload.hybrid_identity_key, &message, sig)
+            .map_err(|e| anyhow::anyhow!("SPK hybrid signature verification failed: {}", e))?;
+    }
+
+    // 3. Kyber SPK hybrid signature (over the current Kyber SPK), if present.
+    if let Some(sig) = &upload.kyber_pre_key_hybrid_signature {
+        validate_hybrid_signature(sig)?;
+        let kyber = row.kyber_signed_pre_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("kyber_pre_key_hybrid_signature provided but device has no Kyber SPK")
+        })?;
+        construct_crypto::pqc::verify_hybrid_kyber_key_signature(
+            &upload.hybrid_identity_key,
+            0x10,
+            kyber,
+            sig,
+        )
+        .map_err(|e| anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e))?;
+    }
+
+    // All present signatures verified — persist. COALESCE keeps an existing hybrid
+    // prekey signature when this upload omits it (e.g. identity-only republish).
+    sqlx::query(
+        r#"
+        UPDATE devices
+        SET hybrid_identity_key       = $2,
+            hybrid_identity_signature = $3,
+            signed_prekey_hybrid_signature        = COALESCE($4, signed_prekey_hybrid_signature),
+            kyber_signed_pre_key_hybrid_signature = COALESCE($5, kyber_signed_pre_key_hybrid_signature)
+        WHERE device_id = $1 AND is_active = true
+        "#,
+    )
+    .bind(device_id)
+    .bind(&upload.hybrid_identity_key)
+    .bind(&upload.hybrid_identity_signature)
+    .bind(upload.signed_prekey_hybrid_signature.as_deref())
+    .bind(upload.kyber_pre_key_hybrid_signature.as_deref())
+    .execute(db)
+    .await?;
+
+    Ok(())
 }
 
 // ============================================================================
@@ -929,6 +1103,9 @@ pub async fn rotate_signed_prekey(
         SET signed_prekey_public = $2,
             signed_prekey_id = $3,
             signed_prekey_signature = $4,
+            -- A new SPK invalidates any prior hybrid signature; cleared here and
+            -- re-set by store_hybrid_identity in the same UploadPreKeys call (lockstep).
+            signed_prekey_hybrid_signature = NULL,
             key_updated_at = NOW(),
             spk_uploaded_at = NOW(),
             spk_rotation_epoch = COALESCE(spk_rotation_epoch, 0) + 1
@@ -1093,6 +1270,11 @@ struct DeviceRow {
     spk_rotation_epoch: i32,
     kyber_spk_uploaded_at: Option<DateTime<Utc>>,
     kyber_spk_rotation_epoch: i32,
+    // Hybrid PQ identity columns (nullable, added in migration 053)
+    hybrid_identity_key: Option<Vec<u8>>,
+    hybrid_identity_signature: Option<Vec<u8>>,
+    signed_prekey_hybrid_signature: Option<Vec<u8>>,
+    kyber_signed_pre_key_hybrid_signature: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1120,6 +1302,15 @@ struct SignedPreKeyRow {
     signed_prekey_id: i32,
     signed_prekey_public: Vec<u8>,
     signed_prekey_signature: Option<Vec<u8>>,
+}
+
+/// Row used by `store_hybrid_identity` to verify hybrid signatures against the
+/// device's current Ed25519 identity and signed pre-keys.
+#[derive(sqlx::FromRow)]
+struct HybridVerifyRow {
+    verifying_key: Vec<u8>,
+    signed_prekey_public: Vec<u8>,
+    kyber_signed_pre_key: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1282,6 +1473,56 @@ mod tests {
         assert_eq!(key.key_id, 42);
         assert_eq!(key.public_key.len(), KYBER_PUBLIC_KEY_SIZE);
         assert_eq!(key.signature.len(), ED25519_SIGNATURE_SIZE);
+    }
+
+    // ── Hybrid PQ identity cross-signature (no DB) ───────────────────────────
+
+    /// Build (device_verifying_key, hybrid_public_key, cross_signature) where the
+    /// device Ed25519 identity cross-signs the bind-message over the hybrid key.
+    fn make_crosssigned_hybrid() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let device = SigningKey::from_bytes(&[7u8; 32]);
+        let verifying_key = device.verifying_key().to_bytes().to_vec();
+        let (_hybrid_sk, hybrid_pk) =
+            construct_crypto::pqc::generate_hybrid_signature_keypair();
+        let mut message = Vec::new();
+        message.extend_from_slice(HYBRID_ID_BIND_PROLOGUE);
+        message.extend_from_slice(&hybrid_pk);
+        let cross_sig = device.sign(&message).to_bytes().to_vec();
+        (verifying_key, hybrid_pk, cross_sig)
+    }
+
+    #[test]
+    fn test_hybrid_identity_crosssign_roundtrip() {
+        let (vk, hk, sig) = make_crosssigned_hybrid();
+        assert_eq!(hk.len(), construct_crypto::pqc::HYBRID_SIG_PUBLIC_KEY_SIZE);
+        assert!(verify_hybrid_identity_crosssign(&vk, &hk, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_hybrid_identity_crosssign_rejects_wrong_device_key() {
+        let (_vk, hk, sig) = make_crosssigned_hybrid();
+        // A different device identity must not validate the cross-signature.
+        let other_vk = SigningKey::from_bytes(&[9u8; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        assert!(verify_hybrid_identity_crosssign(&other_vk, &hk, &sig).is_err());
+    }
+
+    #[test]
+    fn test_hybrid_identity_crosssign_rejects_tampered_key() {
+        let (vk, mut hk, sig) = make_crosssigned_hybrid();
+        hk[0] ^= 0xFF; // flip a byte of the signed hybrid key
+        assert!(verify_hybrid_identity_crosssign(&vk, &hk, &sig).is_err());
+    }
+
+    #[test]
+    fn test_hybrid_identity_crosssign_rejects_bad_sizes() {
+        let (vk, hk, sig) = make_crosssigned_hybrid();
+        // Wrong verifying-key length.
+        assert!(verify_hybrid_identity_crosssign(&vk[..31], &hk, &sig).is_err());
+        // Wrong signature length.
+        assert!(verify_hybrid_identity_crosssign(&vk, &hk, &sig[..63]).is_err());
     }
 
     // ── Database tests (require PostgreSQL) ──────────────────────────────────
