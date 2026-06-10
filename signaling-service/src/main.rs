@@ -20,7 +20,7 @@ use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::signaling::v1::signaling_service_server::SignalingServiceServer;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::{RateLimitConfig, RateLimiter};
 use crate::registry::CallRegistry;
 use crate::service::{make_default_peer_salt, make_instance_id, SignalingServiceImpl};
 
@@ -146,7 +146,11 @@ async fn main() -> anyhow::Result<()> {
 
     let service = SignalingServiceImpl {
         registry: Arc::clone(&registry),
-        rate_limiter: RateLimiter::new(registry.redis_client(), peer_salt),
+        rate_limiter: RateLimiter::new(
+            registry.redis_client(),
+            peer_salt,
+            RateLimitConfig::from_env(),
+        ),
         turn_secret,
         turn_ttl,
         notification_client,
