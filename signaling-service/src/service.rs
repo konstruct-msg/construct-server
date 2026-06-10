@@ -261,6 +261,8 @@ impl SignalingService for SignalingServiceImpl {
 
             let _ = tokio::join!(inbound_task, outbound_task);
 
+            registry.unregister_user(&user_id, &device_id).await;
+
             if let Some(state) = registry
                 .call_ended_by_disconnect(&user_id, &device_id)
                 .await
@@ -298,7 +300,6 @@ impl SignalingService for SignalingServiceImpl {
                 registry.remove_call(&state.call_id).await;
             }
 
-            registry.unregister_user(&user_id, &device_id).await;
             info!(user_id, "signal stream closed");
         });
 
