@@ -36,6 +36,12 @@ message WebRTCSignal {
 
     // Media update (add/remove video, screen share)
     MediaUpdate media_update = 9;
+
+    // Peer confirmed media connectivity (iceConnectionState >= connected).
+    // Sent by either side after the E2EE answer exchange completes and WebRTC
+    // reports the connection is live. Sets answered_at_ms on the server so the
+    // aggressive "ringing without answer" reaper no longer applies.
+    CallConnected connected = 21;
   }
 
   // Sender device ID
@@ -190,6 +196,18 @@ message CallRinging {
 
   // Ringing timestamp
   int64 ringing_at = 2;
+}
+
+// CallConnected - Peer confirmed media connectivity.
+// Sent after iceConnectionState reaches "connected" (or "completed").
+// This is a lightweight presence signal — no SDP payload — that tells the
+// server the E2EE answer exchange succeeded and media is flowing P2P.
+message CallConnected {
+  // Device that confirmed connectivity
+  string device_id = 1;
+
+  // Timestamp (Unix ms)
+  int64 connected_at = 2;
 }
 
 // MediaUpdate - Update media streams during call
