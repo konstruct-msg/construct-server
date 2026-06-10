@@ -909,6 +909,15 @@ async fn handle_outbound_signal(
                 }
             }
 
+            let is_same_device = state
+                .accepted_callee_device_id
+                .as_deref()
+                .is_some_and(|d| d == sender_device_id);
+
+            if !newly_accepted && is_same_device {
+                return Ok(());
+            }
+
             let hangup = WebRtcSignal {
                 call_id: call_id.clone(),
                 signal: Some(web_rtc_signal::Signal::Hangup(CallHangup {

@@ -556,20 +556,49 @@ impl CallRegistry {
     }
 
     pub(crate) async fn get_user_call(&self, user_id: &str) -> Option<String> {
-        {
+        let call_id = {
             let active = self.active_calls.read().await;
-            if let Some(call_id) = active.get(user_id) {
-                return Some(call_id.clone());
+            active.get(user_id).cloned()
+        };
+
+        if let Some(call_id) = call_id {
+            if self.call_exists_in_redis(&call_id).await {
+                return Some(call_id);
             }
+            self.remove_call(&call_id).await;
+            return None;
         }
 
         let mut conn = self.redis.clone();
-        redis::cmd("GET")
+        let redis_call_id: String = redis::cmd("GET")
             .arg(format!("user:{}:active_call", user_id))
-            .query_async::<Option<String>>(&mut conn)
+            .query_async(&mut conn)
             .await
             .ok()
-            .flatten()
+            .flatten()?;
+
+        if self.call_exists_in_redis(&redis_call_id).await {
+            let mut active = self.active_calls.write().await;
+            active.insert(user_id.to_string(), redis_call_id.clone());
+            Some(redis_call_id)
+        } else {
+            let mut conn = self.redis.clone();
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(format!("user:{}:active_call", user_id))
+                .query_async(&mut conn)
+                .await;
+            None
+        }
+    }
+
+    async fn call_exists_in_redis(&self, call_id: &str) -> bool {
+        let mut conn = self.redis.clone();
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(Self::call_key(call_id))
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(false);
+        exists
     }
 
     pub(crate) async fn call_ended_by_disconnect(
@@ -1097,32 +1126,19 @@ impl CallRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::redis::Redis;
 
     async fn start_test_registry() -> CallRegistry {
-        let container = Redis::default()
-            .start()
-            .await
-            .expect("failed to start redis container");
-        let host = container
-            .get_host()
-            .await
-            .expect("failed to get redis host");
-        let port = container
-            .get_host_port_ipv4(6379)
-            .await
-            .expect("failed to get redis port");
-        let url = format!("redis://{}:{}", host, port);
+        let url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
         let registry = CallRegistry::new(&url, "test-instance".into())
             .await
             .expect("failed to create registry");
-        std::mem::forget(container);
+        let mut conn = registry.redis.clone();
+        let _: Result<(), _> = redis::cmd("FLUSHDB").query_async(&mut conn).await;
         registry
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
     async fn test_call_ended_by_disconnect_caller() {
         let registry = start_test_registry().await;
 
@@ -1151,7 +1167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
+
     async fn test_call_ended_by_disconnect_callee_single_device() {
         let registry = start_test_registry().await;
 
@@ -1188,7 +1204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
+
     async fn test_call_ended_by_disconnect_callee_multi_device() {
         let registry = start_test_registry().await;
 
@@ -1231,7 +1247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
+
     async fn test_call_ended_by_disconnect_non_participant() {
         let registry = start_test_registry().await;
 
@@ -1260,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
+
     async fn test_note_connected_sets_answered() {
         let registry = start_test_registry().await;
 
@@ -1293,7 +1309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker for testcontainers"]
+
     async fn test_note_connected_idempotent() {
         let registry = start_test_registry().await;
 
@@ -1325,6 +1341,88 @@ mod tests {
             state2.accepted_callee_device_id,
             Some("callee-device-1".to_string()),
             "note_connected should not change accepted device"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_user_call_cleans_ghost_calls() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        let call_id = registry.get_user_call("caller-user").await;
+        assert_eq!(call_id, Some("call-1".to_string()));
+
+        {
+            let mut conn = registry.redis.clone();
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg("call:call-1")
+                .arg("user:caller-user:active_call")
+                .arg("user:callee-user:active_call")
+                .query_async(&mut conn)
+                .await;
+        }
+
+        {
+            let active = registry.active_calls.read().await;
+            assert!(
+                active.contains_key("caller-user"),
+                "in-memory cache should still have the entry"
+            );
+        }
+
+        let call_id = registry.get_user_call("caller-user").await;
+        assert!(
+            call_id.is_none(),
+            "get_user_call should return None when Redis key is gone"
+        );
+
+        {
+            let active = registry.active_calls.read().await;
+            assert!(
+                !active.contains_key("caller-user"),
+                "in-memory cache should be cleaned up"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_user_busy_after_redis_expiry() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        assert!(registry.is_user_busy("caller-user").await);
+
+        {
+            let mut conn = registry.redis.clone();
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg("call:call-1")
+                .arg("user:caller-user:active_call")
+                .arg("user:callee-user:active_call")
+                .query_async(&mut conn)
+                .await;
+        }
+
+        assert!(
+            !registry.is_user_busy("caller-user").await,
+            "user should not be busy after Redis key expires"
         );
     }
 }
