@@ -659,6 +659,44 @@ impl CallRegistry {
         calls.insert(call_id.to_string(), state);
     }
 
+    pub(crate) async fn note_connected(&self, call_id: &str, device_id: &str) {
+        let Some(mut state) = self.load_call_state(call_id).await else {
+            return;
+        };
+        if state.answered_at_ms.is_some() {
+            return;
+        }
+        if state.accepted_callee_device_id.is_none() {
+            state.accepted_callee_device_id = Some(device_id.to_string());
+        }
+        let now_ms = unix_millis();
+        state.answered_at_ms = Some(now_ms);
+
+        {
+            let mut conn = self.redis.clone();
+            let key = Self::call_key(call_id);
+            let accepted = state
+                .accepted_callee_device_id
+                .as_deref()
+                .unwrap_or(device_id);
+            let _: Result<(), _> = redis::pipe()
+                .cmd("HSET")
+                .arg(&key)
+                .arg("answered_at_ms")
+                .arg(now_ms.to_string())
+                .arg("accepted_callee_device_id")
+                .arg(accepted)
+                .cmd("EXPIRE")
+                .arg(&key)
+                .arg(300)
+                .query_async(&mut conn)
+                .await;
+        }
+
+        let mut calls = self.calls.write().await;
+        calls.insert(call_id.to_string(), state);
+    }
+
     pub(crate) async fn accept_call(
         &self,
         call_id: &str,
@@ -812,18 +850,20 @@ impl CallRegistry {
 
                 // In the E2EE-direct flow the callee's Answer SDP is forwarded
                 // to the caller via encrypted messaging, not over the signaling
-                // stream — so `answered_at_ms` stays `None` even for healthy
-                // calls. We can't use it as a liveness signal. Instead, gate
-                // this reaper on signaling-stream silence on either side: a live
-                // call keeps both sides' keepalives fresh; if neither side has
-                // pinged in >15s after 30s of "ringing without answer", the
-                // call really is hung. The 60s keepalive reaper below catches
-                // the remaining dead cases.
+                // stream — so `answered_at_ms` stays `None` until the client
+                // sends a `CallConnected` signal after iceConnectionState reaches
+                // "connected". Once `note_connected` fires, `answered_at_ms` is
+                // set and this reaper no longer applies — the call falls through
+                // to the softer 60s keepalive reaper below.
+                //
+                // The 30s keepalive staleness threshold (3× the 10s client
+                // interval) tolerates a couple of lost pings without reaping a
+                // healthy call that is still waiting for the connected signal.
                 if state.ringing_at_ms.is_some()
                     && state.answered_at_ms.is_none()
                     && now_ms.saturating_sub(state.ringing_at_ms.unwrap()) > 30_000
-                    && now_s.saturating_sub(state.caller_last_keepalive_at) > 15
-                    && now_s.saturating_sub(state.callee_last_keepalive_at) > 15
+                    && now_s.saturating_sub(state.caller_last_keepalive_at) > 30
+                    && now_s.saturating_sub(state.callee_last_keepalive_at) > 30
                 {
                     actions.push(CleanupAction::HangupBoth {
                         call_id: state.call_id.clone(),
