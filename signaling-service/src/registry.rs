@@ -23,6 +23,32 @@ use crate::time::{unix_millis, unix_seconds};
 /// Caps fanout to prevent amplification attacks in multi-device scenarios.
 const MAX_SIGNAL_DESTINATIONS: usize = 5;
 
+/// Redis key for the set of all active call IDs.
+/// Used by cleanup_loop for O(1) lookup instead of SCAN call:*.
+const ACTIVE_CALLS_SET_KEY: &str = "signaling:active_calls";
+
+/// Lua script for atomic SCAN+GET to avoid N+1 queries.
+/// KEYS[1] = pattern for SCAN
+/// Returns flat array: [key1, value1, key2, value2, ...]
+const SCAN_GET_LUA: &str = r#"
+local pattern = KEYS[1]
+local cursor = "0"
+local results = {}
+repeat
+    local res = redis.call("SCAN", cursor, "MATCH", pattern, "COUNT", 100)
+    cursor = res[1]
+    local keys = res[2]
+    for i, key in ipairs(keys) do
+        local val = redis.call("GET", key)
+        if val then
+            table.insert(results, key)
+            table.insert(results, val)
+        end
+    end
+until cursor == "0"
+return results
+"#;
+
 #[derive(Clone)]
 pub(crate) struct CallState {
     pub(crate) call_id: String,
@@ -147,47 +173,24 @@ impl CallRegistry {
 
     pub(crate) async fn list_online_devices(&self, user_id: &str) -> Vec<(String, String)> {
         let mut conn = self.redis.clone();
-
         let pattern = format!("signaling:online:{}:*", user_id);
-        let mut cursor: u64 = 0;
-        let mut out: Vec<(String, String)> = Vec::new();
-        loop {
-            let res: redis::RedisResult<(u64, Vec<String>)> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query_async(&mut conn)
-                .await;
 
-            let Ok((next_cursor, keys)) = res else {
-                break;
-            };
+        let results: Vec<String> = redis::Script::new(SCAN_GET_LUA)
+            .key(&pattern)
+            .invoke_async(&mut conn)
+            .await
+            .unwrap_or_default();
 
-            for key in keys {
-                let instance: Option<String> = redis::cmd("GET")
-                    .arg(&key)
-                    .query_async(&mut conn)
-                    .await
-                    .ok()
-                    .flatten();
-                let Some(instance) = instance else {
-                    continue;
-                };
-                let device_id = key
-                    .rsplit_once(':')
-                    .map(|(_, d)| d.to_string())
-                    .unwrap_or_default();
-                if device_id.is_empty() {
-                    continue;
-                }
-                out.push((device_id, instance));
-            }
-
-            cursor = next_cursor;
-            if cursor == 0 {
-                break;
+        let mut out = Vec::new();
+        for chunk in results.chunks_exact(2) {
+            let key = &chunk[0];
+            let instance = &chunk[1];
+            let device_id = key
+                .rsplit_once(':')
+                .map(|(_, d)| d.to_string())
+                .unwrap_or_default();
+            if !device_id.is_empty() {
+                out.push((device_id, instance.clone()));
             }
         }
         out
@@ -412,6 +415,12 @@ impl CallRegistry {
                 .arg(300)
                 .set_ex(format!("user:{}:active_call", caller_user_id), call_id, 300)
                 .set_ex(format!("user:{}:active_call", callee_user_id), call_id, 300)
+                .cmd("SADD")
+                .arg(ACTIVE_CALLS_SET_KEY)
+                .arg(call_id)
+                .cmd("EXPIRE")
+                .arg(ACTIVE_CALLS_SET_KEY)
+                .arg(300)
                 .query_async(&mut conn)
                 .await;
         }
@@ -477,6 +486,9 @@ impl CallRegistry {
                     .del(call_key)
                     .del(format!("user:{}:active_call", state.caller_user_id))
                     .del(format!("user:{}:active_call", state.callee_user_id))
+                    .cmd("SREM")
+                    .arg(ACTIVE_CALLS_SET_KEY)
+                    .arg(call_id)
                     .query_async(&mut conn)
                     .await;
             }
@@ -1022,35 +1034,11 @@ impl CallRegistry {
 
     async fn list_active_call_ids(&self) -> Vec<String> {
         let mut conn = self.redis.clone();
-
-        let mut cursor: u64 = 0;
-        let mut out: Vec<String> = Vec::new();
-        loop {
-            let res: redis::RedisResult<(u64, Vec<String>)> = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("call:*")
-                .arg("COUNT")
-                .arg(200)
-                .query_async(&mut conn)
-                .await;
-
-            let Ok((next_cursor, keys)) = res else {
-                break;
-            };
-            for key in keys {
-                if let Some(call_id) = key.strip_prefix("call:") {
-                    if !call_id.is_empty() {
-                        out.push(call_id.to_string());
-                    }
-                }
-            }
-            cursor = next_cursor;
-            if cursor == 0 {
-                break;
-            }
-        }
-        out
+        redis::cmd("SMEMBERS")
+            .arg(ACTIVE_CALLS_SET_KEY)
+            .query_async::<Vec<String>>(&mut conn)
+            .await
+            .unwrap_or_default()
     }
 
     pub(crate) async fn instance_pubsub_loop(self: Arc<Self>) {
@@ -1424,5 +1412,67 @@ mod tests {
             !registry.is_user_busy("caller-user").await,
             "user should not be busy after Redis key expires"
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_active_call_ids_uses_set() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user-1",
+                "caller-device-1",
+                "callee-user-1",
+                1000,
+            )
+            .await;
+
+        registry
+            .create_call(
+                "call-2",
+                "caller-user-2",
+                "caller-device-2",
+                "callee-user-2",
+                2000,
+            )
+            .await;
+
+        let call_ids = registry.list_active_call_ids().await;
+        assert_eq!(call_ids.len(), 2);
+        assert!(call_ids.contains(&"call-1".to_string()));
+        assert!(call_ids.contains(&"call-2".to_string()));
+
+        registry.remove_call("call-1").await;
+
+        let call_ids = registry.list_active_call_ids().await;
+        assert_eq!(call_ids.len(), 1);
+        assert!(call_ids.contains(&"call-2".to_string()));
+        assert!(!call_ids.contains(&"call-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_list_online_devices_uses_lua_script() {
+        let registry = start_test_registry().await;
+
+        registry.register_user("user-1", "device-1").await;
+        registry.touch_online("user-1", "device-1").await;
+
+        registry.register_user("user-1", "device-2").await;
+        registry.touch_online("user-1", "device-2").await;
+
+        registry.register_user("user-2", "device-3").await;
+        registry.touch_online("user-2", "device-3").await;
+
+        let devices = registry.list_online_devices("user-1").await;
+        assert_eq!(devices.len(), 2);
+
+        let device_ids: Vec<&str> = devices.iter().map(|(d, _)| d.as_str()).collect();
+        assert!(device_ids.contains(&"device-1"));
+        assert!(device_ids.contains(&"device-2"));
+
+        let devices = registry.list_online_devices("user-2").await;
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].0, "device-3");
     }
 }
