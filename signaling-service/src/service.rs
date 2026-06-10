@@ -846,6 +846,17 @@ async fn handle_outbound_signal(
                 )
                 .await?;
         }
+        Some(web_rtc_signal::Signal::Connected(_)) => {
+            registry.note_connected(&call_id, &sender_device_id).await;
+            registry
+                .forward_signal(
+                    &call_id,
+                    user_id,
+                    &sender_device_id,
+                    ForwardedSignal::Signal(signal),
+                )
+                .await?;
+        }
         Some(web_rtc_signal::Signal::Busy(_)) => {
             let _ = registry
                 .forward_signal(
