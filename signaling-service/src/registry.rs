@@ -588,7 +588,10 @@ impl CallRegistry {
                 .as_deref()
                 .is_some_and(|d| d == device_id)
         {
-            return Some(state.clone());
+            let other_devices = self.list_online_devices(user_id).await;
+            if other_devices.is_empty() {
+                return Some(state.clone());
+            }
         }
         None
     }
@@ -1023,19 +1026,32 @@ impl CallRegistry {
 
     pub(crate) async fn instance_pubsub_loop(self: Arc<Self>) {
         let channel = format!("signaling:instance:{}", self.instance_id);
+        let mut backoff_secs = 1u64;
+        let max_backoff_secs = 30u64;
 
-        let mut pubsub = match self.redis_pubsub_client.get_async_pubsub().await {
-            Ok(p) => p,
-            Err(e) => {
-                error!(error = %e, "failed to create redis pubsub connection");
-                return;
+        loop {
+            match self.run_pubsub_connection(&channel).await {
+                Ok(()) => {
+                    info!("pubsub connection closed cleanly, reconnecting immediately");
+                    backoff_secs = 1;
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        backoff_secs,
+                        "pubsub connection error, reconnecting"
+                    );
+                }
             }
-        };
 
-        if let Err(e) = pubsub.subscribe(&channel).await {
-            error!(error = %e, channel, "failed to subscribe to instance pubsub channel");
-            return;
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(max_backoff_secs);
         }
+    }
+
+    async fn run_pubsub_connection(&self, channel: &str) -> Result<(), anyhow::Error> {
+        let mut pubsub = self.redis_pubsub_client.get_async_pubsub().await?;
+        pubsub.subscribe(channel).await?;
 
         info!(channel, "subscribed to instance pubsub channel");
 
@@ -1073,5 +1089,242 @@ impl CallRegistry {
                 .send_local_to_user(&env.user_id, env.device_id.as_deref(), forwarded)
                 .await;
         }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::redis::Redis;
+
+    async fn start_test_registry() -> CallRegistry {
+        let container = Redis::default()
+            .start()
+            .await
+            .expect("failed to start redis container");
+        let host = container
+            .get_host()
+            .await
+            .expect("failed to get redis host");
+        let port = container
+            .get_host_port_ipv4(6379)
+            .await
+            .expect("failed to get redis port");
+        let url = format!("redis://{}:{}", host, port);
+        let registry = CallRegistry::new(&url, "test-instance".into())
+            .await
+            .expect("failed to create registry");
+        std::mem::forget(container);
+        registry
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_call_ended_by_disconnect_caller() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.register_user("caller-user", "caller-device").await;
+        registry.touch_online("caller-user", "caller-device").await;
+
+        registry
+            .unregister_user("caller-user", "caller-device")
+            .await;
+
+        let state = registry
+            .call_ended_by_disconnect("caller-user", "caller-device")
+            .await;
+        assert!(state.is_some(), "call should end when caller disconnects");
+        assert_eq!(state.unwrap().call_id, "call-1");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_call_ended_by_disconnect_callee_single_device() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.accept_call("call-1", "callee-device-1").await;
+
+        registry
+            .register_user("callee-user", "callee-device-1")
+            .await;
+        registry
+            .touch_online("callee-user", "callee-device-1")
+            .await;
+
+        registry
+            .unregister_user("callee-user", "callee-device-1")
+            .await;
+
+        let state = registry
+            .call_ended_by_disconnect("callee-user", "callee-device-1")
+            .await;
+        assert!(
+            state.is_some(),
+            "call should end when callee's only device disconnects"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_call_ended_by_disconnect_callee_multi_device() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.accept_call("call-1", "callee-device-1").await;
+
+        registry
+            .register_user("callee-user", "callee-device-1")
+            .await;
+        registry
+            .touch_online("callee-user", "callee-device-1")
+            .await;
+        registry
+            .register_user("callee-user", "callee-device-2")
+            .await;
+        registry
+            .touch_online("callee-user", "callee-device-2")
+            .await;
+
+        registry
+            .unregister_user("callee-user", "callee-device-1")
+            .await;
+
+        let state = registry
+            .call_ended_by_disconnect("callee-user", "callee-device-1")
+            .await;
+        assert!(
+            state.is_none(),
+            "call should NOT end when callee has other devices online"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_call_ended_by_disconnect_non_participant() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.register_user("other-user", "other-device").await;
+        registry.touch_online("other-user", "other-device").await;
+
+        registry.unregister_user("other-user", "other-device").await;
+
+        let state = registry
+            .call_ended_by_disconnect("other-user", "other-device")
+            .await;
+        assert!(
+            state.is_none(),
+            "call should NOT end when non-participant disconnects"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_note_connected_sets_answered() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.note_ringing("call-1").await;
+
+        let state_before = registry.load_call_state("call-1").await.unwrap();
+        assert!(state_before.answered_at_ms.is_none());
+
+        registry.note_connected("call-1", "callee-device-1").await;
+
+        let state_after = registry.load_call_state("call-1").await.unwrap();
+        assert!(
+            state_after.answered_at_ms.is_some(),
+            "note_connected should set answered_at_ms"
+        );
+        assert_eq!(
+            state_after.accepted_callee_device_id,
+            Some("callee-device-1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker for testcontainers"]
+    async fn test_note_connected_idempotent() {
+        let registry = start_test_registry().await;
+
+        registry
+            .create_call(
+                "call-1",
+                "caller-user",
+                "caller-device",
+                "callee-user",
+                1000,
+            )
+            .await;
+
+        registry.note_connected("call-1", "callee-device-1").await;
+        let state1 = registry.load_call_state("call-1").await.unwrap();
+        let first_answered = state1.answered_at_ms.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        registry.note_connected("call-1", "callee-device-2").await;
+        let state2 = registry.load_call_state("call-1").await.unwrap();
+
+        assert_eq!(
+            state2.answered_at_ms.unwrap(),
+            first_answered,
+            "note_connected should not overwrite existing answered_at_ms"
+        );
+        assert_eq!(
+            state2.accepted_callee_device_id,
+            Some("callee-device-1".to_string()),
+            "note_connected should not change accepted device"
+        );
     }
 }
