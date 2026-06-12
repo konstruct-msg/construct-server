@@ -6,12 +6,11 @@
 #     ├→ ams.konstruct.cc              → Envoy (:8080, gRPC API)
 #     ├→ grafana.ams.konstruct.cc      → Grafana (:3000)
 #     └→ prometheus.ams.konstruct.cc   → Prometheus (:9090)
-#   relay-ams — construct-relay on ice.ams.konstruct.cc
-#     Traefik does TCP SNI passthrough (not TLS termination).
-#     relay-ams handles its own TLS (self-signed cert, SPKI-pinned in iOS).
-#     Upstream: loops back to INSTANCE_DOMAIN:443 (Traefik → Envoy).
-#     After first start, read SPKI from relay-ams logs and set in iOS ICEConfig.
 #   Envoy — gRPC-web routing to Rust microservices
+# Note: the standalone obfs4 relay (relay-ams / construct-relay) was retired
+# 2026-06-12 in favour of veil-front (separate construct-veil deployment). The
+# gateway still embeds a legacy obfs4 relay on :9443 (see ICE_* below) — slated
+# for removal once clients are off obfs4.
 #
 # Secrets management:
 #   /opt/construct/secrets/app.env — manually maintained on the server.
@@ -421,56 +420,6 @@ services:
     labels:
       - "traefik.enable=false"
       # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
-      # ice.INSTANCE_DOMAIN:443 is now handled by relay-ams (TCP passthrough).
-
-  # ─── VEIL Relay (construct-relay on ice.INSTANCE_DOMAIN) ─────────────────────
-  # construct-relay manages its own TLS (self-signed cert, SPKI-pinned in iOS).
-  # Traefik does SNI-based TCP passthrough — it does NOT terminate TLS here.
-  #
-  # Upstream: INSTANCE_DOMAIN:443 (loops back to Traefik → Envoy).
-  # Why TLS upstream (not direct envoy:8080 h2c):
-  #   iOS gRPC uses TLS with ALPN=h2. The relay decrypts iOS's TLS, leaving
-  #   raw h2 frames (no HTTP/2 connection preface). Envoy:8080 expects h2c
-  #   (with PRI preface) — protocol mismatch → immediate GOAWAY for all streams.
-  #   With UPSTREAM_TLS=true the relay re-encrypts using TLS+ALPN=h2, letting
-  #   Traefik properly negotiate h2 and translate to h2c toward Envoy. Hairpin
-  #   latency is negligible (~0.1ms same-machine) and Hetzner supports it.
-  #
-  # First-time setup:
-  #   1. docker compose ... up -d relay-ams
-  #   2. docker compose ... logs relay-ams | grep SPKI
-  #   3. Copy the hex SPKI fingerprint into iOS ICEConfig.amsRelayPinnedSPKI
-  #   4. Rebuild and deploy iOS app
-
-  relay-ams:
-    image: ghcr.io/konstruct-msg/construct-relay:latest
-    restart: unless-stopped
-    environment:
-      LISTEN_ADDR: "0.0.0.0:9444"
-      # Plain TCP forward to Traefik:443 — the iOS client's TLS stream is
-      # tunneled inside obfs4/WebTunnel and re-emerges here as raw TLS bytes.
-      # Traefik terminates TLS (SNI=${INSTANCE_DOMAIN}) and routes h2c→envoy:8080.
-      # Do NOT set UPSTREAM_TLS=true: that would double-wrap the client's TLS,
-      # turning its ClientHello into application data and closing the upstream.
-      UPSTREAM: "traefik:443"
-      UPSTREAM_TLS: "false"
-      STATE_DIR: "/data"
-      TLS_SNI_HOST: "ice.${INSTANCE_DOMAIN}"
-      WT_PATH: "/construct-veil"
-      TRUSTED_PROXIES: "172.16.0.0/12"
-      RUST_LOG: ${RUST_LOG:-info}
-    volumes:
-      - relay-ams-state:/data
-    networks:
-      - internal
-    labels:
-      - "traefik.enable=true"
-      # TCP SNI passthrough — relay-ams handles its own TLS (SPKI-pinned by iOS).
-      # HostSNI matching requires passthrough=true in Traefik v3.
-      - "traefik.tcp.routers.ice.rule=HostSNI(`ice.${INSTANCE_DOMAIN}`)"
-      - "traefik.tcp.routers.ice.entrypoints=websecure"
-      - "traefik.tcp.routers.ice.tls.passthrough=true"
-      - "traefik.tcp.services.ice.loadbalancer.server.port=9444"
 
   # ─── MASQUE-lite UDP relay ──────────────────────────────────────────────────
   # Tunnels iOS QUIC datagrams over WebSocket/TLS to the Traefik QUIC endpoint.
@@ -561,7 +510,6 @@ volumes:
   traefik-certs:
   prometheus-data:
   grafana-data:
-  relay-ams-state:
 
 networks:
   internal:
