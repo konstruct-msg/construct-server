@@ -17,6 +17,7 @@ members = [
     "signaling-service",
     "masque-service",
     "channel-service",
+    "veil-service",
     # New modular crates
     "crates/construct-types",
     "crates/construct-error",
