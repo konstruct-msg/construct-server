@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// VeilService — выдача и распространение veil-front тикетов.
+//
+// Тикет — это per-user секрет доступа к veil-front релею (probing-resistance):
+// ticket_id + auth_key + окно валидности. Клиент при коннекте выводит
+// exporter-bound authcode (replay-proof), релей валидирует локально.
+//
+// Модель (decisions/veil-ticket-provisioning-system.md):
+//   1. Первый тикет приходит OUT-OF-BAND (подписанный blob: QR / deep link).
+//   2. Дальше клиент продлевает IN-BAND через IssueVeilTicket по уже поднятому
+//      VEIL-туннелю до истечения текущего тикета.
+//   3. Backend — источник истины (Postgres + Redis). Релеи подписываются на
+//      активный набор через SubscribeVeilTickets и применяют дельты вживую
+//      (hot-reload, без рестарта).
+service VeilService {
+  // Клиент → backend (JWT-gated). Запрашивает свежий тикет у истечения текущего.
+  // Идёт по уже работающему VEIL-туннелю, поэтому требует валидную сессию.
+  rpc IssueVeilTicket(IssueVeilTicketRequest) returns (IssueVeilTicketResponse);
+
+  // Релей → backend (relay-credential-gated). Долгоживущий server-stream:
+  // SNAPSHOT на коннекте, затем UPSERT/REVOKE дельты. Релей применяет в свой
+  // in-memory стор вживую. Отзыв — near-real-time.
+  rpc SubscribeVeilTickets(SubscribeVeilTicketsRequest) returns (stream VeilTicketUpdate);
+}
+
+// ============================================================================
+// Ticket material
+// ============================================================================
+
+// Полный материал тикета: выдаётся клиенту и пушится на релеи.
+// Бинарные поля — bytes (binary pipeline: никакого base64 в логике).
+message VeilTicket {
+  // Идентификатор тикета (16 байт). Передаётся открыто в AUTH-фрейме.
+  bytes ticket_id = 1;
+
+  // Секретный ключ тикета (32 байта). НИКОГДА не логировать, не отдавать
+  // никому кроме владельца-клиента и доверенных релеев.
+  bytes auth_key = 2;
+
+  // Окно валидности, unix-секунды.
+  int64 not_before = 3;
+  int64 not_after = 4;
+
+  // Идентификатор крипто-сьюта (authcode derivation). Сейчас 0x01.
+  uint32 suite_id = 5;
+}
+
+// ============================================================================
+// IssueVeilTicket (client)
+// ============================================================================
+
+message IssueVeilTicketRequest {
+  // Какой релей-scope нужен клиенту (host:port). Backend выдаёт тикет,
+  // действительный на релеях этого scope.
+  string relay_address = 1;
+
+  // Тикет, который заменяем (для учёта / связывания ротации). Опционально.
+  bytes current_ticket_id = 2;
+}
+
+message IssueVeilTicketResponse {
+  // Свежий тикет.
+  VeilTicket ticket = 1;
+
+  // Подтверждённые сетевые параметры релея — чтобы клиент мог обновить пин/SNI
+  // по тому же in-band каналу при ротации серта (без пересборки приложения).
+  string relay_address = 2;
+  string spki = 3; // hex SHA-256 SPKI pin
+  string sni = 4;
+}
+
+// ============================================================================
+// SubscribeVeilTickets (relay)
+// ============================================================================
+
+message SubscribeVeilTicketsRequest {
+  // Идентификатор релея (scope), за которым он следит.
+  string relay_id = 1;
+}
+
+// Обновление активного набора тикетов для релея.
+message VeilTicketUpdate {
+  enum Kind {
+    // Полный снимок активного набора (на коннекте / ресинхронизации).
+    // Релей ЗАМЕНЯЕТ свой стор содержимым `tickets`.
+    SNAPSHOT = 0;
+    // Добавить/обновить тикеты из `tickets`.
+    UPSERT = 1;
+    // Удалить тикеты по id из `revoked_ids` (отзыв / истечение).
+    REVOKE = 2;
+  }
+
+  Kind kind = 1;
+
+  // SNAPSHOT / UPSERT: полные тикеты.
+  repeated VeilTicket tickets = 2;
+
+  // REVOKE: ticket_id, которые нужно выкинуть из стора.
+  repeated bytes revoked_ids = 3;
+}
