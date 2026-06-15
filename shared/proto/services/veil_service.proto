@@ -9,9 +9,9 @@ package shared.proto.services.v1;
 // своим Ed25519-ключом; релей хранит только публичный ключ и валидирует capability
 // ОФЛАЙН (без стора, без синхронизации, без секретов на диске).
 //
-//   1. Первая capability приходит OUT-OF-BAND (подписанный blob: QR / deep link).
-//   2. Дальше клиент продлевает IN-BAND через IssueVeilCapability по уже поднятому
-//      VEIL-туннелю до истечения текущей.
+// Первая capability приходит OUT-OF-BAND (подписанный blob: QR / deep link); дальше
+// клиент продлевает IN-BAND через IssueVeilCapability по уже поднятому VEIL-туннелю
+// до истечения текущей.
 //
 // IssueVeilCapability — JWT-gated (требует валидную пользовательскую сессию;
 // user_id берётся из метаданных x-user-id, проставленных gateway/envoy).

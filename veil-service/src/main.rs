@@ -72,17 +72,17 @@ async fn health_check() -> Json<serde_json::Value> {
 /// Build the relay registry from env (MVP single relay).
 fn load_relays() -> HashMap<String, RelayInfo> {
     let mut relays = HashMap::new();
-    if let Ok(addr) = env::var("VEIL_RELAY_ADDRESS") {
-        if !addr.is_empty() {
-            relays.insert(
-                addr,
-                RelayInfo {
-                    scope: env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
-                    spki: env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
-                    sni: env::var("VEIL_RELAY_SNI").unwrap_or_default(),
-                },
-            );
-        }
+    if let Ok(addr) = env::var("VEIL_RELAY_ADDRESS")
+        && !addr.is_empty()
+    {
+        relays.insert(
+            addr,
+            RelayInfo {
+                scope: env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
+                spki: env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
+                sni: env::var("VEIL_RELAY_SNI").unwrap_or_default(),
+            },
+        );
     }
     relays
 }
