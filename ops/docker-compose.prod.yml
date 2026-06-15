@@ -268,6 +268,30 @@ services:
     networks:
       - internal
 
+  # VEIL-front capability issuer. Signs per-user access capabilities that relays
+  # validate offline. VEIL_ISSUER_SEED is the issuer Ed25519 seed (SECRET — keep in
+  # app.env, never echo); its pubkey must equal the app pin AND the relay --issuer-pubkey.
+  veil:
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    command: /usr/local/bin/veil-service
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: veil
+      VEIL_GRPC_BIND_ADDRESS: "[::]:50056"
+      VEIL_ISSUER_SEED: ${VEIL_ISSUER_SEED}
+      VEIL_RELAY_ADDRESS: ${VEIL_RELAY_ADDRESS:-api.divany-kresla.uk:443}
+      VEIL_RELAY_SCOPE: ${VEIL_RELAY_SCOPE:-}
+      VEIL_RELAY_SPKI: ${VEIL_RELAY_SPKI}
+      VEIL_RELAY_SNI: ${VEIL_RELAY_SNI:-api.divany-kresla.uk}
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+
   media:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/media-service

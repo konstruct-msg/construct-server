@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Context, Result};
-use axum::{routing::get, Json, Router};
+use anyhow::{Context, Result, anyhow};
+use axum::{Json, Router, routing::get};
 use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 use std::collections::HashMap;
 use std::{env, sync::Arc};
-use tonic::{metadata::MetadataMap, Request, Response, Status};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 use tracing::info;
 use uuid::Uuid;
 
@@ -127,7 +127,9 @@ async fn main() -> Result<()> {
 
     let relays = load_relays();
     if relays.is_empty() {
-        tracing::warn!("No relays configured (VEIL_RELAY_ADDRESS unset) — IssueVeilCapability will reject all requests");
+        tracing::warn!(
+            "No relays configured (VEIL_RELAY_ADDRESS unset) — IssueVeilCapability will reject all requests"
+        );
     } else {
         info!("Configured relays: {:?}", relays.keys().collect::<Vec<_>>());
     }
