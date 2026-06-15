@@ -282,11 +282,9 @@ services:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: veil
       VEIL_GRPC_BIND_ADDRESS: "[::]:50056"
-      VEIL_ISSUER_SEED: ${VEIL_ISSUER_SEED}
-      VEIL_RELAY_ADDRESS: ${VEIL_RELAY_ADDRESS:-api.divany-kresla.uk:443}
-      VEIL_RELAY_SCOPE: ${VEIL_RELAY_SCOPE:-}
-      VEIL_RELAY_SPKI: ${VEIL_RELAY_SPKI}
-      VEIL_RELAY_SNI: ${VEIL_RELAY_SNI:-api.divany-kresla.uk}
+      # VEIL_ISSUER_SEED + VEIL_RELAY_* come from env_file (app.env). Do NOT list them
+      # here as ${VEIL_*}: compose would substitute from the project .env (not app.env),
+      # and an unset value silently overrides env_file with an empty string.
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
