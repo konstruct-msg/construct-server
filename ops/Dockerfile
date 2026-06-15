@@ -37,6 +37,7 @@ COPY sentinel-service ./sentinel-service
 COPY signaling-service ./signaling-service
 COPY channel-service ./channel-service
 COPY masque-service ./masque-service
+COPY veil-service ./veil-service
 
 # Build all binaries in release mode
 RUN cargo build --release --bins
@@ -71,6 +72,7 @@ COPY --from=builder --chmod=+x /app/target/release/sentinel-service /usr/local/b
 COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service
 COPY --from=builder --chmod=+x /app/target/release/channel-service /usr/local/bin/channel-service
 COPY --from=builder --chmod=+x /app/target/release/masque-service /usr/local/bin/masque-service
+COPY --from=builder --chmod=+x /app/target/release/veil-service /usr/local/bin/veil-service
 
 # Copy migrations
 COPY shared/migrations /app/migrations
