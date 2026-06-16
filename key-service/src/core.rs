@@ -818,12 +818,16 @@ pub async fn upload_kyber_signed_prekey(
     key_id: u32,
     public_key: &[u8],
     signature: &[u8],
+    // Optional hybrid (ML-DSA) signature over public_key (suite 0x10). When provided it is
+    // verified against the device's hybrid identity key and stored ATOMICALLY with the rotated
+    // Kyber SPK. None preserves the legacy clear-and-re-set-separately behaviour.
+    hybrid_sig: Option<&[u8]>,
 ) -> Result<u32> {
     validate_kyber_public_key(public_key)?;
     validate_ed25519_signature(signature)?;
 
-    let verifying_key: Vec<u8> = sqlx::query_scalar(
-        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+    let (verifying_key, hybrid_identity_key): (Vec<u8>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
     )
     .bind(device_id)
     .fetch_one(db)
@@ -833,15 +837,26 @@ pub async fn upload_kyber_signed_prekey(
     // Suite 0x10 = HybridKyber1024X25519
     verify_prekey_signature(&verifying_key, 0x10, public_key, signature)?;
 
+    // Verify the hybrid Kyber SPK signature now so it can be written in the same UPDATE (atomic).
+    if let Some(sig) = hybrid_sig {
+        validate_hybrid_signature(sig)?;
+        let hybrid_key = hybrid_identity_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "kyber_signed_pre_key_hybrid_signature provided but device has no hybrid identity key"
+            )
+        })?;
+        construct_crypto::pqc::verify_hybrid_kyber_key_signature(hybrid_key, 0x10, public_key, sig)
+            .map_err(|e| anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e))?;
+    }
+
     let new_epoch: i32 = sqlx::query_scalar(
         r#"
         UPDATE devices
         SET kyber_signed_pre_key           = $2,
             kyber_signed_pre_key_id        = $3,
             kyber_signed_pre_key_signature = $4,
-            -- A new Kyber SPK invalidates any prior hybrid signature; cleared here and
-            -- re-set by store_hybrid_identity in the same UploadPreKeys call (lockstep).
-            kyber_signed_pre_key_hybrid_signature = NULL,
+            -- Atomic with rotation: store the verified hybrid signature when sent ($5), else clear.
+            kyber_signed_pre_key_hybrid_signature = $5,
             key_updated_at                 = NOW(),
             kyber_spk_uploaded_at          = NOW(),
             kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
@@ -853,6 +868,7 @@ pub async fn upload_kyber_signed_prekey(
     .bind(public_key)
     .bind(key_id as i32)
     .bind(signature)
+    .bind(hybrid_sig)
     .fetch_one(db)
     .await?;
 
@@ -1067,17 +1083,24 @@ pub async fn rotate_signed_prekey(
     device_id: &str,
     new_key: &SignedPreKey,
     reason: &str,
+    // Optional hybrid (ML-DSA) signature over new_key.public_key (suite 0x01). When provided it
+    // is verified against the device's hybrid identity key and stored ATOMICALLY with the rotated
+    // SPK (same UPDATE), so the bundle is never served with a hybrid identity but an unsigned SPK.
+    // None preserves the legacy behaviour (clear the column; the caller re-sets it via a separate
+    // UploadPreKeys/store_hybrid_identity call).
+    spk_hybrid_sig: Option<&[u8]>,
 ) -> Result<(DateTime<Utc>, u32)> {
     // Verify Classic SPK signature before archiving or updating.
     // Kyber SPK is verified in upload_kyber_signed_prekey via verify_prekey_signature(0x10).
     // suite_id 0x01 = ClassicX25519 (see verify_prekey_signature header comment).
-    let verifying_key_bytes: Vec<u8> = sqlx::query_scalar(
-        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
-    )
-    .bind(device_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("Device not found or inactive: {}", device_id))?;
+    let (verifying_key_bytes, hybrid_identity_key): (Vec<u8>, Option<Vec<u8>>) =
+        sqlx::query_as(
+            "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
+        )
+        .bind(device_id)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Device not found or inactive: {}", device_id))?;
 
     verify_prekey_signature(
         &verifying_key_bytes,
@@ -1086,6 +1109,20 @@ pub async fn rotate_signed_prekey(
         &new_key.signature,
     )
     .map_err(|e| anyhow::anyhow!("Classic SPK signature verification failed: {}", e))?;
+
+    // If a hybrid SPK signature is provided, verify it over the NEW SPK now so it can be written
+    // in the same UPDATE below (atomic rotation — no NULL/unsigned window).
+    if let Some(sig) = spk_hybrid_sig {
+        validate_hybrid_signature(sig)?;
+        let hybrid_key = hybrid_identity_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "signed_pre_key_hybrid_signature provided but device has no hybrid identity key"
+            )
+        })?;
+        let message = construct_crypto::pqc::build_prekey_sign_message(0x01, &new_key.public_key);
+        construct_crypto::pqc::verify_hybrid_signature(hybrid_key, &message, sig)
+            .map_err(|e| anyhow::anyhow!("SPK hybrid signature verification failed: {}", e))?;
+    }
 
     // Get current signed prekey (including its ID) before updating
     let current = sqlx::query_as::<_, SignedPreKeyRow>(
@@ -1128,9 +1165,9 @@ pub async fn rotate_signed_prekey(
         SET signed_prekey_public = $2,
             signed_prekey_id = $3,
             signed_prekey_signature = $4,
-            -- A new SPK invalidates any prior hybrid signature; cleared here and
-            -- re-set by store_hybrid_identity in the same UploadPreKeys call (lockstep).
-            signed_prekey_hybrid_signature = NULL,
+            -- Atomic with rotation: store the verified hybrid signature when the client sent it
+            -- ($5), otherwise clear it ($5 = NULL) for the caller to re-set via store_hybrid_identity.
+            signed_prekey_hybrid_signature = $5,
             key_updated_at = NOW(),
             spk_uploaded_at = NOW(),
             spk_rotation_epoch = COALESCE(spk_rotation_epoch, 0) + 1
@@ -1142,6 +1179,7 @@ pub async fn rotate_signed_prekey(
     .bind(&new_key.public_key)
     .bind(new_key.key_id as i32)
     .bind(&new_key.signature)
+    .bind(spk_hybrid_sig)
     .fetch_one(db)
     .await?;
 
