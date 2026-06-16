@@ -454,6 +454,18 @@ message RotateSignedPreKeyRequest {
   // When present, the server MUST update both keys in a single transaction
   // so they cannot desynchronize. If absent, only the classic SPK is rotated.
   optional KyberSignedPreKeyUpload new_kyber_signed_pre_key = 4;
+
+  // Hybrid (ML-DSA) signature over new_signed_pre_key.public_key (suite 0x01). When present,
+  // the server stores it ATOMICALLY with the rotated SPK — eliminating the window where a
+  // device has a hybrid identity key but its freshly-rotated SPK has no hybrid signature
+  // (which makes initiators hard-reject the bundle until a separate publish lands). Older
+  // clients omit this and publish it separately via
+  // UploadPreKeysRequest.signed_pre_key_hybrid_signature.
+  optional bytes signed_pre_key_hybrid_signature = 5;
+
+  // Hybrid (ML-DSA) signature over new_kyber_signed_pre_key.public_key (suite 0x10). Stored
+  // atomically with the rotated Kyber SPK when both are present.
+  optional bytes kyber_signed_pre_key_hybrid_signature = 6;
 }
 
 enum SignedPreKeyRotationReason {
