@@ -221,6 +221,20 @@ impl KeyService for KeyGrpcService {
                 let notify_device_id = b.device_id.clone();
                 let notify_user_id = req.user_id.clone();
 
+                // Auto-heal detection: a device with a hybrid identity key but no SPK hybrid
+                // signature publishes a bundle every initiator hard-rejects ("SPK hybrid signature
+                // missing"). The server can't sign it (no private key) — nudge the device to
+                // re-publish. Captured before `b` is moved into the response below.
+                let hybrid_bundle_broken = b
+                    .hybrid_identity_key
+                    .as_ref()
+                    .is_some_and(|k| !k.is_empty())
+                    && b.signed_prekey_hybrid_signature
+                        .as_ref()
+                        .is_none_or(|s| s.is_empty());
+                let heal_user_id = notify_user_id.clone();
+                let heal_device_id = notify_device_id.clone();
+
                 let response = Response::new(proto::GetPreKeyBundleResponse {
                     bundle: Some(proto::PreKeyBundle {
                         registration_id: 1,
@@ -266,6 +280,22 @@ impl KeyService for KeyGrpcService {
                         )
                         .await;
                     });
+                }
+
+                // Auto-heal nudge for a broken (unsigned-SPK) hybrid bundle — throttled, silent.
+                if hybrid_bundle_broken {
+                    if let Some(notif_client) = self.context.notification_client.clone() {
+                        let mut redis = self.context.redis.clone();
+                        tokio::spawn(async move {
+                            maybe_nudge_hybrid_republish(
+                                &mut redis,
+                                &notif_client,
+                                &heal_user_id,
+                                &heal_device_id,
+                            )
+                            .await;
+                        });
+                    }
                 }
 
                 Ok(response)
@@ -759,6 +789,60 @@ fn to_proto_kt_proof(p: crate::kt::KtProof) -> proto::KtInclusionProof {
 ///   request — notify immediately.
 /// - `otp_was_consumed = true`: one key was just consumed — query the remaining
 ///   count and notify only if it is below the threshold.
+///
+///   Nudge a device to re-publish its hybrid prekey signatures via a throttled silent push.
+///
+/// Used when a fetched bundle has a hybrid identity key but no SPK hybrid signature — a state the
+/// server cannot repair itself (no access to the device's hybrid private key). The device's silent-
+/// push handler runs `HybridIdentityService.publish` and re-signs the current SPK. Best-effort:
+/// iOS throttles background pushes, so this only opportunistically speeds up the heal; opening the
+/// app remains the guaranteed path. Throttled to one nudge per device per 6h.
+async fn maybe_nudge_hybrid_republish(
+    redis: &mut RedisConnectionManager,
+    notif_client: &NotificationClient,
+    user_id: &str,
+    device_id: &str,
+) {
+    // SET NX EX — acquire a 6h throttle slot for this device. Skip if already nudged recently or
+    // Redis is unavailable (fail-closed: don't spam pushes).
+    let throttle_key = format!("heal_nudge:hybrid:{device_id}");
+    let acquired: Option<String> = redis::cmd("SET")
+        .arg(&throttle_key)
+        .arg(1)
+        .arg("NX")
+        .arg("EX")
+        .arg(6 * 3600)
+        .query_async(redis)
+        .await
+        .unwrap_or(None);
+    if acquired.is_none() {
+        return;
+    }
+
+    let mut client = notif_client.get();
+    match client
+        .send_blind_notification(SendBlindNotificationRequest {
+            user_id: user_id.to_string(),
+            badge_count: None,
+            activity_type: Some("republish_hybrid_prekeys".to_string()),
+            conversation_id: None,
+        })
+        .await
+    {
+        Ok(_) => tracing::info!(
+            user_id,
+            device_id,
+            "Hybrid republish nudge sent (bundle has hybrid identity but no SPK hybrid signature)"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            user_id,
+            device_id,
+            "Failed to send hybrid republish nudge"
+        ),
+    }
+}
+
 async fn maybe_notify_low_prekeys(
     db: &sqlx::PgPool,
     notif_client: &NotificationClient,
