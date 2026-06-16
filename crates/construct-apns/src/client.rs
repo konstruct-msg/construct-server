@@ -62,6 +62,20 @@ impl ApnsClient {
             self.config.environment
         );
 
+        // Surface VoIP topic configuration at boot — when this is empty, VoIP pushes are
+        // silently skipped (incoming calls never wake a backgrounded device). Make it visible.
+        match self.config.voip_topic.as_deref() {
+            Some(topic) if !topic.is_empty() => {
+                info!("APNs VoIP topic configured: {}", topic);
+            }
+            _ => {
+                warn!(
+                    "APNs VoIP topic is NOT configured (set APNS_VOIP_TOPIC=<bundle_id>.voip) — \
+                     VoIP incoming-call pushes will be SKIPPED"
+                );
+            }
+        }
+
         // Open .p8 key file
         let key_file = File::open(&self.config.key_path)
             .with_context(|| format!("Failed to open APNs key file: {}", self.config.key_path))?;
@@ -302,10 +316,14 @@ impl ApnsClient {
         offered_at: i64,
     ) -> Result<(), ApnsSendError> {
         if self.config.voip_topic.as_deref().unwrap_or("").is_empty() {
-            // Explicitly skip — we don't want to send a VoIP push with the normal topic,
-            // which APNs would reject.
-            debug!("APNs VoIP topic is not configured - skipping VoIP push send");
-            return Ok(());
+            // Explicitly skip — sending with the normal topic would be rejected by APNs.
+            // Return an error (not Ok) so the caller does NOT count this as a delivered push:
+            // previously this returned Ok(()), which made notification-service log
+            // `sent_count=1` for a push that never left the server — masking the
+            // misconfiguration and making incoming calls silently undeliverable offline.
+            return Err(ApnsSendError::Other(anyhow::anyhow!(
+                "APNS_VOIP_TOPIC not configured — VoIP push skipped"
+            )));
         }
 
         let payload =
