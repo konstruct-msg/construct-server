@@ -846,7 +846,9 @@ pub async fn upload_kyber_signed_prekey(
             )
         })?;
         construct_crypto::pqc::verify_hybrid_kyber_key_signature(hybrid_key, 0x10, public_key, sig)
-            .map_err(|e| anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e)
+            })?;
     }
 
     let new_epoch: i32 = sqlx::query_scalar(

@@ -354,10 +354,16 @@ impl KeyService for KeyGrpcService {
             };
             // None: the hybrid SPK signature is set separately by store_hybrid_identity below
             // (lockstep), so the rotation clears the column and the COALESCE re-sets it.
-            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, "upload", None)
-                .await
-                .map(|_| ())
-                .map_err(|e| Status::internal(e.to_string()))?;
+            core::rotate_signed_prekey(
+                &self.context.db,
+                &req.device_id,
+                &signed_key,
+                "upload",
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| Status::internal(e.to_string()))?;
         }
 
         // Handle optional Kyber signed prekey update
@@ -472,16 +478,15 @@ impl KeyService for KeyGrpcService {
             signature: new_key.signature,
         };
 
-        let (old_valid_until, new_spk_rotation_epoch) =
-            core::rotate_signed_prekey(
-                &self.context.db,
-                &req.device_id,
-                &signed_key,
-                reason,
-                spk_hybrid_sig.as_deref(),
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let (old_valid_until, new_spk_rotation_epoch) = core::rotate_signed_prekey(
+            &self.context.db,
+            &req.device_id,
+            &signed_key,
+            reason,
+            spk_hybrid_sig.as_deref(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         // Rotate Kyber SPK if provided in the same request (keeps both keys in sync)
         let (new_kyber_key_id, new_kyber_spk_rotation_epoch) =
