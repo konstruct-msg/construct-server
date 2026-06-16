@@ -352,7 +352,9 @@ impl KeyService for KeyGrpcService {
                 public_key: spk.public_key,
                 signature: spk.signature,
             };
-            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, "upload")
+            // None: the hybrid SPK signature is set separately by store_hybrid_identity below
+            // (lockstep), so the rotation clears the column and the COALESCE re-sets it.
+            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, "upload", None)
                 .await
                 .map(|_| ())
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -366,6 +368,7 @@ impl KeyService for KeyGrpcService {
                 kspk.key_id,
                 &kspk.public_key,
                 &kspk.signature,
+                None,
             )
             .await
             .map(|_| ())
@@ -439,6 +442,12 @@ impl KeyService for KeyGrpcService {
             ));
         }
 
+        // Hybrid (ML-DSA) signatures over the new SPK / Kyber SPK, sent by clients that rotate
+        // atomically. Captured before the field moves below; verified + stored in the same UPDATE
+        // as the rotation so the bundle never has a hybrid identity with an unsigned fresh SPK.
+        let spk_hybrid_sig = req.signed_pre_key_hybrid_signature.clone();
+        let kyber_spk_hybrid_sig = req.kyber_signed_pre_key_hybrid_signature.clone();
+
         let new_key = req
             .new_signed_pre_key
             .ok_or_else(|| Status::invalid_argument("new_signed_pre_key is required"))?;
@@ -464,9 +473,15 @@ impl KeyService for KeyGrpcService {
         };
 
         let (old_valid_until, new_spk_rotation_epoch) =
-            core::rotate_signed_prekey(&self.context.db, &req.device_id, &signed_key, reason)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            core::rotate_signed_prekey(
+                &self.context.db,
+                &req.device_id,
+                &signed_key,
+                reason,
+                spk_hybrid_sig.as_deref(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         // Rotate Kyber SPK if provided in the same request (keeps both keys in sync)
         let (new_kyber_key_id, new_kyber_spk_rotation_epoch) =
@@ -478,6 +493,7 @@ impl KeyService for KeyGrpcService {
                     key_id,
                     &kspk.public_key,
                     &kspk.signature,
+                    kyber_spk_hybrid_sig.as_deref(),
                 )
                 .await
                 .map_err(|e| Status::internal(format!("Kyber SPK rotation failed: {e}")))?;
