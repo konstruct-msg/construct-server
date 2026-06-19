@@ -25,13 +25,18 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Gateway application state: config + optional bundle verification key
+/// Gateway application state: config + optional bundle verification key + token encryption key (for sealed sender)
 #[derive(Clone)]
 struct GatewayState {
     config: Arc<Config>,
     /// Base64-encoded Ed25519 public key for verifying PreKeyBundle server signatures.
     /// Populated from `BUNDLE_SIGNING_PUBLIC_KEY` env var. Optional — absent in dev.
     bundle_verification_key: Option<String>,
+    /// Base64-encoded X25519 public key used by clients to encrypt Privacy Pass tokens
+    /// inside SealedInner (so VEIL relays can't read them).
+    /// Populated from `TOKEN_ENCRYPTION_PUBLIC_KEY` env var.
+    /// Should match the value derived on auth-service from SERVER_SIGNING_KEY via HKDF.
+    token_encryption_key: Option<String>,
 }
 
 #[tokio::main]
@@ -52,9 +57,17 @@ async fn main() -> Result<()> {
         info!("Bundle verification key loaded — .well-known will advertise it");
     }
 
+    let token_encryption_key = std::env::var("TOKEN_ENCRYPTION_PUBLIC_KEY").ok();
+    if token_encryption_key.is_some() {
+        info!(
+            "Token encryption public key loaded — .well-known will advertise token_encryption_key for sealed sender / Privacy Pass"
+        );
+    }
+
     let state = GatewayState {
         config: config.clone(),
         bundle_verification_key,
+        token_encryption_key,
     };
 
     // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
@@ -376,6 +389,16 @@ async fn well_known_construct_server(
     // Expose bundle verification key when configured so clients can verify server-signed bundles.
     if let Some(vk) = &state.bundle_verification_key {
         body["bundle_verification_key"] = json!(vk);
+    }
+
+    // Expose token encryption key (X25519) for clients to seal Privacy Pass tokens in SealedInner.
+    // This prevents VEIL relay operators from seeing the tokens.
+    if let Some(tk) = &state.token_encryption_key {
+        body["token_encryption_key"] = json!(tk);
+        // Also publish under server section for compatibility with some client parsers.
+        if let Some(server_obj) = body.get_mut("server").and_then(|s| s.as_object_mut()) {
+            server_obj.insert("token_encryption_key".to_string(), json!(tk));
+        }
     }
     (
         StatusCode::OK,
