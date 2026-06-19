@@ -27,13 +27,28 @@ message IssueVeilCapabilityRequest {
 
   // ticket_id заменяемой capability (для учёта ротации). Опционально.
   bytes current_ticket_id = 2;
+
+  // B1 (decisions/veil-ticket-provisioning-system.md): держателя публичный
+  // Ed25519-ключ (32 байта). Если задан — backend выдаёт key-bound CapabilityV2
+  // (AUTH v3), привязанную к этому ключу, вместо bearer-capability B2. Приватный
+  // ключ никогда не передаётся backend'у. Обязателен при role = ROLE_RELAY.
+  bytes veil_pk = 3;
+
+  // B1: роль держателя — 0 = ROLE_USER (по умолчанию), 1 = ROLE_RELAY (цепочечный
+  // релей, запрашивающий capability на upstream-релей, см.
+  // decisions/veil-relay-topology.md §3/§4). Игнорируется, если veil_pk не задан.
+  uint32 role = 4;
 }
 
 message IssueVeilCapabilityResponse {
   // Каноничный подписанный capability blob, который клиент скармливает veil_start
-  // напрямую (base64 → store). Layout — construct-veil-protocol::Capability::encode:
-  //   ticket_id[16] || auth_key[32] || not_before[8 LE] || not_after[8 LE]
-  //   || suite_id[1] || scope_len[u8] || scope || sig[64]
+  // напрямую (base64 → store). Layout зависит от capability_version:
+  //   v1 (B2, construct-veil-protocol::Capability::encode):
+  //     ticket_id[16] || auth_key[32] || not_before[8 LE] || not_after[8 LE]
+  //     || suite_id[1] || scope_len[u8] || scope || sig[64]
+  //   v2 (B1, construct-veil-protocol::CapabilityV2::encode):
+  //     ticket_id[16] || veil_pk[32] || role[1] || not_before[8 LE]
+  //     || not_after[8 LE] || suite_id[1] || scope_len[u8] || scope || sig[64]
   bytes capability = 1;
 
   // Подтверждённые сетевые параметры релея — клиент обновляет пин/SNI по этому же
@@ -44,4 +59,8 @@ message IssueVeilCapabilityResponse {
 
   // Unix-время истечения — клиент планирует следующее продление.
   int64 not_after = 5;
+
+  // Формат выданной capability: 1 = B2 (bearer, AUTH v2), 2 = B1 (key-bound, AUTH
+  // v3). Зависит от того, был ли в запросе задан veil_pk.
+  uint32 capability_version = 6;
 }

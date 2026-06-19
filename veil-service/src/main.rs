@@ -40,18 +40,41 @@ impl VeilService for VeilGrpcService {
         let user_id = extract_user_id(request.metadata())?;
         let req = request.into_inner();
 
-        let issued = core::issue_capability(&self.context, user_id, &req.relay_address)
+        let map_issue_err = |e: core::IssueError| match e {
+            core::IssueError::UnknownRelay(r) => {
+                Status::invalid_argument(format!("unknown relay: {r}"))
+            }
+            core::IssueError::Db(e) => Status::internal(format!("db error: {e}")),
+            core::IssueError::InvalidVeilPk(n) => {
+                Status::invalid_argument(format!("invalid veil_pk length: {n}"))
+            }
+            core::IssueError::InvalidRole(r) => {
+                Status::invalid_argument(format!("invalid role: {r}"))
+            }
+        };
+
+        // B1: a non-empty veil_pk requests a key-bound CapabilityV2 (AUTH v3)
+        // instead of a B2 bearer capability. See decisions/veil-ticket-provisioning-system.md.
+        let issued = if req.veil_pk.is_empty() {
+            core::issue_capability(&self.context, user_id, &req.relay_address)
+                .await
+                .map_err(map_issue_err)?
+        } else {
+            core::issue_capability_v2(
+                &self.context,
+                user_id,
+                &req.relay_address,
+                &req.veil_pk,
+                req.role,
+            )
             .await
-            .map_err(|e| match e {
-                core::IssueError::UnknownRelay(r) => {
-                    Status::invalid_argument(format!("unknown relay: {r}"))
-                }
-                core::IssueError::Db(e) => Status::internal(format!("db error: {e}")),
-            })?;
+            .map_err(map_issue_err)?
+        };
 
         info!(
             user_id = %user_id,
             relay = %issued.relay_address,
+            capability_version = issued.capability_version,
             "issued veil capability"
         );
 
@@ -61,6 +84,7 @@ impl VeilService for VeilGrpcService {
             spki: issued.spki,
             sni: issued.sni,
             not_after: issued.not_after,
+            capability_version: issued.capability_version,
         }))
     }
 }
