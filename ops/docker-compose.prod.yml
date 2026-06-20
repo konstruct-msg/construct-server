@@ -56,7 +56,6 @@ services:
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      # HTTPS entrypoint (TCP for TLS/HTTP2 + UDP for QUIC/HTTP3)
       - "--entrypoints.websecure.address=:443"
       # 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
       # mobile clients that share one persistent connection for heartbeat + unary RPCs.
