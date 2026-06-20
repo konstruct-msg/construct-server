@@ -58,9 +58,6 @@ services:
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       # HTTPS entrypoint (TCP for TLS/HTTP2 + UDP for QUIC/HTTP3)
       - "--entrypoints.websecure.address=:443"
-      # HTTP/3 (QUIC) — construct-engine connects over QUIC; Traefik terminates QUIC,
-      # forwards to Envoy as h2c (unchanged). Requires UDP 443 exposed below.
-      - "--entrypoints.websecure.http3=true"
       # 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
       # mobile clients that share one persistent connection for heartbeat + unary RPCs.
       # When the limit was exceeded Traefik sent GOAWAY, causing gRPC-swift to enter
@@ -80,7 +77,6 @@ services:
     ports:
       - "80:80"
       - "443:443" # TCP — TLS/HTTP1.1 + HTTP/2
-      - "443:443/udp" # UDP — QUIC/HTTP3 (construct-engine)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik-certs:/certs
@@ -442,45 +438,6 @@ services:
     labels:
       - "traefik.enable=false"
       # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
-
-  # ─── MASQUE-lite UDP relay ──────────────────────────────────────────────────
-  # Tunnels iOS QUIC datagrams over WebSocket/TLS to the Traefik QUIC endpoint.
-  # iOS cannot use raw UDP port 443 (blocked by Network.framework), so quinn
-  # connects via this relay instead of directly to Traefik.
-  #
-  # Wire: iOS → WSS (TCP 443, masque.INSTANCE_DOMAIN) → masque-service
-  #              → UDP → traefik:443 (QUIC) → Envoy → microservices
-  #
-  # First-time setup:
-  #   1. Add DNS A record: masque.INSTANCE_DOMAIN → VPS IP
-  #   2. Set MASQUE_AUTH_TOKEN in /opt/construct/secrets/app.env
-  #   3. On iOS: set use_masque=true, masque_host=masque.INSTANCE_DOMAIN in EngineAdapter
-
-  masque:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
-    command: /usr/local/bin/masque-service
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      RUST_LOG: ${RUST_LOG:-info}
-      SERVICE_NAME: masque
-      MASQUE_LISTEN_ADDR: "0.0.0.0:9200"
-      # Forward UDP to Traefik's QUIC listener (same Docker network — no hairpin NAT)
-      MASQUE_TARGET_HOST: ${MASQUE_TARGET_HOST:-traefik}
-      MASQUE_TARGET_PORT: ${MASQUE_TARGET_PORT:-443}
-      MASQUE_AUTH_TOKEN: ${MASQUE_AUTH_TOKEN:-}
-    networks:
-      - internal
-    labels:
-      - "traefik.enable=true"
-      # HTTP router — Traefik terminates TLS, forwards plain HTTP to masque-service.
-      # axum handles the WebSocket upgrade (Connection: Upgrade, Upgrade: websocket).
-      - "traefik.http.routers.masque.rule=Host(`masque.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.masque.entrypoints=websecure"
-      - "traefik.http.routers.masque.tls.certresolver=letsencrypt"
-      - "traefik.http.services.masque.loadbalancer.server.port=9200"
 
   prometheus:
     image: prom/prometheus:v3.2.1
