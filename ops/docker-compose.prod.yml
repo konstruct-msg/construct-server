@@ -438,6 +438,23 @@ services:
       - "traefik.enable=false"
       # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
 
+  # ─── QUIC/HTTP-3 endpoint (Phase 0: echo, reachability test) ─────────────────
+  # Native quinn+h3. Bypasses Traefik (that QUIC<->h2c bridge was the prior bidi
+  # failure). Phase 0.5 swaps the echo binary for an h3 -> envoy:8080 proxy.
+  quic:
+    image: ghcr.io/konstruct-msg/construct-transport:main
+    command: ["0.0.0.0:443"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      QUIC_SAN: quic.konstruct.cc # cert SAN must match client SNI
+    ports:
+      - "443:443/udp" # UDP 443 freed from Traefik; TCP 443 stays Traefik
+    networks:
+      - internal
+    labels:
+      - "traefik.enable=false"
+
   prometheus:
     image: prom/prometheus:v3.2.1
     container_name: construct-prometheus
