@@ -442,7 +442,7 @@ services:
   # Native quinn+h3. Bypasses Traefik (that QUIC<->h2c bridge was the prior bidi
   # failure). Phase 0.5 swaps the echo binary for an h3 -> envoy:8080 proxy.
   quic:
-    image: ghcr.io/konstruct-msg/construct-transport:sha-46e9ce5
+    image: ghcr.io/konstruct-msg/construct-transport:latest
     command: ["0.0.0.0:443"]
     restart: unless-stopped
     environment:
