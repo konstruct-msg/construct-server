@@ -443,7 +443,6 @@ services:
   # failure). Phase 0.5 swaps the echo binary for an h3 -> envoy:8080 proxy.
   quic:
     image: ghcr.io/konstruct-msg/construct-transport:latest
-    command: ["0.0.0.0:443"]
     restart: unless-stopped
     environment:
       RUST_LOG: ${RUST_LOG:-info}
