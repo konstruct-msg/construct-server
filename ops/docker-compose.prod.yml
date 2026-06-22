@@ -448,12 +448,17 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       QUIC_SAN: quic.konstruct.cc # cert SAN must match client SNI
+      QUIC_UPSTREAM: envoy:8080
+      QUIC_CERT_PATH: /certs/server-cert.der
+      QUIC_KEY_PATH: /certs/server-key.der
     ports:
       - "443:443/udp" # UDP 443 freed from Traefik; TCP 443 stays Traefik
     networks:
       - internal
     labels:
       - "traefik.enable=false"
+    volumes:
+      - /opt/construct/quic-certs:/certs
 
   prometheus:
     image: prom/prometheus:v3.2.1
