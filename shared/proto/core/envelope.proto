@@ -191,8 +191,21 @@ enum ContentType {
   // Server treats this identically to E2EE_SIGNAL (opaque bytes, no inspection).
   CONTENT_TYPE_SESSION_RESET_INIT = 24;
 
+  // SESSION_PING — tie-break handshake nudge (INITIATOR → peer) that triggers the
+  // RESPONDER's receiving-session init. Payload is a SessionControl (op=PING).
+  // Replaces the legacy "__session_ping_<UUID>__" plaintext magic string so the
+  // signal can never render as a chat bubble. Server forwards opaquely (treat
+  // identically to E2EE_SIGNAL — opaque bytes, no inspection, payload preserved).
+  CONTENT_TYPE_SESSION_PING = 25;
+
+  // SESSION_READY — phase 2 of the two-phase handshake (RESPONDER → INITIATOR),
+  // sent after a successful initReceivingSession to confirm both sides match.
+  // Payload is a SessionControl (op=READY). Replaces "__session_ready_<UUID>__".
+  // Server forwards opaquely (treat identically to E2EE_SIGNAL).
+  CONTENT_TYPE_SESSION_READY = 26;
+
   // Reserved for future types
-  reserved 3 to 9, 15 to 19, 25 to 100;
+  reserved 3 to 9, 15 to 19, 27 to 100;
 }
 
 // MessagePriority - Delivery priority
