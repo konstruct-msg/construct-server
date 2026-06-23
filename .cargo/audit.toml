@@ -32,6 +32,9 @@ ignore = [
     #       rand is pulled in transitively by sqlx-postgres and apns-h2.
     # Action: Remove when sqlx upgrades to a rand version with the fix
     "RUSTSEC-2026-0097",
+    # RUSTSEC-2026-0185: quinn-proto Remote memory exhaustion in quinn-proto from unbounded out-of-order stream reassembly
+    # Status: No patched reqwest 0.13.4 available;
+    "RUSTSEC-2026-0185",
 ]
 
 # Don't fail on unmaintained crates (just warn)
