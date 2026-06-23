@@ -444,12 +444,15 @@ services:
   quic:
     image: ghcr.io/konstruct-msg/construct-transport:latest
     restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       QUIC_SAN: quic.konstruct.cc # cert SAN must match client SNI
       QUIC_UPSTREAM: envoy:8080
       QUIC_CERT_PATH: /certs/server-cert.der
       QUIC_KEY_PATH: /certs/server-key.der
+      QUIC_OBF_PSK: ${QUIC_OBF_PSK}
     ports:
       - "443:443/udp" # UDP 443 freed from Traefik; TCP 443 stays Traefik
     networks:
