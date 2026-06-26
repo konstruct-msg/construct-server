@@ -102,6 +102,16 @@ pub struct UnregisterVoipTokenOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct SendKeyRotationWakeInput {
+    pub user_id: Uuid,
+}
+
+#[derive(Debug, Clone)]
+pub struct SendKeyRotationWakeOutput {
+    pub success: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct SendVoipIncomingCallInput {
     pub user_id: Uuid,
     pub call_id: String,
@@ -682,6 +692,110 @@ pub async fn unregister_voip_token(
     }
 
     Ok(UnregisterVoipTokenOutput { success })
+}
+
+/// Send a silent background push telling the device to rotate its SPK and
+/// replenish one-time pre-keys. Best-effort, fail-open: errors are logged but
+/// never returned as gRPC errors (the caller must not block on this).
+pub async fn send_key_rotation_wake(
+    context: &NotificationServiceContext,
+    input: SendKeyRotationWakeInput,
+) -> Result<SendKeyRotationWakeOutput> {
+    let user_id_hash = log_safe_id(
+        &input.user_id.to_string(),
+        &context.config.logging.hash_salt,
+    );
+
+    tracing::info!(user_hash = %user_id_hash, "Sending key rotation wake push");
+
+    let rows = sqlx::query(
+        r#"
+        SELECT device_token_encrypted, push_provider, push_environment
+        FROM device_tokens
+        WHERE user_id = $1 AND enabled = TRUE
+        "#,
+    )
+    .bind(input.user_id)
+    .fetch_all(&*context.db_pool)
+    .await
+    .context("Failed to fetch device tokens")?;
+
+    struct TokenRow {
+        device_token_encrypted: Vec<u8>,
+        push_provider: String,
+        push_environment: String,
+    }
+
+    let device_tokens: Vec<TokenRow> = rows
+        .into_iter()
+        .map(|row| {
+            Ok(TokenRow {
+                device_token_encrypted: row.try_get("device_token_encrypted")?,
+                push_provider: row.try_get("push_provider")?,
+                push_environment: row.try_get("push_environment")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .context("Failed to parse device token rows")?;
+
+    if device_tokens.is_empty() {
+        tracing::debug!(user_hash = %user_id_hash, "No active device tokens for key rotation wake");
+        return Ok(SendKeyRotationWakeOutput { success: false });
+    }
+
+    use construct_server_shared::apns::types::{ApnsPayload, NotificationPriority, PushType};
+
+    let payload = ApnsPayload::key_rotation_wake();
+
+    let mut sent_any = false;
+    for token_row in &device_tokens {
+        let device_token = match context
+            .token_encryption
+            .decrypt(&token_row.device_token_encrypted)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = %e, user_hash = %user_id_hash, "Failed to decrypt device token");
+                continue;
+            }
+        };
+
+        let apns_client = if token_row.push_provider == "apns" {
+            match token_row.push_environment.as_str() {
+                "sandbox" => &context.apns_sandbox_client,
+                _ => &context.apns_client,
+            }
+        } else {
+            continue;
+        };
+
+        match apns_client
+            .send_notification(
+                &device_token,
+                payload.clone(),
+                PushType::Silent,
+                NotificationPriority::Low,
+            )
+            .await
+        {
+            Ok(()) => {
+                sent_any = true;
+            }
+            Err(ApnsSendError::InvalidToken) => {
+                tracing::warn!(user_hash = %user_id_hash, push_environment = %token_row.push_environment, "APNs token invalid — deleting");
+                let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                    .bind(&token_row.device_token_encrypted)
+                    .execute(&*context.db_pool)
+                    .await;
+            }
+            Err(ApnsSendError::Other(e)) => {
+                tracing::warn!(error = %e, user_hash = %user_id_hash, "APNs send failed (best-effort)");
+            }
+        }
+    }
+
+    tracing::info!(user_hash = %user_id_hash, sent_any, "Key rotation wake processed");
+    Ok(SendKeyRotationWakeOutput { success: sent_any })
 }
 
 /// Internal: send VoIP push notification for an incoming call.

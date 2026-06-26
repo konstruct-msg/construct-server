@@ -106,6 +106,27 @@ impl ApnsPayload {
         }
     }
 
+    /// Create key-rotation wake push (Phase 3B).
+    ///
+    /// Silent background push that tells the device to rotate its Signed Pre-Key
+    /// and replenish one-time pre-keys. No sender identity or conversation context.
+    /// Privacy: cannot be distinguished from a regular silent push by an observer.
+    pub fn key_rotation_wake() -> Self {
+        Self {
+            aps: ApsData {
+                content_available: Some(1),
+                alert: None,
+                sound: None,
+                badge: None,
+            },
+            construct: Some(ConstructData {
+                notification_type: "rotate_keys".to_string(),
+                conversation_id: None,
+            }),
+            construct_call: None,
+        }
+    }
+
     /// Create visible push notification (Phase 2: Option C from docs)
     /// Shows notification to user
     /// IMPORTANT: Never include message content in payload! (privacy)

@@ -22,6 +22,12 @@ pub const ED25519_SIGNATURE_SIZE: usize = 64;
 /// Warn in logs when a served SPK is older than 8 days. Clients will reject at 10 days.
 const SPK_WARN_AGE_SECS: i64 = 8 * 24 * 3600;
 
+/// Fire a wake push when a served SPK is older than 21 days.
+/// Sits below the client-side 30-day hard-reject limit, with margin for the
+/// wake → rotate → re-publish round-trip. Well above the 8-day warn threshold
+/// so active users who rotate on schedule are never woken.
+const SPK_WAKE_AGE_SECS: i64 = 21 * 24 * 3600;
+
 #[derive(Debug, Clone)]
 pub struct PreKeyBundle {
     pub device_id: String,
@@ -250,6 +256,20 @@ fn warn_if_spk_aging(bundle: &PreKeyBundle) {
              clients will reject this bundle for PQ session init"
         );
     }
+}
+
+/// Returns `true` if any of the bundle's SPKs is old enough to warrant a
+/// rotation wake push (> `SPK_WAKE_AGE_SECS`). Used by key-service main.rs
+/// to decide whether to fire-and-forget a `SendKeyRotationWake`.
+///
+/// Always returns `false` when the bundle has no `spk_uploaded_at` timestamp
+/// (shouldn't happen for active devices, but safe to skip).
+pub fn spk_is_stale_enough_for_wake(bundle: &PreKeyBundle) -> bool {
+    let now = Utc::now();
+    let check = |ts: Option<DateTime<Utc>>| -> bool {
+        ts.is_some_and(|t| (now - t).num_seconds() > SPK_WAKE_AGE_SECS)
+    };
+    check(bundle.spk_uploaded_at) || check(bundle.kyber_spk_uploaded_at)
 }
 
 /// Get pre-key bundle for a device (consumes one-time pre-key if available)
@@ -1587,6 +1607,80 @@ mod tests {
         assert!(verify_hybrid_identity_crosssign(&vk[..31], &hk, &sig).is_err());
         // Wrong signature length.
         assert!(verify_hybrid_identity_crosssign(&vk, &hk, &sig[..63]).is_err());
+    }
+
+    // ── SPK wake-push threshold tests (no DB) ────────────────────────────────
+
+    fn make_bundle_for_wake_test(
+        spk_age_days: Option<f64>,
+        kyber_spk_age_days: Option<f64>,
+    ) -> PreKeyBundle {
+        let now = Utc::now();
+        PreKeyBundle {
+            device_id: "test-device".into(),
+            identity_key: vec![],
+            verifying_key: vec![],
+            signed_prekey: vec![],
+            signed_prekey_id: 0,
+            signed_prekey_signature: vec![],
+            one_time_prekey: None,
+            one_time_prekey_id: None,
+            crypto_suite: "Curve25519+Ed25519".into(),
+            registered_at: now,
+            kyber_pre_key: None,
+            kyber_pre_key_id: None,
+            kyber_pre_key_signature: None,
+            kyber_one_time_pre_key: None,
+            kyber_one_time_pre_key_id: None,
+            spk_uploaded_at: spk_age_days.map(|d| now - chrono::Duration::days(d as i64)),
+            spk_rotation_epoch: 0,
+            kyber_spk_uploaded_at: kyber_spk_age_days
+                .map(|d| now - chrono::Duration::days(d as i64)),
+            kyber_spk_rotation_epoch: 0,
+            bundle_signature: None,
+            kt_proof: None,
+            hybrid_identity_key: None,
+            hybrid_identity_signature: None,
+            signed_prekey_hybrid_signature: None,
+            kyber_pre_key_hybrid_signature: None,
+            hybrid_kt_proof: None,
+        }
+    }
+
+    #[test]
+    fn test_spk_wake_fires_when_spk_age_exceeds_threshold() {
+        let bundle = make_bundle_for_wake_test(Some(22.0), None);
+        assert!(spk_is_stale_enough_for_wake(&bundle));
+    }
+
+    #[test]
+    fn test_spk_wake_fires_when_kyber_spk_age_exceeds_threshold() {
+        let bundle = make_bundle_for_wake_test(None, Some(22.0));
+        assert!(spk_is_stale_enough_for_wake(&bundle));
+    }
+
+    #[test]
+    fn test_spk_wake_does_not_fire_for_fresh_spk() {
+        let bundle = make_bundle_for_wake_test(Some(5.0), None);
+        assert!(!spk_is_stale_enough_for_wake(&bundle));
+    }
+
+    #[test]
+    fn test_spk_wake_does_not_fire_for_no_timestamps() {
+        let bundle = make_bundle_for_wake_test(None, None);
+        assert!(!spk_is_stale_enough_for_wake(&bundle));
+    }
+
+    #[test]
+    fn test_spk_wake_fires_when_either_spk_is_stale() {
+        let bundle = make_bundle_for_wake_test(Some(5.0), Some(22.0));
+        assert!(spk_is_stale_enough_for_wake(&bundle));
+    }
+
+    #[test]
+    fn test_spk_wake_boundary_just_below_threshold() {
+        let bundle = make_bundle_for_wake_test(Some(20.99), None);
+        assert!(!spk_is_stale_enough_for_wake(&bundle));
     }
 
     // ── Database tests (require PostgreSQL) ──────────────────────────────────
