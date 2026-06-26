@@ -135,7 +135,7 @@ jobs:
         run: ./scripts/generate_test_keys.sh
 
       - name: Install sqlx-cli
-        run: command -v sqlx || cargo install sqlx-cli --no-default-features --features postgres --locked
+        run: command -v sqlx || cargo install sqlx-cli --no-default-features --features postgres
 
       - name: Run database migrations
         run: sqlx migrate run --source shared/migrations
