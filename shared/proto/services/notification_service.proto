@@ -30,6 +30,12 @@ service NotificationService {
   // SendVoipIncomingCall - internal RPC: deliver an APNs VoIP push for an incoming call.
   // Called by signaling-service when the callee is offline.
   rpc SendVoipIncomingCall(SendVoipIncomingCallRequest) returns (SendVoipIncomingCallResponse);
+
+  // SendKeyRotationWake - internal RPC: send a silent background push prompting the
+  // recipient to rotate their Signed Pre-Key (SPK) and replenish one-time pre-keys.
+  // Called by key-service when a bundle's SPK is approaching the client-side degrade limit.
+  // The payload carries only a "rotate_keys" marker — no sender identity, no conversation context.
+  rpc SendKeyRotationWake(SendKeyRotationWakeRequest) returns (SendKeyRotationWakeResponse);
 }
 
 // ============================================================================
@@ -210,4 +216,18 @@ message SendVoipIncomingCallRequest {
 message SendVoipIncomingCallResponse {
   bool success = 1;
   int32 sent_count = 2;
+}
+
+// ============================================================================
+// Key Rotation Wake Push (internal — called by key-service)
+// ============================================================================
+
+message SendKeyRotationWakeRequest {
+  // Bundle owner to wake (the peer whose SPK is stale). NOT the fetcher.
+  string user_id = 1;
+}
+
+message SendKeyRotationWakeResponse {
+  // true if at least one device token was targeted
+  bool success = 1;
 }
