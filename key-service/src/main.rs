@@ -39,7 +39,7 @@ use construct_server_shared::shared::proto::core::v1::CryptoSuite;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
     key_service_server::{KeyService, KeyServiceServer},
-    SendBlindNotificationRequest,
+    SendBlindNotificationRequest, SendKeyRotationWakeRequest,
 };
 
 /// Map a DB crypto_suite string to the proto CryptoSuite enum value.
@@ -235,6 +235,10 @@ impl KeyService for KeyGrpcService {
                 let heal_user_id = notify_user_id.clone();
                 let heal_device_id = notify_device_id.clone();
 
+                // Capture SPK staleness before `b` is moved.
+                let spk_is_stale = core::spk_is_stale_enough_for_wake(&b);
+                let wake_user_id = notify_user_id.clone();
+
                 let response = Response::new(proto::GetPreKeyBundleResponse {
                     bundle: Some(proto::PreKeyBundle {
                         registration_id: 1,
@@ -294,6 +298,16 @@ impl KeyService for KeyGrpcService {
                                 &heal_device_id,
                             )
                             .await;
+                        });
+                    }
+                }
+
+                // Fire-and-forget SPK rotation wake if the bundle is stale enough.
+                if spk_is_stale {
+                    if let Some(notif_client) = self.context.notification_client.clone() {
+                        let mut redis = self.context.redis.clone();
+                        tokio::spawn(async move {
+                            maybe_wake_key_rotation(&mut redis, &notif_client, &wake_user_id).await;
                         });
                     }
                 }
@@ -695,11 +709,20 @@ impl KeyService for KeyGrpcService {
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Collect per-device info for low-prekey check before consuming the iterator.
-        let notify_items: Vec<(String, bool)> = if self.context.notification_client.is_some() {
+        // Collect per-device info for low-prekey + wake checks before consuming the iterator.
+        struct DeviceChecks {
+            device_id: String,
+            otp_was_consumed: bool,
+            spk_is_stale: bool,
+        }
+        let notify_items: Vec<DeviceChecks> = if self.context.notification_client.is_some() {
             bundles
                 .iter()
-                .map(|b| (b.device_id.clone(), b.one_time_prekey_id.is_some()))
+                .map(|b| DeviceChecks {
+                    device_id: b.device_id.clone(),
+                    otp_was_consumed: b.one_time_prekey_id.is_some(),
+                    spk_is_stale: core::spk_is_stale_enough_for_wake(b),
+                })
                 .collect()
         } else {
             vec![]
@@ -742,20 +765,25 @@ impl KeyService for KeyGrpcService {
             })
             .collect();
 
-        // Fire-and-forget low-prekey checks for each device.
+        // Fire-and-forget low-prekey checks + SPK rotation wake for each device.
         if let Some(notif_client) = self.context.notification_client.clone() {
             let db = self.context.db.clone();
+            let mut redis = self.context.redis.clone();
             let user_id = req.user_id.clone();
             tokio::spawn(async move {
-                for (device_id, otp_was_consumed) in notify_items {
+                for item in notify_items {
                     maybe_notify_low_prekeys(
                         &db,
                         &notif_client,
                         &user_id,
-                        &device_id,
-                        otp_was_consumed,
+                        &item.device_id,
+                        item.otp_was_consumed,
                     )
                     .await;
+
+                    if item.spk_is_stale {
+                        maybe_wake_key_rotation(&mut redis, &notif_client, &user_id).await;
+                    }
                 }
             });
         }
@@ -840,6 +868,47 @@ async fn maybe_nudge_hybrid_republish(
             device_id,
             "Failed to send hybrid republish nudge"
         ),
+    }
+}
+
+/// Fire-and-forget a key-rotation wake push to the bundle owner.
+///
+/// Rate-limited per recipient via Redis `SET NX EX` (key: `wake:rotate:{user_id}`
+/// with `WAKE_COOLDOWN_SECS` TTL). Fail-open: if Redis is down or the RPC fails,
+/// log and move on — the wake is an optimisation, never a correctness dependency.
+async fn maybe_wake_key_rotation(
+    redis: &mut RedisConnectionManager,
+    notif_client: &NotificationClient,
+    user_id: &str,
+) {
+    let cooldown_secs = 6 * 3600; // 6 hours
+    let throttle_key = format!("wake:rotate:{user_id}");
+    let acquired: Option<String> = redis::cmd("SET")
+        .arg(&throttle_key)
+        .arg(1)
+        .arg("NX")
+        .arg("EX")
+        .arg(cooldown_secs)
+        .query_async(redis)
+        .await
+        .unwrap_or(None);
+    if acquired.is_none() {
+        tracing::debug!(
+            user_id,
+            "Key rotation wake skipped — within cooldown or Redis unavailable"
+        );
+        return;
+    }
+
+    let mut client = notif_client.get();
+    match client
+        .send_key_rotation_wake(SendKeyRotationWakeRequest {
+            user_id: user_id.to_string(),
+        })
+        .await
+    {
+        Ok(_) => tracing::info!(user_id, "Key rotation wake sent"),
+        Err(e) => tracing::warn!(error = %e, user_id, "Failed to send key rotation wake"),
     }
 }
 

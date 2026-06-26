@@ -272,6 +272,26 @@ impl NotificationService for NotificationGrpcService {
             sent_count: output.sent_count,
         }))
     }
+
+    async fn send_key_rotation_wake(
+        &self,
+        request: Request<proto::SendKeyRotationWakeRequest>,
+    ) -> Result<Response<proto::SendKeyRotationWakeResponse>, Status> {
+        let req = request.into_inner();
+
+        let user_id = Uuid::parse_str(&req.user_id)
+            .map_err(|_| Status::invalid_argument("Invalid user_id"))?;
+
+        let input = core::SendKeyRotationWakeInput { user_id };
+
+        let output = core::send_key_rotation_wake(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to send key rotation wake: {}", e)))?;
+
+        Ok(Response::new(proto::SendKeyRotationWakeResponse {
+            success: output.success,
+        }))
+    }
 }
 
 /// Health check endpoint
