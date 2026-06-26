@@ -35,7 +35,10 @@ message MessageContent {
     // Poll/Survey
     PollMessage poll = 9;
 
-    // Future content types: 10-20
+    // Album of one or more media items (images/videos) sent as a single message.
+    MediaAlbumMessage media_album = 10;
+
+    // Future content types: 11-20
   }
 
   // Formatting metadata (applies to all types)
@@ -101,8 +104,28 @@ message MediaMessage {
   // Caption (optional text with media)
   optional string caption = 11;
 
+  // BlurHash placeholder string — compact blurred preview shown before the full
+  // media downloads (a few dozen bytes). Optional.
+  optional string blurhash = 12;
+
+  // Server media object id (used to fetch the encrypted blob; may differ from the
+  // host part of file_url). Carried explicitly so it survives the wire round-trip.
+  string media_id = 13;
+
   // Reserved for future media metadata
-  reserved 12 to 20;
+  reserved 14 to 20;
+}
+
+// MediaAlbumMessage - one or more media items sent as a single message (album/grid).
+message MediaAlbumMessage {
+  // Media items, in display order (1..N).
+  repeated MediaMessage items = 1;
+
+  // Caption for the album as a whole (applies once, not per item).
+  optional string caption = 2;
+
+  // Quoted message (when the album is sent as a reply).
+  optional QuotedMessage quoted = 3;
 }
 
 // MediaType - Type of media attachment
@@ -414,4 +437,28 @@ message PreviewMetadata {
 
   // Reserved for future metadata
   reserved 6 to 10;
+}
+
+// SessionOp - typed session-handshake control opcode. Replaces the legacy
+// "__session_ping_<UUID>__" / "__session_ready_<UUID>__" / "__session_reset_init_<UUID>__"
+// plaintext magic strings so a handshake signal can never render as a chat bubble.
+// Carried as the E2EE payload of an Envelope whose content_type is
+// CONTENT_TYPE_SESSION_PING (25) / SESSION_READY (26) / SESSION_RESET_INIT (24) /
+// SESSION_RESET (21). The server forwards these opaquely (identical to E2EE_SIGNAL).
+enum SessionOp {
+  SESSION_OP_UNSPECIFIED = 0;
+  SESSION_OP_PING = 1;
+  SESSION_OP_READY = 2;
+  SESSION_OP_RESET_INIT = 3;
+  SESSION_OP_END = 4;
+}
+
+// SessionControl - typed payload for a session-handshake control signal.
+message SessionControl {
+  // Which handshake signal this is.
+  SessionOp op = 1;
+
+  // Correlation nonce (replaces the per-signal UUID embedded in the legacy magic
+  // string); lets the receiver dedup retransmitted control signals.
+  string nonce = 2;
 }
