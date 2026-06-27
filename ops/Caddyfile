@@ -1,57 +1,55 @@
 # ─── Construct Server — Caddyfile ─────────────────────────────────────────
-# Replaces Traefik (TLS) + Envoy (gRPC routing) with one process.
-# Auto TLS via Let's Encrypt (HTTP-01 or TLS-ALPN-01).
-# HTTP/3 (QUIC) auto-enabled on :443.
+# Replaces Traefik (TLS) + Envoy (gRPC routing + JWT validation).
+# Auto TLS via Let's Encrypt, HTTP/3 (QUIC) on :443/UDP.
 #
-# Replace with your domain (single-tenant — one domain per instance):
-#   {...}.konstruct.cc
+# Requires: caddy-jwt plugin (greenpau/caddy-jwt).
+# Build: docker build -t caddy-jwt -f ops/Dockerfile.caddy ops/
 #
-# Upstreams are Docker service names (same compose network).
+# Ports:
+#   :443  — TLS (HTTP/2 + HTTP/3), public-facing
+#   :8080 — plain h2c, for gateway proxy (internal docker network)
+#   :80   — redirect to HTTPS
+#
+# Replace domain (single-tenant): *.konstruct.cc → your.domain
 # ──────────────────────────────────────────────────────────────────────────
 
 {
-	# Global options
 	grace_period 10s
-	# Caddy reads the domain from the site block.  If you use a placeholder
-	# like :443, Let's Encrypt won't auto-issue — set the real domain when
-	# deploying.
-
-	# JWT validation: not handled in Caddy.  Bearer tokens are forwarded to
-	# upstream services which validate them.  Public routes (AuthService,
-	# DeviceService, health, .well-known) need no auth.
-	#
-	# If you want Caddy to reject unauthenticated requests before they reach
-	# a service, build with github.com/greenpau/caddy-security or similar.
+	admin 127.0.0.1:2019
+	# 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
+	# mobile clients that share one persistent connection for heartbeat + unary RPCs.
+	servers {
+		max_concurrent_streams 1000
+	}
 }
 
-# ─── External API ─────────────────────────────────────────────────────────
-# All gRPC traffic enters here.  CORS headers are set for gRPC-web clients
-# that use HTTP/1.1.
-
-ams.konstruct.cc, konstruct.cc {
-	# ── TLS ──────────────────────────────────────────────────────────────
-	# Auto Let's Encrypt via HTTP-01 challenge.  Caddy serves the challenge
-	# on port 80 automatically (use `tls` directive with manual certs if
-	# port 80 is blocked).
-	tls {
-		protocols tls1.2 tls1.3
-	}
-
-	# ── CORS (gRPC-web needs these) ──────────────────────────────────────
+# ── Shared route definitions (imported by both :443 and :8080) ────────────
+(grpc_routes) {
+	# CORS (gRPC-web)
 	header {
 		Access-Control-Allow-Methods "GET, POST, OPTIONS"
 		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
 		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
 		Access-Control-Allow-Origin *
 		Vary Origin
-		# OPTIONS preflight — Caddy returns 204 automatically
 	}
 
-	# ── Global headers ───────────────────────────────────────────────────
-	header /health X-Content-Type-Options nosniff
-	header /.well-known X-Content-Type-Options nosniff
+	# ── JWT validation (caddy-jwt plugin) ─────────────────────────────
+	jwt {
+		jwks_url http://auth:8081/.well-known/jwks.json
+		jwks_cache_duration 10m
+		inject_headers {
+			x-user-id sub
+		}
+		pass_through
+		skip /.well-known*
+		skip /health
+		skip /shared.proto.services.v1.AuthService/*
+		skip /shared.proto.services.v1.DeviceService/*
+		skip /shared.proto.services.v1.UserService/CheckUsernameAvailability
+	}
 
-	# ── Health & Discovery (gateway) ─────────────────────────────────────
+	# Health & Discovery
 	handle /.well-known* {
 		reverse_proxy gateway:3000
 	}
@@ -59,7 +57,7 @@ ams.konstruct.cc, konstruct.cc {
 		reverse_proxy gateway:3000
 	}
 
-	# ── Public gRPC services (no auth required) ──────────────────────────
+	# Public gRPC services
 	handle /shared.proto.services.v1.AuthService/* {
 		reverse_proxy h2c://auth:50051
 	}
@@ -67,26 +65,21 @@ ams.konstruct.cc, konstruct.cc {
 		reverse_proxy h2c://auth:50051
 	}
 
-	# ── Protected gRPC services ──────────────────────────────────────────
-	# UserService.CheckUsernameAvailability is public (pre-registration).
-	# Exact-path match must come BEFORE the prefix catch-all.
+	# Protected gRPC services
 	handle_path /shared.proto.services.v1.UserService/CheckUsernameAvailability {
 		reverse_proxy h2c://user:50052
 	}
 	handle /shared.proto.services.v1.UserService/* {
 		reverse_proxy h2c://user:50052
 	}
-
 	handle /shared.proto.services.v1.MessagingService/* {
 		reverse_proxy h2c://messaging:50053 {
-			# Streaming — no upstream timeout
 			flush_interval -1
 		}
 	}
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}
-
 	handle /shared.proto.services.v1.NotificationService/* {
 		reverse_proxy h2c://notification:50054
 	}
@@ -101,7 +94,6 @@ ams.konstruct.cc, konstruct.cc {
 	}
 	handle /shared.proto.services.v1.MediaService/* {
 		reverse_proxy h2c://media:50056
-		# File uploads — generous timeout
 	}
 	handle /shared.proto.services.v1.MlsService/* {
 		reverse_proxy h2c://mls:50058
@@ -114,27 +106,33 @@ ams.konstruct.cc, konstruct.cc {
 	}
 	handle /shared.proto.signaling.v1.SignalingService/* {
 		reverse_proxy h2c://signaling:50060 {
-			# WebRTC signalling — bidirectional streaming, no timeout
 			flush_interval -1
 		}
 	}
 
-	# ── Prometheus / Grafana (optional) ───────────────────────────────────
-	# handle /api/v1/* {
-	# 	reverse_proxy prometheus:9090
-	# }
-	# handle /grafana/* {
-	# 	reverse_proxy grafana:3000
-	# }
-
-	# ── Fallback 404 ──────────────────────────────────────────────────────
-	# Any unmatched path gets 404.  Clients should never hit this if they
-	# connect to the right service path.
+	# Fallback
 	handle {
 		respond "not found" 404
 	}
 }
 
-# ─── Internal HTTP (metrics, health probes) ─────────────────────────────
-# Caddy listens on :2019 by default for admin API.  If you need to expose
-# metrics from backends, add a separate site block on :2020 without TLS.
+# ── External (TLS) — port 443 ──────────────────────────────────────────────
+*.konstruct.cc, konstruct.cc {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	import grpc_routes
+}
+
+# ── Internal (h2c) — port 8080 ─────────────────────────────────────────────
+# Plain HTTP/2 (no TLS). Used by gateway proxy (veil/obfs4 → caddy:8080).
+# Same JWT validation — gateway forwards Authorization header as-is.
+:8080 {
+	import grpc_routes
+}
+
+# ── HTTP → HTTPS redirect — port 80 ────────────────────────────────────────
+:80 {
+	redir https://{host}{uri} permanent
+}
