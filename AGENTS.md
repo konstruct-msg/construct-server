@@ -9,7 +9,8 @@
 
 | Service | Binary | gRPC Port | HTTP/REST Port | Role |
 |---|---|---|---|---|
-| `caddy` | external | 443 / 8080 | 80 | TLS (Let's Encrypt), HTTP/3, JWT validation, gRPC routing |
+| `caddy` | external | 443 / 8080 | 80 | TLS (Let's Encrypt), JWT validation, gRPC routing |
+| `quic` | external | — | 443/UDP | SALAMANDER-obfuscated QUIC → caddy:8080 (construct-transport) |
 | `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships |
