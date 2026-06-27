@@ -9,7 +9,7 @@ construct-context     = { path = "../construct-context" }
 construct-crypto      = { path = "../construct-crypto" }
 construct-db          = { path = "../construct-db" }
 construct-auth        = { path = "../construct-auth" }
-construct-broker      = { path = "../construct-broker" }
+construct-message          = { path = "../construct-message" }
 construct-federation  = { path = "../construct-federation" }
 construct-key-management = { path = "../construct-key-management" }
 construct-queue       = { path = "../construct-queue" }

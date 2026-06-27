@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 construct-apns           = { path = "../construct-apns" }
 construct-auth           = { path = "../construct-auth" }
-construct-broker         = { path = "../construct-broker" }
+construct-message          = { path = "../construct-message" }
 construct-config         = { path = "../construct-config" }
 construct-context        = { path = "../construct-context" }
 construct-db             = { path = "../construct-db" }

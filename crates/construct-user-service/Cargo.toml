@@ -7,7 +7,7 @@ edition.workspace = true
 construct-apns           = { path = "../construct-apns" }
 construct-audit          = { path = "../construct-audit" }
 construct-auth           = { path = "../construct-auth" }
-construct-broker         = { path = "../construct-broker" }
+construct-message          = { path = "../construct-message" }
 construct-config         = { path = "../construct-config" }
 construct-context        = { path = "../construct-context" }
 construct-crypto         = { path = "../construct-crypto", features = ["full"] }

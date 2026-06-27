@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-construct-broker = { path = "../construct-broker" }
+construct-message = { path = "../construct-message" }
 construct-crypto = { path = "../construct-crypto", features = ["e2ee"] }
 construct-utils  = { path = "../construct-utils" }
 construct-config = { path = "../construct-config" }

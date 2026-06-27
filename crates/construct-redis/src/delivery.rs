@@ -40,7 +40,7 @@ impl<'a> DeliveryManager<'a> {
         _server_instance_id: Option<&str>, // Ignored - kept for API compatibility
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, Option<crate::kafka::types::KafkaMessageEnvelope>)>> {
+    ) -> Result<Vec<(String, Option<crate::kafka::types::MessageEnvelope>)>> {
         // Always read from user-based stream
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -186,13 +186,13 @@ impl<'a> DeliveryManager<'a> {
         None
     }
 
-    /// Parse stream message fields into KafkaMessageEnvelope
+    /// Parse stream message fields into MessageEnvelope
     /// Filters by recipient_id to ensure user only gets their messages
     fn parse_stream_message(
         &self,
         fields: HashMap<String, Vec<u8>>,
         user_id: &str,
-    ) -> Result<Option<crate::kafka::types::KafkaMessageEnvelope>> {
+    ) -> Result<Option<crate::kafka::types::MessageEnvelope>> {
         // Extract message_id and payload from fields
         let message_id_bytes = fields
             .get("message_id")
@@ -204,9 +204,9 @@ impl<'a> DeliveryManager<'a> {
             .get("payload")
             .ok_or_else(|| anyhow::anyhow!("Missing payload in stream message"))?;
 
-        // Deserialize KafkaMessageEnvelope from MessagePack
-        let envelope: crate::kafka::types::KafkaMessageEnvelope = rmp_serde::from_slice(payload)
-            .context("Failed to deserialize KafkaMessageEnvelope from stream")?;
+        // Deserialize MessageEnvelope from MessagePack
+        let envelope: crate::kafka::types::MessageEnvelope = rmp_serde::from_slice(payload)
+            .context("Failed to deserialize MessageEnvelope from stream")?;
 
         // SECURITY: Filter by recipient_id - only return messages for this user
         if envelope.recipient_id != user_id {

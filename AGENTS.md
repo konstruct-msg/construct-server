@@ -47,7 +47,7 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 |---|---|
 | `construct-config` | All config structs + env var parsing |
 | `construct-queue` | Redis stream read/write for messaging |
-| `construct-broker` | Message envelope types (`KafkaMessageEnvelope` — name is legacy, no Kafka transport) |
+| `construct-message` | Message envelope types (`MessageEnvelope` — no Kafka transport) |
 | `construct-auth` | JWT signing/verification |
 | `construct-pow` | Proof-of-Work challenge/verify |
 | `construct-rate-limit` | Redis-backed sliding window rate limiter |

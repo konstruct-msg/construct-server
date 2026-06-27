@@ -439,7 +439,7 @@ async fn test_user_blocking() {
 
 #[test]
 fn test_kafka_envelope_msgpack_roundtrip() {
-    use construct_broker::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
+    use construct_message::types::{MessageEnvelope, ProtoEnvelopeContext};
 
     let ctx = ProtoEnvelopeContext {
         sender_id: "0a1c609f-b37d-4d67-b7b2-b0f8ec16d167".to_string(),
@@ -449,21 +449,20 @@ fn test_kafka_envelope_msgpack_roundtrip() {
         content_type: 0,
         edits_message_id: None,
     };
-    let env = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+    let env = MessageEnvelope::from_proto_envelope(&ctx);
 
     // rmp_serde::to_vec uses the legacy serializer and cannot be read back by
-    // from_slice for KafkaMessageEnvelope (wrong msgpack marker Str8).
+    // from_slice for MessageEnvelope (wrong msgpack marker Str8).
     // delivery-worker and the read path both require encode::to_vec_named.
     let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
-    let back: KafkaMessageEnvelope =
-        rmp_serde::from_slice(&bytes).expect("to_vec_named deserialize");
+    let back: MessageEnvelope = rmp_serde::from_slice(&bytes).expect("to_vec_named deserialize");
     assert_eq!(back.message_id, env.message_id);
     assert_eq!(back.recipient_id, env.recipient_id);
 
     // Document the broken path so nobody reintroduces it.
     let broken = rmp_serde::to_vec(&env).unwrap();
     assert!(
-        rmp_serde::from_slice::<KafkaMessageEnvelope>(&broken).is_err(),
+        rmp_serde::from_slice::<MessageEnvelope>(&broken).is_err(),
         "to_vec must remain incompatible — use to_vec_named for Redis streams"
     );
 }
