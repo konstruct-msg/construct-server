@@ -375,36 +375,6 @@ services:
     networks:
       - internal
 
-  delivery:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
-    command: /usr/local/bin/delivery-worker
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "8085"
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      SERVICE_NAME: delivery
-      DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
-      DELIVERY_EXPIRY_DAYS: ${DELIVERY_EXPIRY_DAYS:-7}
-      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
-      OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
-      ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
-      KAFKA_ENABLED: ${KAFKA_ENABLED:-false}
-      KAFKA_BROKERS: ${KAFKA_BROKERS:-localhost:9092}
-      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
-      KAFKA_SSL_ENABLED: ${KAFKA_SSL_ENABLED:-false}
-      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-construct-delivery}
-      KAFKA_TOPIC: ${KAFKA_TOPIC:-messages}
-      KAFKA_PRODUCER_ACKS: ${KAFKA_PRODUCER_ACKS:-all}
-      KAFKA_PRODUCER_COMPRESSION: ${KAFKA_PRODUCER_COMPRESSION:-none}
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-
   gateway:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/gateway
@@ -460,52 +430,6 @@ services:
       - "traefik.enable=false"
     volumes:
       - /opt/construct/quic-certs:/certs
-
-  prometheus:
-    image: prom/prometheus:v3.2.1
-    container_name: construct-prometheus
-    restart: unless-stopped
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=15d"
-      - "--web.enable-lifecycle"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    networks:
-      - internal
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.prometheus.rule=Host(`prometheus.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.prometheus.entrypoints=websecure"
-      - "traefik.http.routers.prometheus.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.prometheus.middlewares=auth-basic"
-      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
-
-  grafana:
-    image: grafana/grafana:11.6.0
-    container_name: construct-grafana
-    restart: unless-stopped
-    environment:
-      GF_SERVER_ROOT_URL: "https://grafana.${INSTANCE_DOMAIN}"
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/etc/grafana/dashboards
-    networks:
-      - internal
-    depends_on:
-      - prometheus
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`grafana.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.grafana.entrypoints=websecure"
-      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
-      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
 
 volumes:
   traefik-certs:
