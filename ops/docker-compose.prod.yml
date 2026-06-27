@@ -38,20 +38,17 @@
 name: construct
 
 services:
-  # ─── Caddy (TLS + JWT + gRPC routing) ──────────────────────────────────────
+  # ─── Caddy (TLS + gRPC routing) ───────────────────────────────────────────
   # Replaces Traefik (TLS + Let's Encrypt) + Envoy (gRPC routing + JWT authn).
-  # Uses caddy-jwt plugin for Bearer JWT validation and x-user-id injection.
-  #
-  # Build: docker build -t caddy-jwt -f ops/Dockerfile.caddy ops/
-  # Then tag: docker tag caddy-jwt ghcr.io/konstruct-msg/caddy-jwt:latest
+  # Vanilla caddy:alpine — no JWT plugin. Each service validates JWT itself.
   #
   # Caddyfile: ops/Caddyfile
   #   - :80      → redirect to HTTPS
-  #   - :443     → TLS (HTTP/2), JWT validate, route to h2c upstreams
-  #   - :8080    → plain h2c for gateway proxy + quic transport (same JWT validation)
+  #   - :443     → TLS (HTTP/2), route h2c to upstreams
+  #   - :8080    → plain h2c for gateway proxy + quic transport
 
   caddy:
-    image: ghcr.io/konstruct-msg/caddy-jwt:${CADDY_TAG:-latest}
+    image: caddy:alpine
     restart: unless-stopped
     ports:
       - "80:80"
