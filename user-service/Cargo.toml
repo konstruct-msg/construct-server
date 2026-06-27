@@ -7,6 +7,8 @@ edition.workspace = true
 construct-config = { path = "../crates/construct-config" }
 construct-db = { path = "../crates/construct-db" }
 construct-server-shared = { path = "../shared" }
+crypto-agility = { path = "../crates/crypto-agility" }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 
 # Workspace deps
 tokio = {workspace = true}

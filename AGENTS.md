@@ -13,10 +13,9 @@
 | `quic` | external | — | 443/UDP | SALAMANDER-obfuscated QUIC → caddy:8080 (construct-transport) |
 | `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
-| `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships |
+| `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships, invite tokens |
 | `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery |
 | `notification` | `notification-service` | 50054 | 8084 | APNs push (prod + sandbox), FCM |
-| `invite` | `invite-service` | 50055 | 8085 | Invite link creation and redemption |
 | `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
 | `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
 | `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
