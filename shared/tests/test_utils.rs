@@ -433,7 +433,6 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         construct_server_shared::messaging_service::core::dispatch_envelope(
             &app_context,
             kafka_envelope,
-            None, // push handled by notification-service in production; tests don't need real push
         )
         .await
         .map_err(|e| GrpcStatus::internal(e.to_string()))?;
