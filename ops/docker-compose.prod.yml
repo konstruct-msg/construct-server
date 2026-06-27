@@ -47,8 +47,8 @@ services:
   #
   # Caddyfile: ops/Caddyfile
   #   - :80      → redirect to HTTPS
-  #   - :443     → TLS (HTTP/2 + HTTP/3), JWT validate, route to h2c upstreams
-  #   - :8080    → plain h2c for gateway proxy (same JWT validation)
+  #   - :443     → TLS (HTTP/2), JWT validate, route to h2c upstreams
+  #   - :8080    → plain h2c for gateway proxy + quic transport (same JWT validation)
 
   caddy:
     image: ghcr.io/konstruct-msg/caddy-jwt:${CADDY_TAG:-latest}
@@ -56,7 +56,8 @@ services:
     ports:
       - "80:80"
       - "443:443"      # TCP — TLS/HTTP2
-      - "443:443/udp"  # UDP — HTTP/3 (QUIC)
+    # UDP 443 is claimed by construct-transport (SALAMANDER obfuscated QUIC).
+    # Caddy native HTTP/3 is not used — clients use SALAMANDER-QUIC instead.
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data  # Let's Encrypt certs + OCSP staples
@@ -347,8 +348,28 @@ services:
     networks:
       - internal
     # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
-    # QUIC/HTTP-3 is handled by Caddy natively (HTTP/3 → h2c upstream).
-    # The separate quic container was retired when Traefik → Caddy migration completed.
+
+  # ─── SALAMANDER QUIC endpoint (construct-transport) ──────────────────────────
+  # Receives obfuscated QUIC (SALAMANDER) on UDP 443, de-obfuscates and forwards
+  # plain h2c to caddy:8080. Standard HTTP/3 (Caddy native) is NOT used — all
+  # client QUIC traffic uses SALAMANDER obfuscation for anti-DPI.
+  quic:
+    image: ghcr.io/konstruct-msg/construct-transport:latest
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      QUIC_SAN: quic.konstruct.cc
+      QUIC_UPSTREAM: "caddy:8080"
+      QUIC_CERT_PATH: /certs/server-cert.der
+      QUIC_KEY_PATH: /certs/server-key.der
+    ports:
+      - "443:443/udp" # SALAMANDER-obfuscated QUIC from clients
+    networks:
+      - internal
+    volumes:
+      - /opt/construct/quic-certs:/certs
 
 volumes:
   caddy-data:
