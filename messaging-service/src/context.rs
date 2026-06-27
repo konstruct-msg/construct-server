@@ -7,7 +7,6 @@
 // ============================================================================
 
 use construct_auth::AuthManager;
-use construct_broker::MessageProducer;
 use construct_config::Config;
 use construct_context::AppContext;
 use construct_db::DbPool;
@@ -26,7 +25,6 @@ pub struct MessagingServiceContext {
     pub db_pool: Arc<DbPool>,
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
-    pub kafka_producer: Arc<MessageProducer>,
     /// gRPC client for notification-service — used for silent push instead of calling APNs directly
     pub notification_client: Option<NotificationClient>,
     /// gRPC client for sentinel-service — rate limiting and spam protection
@@ -35,8 +33,7 @@ pub struct MessagingServiceContext {
     pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
     pub server_signer: Option<Arc<ServerSigner>>,
-    /// Stable ID for this process instance — stored in Redis at stream open so
-    /// delivery-worker can resolve which messaging-service instance a user is on.
+    /// Stable ID for this process instance — stored in Redis at stream open.
     pub server_instance_id: String,
     /// Standalone Redis ConnectionManager for rate-limiting and caching.
     /// Cloned lock-free without acquiring the queue Mutex.
@@ -52,7 +49,6 @@ impl MessagingServiceContext {
             .with_queue(self.queue.clone())
             .with_auth_manager(self.auth_manager.clone())
             .with_config(self.config.clone())
-            .with_kafka_producer(self.kafka_producer.clone())
             .with_server_instance_id(self.server_instance_id.clone());
 
         let builder = if let Some(signer) = &self.server_signer {

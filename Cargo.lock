@@ -1365,41 +1365,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
-name = "delivery-worker"
-version = "0.15.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "bcrypt",
- "chrono",
- "construct-broker",
- "construct-config",
- "construct-server-shared",
- "dotenvy",
- "futures-util",
- "hex",
- "jsonwebtoken 10.3.0",
- "prometheus",
- "redis",
- "reqwest",
- "rmp-serde",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

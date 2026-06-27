@@ -21,7 +21,6 @@ use construct_server_shared::auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::db::DbPool;
-use construct_server_shared::kafka::MessageProducer;
 use construct_server_shared::queue::MessageQueue;
 use construct_server_shared::shared::proto::services::v1::messaging_service_server::MessagingServiceServer;
 use context::MessagingServiceContext;
@@ -82,17 +81,7 @@ async fn main() -> Result<()> {
     let queue = Arc::new(Mutex::new(message_queue));
     info!("Connected to Redis");
 
-    // Initialize Kafka Producer (or no-op stub when KAFKA_ENABLED=false)
-    if config.kafka.enabled {
-        info!("Connecting to Kafka/Redpanda...");
-    } else {
-        info!("KAFKA_ENABLED=false — using Redis Streams for direct delivery");
-    }
-    let kafka_producer =
-        Arc::new(MessageProducer::new(&config.kafka).context("Failed to create message producer")?);
-    if config.kafka.enabled {
-        info!("Connected to Kafka");
-    }
+    info!("Using Redis Streams for direct message delivery");
 
     // Initialize Auth Manager
     let auth_manager =
@@ -179,7 +168,6 @@ async fn main() -> Result<()> {
         db_pool,
         queue,
         auth_manager,
-        kafka_producer,
         notification_client,
         sentinel_client,
         config: config.clone(),

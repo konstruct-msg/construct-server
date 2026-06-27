@@ -28,10 +28,7 @@ use construct_server_shared::{
     auth::AuthManager,
     auth_service::{AuthServiceContext, handlers as auth_handlers},
     health,
-    kafka::{
-        MessageProducer,
-        types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
-    },
+    kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -499,8 +496,6 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             .expect("Failed to create queue"),
     ));
     let auth_manager = Arc::new(AuthManager::new(&config).expect("Failed to create auth manager"));
-    let kafka_producer =
-        Arc::new(MessageProducer::new(&config.kafka).expect("Failed to create kafka producer"));
     let apns_client =
         Arc::new(ApnsClient::new(config.apns.clone()).expect("Failed to create APNs client"));
     let token_encryption = Arc::new(
@@ -514,7 +509,6 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             .with_queue(queue)
             .with_auth_manager(auth_manager)
             .with_config(config.clone())
-            .with_kafka_producer(kafka_producer)
             .with_apns_client(apns_client.clone())
             .with_apns_sandbox_client(apns_client)
             .with_token_encryption(token_encryption)
