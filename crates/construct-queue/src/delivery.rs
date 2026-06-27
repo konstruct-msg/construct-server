@@ -63,11 +63,11 @@ impl<'a> DeliveryManager<'a> {
                 Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
                 Ok(None) => result.push((stream_id, None)), // wrong recipient, still advance
                 Err(e) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         stream_id = %stream_id,
                         user_id = %user_id,
                         error = %e,
-                        "Skipping unparseable Redis stream entry"
+                        "Skipping unparseable Redis stream entry (re-send message or DEL stream if written with broken to_vec)"
                     );
                     result.push((stream_id, None)); // advance past corrupt entry
                 }
@@ -554,8 +554,10 @@ impl<'a> DeliveryManager<'a> {
     ) -> Result<String> {
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
-        // Serialize envelope to MessagePack (same as delivery worker)
-        let payload = rmp_serde::to_vec(envelope)
+        // Serialize envelope to MessagePack (must match delivery-worker: to_vec_named).
+        // rmp_serde::to_vec uses a legacy serializer that from_slice cannot read back
+        // ("wrong msgpack marker Str8") — messages would be written but never delivered.
+        let payload = rmp_serde::encode::to_vec_named(envelope)
             .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
 
         // Use XADD with MAXLEN for automatic trimming
@@ -611,7 +613,7 @@ impl<'a> DeliveryManager<'a> {
             self.delivery_queue_prefix, user_id, device_id
         );
 
-        let payload = rmp_serde::to_vec(envelope)
+        let payload = rmp_serde::encode::to_vec_named(envelope)
             .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
 
         let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
