@@ -27,7 +27,6 @@ COPY auth-service ./auth-service
 COPY messaging-service ./messaging-service
 COPY user-service ./user-service
 COPY notification-service ./notification-service
-COPY invite-service ./invite-service
 COPY gateway ./gateway
 COPY media-service ./media-service
 COPY key-service ./key-service
@@ -62,7 +61,6 @@ COPY --from=builder --chmod=+x /app/target/release/auth-service /usr/local/bin/a
 COPY --from=builder --chmod=+x /app/target/release/user-service /usr/local/bin/user-service
 COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/bin/messaging-service
 COPY --from=builder --chmod=+x /app/target/release/notification-service /usr/local/bin/notification-service
-COPY --from=builder --chmod=+x /app/target/release/invite-service /usr/local/bin/invite-service
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 COPY --from=builder --chmod=+x /app/target/release/mls-service /usr/local/bin/mls-service
