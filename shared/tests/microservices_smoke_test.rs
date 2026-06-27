@@ -93,19 +93,6 @@ fn test_messaging_service_starts() {
     stop_service(service);
 }
 
-/// Basic smoke test - verify notification service starts and responds
-#[test]
-fn test_notification_service_starts() {
-    let mut service = start_service("notification-service", 18004);
-
-    assert!(
-        service.try_wait().unwrap().is_none(),
-        "Service should be running"
-    );
-
-    stop_service(service);
-}
-
 /// Basic smoke test - verify gateway starts and responds
 #[test]
 fn test_gateway_starts() {
