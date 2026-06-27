@@ -6,21 +6,6 @@
 	}
 }
 
-*.konstruct.cc, konstruct.cc {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-	import grpc_routes
-}
-
-:8080 {
-	import grpc_routes
-}
-
-:80 {
-	redir https://{host}{uri} permanent
-}
-
 (grpc_routes) {
 	header {
 		Access-Control-Allow-Methods "GET, POST, OPTIONS"
@@ -86,4 +71,19 @@
 	handle {
 		respond "not found" 404
 	}
+}
+
+*.konstruct.cc, konstruct.cc {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	import grpc_routes
+}
+
+:8080 {
+	import grpc_routes
+}
+
+:80 {
+	redir https://{host}{uri} permanent
 }
