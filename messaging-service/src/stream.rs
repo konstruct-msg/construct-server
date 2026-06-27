@@ -350,27 +350,37 @@ pub(crate) async fn handle_stream_request(
             if let Some(cursor) = sub.since_cursor
                 && !cursor.is_empty()
             {
-                // ACK-driven deletion: the client's since_cursor is the last message it
-                // has durably received AND persisted. Only now is it safe to delete
-                // everything ≤ cursor from the offline stream. This is the ONLY place
-                // offline messages are deleted — never by the server's read/send position,
-                // which previously caused silent loss on short/broken recipient sessions.
-                if let Some(uid) = user_id.as_ref()
-                    && let Err(e) = stream_queue
-                        .trim_offline_stream(&uid.to_string(), &cursor)
-                        .await
-                {
-                    tracing::warn!(error = %e, "Failed to trim offline stream on subscribe (non-fatal)");
-                }
+                // Clients must pass a Redis stream ID (e.g. "1782556480695-0"), NOT a
+                // message UUID.  An invalid cursor used as XREAD start ID is reset to "0"
+                // (re-deliver everything) while a valid-but-stale cursor can skip messages.
+                if !is_valid_redis_stream_cursor(&cursor) {
+                    tracing::warn!(
+                        cursor = %cursor,
+                        "Ignoring invalid since_cursor on Subscribe (expected Redis stream ID, not message UUID)"
+                    );
+                } else {
+                    // ACK-driven deletion: the client's since_cursor is the last message it
+                    // has durably received AND persisted. Only now is it safe to delete
+                    // everything ≤ cursor from the offline stream. This is the ONLY place
+                    // offline messages are deleted — never by the server's read/send position,
+                    // which previously caused silent loss on short/broken recipient sessions.
+                    if let Some(uid) = user_id.as_ref()
+                        && let Err(e) = stream_queue
+                            .trim_offline_stream(&uid.to_string(), &cursor)
+                            .await
+                    {
+                        tracing::warn!(error = %e, "Failed to trim offline stream on subscribe (non-fatal)");
+                    }
 
-                let advance = match last_stream_id {
-                    None => true,
-                    Some(current) => compare_stream_ids(&cursor, current)
-                        == std::cmp::Ordering::Greater,
-                };
-                if advance {
-                    tracing::debug!(cursor = %cursor, "Resuming stream from client cursor");
-                    *last_stream_id = Some(cursor);
+                    let advance = match last_stream_id {
+                        None => true,
+                        Some(current) => compare_stream_ids(&cursor, current)
+                            == std::cmp::Ordering::Greater,
+                    };
+                    if advance {
+                        tracing::info!(cursor = %cursor, "Resuming stream from client since_cursor");
+                        *last_stream_id = Some(cursor.to_string());
+                    }
                 }
             }
         }
@@ -398,6 +408,17 @@ pub(crate) async fn handle_stream_request(
     }
 
     Ok(())
+}
+
+/// Returns true when `cursor` is a valid Redis stream resume position.
+fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
+    if cursor == "0" || cursor == "$" {
+        return true;
+    }
+    if let Some((ts, seq)) = cursor.split_once('-') {
+        return ts.parse::<u64>().is_ok() && seq.parse::<u64>().is_ok();
+    }
+    cursor.parse::<u64>().is_ok()
 }
 
 /// Compare two Redis stream IDs lexicographically by (timestamp, sequence).
@@ -505,7 +526,15 @@ pub(crate) async fn poll_messages(
     let xread_ms = t_xread.elapsed().as_millis();
 
     let msg_count = messages.len();
-    if xread_ms > config.stream_xread_slow_ms {
+    if msg_count > 0 {
+        tracing::info!(
+            user_id = %user_id_str,
+            msg_count,
+            xread_ms,
+            last_stream_id = ?last_stream_id,
+            "poll_messages: read messages from Redis offline stream"
+        );
+    } else if xread_ms > config.stream_xread_slow_ms {
         tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
     }
 
@@ -546,7 +575,26 @@ pub(crate) async fn poll_messages(
         // reconnect by passing stream_cursor as SubscribeRequest.since_cursor.
         response.stream_cursor = Some(stream_id.clone());
 
+        let delivered_message_id = match &response.response {
+            Some(proto::message_stream_response::Response::Message(env)) => env
+                .message_id_type
+                .as_ref()
+                .and_then(|id| match id {
+                    construct_server_shared::shared::proto::core::v1::envelope::MessageIdType::MessageId(
+                        mid,
+                    ) if !mid.is_empty() => Some(mid.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        };
+
         tx.send(Ok(response)).await?;
+        tracing::info!(
+            user_id = %user_id_str,
+            stream_id = %stream_id,
+            message_id = delivered_message_id.as_deref().unwrap_or(""),
+            "poll_messages: pushed message to gRPC stream"
+        );
         *last_stream_id = Some(stream_id);
     }
 
