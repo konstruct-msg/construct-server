@@ -39,7 +39,7 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 ### Shared crate
 `shared/` (`construct-server-shared`) contains:
 - `src/construct_server/auth_service/` — auth business logic
-- `src/construct_server/messaging_service/core.rs` — `dispatch_envelope` + `confirm_pending_message` used **only** by `shared/tests/test_utils.rs` integration tests. The authoritative version is `messaging-service/src/core.rs`; if you change the signature, update both.
+- `src/construct_server/messaging_service/core.rs` — `dispatch_envelope` + `confirm_pending_message` used **only** by `shared/tests/test_utils.rs` integration tests. Mirrors `messaging-service/src/core.rs` — keep both in sync.
 - `src/clients/notification.rs` — `NotificationClient` wrapper (lazy gRPC connect)
 
 ### Crates under `crates/`
@@ -59,24 +59,26 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 
 ---
 
-## Message Delivery Flow (Redis direct — production)
+## Message Delivery Flow (Redis direct — production, multi-device)
 
 ```
 Client ──gRPC──► messaging-service
                     │
-                    ├─► Redis XADD  delivery:offline:{user_id}   (stream, MESSAGE_TTL_DAYS TTL)
-                    └─► Redis PUBLISH inbox:wakeup:{user_id}      (pub/sub wakeup)
+                    ├─► Redis XADD delivery:offline:{user_id}          (legacy user stream)
+                    ├─► Redis XADD delivery:offline:{user_id}:{device} (per-device fan-out)
+                    └─► Redis PUBLISH inbox:wakeup:{user_id}           (pub/sub wakeup)
 
-messaging-service (stream loop per connected user)
+messaging-service (stream loop per connected device)
     │
-    ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}  ← wakeup triggers immediate XREAD
-    └─► Redis XREAD delivery:offline:{user_id}  (fallback poll: MSG_STREAM_POLL_FALLBACK_SECS)
+    ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}
+    └─► Redis XREAD delivery:offline:{user_id}:{device_id}  (per-device)
             │
             └─► gRPC ServerStreamingResponse → client
 ```
 
-**Critical channel name**: `write_message_to_user_stream` must publish to `inbox:wakeup:{user_id}`.
-Using `message_notifications:{user_id}` (old name) would silently break real-time wakeup, causing ~1s delivery delay.
+Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written, so old clients without `x-device-id` continue to receive messages.
+
+**Critical channel name**: `inbox:wakeup:{user_id}`.
 
 **Serialization**: envelopes must use `rmp_serde::encode::to_vec_named` on write and `rmp_serde::from_slice` on read.
 
@@ -86,7 +88,8 @@ Using `message_notifications:{user_id}` (old name) would silently break real-tim
 
 | Key pattern | Type | Owner | Purpose |
 |---|---|---|---|
-| `delivery:offline:{user_id}` | Stream (XADD) | messaging-service | Message inbox per user |
+| `delivery:offline:{user_id}` | Stream (XADD) | messaging-service | Message inbox per user (legacy) |
+| `delivery:offline:{user_id}:{device_id}` | Stream (XADD) | messaging-service | Per-device message inbox |
 | `inbox:wakeup:{user_id}` | Pub/Sub | messaging-service | Real-time wakeup signal |
 | `dispatched_msg:{message_id}` | String (SETEX) | messaging-service | Send-path idempotency dedup |
 | `delivered_direct:{message_id}` | String (SETEX) | messaging-service | Direct delivery dedup |
@@ -202,7 +205,6 @@ Client gRPC send
   → gRPC stream deliver to client
 
 Total: ~5-15 ms
-```
 
 ---
 
@@ -236,63 +238,16 @@ Total: ~5-15 ms
 
 1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients must be initialized in `messaging-service/main.rs` even though messaging-service no longer calls APNs directly. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
 
-2. **Duplicate `dispatch_envelope`** — `messaging-service/src/core.rs` (authoritative, 466 lines) and `shared/src/construct_server/messaging_service/core.rs` (462 lines, test-only copy). If you change `dispatch_envelope` signature, update **both** files.
+2. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
 
-3. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
-
-4. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
+3. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
 
 ---
-
----
-
-## Shared Construct Docs Workflow
-
-These instructions apply to GitHub Copilot, Codex, OpenCode, and similar coding agents.
-
-### Division of labour — read this first
-
-| Role | Tool | Responsibility |
-|------|------|----------------|
-| **Coding agent** (you) | Copilot / Codex | Write code + drop raw session notes into `wiki/sessions/` and `wiki/decisions/`. That is all. |
-| **Wiki pipeline** | `obsidian-llm-wiki-local` (olw) | Reads `raw/`, synthesizes concepts, creates/updates wiki articles, generates cross-links. |
-| **Developer** | Human + Obsidian | Reviews wiki draft articles, approves/rejects. Curates `raw/`. |
-
-**Your job is code.** olw handles article synthesis. Write plain-markdown session notes; let the pipeline do the rest.
 
 ## Documentation
 
 All project documentation: `~/Code/construct-docs` (Obsidian vault).
-**Authoritative map + writing rules: `~/Code/construct-docs/AGENTS.md`** (read it before contributing
-docs). The vault is a flat domain-folder structure — there is no `raw/` or `wiki/` anymore.
+See `~/Code/construct-docs/AGENTS.md` for writing rules and vault layout.
 
-### Vault layout (top-level domain folders)
-
-| Folder | Holds |
-|--------|-------|
-| `overview/` | Vision, philosophy, high-level project overview |
-| `architecture/` | Service map, data flows, server infrastructure, design principles |
-| `backend/` | Server service-specific docs (auth, messaging, federation) |
-| `client/` | Client docs (iOS, Android, desktop, shared); specs in `client/specs/` |
-| `cryptocore/` | Crypto protocol specs and key management |
-| `security/` | Security model, threat model, VEIL anti-censorship |
-| `deployment/` · `testing/` · `compliance/` · `whitepaper/` | as named |
-| `sessions/` | Session logs (this is where your session notes go) |
-| `decisions/` | Architectural decision records (ADRs) |
-| `_archive/` | Superseded docs — read-only |
-
-### Where to save durable reasoning
-
-After any session involving architectural changes, design decisions, API changes, or non-obvious implementation choices:
-
-1. **Always** create or update `sessions/YYYY-MM-DD-<topic>.md`.
-2. **Always** fill in `# Why` — reasoning, alternatives considered, why rejected. Most important section.
-3. If the decision constrains future work, also create `decisions/<topic>.md`.
-4. Session notes: plain markdown, **no YAML frontmatter, no `[[wikilinks]]`** — olw adds those.
-
-Required note sections: `# Context`, `# What Changed`, `# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`
-
-### Operational logging
-
-Append a one-line entry to `log.md` after writing a note.
-Format: `[YYYY-MM-DD HH:MM] note | <topic>`
+Session notes: `sessions/YYYY-MM-DD-<topic>.md` with sections `# Context`, `# What Changed`,
+`# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`.
