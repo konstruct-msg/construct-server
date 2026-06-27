@@ -55,7 +55,10 @@ struct UserGrpcService {
 }
 
 impl UserGrpcService {
-    fn extract_user_id(&self, metadata: &tonic::metadata::MetadataMap) -> Result<uuid::Uuid, tonic::Status> {
+    fn extract_user_id(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<uuid::Uuid, tonic::Status> {
         auth_utils::extract_user_id(&self.context.auth_manager, metadata)
     }
 }
