@@ -14,7 +14,7 @@
 | `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → envoy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships |
-| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Kafka produce |
+| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery |
 | `notification` | `notification-service` | 50054 | 8084 | APNs push (prod + sandbox), FCM |
 | `invite` | `invite-service` | 50055 | 8085 | Invite link creation and redemption |
 | `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
@@ -22,7 +22,6 @@
 | `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
 | `signaling` | `signaling-service` | 50060 | 8091 | WebRTC SDP/ICE signaling |
 | `channel` | `channel-service` | 50061 | 8098 | Broadcast channels (PUBLIC/PRIVATE), Sender Key encryption |
-| `delivery` | `delivery-worker` | — | 8092 | Kafka consumer → Redis stream writer |
 | `mls` | `mls-service` | 50058 | 8097 | MLS groups (RFC 9420), topics, invite links |
 
 ---
@@ -48,7 +47,7 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 |---|---|
 | `construct-config` | All config structs + env var parsing |
 | `construct-queue` | Redis stream read/write for messaging |
-| `construct-broker` | Kafka producer/consumer (`KafkaMessageEnvelope`) |
+| `construct-broker` | Message envelope types (`KafkaMessageEnvelope` — name is legacy, no Kafka transport) |
 | `construct-auth` | JWT signing/verification |
 | `construct-pow` | Proof-of-Work challenge/verify |
 | `construct-rate-limit` | Redis-backed sliding window rate limiter |
@@ -60,33 +59,26 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 
 ---
 
-## Message Delivery Flow (Kafka enabled — production)
+## Message Delivery Flow (Redis direct — production)
 
 ```
 Client ──gRPC──► messaging-service
                     │
-                    ├─► Kafka PRODUCE (topic: messages)
-                    │
-delivery-worker ◄── Kafka CONSUME
-    │
-    ├─► Redis XADD  delivery_queue:offline:{user_id}   (stream, 7-day TTL)
-    └─► Redis PUBLISH inbox:wakeup:{user_id}            (pub/sub wakeup)
+                    ├─► Redis XADD  delivery:offline:{user_id}   (stream, MESSAGE_TTL_DAYS TTL)
+                    └─► Redis PUBLISH inbox:wakeup:{user_id}      (pub/sub wakeup)
 
 messaging-service (stream loop per connected user)
     │
     ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}  ← wakeup triggers immediate XREAD
-    └─► Redis XREAD delivery_queue:offline:{user_id}  (fallback poll: 1s)
+    └─► Redis XREAD delivery:offline:{user_id}  (fallback poll: MSG_STREAM_POLL_FALLBACK_SECS)
             │
             └─► gRPC ServerStreamingResponse → client
 ```
 
-**Critical channel name**: delivery-worker must publish to `inbox:wakeup:{user_id}`.
+**Critical channel name**: `write_message_to_user_stream` must publish to `inbox:wakeup:{user_id}`.
 Using `message_notifications:{user_id}` (old name) would silently break real-time wakeup, causing ~1s delivery delay.
 
-### Offset commit strategy (at-least-once)
-- Delivery-worker writes to Redis stream + marks `processed_msg:{message_id}` atomically (MULTI/EXEC)
-- Returns `UserOffline` → Kafka offset NOT committed immediately
-- Kafka redelivers → dedup check finds `processed_msg` → returns `Skipped` → offset committed
+**Serialization**: envelopes must use `rmp_serde::encode::to_vec_named` on write and `rmp_serde::from_slice` on read.
 
 ---
 
@@ -94,9 +86,9 @@ Using `message_notifications:{user_id}` (old name) would silently break real-tim
 
 | Key pattern | Type | Owner | Purpose |
 |---|---|---|---|
-| `delivery_queue:offline:{user_id}` | Stream (XADD) | delivery-worker | Message inbox per user |
-| `inbox:wakeup:{user_id}` | Pub/Sub | delivery-worker | Real-time wakeup signal |
-| `processed_msg:{message_id}` | String (SETEX) | delivery-worker | Dedup guard |
+| `delivery:offline:{user_id}` | Stream (XADD) | messaging-service | Message inbox per user |
+| `inbox:wakeup:{user_id}` | Pub/Sub | messaging-service | Real-time wakeup signal |
+| `dispatched_msg:{message_id}` | String (SETEX) | messaging-service | Send-path idempotency dedup |
 | `delivered_direct:{message_id}` | String (SETEX) | messaging-service | Direct delivery dedup |
 | `user:{user_id}:server_instance_id` | String (SET) | messaging-service | Which server holds connection |
 | `delivery_queue:{server_instance_id}` | List/key (TTL) | messaging-service | Server heartbeat registry |
@@ -118,9 +110,6 @@ messaging-service
 
 auth-service
     └── → user-service (internal gRPC for profile lookup during auth)
-
-delivery-worker
-    └── Kafka consumer only — no gRPC calls
 ```
 
 `sentinel-service` has full implementation (`CheckSendPermission`, `ReportSpam`, `GetTrustStatus`).
@@ -153,7 +142,7 @@ delivery-worker
 | `MSG_POW_LEVEL_LOW` | 16 | PoW difficulty bits (low-trust new device) |
 | `MSG_POW_LEVEL_MID` | 22 | PoW difficulty bits (mid-trust) |
 | `MSG_POW_LEVEL_HIGH` | 24 | PoW difficulty bits (high-trust established) |
-| `MESSAGE_TTL_DAYS` | 7 | Kafka + Redis message retention |
+| `MESSAGE_TTL_DAYS` | 7 | Redis offline stream retention |
 
 > Note: tonic version is **0.14.5** — no `http2_keepalive_while_idle` support.
 > Application-level HeartbeatAck is the keepalive workaround.
@@ -204,28 +193,6 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 
 ## Message Delivery Latency Analysis
 
-### Kafka-enabled path (production)
-
-```
-Client gRPC send
-  → messaging-service receive + Kafka produce            ~1-5 ms
-  → Kafka broker stores message
-  → delivery-worker poll()                               0-500 ms  ← bottleneck (fetch.wait.max.ms=500)
-  → delivery-worker: Redis XADD + SETEX (MULTI/EXEC)    ~1-5 ms
-  → delivery-worker: Redis PUBLISH inbox:wakeup          ~1-2 ms
-  → messaging-service sub wakeup → XREAD                 ~1-5 ms
-  → gRPC stream deliver to client
-
-Total best case:  ~10 ms
-Total worst case: ~520 ms  (Kafka consumer just started a 500ms fetch wait)
-```
-
-**Key tunable:** `fetch.wait.max.ms=500` in `crates/construct-broker/src/consumer.rs:50`
-Reducing to **10ms** would drop worst-case Kafka consumer latency from 500ms → 10ms.
-No other config changes needed.
-
-### Kafka-disabled path (dev / when KAFKA_ENABLED=false)
-
 ```
 Client gRPC send
   → messaging-service receive
@@ -236,24 +203,6 @@ Client gRPC send
 
 Total: ~5-15 ms
 ```
-
-### Two-delivery Kafka pattern (known design issue)
-
-Every message is processed by delivery-worker **twice**:
-1. First delivery: writes to Redis, publishes wakeup → returns `UserOffline` (offset NOT committed)
-2. Kafka redelivers → dedup check finds `processed_msg:{id}` → returns `Skipped` → offset committed
-
-The second delivery does NOT affect client-facing latency (message already in Redis stream).
-It doubles Kafka consumer throughput consumption and Redis dedup key lookups.
-
-**How to fix** (when ready):
-In `delivery-worker/src/processor.rs` `process_kafka_message()`, change the final return to:
-```rust
-Ok(ProcessResult::Delivered)  // instead of ProcessResult::UserOffline
-```
-And in `delivery-worker/src/main.rs` consumer loop, commit offset for `Delivered` too.
-This requires trusting that Redis MULTI/EXEC was truly atomic (it is — no fix needed there).
-At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
 
 ---
 
@@ -285,21 +234,13 @@ At-least-once is still guaranteed by the atomic XADD + SETEX + dedup check.
 
 ## Known Issues / Tech Debt
 
-1. **Two-delivery Kafka pattern** — every message is processed twice by delivery-worker (see latency section above). Low priority (second pass is nearly free). Fix: return `ProcessResult::Delivered` in `delivery-worker/src/processor.rs` and commit offset for `Delivered` in the consumer loop.
+1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients must be initialized in `messaging-service/main.rs` even though messaging-service no longer calls APNs directly. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
 
-2. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients must be initialized in `messaging-service/main.rs` even though messaging-service no longer calls APNs directly. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
+2. **Duplicate `dispatch_envelope`** — `messaging-service/src/core.rs` (authoritative, 466 lines) and `shared/src/construct_server/messaging_service/core.rs` (462 lines, test-only copy). If you change `dispatch_envelope` signature, update **both** files.
 
-3. **Duplicate `dispatch_envelope`** — `messaging-service/src/core.rs` (authoritative, 466 lines) and `shared/src/construct_server/messaging_service/core.rs` (462 lines, test-only copy). If you change `dispatch_envelope` signature, update **both** files.
+3. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
 
-4. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read by delivery-worker (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
-
-5. **DLQ topic must exist** — delivery-worker sends failures to `{topic}-dlq` (i.e. `messages-dlq`) via `MessageProducer::send_raw_to_topic`. Topic must be pre-created in Redpanda. On producer error falls back to structured `DLQ_MESSAGE` error log.
-
-6. **content-hash dedup (Layer 3) never fires** — `should_skip_message_with_content` hashes ciphertext which always has a random IV per message, so this dedup layer is dead code for E2EE messages. Function exists but is not called from `processor.rs`.
-
-7. **`run_user_online_notification_listener`** in delivery-worker subscribes to `ONLINE_CHANNEL` but takes no action on messages (Kafka auto-redelivers on reconnect). Can be removed.
-
-8. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
+4. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
 
 ---
 

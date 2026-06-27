@@ -661,8 +661,8 @@ impl MessagingService for MessagingGrpcService {
         );
 
         // Deliver the edit through the same path as a regular message
-        // (dispatch_envelope → Kafka → live push), NOT a raw write_message_to_user_stream.
-        // The direct write is only Kafka's Redis fallback; it bypasses live delivery, so a
+        // (dispatch_envelope → Redis stream + wakeup + live push), NOT a raw write_message_to_user_stream.
+        // A raw write bypasses dedup, receipt routing, and push notification side-effects, so a
         // connected recipient never received the edit envelope (and thus edits_message_id),
         // leaving the original message un-updated. dispatch_envelope preserves
         // edits_message_id (see envelope.rs to_proto) and pushes it live.

@@ -43,7 +43,6 @@ pub use construct_utils as utils;
 use auth::AuthManager;
 use construct_config::Config;
 use context::AppContext;
-use kafka::MessageProducer;
 use queue::MessageQueue;
 
 // Monolithic server - simplified to HTTP-only (WebSocket removed)
@@ -116,17 +115,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Connected to Redis");
 
     let queue = Arc::new(Mutex::new(message_queue));
-
-    // Initialize Kafka producer (Phase 1: Foundation)
-    tracing::info!("Initializing Kafka producer...");
-    let kafka_producer = MessageProducer::new(&app_config.kafka)?;
-    tracing::info!(
-        enabled = app_config.kafka.enabled,
-        brokers = %app_config.kafka.brokers,
-        topic = %app_config.kafka.topic,
-        "Kafka producer initialized"
-    );
-    let kafka_producer = Arc::new(kafka_producer);
 
     // Initialize APNs client
     tracing::info!("Initializing APNs client...");
@@ -298,7 +286,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_queue(queue.clone())
         .with_auth_manager(auth_manager.clone())
         .with_config(app_config.clone())
-        .with_kafka_producer(kafka_producer.clone())
         .with_apns_client(apns_client.clone())
         .with_token_encryption(token_encryption.clone())
         .with_server_instance_id(server_instance_id)

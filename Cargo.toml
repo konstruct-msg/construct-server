@@ -10,7 +10,6 @@ members = [
     "invite-service",
     "gateway",
     "media-service",
-    "delivery-worker",
     "key-service",
     "mls-service",
     "sentinel-service",
