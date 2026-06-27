@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use construct_config::Config;
+use construct_server_shared::auth_utils;
 use construct_server_shared::{auth::AuthManager, db::DbPool, queue::MessageQueue};
 use serde_json::json;
 use std::{env, sync::Arc};
@@ -21,17 +22,6 @@ pub struct InviteServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub config: Arc<Config>,
-}
-
-/// Extract user_id from gRPC metadata (set by auth interceptor)
-fn extract_user_id(metadata: &MetadataMap) -> Result<Uuid, Status> {
-    let user_id_str = metadata
-        .get("x-user-id")
-        .ok_or_else(|| Status::unauthenticated("Missing x-user-id metadata"))?
-        .to_str()
-        .map_err(|_| Status::unauthenticated("Invalid x-user-id format"))?;
-
-    Uuid::parse_str(user_id_str).map_err(|_| Status::unauthenticated("Invalid x-user-id UUID"))
 }
 
 /// Extract device_id from gRPC metadata (optional)
@@ -55,7 +45,7 @@ impl InviteService for InviteGrpcService {
         request: Request<proto::GenerateInviteRequest>,
     ) -> Result<Response<proto::GenerateInviteResponse>, Status> {
         let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, metadata)?;
         let device_id = extract_device_id(metadata);
         let req = request.into_inner();
 
@@ -85,7 +75,7 @@ impl InviteService for InviteGrpcService {
         request: Request<proto::AcceptInviteRequest>,
     ) -> Result<Response<proto::AcceptInviteResponse>, Status> {
         let metadata = request.metadata();
-        let accepter_user_id = extract_user_id(metadata)?;
+        let accepter_user_id = auth_utils::extract_user_id(&self.context.auth_manager, metadata)?;
         let req = request.into_inner();
 
         // Parse InviteToken from proto
@@ -134,7 +124,7 @@ impl InviteService for InviteGrpcService {
         request: Request<proto::RevokeInviteRequest>,
     ) -> Result<Response<proto::RevokeInviteResponse>, Status> {
         let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, metadata)?;
         let req = request.into_inner();
 
         // Call core business logic
@@ -158,7 +148,7 @@ impl InviteService for InviteGrpcService {
         request: Request<proto::ListInvitesRequest>,
     ) -> Result<Response<proto::ListInvitesResponse>, Status> {
         let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, metadata)?;
         let req = request.into_inner();
 
         // Call core business logic

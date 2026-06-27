@@ -181,10 +181,10 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 ## Caddy Configuration
 
 - File: `ops/Caddyfile`
-- TLS termination (Let's Encrypt), HTTP/3 (QUIC), JWT validation via `caddy-jwt` plugin
-- Internal listener on `:8080` for gateway proxy (plain h2c, same JWT validation)
+- TLS termination (Let's Encrypt) via vanilla `caddy:alpine` — no JWT plugin
+- Internal listener on `:8080` for gateway proxy (plain h2c)
 - Routes by gRPC service path prefix to upstream h2c services
-- Build: `ops/Dockerfile.caddy` — `xcaddy` build with greenpau/caddy-jwt
+- Each service validates JWT itself via `construct-auth::AuthManager`
 
 ## Gateway (veil/obfs4 proxy)
 
