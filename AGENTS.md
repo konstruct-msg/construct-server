@@ -14,8 +14,7 @@
 | `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships, invite tokens |
-| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery |
-| `notification` | `notification-service` | 50054 | 8084 | APNs push (prod + sandbox), FCM |
+| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery, APNs push (prod + sandbox) |
 | `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
 | `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
 | `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
@@ -106,7 +105,6 @@ Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written,
 
 ```
 messaging-service
-    ├── → notification-service (SendBlindNotification, silent APNs push for offline users)
     ├── → sentinel-service (CheckSendPermission — rate limit + block enforcement on send path)
     └── → key-service (via HTTP for key bundles, rare)
 
@@ -124,13 +122,12 @@ auth-service
 
 ## APNs Push Architecture
 
-**Refactored (commit `69a2cf5`):**
-- `messaging-service` → gRPC → `notification-service` → APNs
-- `messaging-service/src/core.rs`: `send_blind_notification()` calls `SendBlindNotificationRequest`
-- Env var: `NOTIFICATION_SERVICE_URL` (default: `http://notification:50054`)
-- APNs clients are still initialized in `messaging-service/main.rs` for `to_app_context()` adapter compat — this is intentional, not dead code
-
-**Before refactor:** messaging-service called APNs directly.
+**Notification-service merged into messaging-service:**
+- `messaging-service` calls APNs directly via `notification_core::send_blind_notification()`
+- APNs clients (prod + sandbox) are initialized in `messaging-service/main.rs`
+- `NotificationServiceServer` runs on messaging's gRPC port (50053) for other services (key, signaling, mls, user)
+- Env var: `NOTIFICATION_SERVICE_URL` is no longer used by messaging-service; other services point to `messaging:50053`
+- Circuit-breaker `NotificationClient` removed — direct APNs call replaces gRPC round-trip
 
 ---
 
@@ -236,7 +233,7 @@ Total: ~5-15 ms
 
 ## Known Issues / Tech Debt
 
-1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients must be initialized in `messaging-service/main.rs` even though messaging-service no longer calls APNs directly. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
+1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients are initialized in `messaging-service/main.rs` even though `to_app_context()` doesn't use them. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
 
 2. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
 

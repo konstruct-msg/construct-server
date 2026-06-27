@@ -15,18 +15,6 @@ scrape_configs:
     static_configs:
       - targets: ["messaging:8083"]
 
-  - job_name: notification
-    static_configs:
-      - targets: ["notification:8084"]
-
-  - job_name: delivery
-    static_configs:
-      - targets: ["delivery:8085"]
-
-  - job_name: invite
-    static_configs:
-      - targets: ["invite:8086"]
-
   - job_name: media
     static_configs:
       - targets: ["media:8087"]

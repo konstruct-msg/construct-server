@@ -62,7 +62,6 @@ services:
       - auth
       - user
       - messaging
-      - notification
       - signaling
       - mls
       - channel
@@ -142,29 +141,7 @@ services:
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
-      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://notification:50054}
       SENTINEL_SERVICE_URL: ${SENTINEL_SERVICE_URL:-http://sentinel:50059}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-    depends_on:
-      - notification
-
-  notification:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
-    command: /usr/local/bin/notification-service
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "8084"
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      SERVICE_NAME: notification
-      APNS_ENABLED: ${APNS_ENABLED:-true}
-      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -237,7 +214,7 @@ services:
       PORT: "50058"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       METRICS_PORT: "8097"
-      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://notification:50054}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -292,7 +269,7 @@ services:
       TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.msk.konstruct.cc}
       TURN_SECRET: ${TURN_SECRET}
       TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
-      NOTIFICATION_GRPC_ENDPOINT: "http://notification:50054"
+      NOTIFICATION_GRPC_ENDPOINT: "http://messaging:50053"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:

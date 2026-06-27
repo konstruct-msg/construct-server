@@ -54,7 +54,7 @@
 		reverse_proxy h2c://messaging:50053
 	}
 	handle /shared.proto.services.v1.NotificationService/* {
-		reverse_proxy h2c://notification:50054
+		reverse_proxy h2c://messaging:50053
 	}
 	handle /shared.proto.services.v1.InviteService/* {
 		reverse_proxy h2c://user:50052

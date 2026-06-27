@@ -3,8 +3,6 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::clients::notification::NotificationClient;
-use crate::shared::proto::services::v1::SendBlindNotificationRequest;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
@@ -31,11 +29,12 @@ async fn fetch_recipient_device_ids(
 /// Dispatch a pre-built MessageEnvelope to the recipient's Redis offline stream.
 ///
 /// Used by the gRPC path where the envelope is constructed without going
-/// through `EncryptedMessage` deserialization.
+/// through `EncryptedMessage` deserialization. Push notification is handled
+/// by the messaging-service binary directly — this shared copy is for tests
+/// and skips push.
 pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
     envelope: MessageEnvelope,
-    notification_client: Option<NotificationClient>,
 ) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
     let salt = &app_context.config.logging.hash_salt;
@@ -43,17 +42,12 @@ pub async fn dispatch_envelope(
     let sender_id = &envelope.sender_id;
     let recipient_id = &envelope.recipient_id;
 
-    // Idempotency: reject duplicate message_ids (client retry with same UUID).
-    // Receipt and control envelopes are excluded — they are server-generated.
     use construct_message::MessageType;
     let is_user_message = matches!(
         envelope.message_type,
         MessageType::DirectMessage | MessageType::MLSMessage | MessageType::SenderSync
     );
 
-    // All Redis operations are batched inside ONE lock acquisition to avoid
-    // releasing and re-acquiring the mutex between the dedup check, the
-    // stream write, and the receipt-sender mapping.
     let t_lock = std::time::Instant::now();
     let mut queue = app_context.queue.lock().await;
     tracing::debug!(
@@ -75,8 +69,6 @@ pub async fn dispatch_envelope(
             }
         }
 
-        // Block enforcement: silently drop if recipient has blocked sender.
-        // Returns Ok(()) to avoid leaking block status to the sender.
         if let (Ok(sender_uuid), Ok(recipient_uuid)) =
             (Uuid::parse_str(sender_id), Uuid::parse_str(recipient_id))
         {
@@ -99,8 +91,6 @@ pub async fn dispatch_envelope(
         }
     }
 
-    // Fan-out to per-device streams (multi-device support) + legacy user stream.
-    // drop(queue) before the blocking DB call to minimize lock contention.
     drop(queue);
 
     let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
@@ -116,10 +106,6 @@ pub async fn dispatch_envelope(
         tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
     }
     drop(queue);
-    tracing::debug!(
-        redis_ms = t_lock.elapsed().as_millis(),
-        "dispatch redis batch done"
-    );
 
     let elapsed = t_start.elapsed();
     tracing::info!(
@@ -130,8 +116,6 @@ pub async fn dispatch_envelope(
         "Message dispatched"
     );
 
-    // ── Non-critical background tasks ─────────────────────────────────────────
-    // DB fallback for receipt routing (survives Redis restarts).
     if !sender_id.is_empty() {
         let hash_salt = app_context.config.logging.hash_salt.clone();
         let msg_id = message_id.clone();
@@ -154,49 +138,6 @@ pub async fn dispatch_envelope(
         });
     }
 
-    // Send silent push notification via notification-service gRPC (non-critical background task)
-    if let Some(notif_client) = notification_client {
-        let recipient = recipient_id.clone();
-        tokio::spawn(async move {
-            if notif_client.is_circuit_open() {
-                return; // service known down — skip silently until backoff expires
-            }
-            match send_blind_notification(&notif_client, &recipient).await {
-                Ok(()) => notif_client.record_success(),
-                Err(e) => {
-                    notif_client.record_failure();
-                    tracing::warn!(error = %e, "Failed to send blind notification via notification-service (non-critical) — pausing for 30s");
-                }
-            }
-        });
-    }
-
-    Ok(())
-}
-
-/// Send a privacy-preserving "blind" notification to a recipient via notification-service gRPC.
-///
-/// Non-blocking helper — always called via `tokio::spawn`. Failures are logged
-/// but never propagate to the caller.
-async fn send_blind_notification(
-    notification_client: &NotificationClient,
-    recipient_id: &str,
-) -> anyhow::Result<()> {
-    let mut client = notification_client.get();
-    let resp = client
-        .send_blind_notification(SendBlindNotificationRequest {
-            user_id: recipient_id.to_string(),
-            badge_count: None,
-            activity_type: Some("new_message".to_string()),
-            conversation_id: None,
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    if resp.into_inner().success {
-        tracing::debug!(recipient_id = %recipient_id, "Blind notification sent via notification-service");
-    } else {
-        tracing::warn!(recipient_id = %recipient_id, "notification-service returned success=false for blind notification");
-    }
     Ok(())
 }
 

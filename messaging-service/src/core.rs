@@ -13,8 +13,7 @@ use construct_error::AppError;
 use construct_extractors::TrustedUser;
 use construct_message::MessageEnvelope;
 use construct_metrics::{MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL};
-use construct_server_shared::clients::notification::NotificationClient;
-use construct_server_shared::shared::proto::services::v1::SendBlindNotificationRequest;
+use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
 
@@ -43,7 +42,7 @@ async fn fetch_recipient_device_ids(
 pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
     envelope: MessageEnvelope,
-    notification_client: Option<NotificationClient>,
+    notification_context: Option<Arc<NotificationServiceContext>>,
 ) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
     let salt = &app_context.config.logging.hash_salt;
@@ -165,49 +164,29 @@ pub async fn dispatch_envelope(
         });
     }
 
-    // Send silent push notification via notification-service gRPC (non-critical background task)
-    if let Some(notif_client) = notification_client {
+    // Send silent push notification directly via APNs (non-critical background task)
+    if let Some(notif_ctx) = notification_context {
+        let ctx = notif_ctx;
         let recipient = recipient_id.clone();
         tokio::spawn(async move {
-            if notif_client.is_circuit_open() {
-                return; // service known down — skip silently until backoff expires
-            }
-            match send_blind_notification(&notif_client, &recipient).await {
-                Ok(()) => notif_client.record_success(),
+            let Ok(recipient_uuid) = Uuid::parse_str(&recipient) else {
+                return;
+            };
+            let input = crate::notification_core::SendBlindNotificationInput {
+                user_id: recipient_uuid,
+                badge_count: None,
+                activity_type: Some("new_message".to_string()),
+                conversation_id: None,
+            };
+            match crate::notification_core::send_blind_notification(&ctx, input).await {
+                Ok(_) => tracing::debug!("Blind notification sent via embedded APNs"),
                 Err(e) => {
-                    notif_client.record_failure();
-                    tracing::warn!(error = %e, "Failed to send blind notification via notification-service (non-critical) — pausing for 30s");
+                    tracing::warn!(error = %e, "Failed to send blind notification (non-critical)")
                 }
             }
         });
     }
 
-    Ok(())
-}
-
-/// Send a privacy-preserving "blind" notification to a recipient via notification-service gRPC.
-///
-/// Non-blocking helper — always called via `tokio::spawn`. Failures are logged
-/// but never propagate to the caller.
-async fn send_blind_notification(
-    notification_client: &NotificationClient,
-    recipient_id: &str,
-) -> anyhow::Result<()> {
-    let mut client = notification_client.get();
-    let resp = client
-        .send_blind_notification(SendBlindNotificationRequest {
-            user_id: recipient_id.to_string(),
-            badge_count: None,
-            activity_type: Some("new_message".to_string()),
-            conversation_id: None,
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    if resp.into_inner().success {
-        tracing::debug!(recipient_id = %recipient_id, "Blind notification sent via notification-service");
-    } else {
-        tracing::warn!(recipient_id = %recipient_id, "notification-service returned success=false for blind notification");
-    }
     Ok(())
 }
 

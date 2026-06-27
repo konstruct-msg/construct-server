@@ -2797,42 +2797,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "notification-service"
-version = "0.15.2"
-dependencies = [
- "anyhow",
- "apns-h2",
- "async-trait",
- "axum",
- "base64",
- "bcrypt",
- "chrono",
- "construct-config",
- "construct-error",
- "construct-extractors",
- "construct-server-shared",
- "dotenvy",
- "hex",
- "jsonwebtoken 10.3.0",
- "prometheus",
- "prost",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

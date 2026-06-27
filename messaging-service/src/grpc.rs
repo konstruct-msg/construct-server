@@ -583,7 +583,7 @@ impl MessagingService for MessagingGrpcService {
         core::dispatch_envelope(
             &app_context,
             kafka_envelope,
-            self.context.notification_client.clone(),
+            self.context.notification_context.clone(),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -670,7 +670,7 @@ impl MessagingService for MessagingGrpcService {
         core::dispatch_envelope(
             &app_context,
             envelope,
-            self.context.notification_client.clone(),
+            self.context.notification_context.clone(),
         )
         .await
         .map_err(|e| Status::internal(format!("Failed to dispatch edit: {e}")))?;

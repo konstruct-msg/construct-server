@@ -5,11 +5,11 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use uuid::Uuid;
 
 use construct_crypto::hmac_sha256;
+use construct_server_shared::user_service::UserServiceContext;
 use construct_server_shared::{
     AppError,
     db::{self as construct_db, DbPool},
 };
-use construct_server_shared::user_service::UserServiceContext;
 
 use crypto_agility::{InviteToken, InviteValidationError};
 
@@ -317,15 +317,10 @@ pub async fn revoke_invite(
 ) -> Result<RevokeInviteOutput> {
     let jti_uuid = Uuid::parse_str(&input.jti).context("Invalid jti UUID")?;
 
-    let revoked = construct_db::burn_used_invite(
-        &context.db_pool,
-        &jti_uuid,
-        &input.user_id,
-        None,
-        180,
-    )
-    .await
-    .context("Failed to revoke invite")?;
+    let revoked =
+        construct_db::burn_used_invite(&context.db_pool, &jti_uuid, &input.user_id, None, 180)
+            .await
+            .context("Failed to revoke invite")?;
 
     if revoked {
         tracing::info!(
