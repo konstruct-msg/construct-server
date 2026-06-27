@@ -1,12 +1,13 @@
 {
 	grace_period 10s
 	admin 127.0.0.1:2019
-	servers {
-		max_concurrent_streams 1000
-	}
 }
 
-(grpc_routes) {
+*.konstruct.cc, konstruct.cc {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
 	header {
 		Access-Control-Allow-Methods "GET, POST, OPTIONS"
 		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
@@ -73,15 +74,71 @@
 	}
 }
 
-*.konstruct.cc, konstruct.cc {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-	import grpc_routes
-}
-
 :8080 {
-	import grpc_routes
+	header {
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
+		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
+		Access-Control-Allow-Origin *
+		Vary Origin
+	}
+
+	handle /.well-known* {
+		reverse_proxy gateway:3000
+	}
+	handle /health {
+		reverse_proxy gateway:3000
+	}
+	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://auth:50051
+	}
+	handle /shared.proto.services.v1.DeviceService/* {
+		reverse_proxy h2c://auth:50051
+	}
+	handle /shared.proto.services.v1.UserService/* {
+		reverse_proxy h2c://user:50052
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /construct.message_gateway.v1.MessageGateway/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.NotificationService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://user:50052
+	}
+	handle /shared.proto.services.v1.VeilService/* {
+		reverse_proxy h2c://veil:50056
+	}
+	handle /shared.proto.services.v1.KeyService/* {
+		reverse_proxy h2c://key:50057
+	}
+	handle /shared.proto.services.v1.MediaService/* {
+		reverse_proxy h2c://media:50056
+	}
+	handle /shared.proto.services.v1.MlsService/* {
+		reverse_proxy h2c://mls:50058
+	}
+	handle /shared.proto.services.v1.ChannelService/* {
+		reverse_proxy h2c://channel:50061
+	}
+	handle /shared.proto.sentinel.v1.SentinelService/* {
+		reverse_proxy h2c://sentinel:50059
+	}
+	handle /shared.proto.signaling.v1.SignalingService/* {
+		reverse_proxy h2c://signaling:50060 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
 }
 
 :80 {
