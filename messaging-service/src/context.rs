@@ -13,8 +13,8 @@ use construct_db::DbPool;
 use construct_federation::ServerSigner;
 use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
-use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::clients::sentinel::SentinelClient;
+use construct_server_shared::notification_service::NotificationServiceContext;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -25,8 +25,8 @@ pub struct MessagingServiceContext {
     pub db_pool: Arc<DbPool>,
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
-    /// gRPC client for notification-service — used for silent push instead of calling APNs directly
-    pub notification_client: Option<NotificationClient>,
+    /// Embedded notification context for direct push (APNs) — replaces former gRPC round-trip to notification-service
+    pub notification_context: Option<Arc<NotificationServiceContext>>,
     /// gRPC client for sentinel-service — rate limiting and spam protection
     pub sentinel_client: Option<SentinelClient>,
     pub config: Arc<Config>,

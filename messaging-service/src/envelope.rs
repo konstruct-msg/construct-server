@@ -216,7 +216,7 @@ pub(crate) async fn dispatch_sealed_sender(
     core::dispatch_envelope(
         &app_context,
         kafka_envelope,
-        context.notification_client.clone(),
+        context.notification_context.clone(),
     )
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -4,6 +4,8 @@ mod envelope;
 mod grpc;
 mod handlers;
 mod media_routes;
+mod notification_core;
+mod notification_grpc;
 mod receipts;
 mod spent_tag;
 mod stream;
@@ -14,17 +16,20 @@ use axum::{
     Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
-use construct_config::Config;
+use construct_apns::{ApnsClient, DeviceTokenEncryption};
+use construct_config::{ApnsEnvironment, Config};
 use construct_server_shared::auth::AuthManager;
-use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::db::DbPool;
+use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_server_shared::queue::MessageQueue;
 use construct_server_shared::shared::proto::services::v1::messaging_service_server::MessagingServiceServer;
+use construct_server_shared::shared::proto::services::v1::notification_service_server::NotificationServiceServer;
 use context::MessagingServiceContext;
 use grpc::MessagingGrpcService;
+use notification_grpc::NotificationGrpcService;
 use serde_json::json;
 use std::env;
 use std::sync::Arc;
@@ -87,22 +92,48 @@ async fn main() -> Result<()> {
     let auth_manager =
         Arc::new(AuthManager::new(&config).context("Failed to initialize auth manager")?);
 
-    // Initialize notification-service gRPC client for outgoing silent push
-    let notification_client = match env::var("NOTIFICATION_SERVICE_URL")
-        .or_else(|_| Ok::<_, std::env::VarError>("http://notification:50054".to_string()))
-    {
-        Ok(url) => match NotificationClient::new(&url) {
-            Ok(client) => {
-                info!(url = %url, "Notification service gRPC client initialized");
-                Some(client)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create notification service gRPC client — push notifications disabled");
-                None
-            }
-        },
-        Err(_) => None,
-    };
+    // Initialize APNs Client (production endpoint: api.push.apple.com)
+    info!("Initializing APNs client (production)...");
+    let apns_client =
+        Arc::new(ApnsClient::new(config.apns.clone()).context("Failed to initialize APNs client")?);
+    if let Err(e) = apns_client.initialize().await {
+        if config.apns.enabled {
+            tracing::error!(
+                error = %e,
+                key_path = %config.apns.key_path,
+                "APNs initialization failed — push notifications DISABLED until key is deployed"
+            );
+        }
+    } else if config.apns.enabled {
+        info!("APNs client initialized and ENABLED (production)");
+    } else {
+        info!("APNs client initialized but DISABLED (APNS_ENABLED=false)");
+    }
+
+    // Initialize APNs sandbox client (api.sandbox.push.apple.com) — for debug/TestFlight builds.
+    info!("Initializing APNs sandbox client...");
+    let mut sandbox_config = config.apns.clone();
+    sandbox_config.environment = ApnsEnvironment::Development;
+    let apns_sandbox_client = Arc::new(
+        ApnsClient::new(sandbox_config).context("Failed to initialize APNs sandbox client")?,
+    );
+    if let Err(e) = apns_sandbox_client.initialize().await {
+        if config.apns.enabled {
+            tracing::error!(
+                error = %e,
+                key_path = %config.apns.key_path,
+                "APNs sandbox initialization failed — sandbox push notifications DISABLED"
+            );
+        }
+    } else if config.apns.enabled {
+        info!("APNs sandbox client initialized and ENABLED");
+    }
+
+    // Initialize Device Token Encryption
+    let token_encryption = Arc::new(
+        DeviceTokenEncryption::from_hex(&config.apns.device_token_encryption_key)
+            .context("Failed to initialize device token encryption")?,
+    );
 
     // Initialize sentinel-service gRPC client for send-path spam/rate protection
     let sentinel_client = match env::var("SENTINEL_SERVICE_URL")
@@ -159,6 +190,19 @@ async fn main() -> Result<()> {
             }
         };
 
+    // Initialize NotificationServiceContext for direct push (replaces gRPC round-trip)
+    let notification_context = Arc::new(NotificationServiceContext {
+        db_pool: db_pool.clone(),
+        queue: queue.clone(),
+        auth_manager: auth_manager.clone(),
+        apns_client,
+        apns_sandbox_client,
+        token_encryption,
+        config: config.clone(),
+        key_management: key_management.clone(),
+    });
+    tracing::info!("Notification service context initialized (embedded in messaging-service)");
+
     // Initialize server signer for federation (sealed sender cross-server forwarding)
     let server_signer =
         construct_server_shared::context::AppContext::init_server_signer_pub(&config);
@@ -168,7 +212,7 @@ async fn main() -> Result<()> {
         db_pool,
         queue,
         auth_manager,
-        notification_client,
+        notification_context: Some(notification_context),
         sentinel_client,
         config: config.clone(),
         key_management,
@@ -179,23 +223,25 @@ async fn main() -> Result<()> {
 
     // handlers module is local (messaging-service/src/handlers.rs)
 
-    // Start gRPC MessagingService (SVC-3 scaffold)
+    // Start gRPC server hosting MessagingService + NotificationService
     let grpc_context = context.clone();
     let grpc_bind_address =
         env::var("MESSAGING_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50053".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
-    // Replace bare .serve() with graceful shutdown for gRPC
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
     tokio::spawn(async move {
-        let service = MessagingGrpcService {
+        let messaging_svc = MessagingServiceServer::new(MessagingGrpcService {
+            context: grpc_context.clone(),
+        })
+        .max_decoding_message_size(512 * 1024); // 512 KB — ~100× real message
+        let notification_svc = NotificationServiceServer::new(NotificationGrpcService {
             context: grpc_context,
-        };
+        });
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-                .add_service(
-                    MessagingServiceServer::new(service).max_decoding_message_size(512 * 1024), // 512 KB — ~100× real message
-                )
+                .add_service(messaging_svc)
+                .add_service(notification_svc)
                 .serve_with_incoming_shutdown(
                     grpc_incoming,
                     construct_server_shared::shutdown_signal(),
@@ -247,6 +293,19 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/media/token",
             post(media_routes::generate_media_token),
+        )
+        // Notification device registration (merged from notification-service)
+        .route(
+            "/api/v1/notifications/register-device",
+            post(handlers::register_device),
+        )
+        .route(
+            "/api/v1/notifications/unregister-device",
+            post(handlers::unregister_device),
+        )
+        .route(
+            "/api/v1/notifications/preferences",
+            put(handlers::update_preferences),
         )
         // Apply middleware
         .layer(
