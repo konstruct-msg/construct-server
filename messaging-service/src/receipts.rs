@@ -15,7 +15,7 @@ pub(crate) async fn relay_delivery_receipt(
     direct: construct_server_shared::shared::proto::signaling::v1::DirectReceipt,
     receipt_sender_id: String,
 ) -> anyhow::Result<()> {
-    use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+    use construct_server_shared::kafka::types::MessageEnvelope;
 
     if direct.message_ids.is_empty() {
         return Ok(());
@@ -101,7 +101,7 @@ pub(crate) async fn relay_delivery_receipt(
         // SESSION_RESET) through the normal message stream, so we must NOT also queue
         // a server-generated SESSION_RESET here — that would cause the sender to
         // receive two reset signals and double-initialise the X3DH session.
-        let receipt_envelope = KafkaMessageEnvelope::from_receipt(
+        let receipt_envelope = MessageEnvelope::from_receipt(
             sender_id.clone(),
             receipt_sender_id.clone(),
             msg_ids,
@@ -120,9 +120,9 @@ pub(crate) async fn relay_delivery_receipt(
     Ok(())
 }
 
-/// Build a MessageStreamResponse::Receipt from a Receipt-type KafkaMessageEnvelope.
+/// Build a MessageStreamResponse::Receipt from a Receipt-type MessageEnvelope.
 pub(crate) fn build_receipt_response(
-    envelope: &construct_server_shared::kafka::types::KafkaMessageEnvelope,
+    envelope: &construct_server_shared::kafka::types::MessageEnvelope,
 ) -> anyhow::Result<proto::MessageStreamResponse> {
     use construct_server_shared::shared::proto::signaling::v1 as signaling;
 

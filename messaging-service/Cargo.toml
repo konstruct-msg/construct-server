@@ -8,7 +8,7 @@ construct-config = { path = "../crates/construct-config" }
 construct-server-shared = { path = "../shared" }
 construct-apns = { path = "../crates/construct-apns" }
 construct-auth = { path = "../crates/construct-auth" }
-construct-broker = { path = "../crates/construct-broker" }
+construct-message = { path = "../crates/construct-message" }
 construct-context = { path = "../crates/construct-context" }
 construct-db = { path = "../crates/construct-db" }
 construct-federation = { path = "../crates/construct-federation" }

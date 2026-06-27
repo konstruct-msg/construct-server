@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Type of message being sent through Kafka
+/// Type of message being sent
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageType {
@@ -53,13 +53,13 @@ pub enum MessageType {
     SenderSync,
 }
 
-/// Kafka message envelope containing all message types
+/// Message envelope containing all message types
 ///
-/// This structure is serialized to JSON and stored in Kafka.
+/// This structure is serialized to JSON and stored in Redis streams.
 /// The partition key is derived from `recipient_id` to ensure ordering per user/group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct KafkaMessageEnvelope {
+pub struct MessageEnvelope {
     // ===== Identification =====
     /// Unique message ID (UUID v4)
     pub message_id: String,
@@ -68,7 +68,7 @@ pub struct KafkaMessageEnvelope {
     pub sender_id: String,
 
     /// Recipient ID (user UUID) or group ID
-    /// Used as Kafka partition key for ordering guarantees
+    /// Used as partition key for ordering guarantees
     pub recipient_id: String,
 
     /// Unix timestamp in seconds
@@ -162,7 +162,7 @@ pub struct KafkaMessageEnvelope {
     pub proto_content_type: Option<i32>,
 }
 
-impl KafkaMessageEnvelope {
+impl MessageEnvelope {
     /// Create a new DirectMessage envelope (for Phase 1-2 compatibility)
     pub fn new_direct_message(
         message_id: String,
@@ -200,7 +200,7 @@ impl KafkaMessageEnvelope {
         }
     }
 
-    /// Create a KafkaMessageEnvelope for a sealed-sender message.
+    /// Create a MessageEnvelope for a sealed-sender message.
     ///
     /// The server does NOT know the sender. `recipient_id` is extracted from the
     /// plaintext `SealedInner.recipient_user_id` field before calling this.
@@ -383,7 +383,7 @@ impl KafkaMessageEnvelope {
         Ok(())
     }
 
-    /// Create a KafkaMessageEnvelope representing a delivery receipt.
+    /// Create a MessageEnvelope representing a delivery receipt.
     ///
     /// `original_sender_id` — who originally sent the message (receives this receipt).
     /// `receipt_sender_id` — who is sending the receipt (the message recipient).
@@ -441,7 +441,7 @@ impl KafkaMessageEnvelope {
 // Conversions from existing message types
 // ============================================================================
 
-impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
+impl From<&construct_types::ChatMessage> for MessageEnvelope {
     fn from(msg: &construct_types::ChatMessage) -> Self {
         use construct_types::MessageType as ConstructMessageType;
 
@@ -525,7 +525,7 @@ impl From<&construct_types::ChatMessage> for KafkaMessageEnvelope {
 }
 
 // For convenience, also implement From<ChatMessage> (owned)
-impl From<construct_types::ChatMessage> for KafkaMessageEnvelope {
+impl From<construct_types::ChatMessage> for MessageEnvelope {
     fn from(msg: construct_types::ChatMessage) -> Self {
         Self::from(&msg)
     }
@@ -535,7 +535,7 @@ impl From<construct_types::ChatMessage> for KafkaMessageEnvelope {
 // Conversion from EncryptedMessage (REST API v1)
 // ============================================================================
 
-/// Context for creating KafkaMessageEnvelope from a proto Envelope.
+/// Context for creating MessageEnvelope from a proto Envelope.
 ///
 /// E2EE contract: encrypted_payload is opaque ciphertext — server never reads it.
 /// All Signal Protocol parameters live inside the payload. Server only needs
@@ -553,8 +553,8 @@ pub struct ProtoEnvelopeContext {
     pub edits_message_id: Option<String>,
 }
 
-impl KafkaMessageEnvelope {
-    /// Create a KafkaMessageEnvelope from a proto Envelope.
+impl MessageEnvelope {
+    /// Create a MessageEnvelope from a proto Envelope.
     ///
     /// The server stores `encrypted_payload` verbatim (as base64) and routes the
     /// message to the recipient. It never inspects the payload contents.
@@ -607,7 +607,7 @@ impl KafkaMessageEnvelope {
         }
     }
 
-    /// Create a KafkaMessageEnvelope for an edit operation.
+    /// Create a MessageEnvelope for an edit operation.
     ///
     /// Delivers a new encrypted payload to the recipient that replaces
     /// the original message identified by `original_message_id`.
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_direct_message_envelope_creation() {
-        let envelope = KafkaMessageEnvelope::new_direct_message(
+        let envelope = MessageEnvelope::new_direct_message(
             "msg-123".to_string(),
             "user-456".to_string(),
             "user-789".to_string(),
@@ -791,7 +791,7 @@ mod tests {
             edits_message_id: None,
         };
 
-        let envelope = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+        let envelope = MessageEnvelope::from_proto_envelope(&ctx);
 
         assert_eq!(envelope.sender_id, "sender-uuid");
         assert_eq!(envelope.recipient_id, "recipient-uuid");
@@ -813,7 +813,7 @@ mod tests {
         use base64::Engine;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&envelope.encrypted_payload)
-            .expect("KafkaMessageEnvelope.encrypted_payload must be valid base64");
+            .expect("MessageEnvelope.encrypted_payload must be valid base64");
         assert_eq!(
             decoded, fake_ciphertext,
             "encrypted_payload must be stored verbatim (base64), not parsed"
@@ -831,7 +831,7 @@ mod tests {
             edits_message_id: None,
         };
 
-        let env = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+        let env = MessageEnvelope::from_proto_envelope(&ctx);
 
         // SESSION_RESET_INIT carries encrypted payload → DirectMessage, not ControlMessage
         assert_eq!(env.message_type, MessageType::DirectMessage);
@@ -851,7 +851,7 @@ mod tests {
     #[test]
     fn test_serde_proto_content_type_absent_for_legacy() {
         // proto_content_type has skip_serializing_if = "Option::is_none"
-        let env = KafkaMessageEnvelope::new_direct_message(
+        let env = MessageEnvelope::new_direct_message(
             "msg-1".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -878,12 +878,12 @@ mod tests {
             content_type: 24,
             edits_message_id: None,
         };
-        let env = KafkaMessageEnvelope::from_proto_envelope(&ctx);
+        let env = MessageEnvelope::from_proto_envelope(&ctx);
 
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("protoContentType"));
 
-        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+        let restored: MessageEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.proto_content_type, Some(24));
     }
 
@@ -891,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_from_edit_sets_edits_message_id() {
-        let env = KafkaMessageEnvelope::from_edit(
+        let env = MessageEnvelope::from_edit(
             "new-msg-id".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -915,7 +915,7 @@ mod tests {
     fn test_from_edit_payload_is_base64_of_ciphertext() {
         use base64::Engine;
         let ciphertext = b"opaque-encrypted-edit-bytes";
-        let env = KafkaMessageEnvelope::from_edit(
+        let env = MessageEnvelope::from_edit(
             "e-id".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -933,14 +933,14 @@ mod tests {
     fn test_from_edit_content_hash_includes_original_id() {
         // Two edits with different original_message_ids must have different content hashes
         // even if new_message_id and ciphertext are the same.
-        let env_a = KafkaMessageEnvelope::from_edit(
+        let env_a = MessageEnvelope::from_edit(
             "new-id".to_string(),
             "alice".to_string(),
             "bob".to_string(),
             "original-A".to_string(),
             b"same ciphertext".to_vec(),
         );
-        let env_b = KafkaMessageEnvelope::from_edit(
+        let env_b = MessageEnvelope::from_edit(
             "new-id".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -960,7 +960,7 @@ mod tests {
     fn test_serde_edits_message_id_none_is_absent_in_json() {
         // edits_message_id has skip_serializing_if = "Option::is_none"
         // Backward compatibility: existing consumers must not break on new field.
-        let env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: "alice".to_string(),
             recipient_id: "bob".to_string(),
             message_id: "msg-1".to_string(),
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_serde_edits_message_id_some_is_present_in_json() {
-        let env = KafkaMessageEnvelope::from_edit(
+        let env = MessageEnvelope::from_edit(
             "new-id".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_serde_direct_message_round_trip() {
-        let env = KafkaMessageEnvelope::new_direct_message(
+        let env = MessageEnvelope::new_direct_message(
             "msg-rt".to_string(),
             "alice".to_string(),
             "bob".to_string(),
@@ -1007,7 +1007,7 @@ mod tests {
         );
 
         let json = serde_json::to_string(&env).unwrap();
-        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+        let restored: MessageEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.message_id, env.message_id);
         assert_eq!(restored.sender_id, env.sender_id);
@@ -1034,7 +1034,7 @@ mod tests {
             "isSealedSender": false
         }"#;
 
-        let env: KafkaMessageEnvelope = serde_json::from_str(json)
+        let env: MessageEnvelope = serde_json::from_str(json)
             .expect("old message without editsMessageId must deserialize");
         assert!(
             env.edits_message_id.is_none(),
@@ -1044,7 +1044,7 @@ mod tests {
 
     #[test]
     fn test_serde_receipt_round_trip() {
-        let env = KafkaMessageEnvelope::from_receipt(
+        let env = MessageEnvelope::from_receipt(
             "alice".to_string(),
             "bob".to_string(),
             vec!["msg-1".to_string(), "msg-2".to_string()],
@@ -1052,7 +1052,7 @@ mod tests {
         );
 
         let json = serde_json::to_string(&env).unwrap();
-        let restored: KafkaMessageEnvelope = serde_json::from_str(&json).unwrap();
+        let restored: MessageEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(restored.message_type, MessageType::Receipt);
         // After the receipt routing fix: sender_id = who sent the receipt (bob),
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_validate_direct_message_passes() {
-        let env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: "alice".to_string(),
             recipient_id: "bob".to_string(),
             message_id: "msg-1".to_string(),
@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_validate_sealed_sender_passes_with_sealed_inner() {
-        let env = KafkaMessageEnvelope::from_sealed_sender(
+        let env = MessageEnvelope::from_sealed_sender(
             "msg-s".to_string(),
             "bob".to_string(),
             b"sealed-inner-bytes".to_vec(),
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_validate_mls_message_requires_mls_payload() {
-        let mut env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let mut env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: "alice".to_string(),
             recipient_id: "group-1".to_string(),
             message_id: "mls-1".to_string(),
@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_validate_federated_message_requires_origin_server() {
-        let mut env = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let mut env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: "alice".to_string(),
             recipient_id: "bob".to_string(),
             message_id: "fed-1".to_string(),

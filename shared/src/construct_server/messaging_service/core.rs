@@ -10,10 +10,10 @@ use uuid::Uuid;
 
 use crate::clients::notification::NotificationClient;
 use crate::shared::proto::services::v1::SendBlindNotificationRequest;
-use construct_broker::KafkaMessageEnvelope;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
+use construct_message::MessageEnvelope;
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
 
@@ -35,13 +35,13 @@ async fn fetch_recipient_device_ids(
     }
 }
 
-/// Dispatch a pre-built KafkaMessageEnvelope to the recipient's Redis offline stream.
+/// Dispatch a pre-built MessageEnvelope to the recipient's Redis offline stream.
 ///
 /// Used by the gRPC path where the envelope is constructed without going
 /// through `EncryptedMessage` deserialization.
 pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
-    envelope: KafkaMessageEnvelope,
+    envelope: MessageEnvelope,
     notification_client: Option<NotificationClient>,
 ) -> Result<(), AppError> {
     let salt = &app_context.config.logging.hash_salt;
@@ -51,7 +51,7 @@ pub async fn dispatch_envelope(
 
     // Idempotency: reject duplicate message_ids (client retry with same UUID).
     // Receipt and control envelopes are excluded — they are server-generated.
-    use construct_broker::MessageType;
+    use construct_message::MessageType;
     let is_user_message = matches!(
         envelope.message_type,
         MessageType::DirectMessage | MessageType::MLSMessage | MessageType::SenderSync
@@ -297,7 +297,7 @@ pub async fn send_control_message(
         ));
     }
 
-    let envelope = KafkaMessageEnvelope::from(chat_message);
+    let envelope = MessageEnvelope::from(chat_message);
     let salt = &app_context.config.logging.hash_salt;
 
     let mut queue = app_context.queue.lock().await;

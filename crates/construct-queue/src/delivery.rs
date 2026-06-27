@@ -42,12 +42,7 @@ impl<'a> DeliveryManager<'a> {
         _server_instance_id: Option<&str>, // Ignored - kept for API compatibility
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<
-        Vec<(
-            String,
-            Option<construct_broker::types::KafkaMessageEnvelope>,
-        )>,
-    > {
+    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
         // Always read from user-based stream
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -254,13 +249,13 @@ impl<'a> DeliveryManager<'a> {
         None
     }
 
-    /// Parse stream message fields into KafkaMessageEnvelope
+    /// Parse stream message fields into MessageEnvelope
     /// Filters by recipient_id to ensure user only gets their messages
     fn parse_stream_message(
         &self,
         fields: HashMap<String, Vec<u8>>,
         user_id: &str,
-    ) -> Result<Option<construct_broker::types::KafkaMessageEnvelope>> {
+    ) -> Result<Option<construct_message::types::MessageEnvelope>> {
         // Extract message_id and payload from fields
         let message_id_bytes = fields
             .get("message_id")
@@ -272,10 +267,9 @@ impl<'a> DeliveryManager<'a> {
             .get("payload")
             .ok_or_else(|| anyhow::anyhow!("Missing payload in stream message"))?;
 
-        // Deserialize KafkaMessageEnvelope from MessagePack
-        let envelope: construct_broker::types::KafkaMessageEnvelope =
-            rmp_serde::from_slice(payload)
-                .context("Failed to deserialize KafkaMessageEnvelope from stream")?;
+        // Deserialize MessageEnvelope from MessagePack
+        let envelope: construct_message::types::MessageEnvelope = rmp_serde::from_slice(payload)
+            .context("Failed to deserialize MessageEnvelope from stream")?;
 
         // SECURITY: Filter by recipient_id - only return messages for this user
         if envelope.recipient_id != user_id {
@@ -550,7 +544,7 @@ impl<'a> DeliveryManager<'a> {
     pub(crate) async fn write_message_to_user_stream(
         &mut self,
         user_id: &str,
-        envelope: &construct_broker::types::KafkaMessageEnvelope,
+        envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<String> {
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
@@ -558,7 +552,7 @@ impl<'a> DeliveryManager<'a> {
         // rmp_serde::to_vec uses a legacy serializer that from_slice cannot read back
         // ("wrong msgpack marker Str8") — messages would be written but never delivered.
         let payload = rmp_serde::encode::to_vec_named(envelope)
-            .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
+            .context("Failed to serialize MessageEnvelope to MessagePack")?;
 
         // Use XADD with MAXLEN for automatic trimming
         let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
@@ -606,7 +600,7 @@ impl<'a> DeliveryManager<'a> {
         &mut self,
         user_id: &str,
         device_id: &str,
-        envelope: &construct_broker::types::KafkaMessageEnvelope,
+        envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<()> {
         let stream_key = format!(
             "{}:offline:{}:{}",
@@ -614,7 +608,7 @@ impl<'a> DeliveryManager<'a> {
         );
 
         let payload = rmp_serde::encode::to_vec_named(envelope)
-            .context("Failed to serialize KafkaMessageEnvelope to MessagePack")?;
+            .context("Failed to serialize MessageEnvelope to MessagePack")?;
 
         let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
         let stream_id: String = redis::cmd("XADD")
@@ -652,12 +646,7 @@ impl<'a> DeliveryManager<'a> {
         device_id: &str,
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<
-        Vec<(
-            String,
-            Option<construct_broker::types::KafkaMessageEnvelope>,
-        )>,
-    > {
+    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
         let stream_key = format!(
             "{}:offline:{}:{}",
             self.delivery_queue_prefix, user_id, device_id
@@ -852,7 +841,7 @@ impl<'a> DeliveryManager<'a> {
         stream_key: &str,
         target_sender_id: &str,
     ) -> Result<u64> {
-        use construct_broker::types::KafkaMessageEnvelope;
+        use construct_message::types::MessageEnvelope;
 
         let entries = self
             .client
@@ -868,7 +857,7 @@ impl<'a> DeliveryManager<'a> {
             .into_iter()
             .filter_map(|entry| {
                 let payload = entry.fields.get("payload")?;
-                let envelope: KafkaMessageEnvelope = rmp_serde::from_slice(payload).ok()?;
+                let envelope: MessageEnvelope = rmp_serde::from_slice(payload).ok()?;
                 // Skip sealed-sender entries — sender is intentionally hidden.
                 if envelope.is_sealed_sender || envelope.sender_id.is_empty() {
                     return None;

@@ -230,10 +230,10 @@ pub(crate) async fn handle_stream_request(
                 }
 
                 use construct_server_shared::kafka::types::{
-                    KafkaMessageEnvelope, ProtoEnvelopeContext,
+                    MessageEnvelope, ProtoEnvelopeContext,
                 };
                 let kafka_envelope =
-                    KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+                    MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
                         sender_id: uid.to_string(),
                         recipient_id,
                         message_id: message_id.clone(),
@@ -539,7 +539,7 @@ pub(crate) async fn poll_messages(
     }
 
     for (stream_id, envelope) in messages {
-        // Convert KafkaMessageEnvelope to the appropriate stream response
+        // Convert MessageEnvelope to the appropriate stream response
         let Some(envelope) = envelope else {
             *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
             continue;

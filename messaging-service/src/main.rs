@@ -287,17 +287,13 @@ mod tests {
     use crate::envelope::convert_kafka_envelope_to_proto;
     use crate::receipts::build_receipt_response;
     use base64::Engine as _;
-    use construct_server_shared::kafka::types::{KafkaMessageEnvelope, MessageType};
+    use construct_server_shared::kafka::types::{MessageEnvelope, MessageType};
     use construct_server_shared::shared::proto::services::v1 as proto;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn make_direct_envelope(
-        sender: &str,
-        recipient: &str,
-        payload_b64: &str,
-    ) -> KafkaMessageEnvelope {
-        KafkaMessageEnvelope {
+    fn make_direct_envelope(sender: &str, recipient: &str, payload_b64: &str) -> MessageEnvelope {
+        MessageEnvelope {
             message_id: "msg-001".to_string(),
             sender_id: sender.to_string(),
             recipient_id: recipient.to_string(),
@@ -321,8 +317,8 @@ mod tests {
         }
     }
 
-    fn make_control_envelope(msg_type_str: &str) -> KafkaMessageEnvelope {
-        KafkaMessageEnvelope {
+    fn make_control_envelope(msg_type_str: &str) -> MessageEnvelope {
+        MessageEnvelope {
             message_id: "ctrl-001".to_string(),
             sender_id: "alice".to_string(),
             recipient_id: "bob".to_string(),
@@ -346,8 +342,8 @@ mod tests {
         }
     }
 
-    fn make_sealed_envelope(recipient: &str, sealed_b64: &str) -> KafkaMessageEnvelope {
-        KafkaMessageEnvelope {
+    fn make_sealed_envelope(recipient: &str, sealed_b64: &str) -> MessageEnvelope {
+        MessageEnvelope {
             message_id: "sealed-001".to_string(),
             sender_id: String::new(), // intentionally empty
             recipient_id: recipient.to_string(),
@@ -511,7 +507,7 @@ mod tests {
     fn test_build_receipt_response_delivered_status() {
         use construct_server_shared::shared::proto::signaling::v1 as signaling;
 
-        let env = KafkaMessageEnvelope::from_receipt(
+        let env = MessageEnvelope::from_receipt(
             "alice".to_string(),
             "bob".to_string(),
             vec!["msg-1".to_string(), "msg-2".to_string()],
@@ -536,7 +532,7 @@ mod tests {
     fn test_build_receipt_response_read_status() {
         use construct_server_shared::shared::proto::signaling::v1 as signaling;
 
-        let env = KafkaMessageEnvelope::from_receipt(
+        let env = MessageEnvelope::from_receipt(
             "alice".to_string(),
             "bob".to_string(),
             vec!["msg-42".to_string()],
@@ -571,7 +567,7 @@ mod tests {
     fn test_build_receipt_response_unknown_status_defaults_to_delivered() {
         use construct_server_shared::shared::proto::signaling::v1 as signaling;
 
-        let env = KafkaMessageEnvelope::from_receipt(
+        let env = MessageEnvelope::from_receipt(
             "alice".to_string(),
             "bob".to_string(),
             vec!["msg-99".to_string()],
