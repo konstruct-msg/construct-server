@@ -24,7 +24,7 @@ use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreake
 use super::config::create_client_config;
 #[cfg(feature = "kafka")]
 use super::metrics;
-use super::types::{DeliveryAckEvent, KafkaMessageEnvelope};
+use super::types::{DeliveryAckEvent, MessageEnvelope};
 use construct_config::KafkaConfig;
 
 // ============================================================================
@@ -109,7 +109,7 @@ impl MessageProducer {
 
     pub async fn send_message(
         &self,
-        envelope: &KafkaMessageEnvelope,
+        envelope: &MessageEnvelope,
     ) -> Result<(i32, i64), CircuitBreakerError<anyhow::Error>> {
         if !self.enabled {
             tracing::debug!(message_id = %envelope.message_id, "Kafka disabled — message skipped");
@@ -126,7 +126,7 @@ impl MessageProducer {
 
     async fn send_message_internal(
         &self,
-        envelope: &KafkaMessageEnvelope,
+        envelope: &MessageEnvelope,
     ) -> anyhow::Result<(i32, i64)> {
         let producer = self
             .producer
@@ -283,7 +283,7 @@ impl MessageProducer {
 
     pub async fn send_message(
         &self,
-        _envelope: &KafkaMessageEnvelope,
+        _envelope: &MessageEnvelope,
     ) -> Result<(i32, i64), CircuitBreakerError<anyhow::Error>> {
         Ok((-1, -1))
     }
@@ -353,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn test_disabled_producer_send() {
         let producer = MessageProducer::new(&disabled_config()).unwrap();
-        let envelope = KafkaMessageEnvelope::new_direct_message(
+        let envelope = MessageEnvelope::new_direct_message(
             "msg-123".to_string(),
             "user-456".to_string(),
             "user-789".to_string(),

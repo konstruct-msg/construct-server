@@ -31,7 +31,7 @@ use construct_db::DbPool;
 use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
 
-use construct_broker::MessageProducer;
+use construct_message::MessageProducer;
 // MessageGatewayClient removed - was only used for WebSocket
 use construct_queue::MessageQueue;
 

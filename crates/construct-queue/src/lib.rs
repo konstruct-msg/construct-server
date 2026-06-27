@@ -570,12 +570,7 @@ impl MessageQueue {
         server_instance_id: Option<&str>,
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<
-        Vec<(
-            String,
-            Option<construct_broker::types::KafkaMessageEnvelope>,
-        )>,
-    > {
+    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
         delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
@@ -710,7 +705,7 @@ impl MessageQueue {
     pub async fn write_message_to_user_stream(
         &mut self,
         user_id: &str,
-        envelope: &construct_broker::types::KafkaMessageEnvelope,
+        envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<String> {
         delivery::DeliveryManager::new(
             &mut self.client,
@@ -733,7 +728,7 @@ impl MessageQueue {
         &mut self,
         user_id: &str,
         device_ids: &[String],
-        envelope: &construct_broker::types::KafkaMessageEnvelope,
+        envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<()> {
         // Always write to the legacy user stream for backward compatibility.
         delivery::DeliveryManager::new(
@@ -777,12 +772,7 @@ impl MessageQueue {
         device_id: &str,
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<
-        Vec<(
-            String,
-            Option<construct_broker::types::KafkaMessageEnvelope>,
-        )>,
-    > {
+    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
         delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,

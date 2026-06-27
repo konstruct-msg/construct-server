@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
-use construct_broker::producer::MessageProducer;
-use construct_broker::types::DeliveryAckEvent;
+use construct_message::producer::MessageProducer;
+use construct_message::types::DeliveryAckEvent;
 
 /// ACK Batcher - buffers and randomizes delivery ACK events
 ///
@@ -201,8 +201,8 @@ impl AckBatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use construct_broker::types::DeliveryAckEvent;
     use construct_config::KafkaConfig;
+    use construct_message::types::DeliveryAckEvent;
 
     #[tokio::test]
     async fn test_passthrough_mode() {

@@ -332,7 +332,7 @@ impl MessagingService for MessagingGrpcService {
             }
         };
 
-        use construct_server_shared::kafka::types::{KafkaMessageEnvelope, ProtoEnvelopeContext};
+        use construct_server_shared::kafka::types::{MessageEnvelope, ProtoEnvelopeContext};
 
         // ── Early idempotency fast-path ─────────────────────────────────────────
         // Check if this message_id was already dispatched BEFORE touching rate
@@ -568,7 +568,7 @@ impl MessagingService for MessagingGrpcService {
 
         let t_dispatch = std::time::Instant::now();
         let rate_ms = t_dispatch.duration_since(t_rate).as_millis();
-        let mut kafka_envelope = KafkaMessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let mut kafka_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
@@ -651,8 +651,8 @@ impl MessagingService for MessagingGrpcService {
         let edited_at = chrono::Utc::now().timestamp_millis();
         let new_message_id = uuid::Uuid::new_v4().to_string();
 
-        use construct_server_shared::kafka::types::KafkaMessageEnvelope;
-        let envelope = KafkaMessageEnvelope::from_edit(
+        use construct_server_shared::kafka::types::MessageEnvelope;
+        let envelope = MessageEnvelope::from_edit(
             new_message_id,
             sender_id.to_string(),
             req.recipient_user_id.clone(),
@@ -857,9 +857,9 @@ impl MessagingService for MessagingGrpcService {
             return Err(Status::invalid_argument("recipient_user_id is required"));
         }
 
-        use construct_server_shared::kafka::types::KafkaMessageEnvelope;
+        use construct_server_shared::kafka::types::MessageEnvelope;
         let envelope =
-            KafkaMessageEnvelope::new_key_sync(sender_id.to_string(), recipient_user_id.clone());
+            MessageEnvelope::new_key_sync(sender_id.to_string(), recipient_user_id.clone());
 
         let mut queue = self.context.queue.lock().await;
         queue

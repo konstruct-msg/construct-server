@@ -20,8 +20,8 @@ use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
 use construct_pending::PendingMessageStorage;
 
-use construct_broker::MessageProducer;
 use construct_key_management::KeyManagementSystem;
+use construct_message::MessageProducer;
 // MessageGatewayClient removed - was only used for WebSocket message processing
 use construct_queue::MessageQueue;
 use std::sync::Arc;

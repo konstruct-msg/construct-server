@@ -24,7 +24,7 @@ members = [
     "crates/construct-db",
     "crates/construct-redis",
     "crates/construct-config",
-    "crates/construct-broker",
+    "crates/construct-message",
     "crates/construct-queue",
     "crates/construct-auth",
     "crates/construct-auth-service",

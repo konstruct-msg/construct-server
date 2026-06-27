@@ -1,5 +1,5 @@
 [package]
-name = "construct-broker"
+name = "construct-message"
 version.workspace = true
 edition.workspace = true
 

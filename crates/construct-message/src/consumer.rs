@@ -16,7 +16,7 @@ use tracing::{error, info};
 
 #[cfg(feature = "kafka")]
 use super::config::create_client_config;
-use super::types::KafkaMessageEnvelope;
+use super::types::MessageEnvelope;
 use construct_config::KafkaConfig;
 
 // ============================================================================
@@ -70,11 +70,11 @@ impl MessageConsumer {
         })
     }
 
-    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<KafkaMessageEnvelope>> {
+    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<MessageEnvelope>> {
         match self.consumer.recv().await {
             Ok(message) => {
                 let payload = message.payload().context("Message payload is empty")?;
-                let envelope: KafkaMessageEnvelope = serde_json::from_slice(payload)
+                let envelope: MessageEnvelope = serde_json::from_slice(payload)
                     .context("Failed to deserialize message envelope")?;
                 Ok(Some(envelope))
             }
@@ -124,7 +124,7 @@ impl MessageConsumer {
         anyhow::bail!("Kafka feature not compiled in — rebuild with --features kafka")
     }
 
-    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<KafkaMessageEnvelope>> {
+    pub async fn poll(&self, _timeout: Duration) -> anyhow::Result<Option<MessageEnvelope>> {
         anyhow::bail!("Kafka feature not compiled in")
     }
 

@@ -12,8 +12,8 @@
 // ============================================================================
 
 use crate::*;
-use construct_broker::types::DeliveryAckEvent;
 use construct_crypto::{compute_message_hash, compute_user_id_hash, verify_message_hash};
+use construct_message::types::DeliveryAckEvent;
 use serial_test::serial;
 
 /// Test 1: Verify HMAC hashes are deterministic and collision-resistant

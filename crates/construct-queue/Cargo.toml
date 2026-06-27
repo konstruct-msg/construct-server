@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 construct-config = { path = "../construct-config" }
 construct-redis  = { path = "../construct-redis" }
-construct-broker = { path = "../construct-broker" }
+construct-message = { path = "../construct-message" }
 construct-crypto = { path = "../construct-crypto", features = ["full"] }
 
 # Serialization
