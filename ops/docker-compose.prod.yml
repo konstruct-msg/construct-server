@@ -170,23 +170,6 @@ services:
     networks:
       - internal
 
-  invite:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
-    command: /usr/local/bin/invite-service
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "8086"
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      SERVICE_NAME: invite
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-
   key:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
     command: /usr/local/bin/key-service

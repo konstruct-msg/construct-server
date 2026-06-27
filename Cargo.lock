@@ -2267,42 +2267,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "invite-service"
-version = "0.15.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "construct-config",
- "construct-server-shared",
- "crypto-agility",
- "dotenvy",
- "ed25519-dalek",
- "hex",
- "hmac 0.13.0",
- "jsonwebtoken 10.3.0",
- "prometheus",
- "rand 0.10.1",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "x25519-dalek",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5266,7 +5230,9 @@ dependencies = [
  "construct-extractors",
  "construct-server-shared",
  "construct-types",
+ "crypto-agility",
  "dotenvy",
+ "ed25519-dalek",
  "hex",
  "jsonwebtoken 10.3.0",
  "prometheus",
