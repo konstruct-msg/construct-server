@@ -244,22 +244,17 @@ pub async fn accept_invite(
     let jti_uuid = invite.jti;
     let creator_user_id = invite.uuid;
 
-    let burn_result = sqlx::query!(
-        r#"
-        INSERT INTO used_invites (jti, user_id, device_id, expires_at)
-        VALUES ($1, $2, $3, NOW() + INTERVAL '600 seconds')
-        ON CONFLICT (jti) DO NOTHING
-        RETURNING jti
-        "#,
-        jti_uuid,
-        creator_user_id,
+    let burned = construct_db::burn_used_invite(
+        &context.db_pool,
+        &jti_uuid,
+        &creator_user_id,
         invite.device_id.as_deref(),
+        600,
     )
-    .fetch_optional(&*context.db_pool)
     .await
     .context("Failed to burn invite jti")?;
 
-    if burn_result.is_none() {
+    if !burned {
         tracing::warn!(
             jti = %invite.jti,
             "Invite already used (replay attack detected)"
@@ -322,21 +317,17 @@ pub async fn revoke_invite(
 ) -> Result<RevokeInviteOutput> {
     let jti_uuid = Uuid::parse_str(&input.jti).context("Invalid jti UUID")?;
 
-    let revoke_result = sqlx::query!(
-        r#"
-        INSERT INTO used_invites (jti, user_id, device_id, expires_at)
-        VALUES ($1, $2, NULL, NOW() + INTERVAL '180 seconds')
-        ON CONFLICT (jti) DO NOTHING
-        RETURNING jti
-        "#,
-        jti_uuid,
-        input.user_id,
+    let revoked = construct_db::burn_used_invite(
+        &context.db_pool,
+        &jti_uuid,
+        &input.user_id,
+        None,
+        180,
     )
-    .fetch_optional(&*context.db_pool)
     .await
     .context("Failed to revoke invite")?;
 
-    if revoke_result.is_some() {
+    if revoked {
         tracing::info!(
             jti = %input.jti,
             user_id = %input.user_id,
