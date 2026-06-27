@@ -9,9 +9,8 @@
 
 | Service | Binary | gRPC Port | HTTP/REST Port | Role |
 |---|---|---|---|---|
-| `traefik` | external | — | 443/80 | TLS termination, HTTPS redirect, CORS |
-| `envoy` | external | 8443 | 8080 | H2 multiplexing, gRPC routing, upstream LB |
-| `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → envoy:8080 |
+| `caddy` | external | 443 / 8080 | 80 | TLS (Let's Encrypt), HTTP/3, JWT validation, gRPC routing |
+| `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships |
 | `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery |
@@ -178,18 +177,19 @@ Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git 
 
 ---
 
-## Envoy Configuration
+## Caddy Configuration
 
-- File: `ops/envoy.yaml`
-- Uses `dns_lookup_family: V4_ONLY` (important for Docker DNS)
-- Routes by `:authority` header or path prefix to upstream gRPC services
-- H2 multiplexing: clients connect once, all gRPC calls share the connection
+- File: `ops/Caddyfile`
+- TLS termination (Let's Encrypt), HTTP/3 (QUIC), JWT validation via `caddy-jwt` plugin
+- Internal listener on `:8080` for gateway proxy (plain h2c, same JWT validation)
+- Routes by gRPC service path prefix to upstream h2c services
+- Build: `ops/Dockerfile.caddy` — `xcaddy` build with greenpau/caddy-jwt
 
 ## Gateway (veil/obfs4 proxy)
 
 - Listens on `0.0.0.0:9443` (obfuscated port for censorship-resistant clients)
-- Plain gRPC clients connect via Envoy directly (port 8443)
-- veil/obfs4 clients connect via gateway:9443 → envoy:8080
+- Plain gRPC clients connect via Caddy directly (port 443)
+- veil/obfs4 clients connect via gateway:9443 → caddy:8080
 - `gateway/src/` — cleaned up, contains only veil proxy logic (no dead code as of checkpoint 004)
 
 ---

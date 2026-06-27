@@ -2,11 +2,11 @@
 # Construct Server — Production Docker Compose
 # =============================================================================
 # Architecture:
-#   Traefik — TLS termination (Let's Encrypt ACME) + routing
-#     ├→ ams.konstruct.cc              → Envoy (:8080, gRPC API)
-#     ├→ grafana.ams.konstruct.cc      → Grafana (:3000)
-#     └→ prometheus.ams.konstruct.cc   → Prometheus (:9090)
-#   Envoy — gRPC-web routing to Rust microservices
+#   Caddy — TLS termination (Let's Encrypt ACME), HTTP/3, JWT validation,
+#           gRPC routing to Rust microservices (replaces Traefik + Envoy).
+#     ├→ caddy:8080 (internal h2c, no TLS — used by gateway)
+#     └→ caddy:443  (external TLS, HTTP/2 + HTTP/3)
+#
 # Note: the standalone obfs4 relay (relay-ams / construct-relay) was retired
 # 2026-06-12 in favour of veil-front (separate construct-veil deployment). The
 # gateway still embeds a legacy obfs4 relay on :9443 (see ICE_* below) — slated
@@ -18,7 +18,7 @@
 #   Services read secrets directly from this file (no vault-agent).
 #
 # DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
-# TLS: Traefik auto-obtains Let's Encrypt certs via TLS-ALPN-01
+# TLS: Caddy auto-obtains Let's Encrypt certs via TLS-ALPN-01
 #
 # External services (not in this compose):
 #   Database : Supabase (DATABASE_URL in app.env)
@@ -38,67 +38,28 @@
 name: construct
 
 services:
-  # ─── Traefik (TLS + routing) ─────────────────────────────────────────────
-  # Handles Let's Encrypt certificates via TLS-ALPN-01 challenge.
-  # All external traffic enters through Traefik on ports 80/443.
-  # HTTP automatically redirects to HTTPS.
+  # ─── Caddy (TLS + JWT + gRPC routing) ──────────────────────────────────────
+  # Replaces Traefik (TLS + Let's Encrypt) + Envoy (gRPC routing + JWT authn).
+  # Uses caddy-jwt plugin for Bearer JWT validation and x-user-id injection.
+  #
+  # Build: docker build -t caddy-jwt -f ops/Dockerfile.caddy ops/
+  # Then tag: docker tag caddy-jwt ghcr.io/konstruct-msg/caddy-jwt:latest
+  #
+  # Caddyfile: ops/Caddyfile
+  #   - :80      → redirect to HTTPS
+  #   - :443     → TLS (HTTP/2 + HTTP/3), JWT validate, route to h2c upstreams
+  #   - :8080    → plain h2c for gateway proxy (same JWT validation)
 
-  traefik:
-    image: traefik:v3.6
-    environment:
-      - DOCKER_API_VERSION=1.44
+  caddy:
+    image: ghcr.io/konstruct-msg/caddy-jwt:${CADDY_TAG:-latest}
     restart: unless-stopped
-    command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedByDefault=false"
-      - "--providers.docker.network=construct_internal"
-      # HTTP entrypoint — redirect to HTTPS
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--entrypoints.websecure.address=:443"
-      # 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
-      # mobile clients that share one persistent connection for heartbeat + unary RPCs.
-      # When the limit was exceeded Traefik sent GOAWAY, causing gRPC-swift to enter
-      # TRANSIENT_FAILURE and fail all subsequent RPCs with "connection preface" errors.
-      - "--entrypoints.websecure.http2.maxConcurrentStreams=1000"
-      # Disable timeouts for long-lived gRPC bidirectional streams
-      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=0s"
-      - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=0s"
-      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=0s"
-      # Let's Encrypt ACME (TLS-ALPN-01 — works without Cloudflare)
-      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-admin@konstruct.cc}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/certs/acme.json"
-      # Dashboard
-      - "--api.dashboard=true"
-      - "--log.level=INFO"
     ports:
       - "80:80"
-      - "443:443" # TCP — TLS/HTTP1.1 + HTTP/2
+      - "443:443"      # TCP — TLS/HTTP2
+      - "443:443/udp"  # UDP — HTTP/3 (QUIC)
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik-certs:/certs
-    networks:
-      - internal
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik.rule=Host(`traefik.${INSTANCE_DOMAIN}`)"
-      - "traefik.http.routers.traefik.entrypoints=websecure"
-      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.traefik.service=api@internal"
-      - "traefik.http.routers.traefik.middlewares=auth-basic"
-      - "traefik.http.middlewares.auth-basic.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
-
-  # ─── Envoy (gRPC-web routing) ─────────────────────────────────────────────
-
-  envoy:
-    image: envoyproxy/envoy:v1.37.0
-    restart: unless-stopped
-    volumes:
-      - ./envoy.docker.yaml:/etc/envoy/envoy.yaml:ro
-    networks:
-      - internal
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data  # Let's Encrypt certs + OCSP staples
     depends_on:
       - auth
       - user
@@ -107,19 +68,8 @@ services:
       - signaling
       - mls
       - channel
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.envoy.rule=Host(`${INSTANCE_DOMAIN}`) || HeaderRegexp(`content-type`, `application/grpc`)"
-      - "traefik.http.routers.envoy.entrypoints=websecure"
-      - "traefik.http.routers.envoy.tls.certresolver=letsencrypt"
-      - "traefik.http.services.envoy.loadbalancer.server.port=8080"
-      - "traefik.http.services.envoy.loadbalancer.server.scheme=h2c"
-      - "traefik.http.routers.envoy.middlewares=cors"
-      - "traefik.http.middlewares.cors.headers.accesscontrolallowmethods=GET,POST,OPTIONS"
-      - "traefik.http.middlewares.cors.headers.accesscontrolallowheaders=Content-Type,Authorization,X-Grpc-Web,X-User-Agent,X-CSRF-Token,Grpc-Timeout"
-      - "traefik.http.middlewares.cors.headers.accesscontrolexposeheaders=Grpc-Status,Grpc-Message,Grpc-Encoding,Grpc-Accept-Encoding"
-      - "traefik.http.middlewares.cors.headers.accesscontrolalloworiginlist=${CORS_ALLOWED_ORIGINS:-*}"
-      - "traefik.http.middlewares.cors.headers.addvaryheader=true"
+    networks:
+      - internal
 
   # ─── Core Services ─────────────────────────────────────────────────────────
   # All services:
@@ -381,50 +331,27 @@ services:
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
-      ICE_UPSTREAM: "envoy:8080"
+      ICE_UPSTREAM: "caddy:8080"
       # Relay addresses advertised in /.well-known/construct-server.
-      # Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS on the relay server).
-      # Add more relays as comma-separated list: "ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"
+      # Port 443 = TLS-wrapped obfs4 (Caddy terminates TLS).
+      # Add more relays as comma-separated list: "ice.msk.konstruct.cc:443,ice.ams.konstruct.cc:443"
       VEIL_RELAY_ADDRESSES: ${VEIL_RELAY_ADDRESSES:-ice.msk.konstruct.cc:443,ice.ams.konstruct.cc:443}
-      # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Traefik terminates TLS.
-      # Set these only for deployments where gateway is exposed directly without Traefik.
+      # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Caddy terminates TLS.
+      # Set these only for deployments where gateway is exposed directly without Caddy.
     ports:
       # Port 9443 still exposed for legacy plain-obfs4 clients (no TLS wrapper).
-      # New clients use port 443 via Traefik TCP router below.
+      # New clients use port 443 via Caddy.
       - "9443:9443"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
       - internal
-    labels:
-      - "traefik.enable=false"
-      # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
-
-  # ─── QUIC/HTTP-3 endpoint (Phase 0: echo, reachability test) ─────────────────
-  # Native quinn+h3. Bypasses Traefik (that QUIC<->h2c bridge was the prior bidi
-  # failure). Phase 0.5 swaps the echo binary for an h3 -> envoy:8080 proxy.
-  quic:
-    image: ghcr.io/konstruct-msg/construct-transport:latest
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-    environment:
-      RUST_LOG: ${RUST_LOG:-info}
-      QUIC_SAN: quic.konstruct.cc # cert SAN must match client SNI
-      QUIC_UPSTREAM: envoy:8080
-      QUIC_CERT_PATH: /certs/server-cert.der
-      QUIC_KEY_PATH: /certs/server-key.der
-    ports:
-      - "443:443/udp" # UDP 443 freed from Traefik; TCP 443 stays Traefik
-    networks:
-      - internal
-    labels:
-      - "traefik.enable=false"
-    volumes:
-      - /opt/construct/quic-certs:/certs
+    # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
+    # QUIC/HTTP-3 is handled by Caddy natively (HTTP/3 → h2c upstream).
+    # The separate quic container was retired when Traefik → Caddy migration completed.
 
 volumes:
-  traefik-certs:
+  caddy-data:
   prometheus-data:
   grafana-data:
 
