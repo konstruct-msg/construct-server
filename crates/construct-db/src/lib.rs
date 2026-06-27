@@ -1294,6 +1294,33 @@ pub async fn burn_invite_token(pool: &DbPool, jti: &Uuid) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Atomically burn a JTI in the used_invites table (anti-replay for dynamic invites).
+/// Returns true if the JTI was inserted (first use), false if already present (replay).
+pub async fn burn_used_invite(
+    pool: &DbPool,
+    jti: &Uuid,
+    user_id: &Uuid,
+    device_id: Option<&str>,
+    ttl_seconds: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO used_invites (jti, user_id, device_id, expires_at)
+        VALUES ($1, $2, $3, NOW() + $4 * INTERVAL '1 second')
+        ON CONFLICT (jti) DO NOTHING
+        RETURNING jti
+        "#,
+    )
+    .bind(jti)
+    .bind(user_id)
+    .bind(device_id)
+    .bind(ttl_seconds)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.is_some())
+}
+
 /// Check if an invite token is valid (exists and not yet used)
 pub async fn is_invite_token_valid(pool: &DbPool, jti: &Uuid) -> Result<bool> {
     let result = sqlx::query_scalar::<_, bool>(
