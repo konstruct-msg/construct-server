@@ -12,6 +12,7 @@
 // ============================================================================
 
 mod handlers;
+mod invite_core;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -34,6 +35,7 @@ use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
+    invite_service_server::{InviteService, InviteServiceServer},
     user_service_server::{UserService, UserServiceServer},
 };
 use construct_server_shared::user_service::UserServiceContext;
@@ -60,6 +62,13 @@ impl UserGrpcService {
         metadata: &tonic::metadata::MetadataMap,
     ) -> Result<uuid::Uuid, tonic::Status> {
         auth_utils::extract_user_id(&self.context.auth_manager, metadata)
+    }
+
+    fn extract_device_id(metadata: &tonic::metadata::MetadataMap) -> Option<String> {
+        metadata
+            .get("x-device-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
     }
 }
 
@@ -921,6 +930,143 @@ impl UserService for UserGrpcService {
     }
 }
 
+#[tonic::async_trait]
+impl InviteService for UserGrpcService {
+    async fn generate_invite(
+        &self,
+        request: Request<proto::GenerateInviteRequest>,
+    ) -> Result<Response<proto::GenerateInviteResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = self.extract_user_id(metadata)?;
+        let device_id = Self::extract_device_id(metadata);
+        let req = request.into_inner();
+
+        let input = invite_core::GenerateInviteInput {
+            user_id,
+            device_id,
+            ttl_seconds: req.ttl_seconds,
+        };
+
+        let output = invite_core::generate_invite(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to generate invite: {}", e)))?;
+
+        Ok(Response::new(proto::GenerateInviteResponse {
+            jti: output.jti,
+            server: output.server,
+            expires_at: output.expires_at,
+            user_id: output.user_id,
+            device_id: output.device_id,
+            ttl_seconds: output.ttl_seconds,
+        }))
+    }
+
+    async fn accept_invite(
+        &self,
+        request: Request<proto::AcceptInviteRequest>,
+    ) -> Result<Response<proto::AcceptInviteResponse>, Status> {
+        let metadata = request.metadata();
+        let accepter_user_id = self.extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let invite_token = req
+            .invite
+            .ok_or_else(|| Status::invalid_argument("Missing invite token"))?;
+
+        let invite = crypto_agility::InviteToken {
+            v: invite_token.v as u32,
+            jti: uuid::Uuid::parse_str(&invite_token.jti)
+                .map_err(|_| Status::invalid_argument("Invalid jti UUID"))?,
+            uuid: uuid::Uuid::parse_str(&invite_token.uuid)
+                .map_err(|_| Status::invalid_argument("Invalid user UUID"))?,
+            device_id: invite_token.device_id,
+            server: invite_token.server,
+            eph_key: invite_token.eph_pub,
+            ts: invite_token.ts,
+            sig: invite_token.sig,
+            username: invite_token.un,
+        };
+
+        let input = invite_core::AcceptInviteInput {
+            accepter_user_id,
+            invite,
+        };
+
+        let output = invite_core::accept_invite(&self.context, input)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to accept invite");
+                Status::invalid_argument(format!("Failed to accept invite: {}", e))
+            })?;
+
+        Ok(Response::new(proto::AcceptInviteResponse {
+            user_id: output.user_id,
+            device_id: output.device_id,
+            server: output.server,
+            message: output.message,
+        }))
+    }
+
+    async fn revoke_invite(
+        &self,
+        request: Request<proto::RevokeInviteRequest>,
+    ) -> Result<Response<proto::RevokeInviteResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = self.extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = invite_core::RevokeInviteInput {
+            user_id,
+            jti: req.jti,
+        };
+
+        let output = invite_core::revoke_invite(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to revoke invite: {}", e)))?;
+
+        Ok(Response::new(proto::RevokeInviteResponse {
+            success: output.success,
+            message: output.message,
+        }))
+    }
+
+    async fn list_invites(
+        &self,
+        request: Request<proto::ListInvitesRequest>,
+    ) -> Result<Response<proto::ListInvitesResponse>, Status> {
+        let metadata = request.metadata();
+        let user_id = self.extract_user_id(metadata)?;
+        let req = request.into_inner();
+
+        let input = invite_core::ListInvitesInput {
+            user_id,
+            limit: req.limit,
+            include_expired: req.include_expired.unwrap_or(false),
+        };
+
+        let output = invite_core::list_invites(&self.context, input)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list invites: {}", e)))?;
+
+        let invites = output
+            .invites
+            .into_iter()
+            .map(|inv| proto::InviteInfo {
+                jti: inv.jti,
+                user_id: inv.user_id,
+                device_id: inv.device_id,
+                created_at: inv.created_at,
+                expires_at: inv.expires_at,
+                used: inv.used,
+                used_by: inv.used_by,
+                used_at: inv.used_at,
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListInvitesResponse { invites }))
+    }
+}
+
 /// Health check endpoint
 async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
@@ -1010,7 +1156,8 @@ async fn main() -> Result<()> {
         };
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-                .add_service(UserServiceServer::new(service))
+                .add_service(UserServiceServer::new(service.clone()))
+                .add_service(InviteServiceServer::new(service))
                 .serve_with_incoming_shutdown(
                     grpc_incoming,
                     construct_server_shared::shutdown_signal(),
