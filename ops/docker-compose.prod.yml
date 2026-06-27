@@ -52,12 +52,12 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"      # TCP — TLS/HTTP2
+      - "443:443" # TCP — TLS/HTTP2
     # UDP 443 is claimed by construct-transport (SALAMANDER obfuscated QUIC).
     # Caddy native HTTP/3 is not used — clients use SALAMANDER-QUIC instead.
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data  # Let's Encrypt certs + OCSP staples
+      - caddy-data:/data # Let's Encrypt certs + OCSP staples
     depends_on:
       - auth
       - user
@@ -75,7 +75,7 @@ services:
   #   - Read secrets from /opt/construct/secrets/app.env (managed manually on server)
 
   auth:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
     env_file:
@@ -106,7 +106,7 @@ services:
       - internal
 
   user:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/user-service
     restart: unless-stopped
     env_file:
@@ -124,7 +124,7 @@ services:
       - internal
 
   messaging:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
     env_file:
@@ -148,7 +148,7 @@ services:
       - internal
 
   key:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/key-service
     restart: unless-stopped
     env_file:
@@ -167,7 +167,7 @@ services:
   # validate offline. VEIL_ISSUER_SEED is the issuer Ed25519 seed (SECRET — keep in
   # app.env, never echo); its pubkey must equal the app pin AND the relay --issuer-pubkey.
   veil:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/veil-service
     restart: unless-stopped
     env_file:
@@ -186,7 +186,7 @@ services:
       - internal
 
   media:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/media-service
     restart: unless-stopped
     env_file:
@@ -204,7 +204,7 @@ services:
 
   # mls-service is no longer a stub — MLS groups are fully implemented.
   mls:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/mls-service
     restart: unless-stopped
     env_file:
@@ -221,7 +221,7 @@ services:
       - internal
 
   channel:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/channel-service
     restart: unless-stopped
     env_file:
@@ -238,7 +238,7 @@ services:
       - internal
 
   sentinel:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
     env_file:
@@ -254,7 +254,7 @@ services:
       - internal
 
   signaling:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/signaling-service
     restart: unless-stopped
     env_file:
@@ -276,7 +276,7 @@ services:
       - internal
 
   gateway:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.12.0}
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/gateway
     restart: unless-stopped
     env_file:
