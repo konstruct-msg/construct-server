@@ -28,6 +28,7 @@ use construct_db::{
     get_sent_contact_requests, get_user_by_id, is_user_searchable, respond_to_contact_request,
 };
 use construct_server_shared::auth::AuthManager;
+use construct_server_shared::auth_utils;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::queue::MessageQueue;
@@ -51,6 +52,12 @@ struct UserGrpcService {
     context: Arc<UserServiceContext>,
     /// gRPC client for notification-service — used to send silent push to User A on acceptance.
     notification_client: Option<NotificationClient>,
+}
+
+impl UserGrpcService {
+    fn extract_user_id(&self, metadata: &tonic::metadata::MetadataMap) -> Result<uuid::Uuid, tonic::Status> {
+        auth_utils::extract_user_id(&self.context.auth_manager, metadata)
+    }
 }
 
 #[tonic::async_trait]
@@ -325,15 +332,8 @@ impl UserService for UserGrpcService {
         request: Request<proto::DeleteAccountRequest>,
     ) -> Result<Response<proto::DeleteAccountResponse>, Status> {
         // Extract authenticated user_id from gRPC metadata (set by auth interceptor)
-        let user_id_str = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
-            .to_string();
-
-        let user_id = uuid::Uuid::parse_str(&user_id_str)
-            .map_err(|_| Status::invalid_argument("invalid user_id in metadata"))?;
+        let user_id = self.extract_user_id(request.metadata())?;
+        let user_id_str = user_id.to_string();
 
         let req = request.into_inner();
 
@@ -387,15 +387,8 @@ impl UserService for UserGrpcService {
         request: Request<proto::ExportUserDataRequest>,
     ) -> Result<Response<proto::ExportUserDataResponse>, Status> {
         // Extract authenticated user_id from gRPC metadata
-        let user_id_str = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::unauthenticated("Missing x-user-id"))?
-            .to_string();
-
-        let user_id = uuid::Uuid::parse_str(&user_id_str)
-            .map_err(|_| Status::invalid_argument("invalid user_id in metadata"))?;
+        let user_id = self.extract_user_id(request.metadata())?;
+        let user_id_str = user_id.to_string();
 
         // Fetch user profile
         let user = construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
@@ -495,12 +488,7 @@ impl UserService for UserGrpcService {
         request: Request<proto::SetDiscoverableRequest>,
     ) -> Result<Response<proto::SetDiscoverableResponse>, Status> {
         // Auth: extract user_id from Envoy-injected metadata header.
-        let user_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let user_id = self.extract_user_id(request.metadata())?;
 
         let discoverable = request.into_inner().discoverable;
 
@@ -540,12 +528,7 @@ impl UserService for UserGrpcService {
         request: Request<proto::FindUserRequest>,
     ) -> Result<Response<proto::FindUserResponse>, Status> {
         // Auth: must be authenticated to search.
-        let caller_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let caller_id = self.extract_user_id(request.metadata())?;
 
         let req = request.into_inner();
         if req.username.is_empty() {
@@ -599,12 +582,7 @@ impl UserService for UserGrpcService {
         &self,
         request: Request<proto::SendContactRequestRequest>,
     ) -> Result<Response<proto::SendContactRequestResponse>, Status> {
-        let caller_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let caller_id = self.extract_user_id(request.metadata())?;
 
         let req = request.into_inner();
         let to_user_id = uuid::Uuid::parse_str(&req.to_user_id)
@@ -746,12 +724,7 @@ impl UserService for UserGrpcService {
         &self,
         request: Request<proto::GetContactRequestsRequest>,
     ) -> Result<Response<proto::GetContactRequestsResponse>, Status> {
-        let caller_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let caller_id = self.extract_user_id(request.metadata())?;
 
         let sec = &self.context.config.security;
 
@@ -804,12 +777,7 @@ impl UserService for UserGrpcService {
         &self,
         request: Request<proto::RespondToContactRequestRequest>,
     ) -> Result<Response<proto::RespondToContactRequestResponse>, Status> {
-        let caller_id = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let caller_id = self.extract_user_id(request.metadata())?;
 
         let req = request.into_inner();
         let request_id = uuid::Uuid::parse_str(&req.request_id)
@@ -936,12 +904,7 @@ impl UserService for UserGrpcService {
         &self,
         request: Request<proto::SetGroupInvitePolicyRequest>,
     ) -> Result<Response<proto::SetGroupInvitePolicyResponse>, Status> {
-        let user_id: uuid::Uuid = request
-            .metadata()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))?;
+        let user_id = self.extract_user_id(request.metadata())?;
         let allow = request.into_inner().allow_contact_invites;
 
         use construct_server_shared::db;

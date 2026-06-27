@@ -26,13 +26,14 @@ use axum::{
 use construct_config::{ApnsEnvironment, Config};
 use construct_server_shared::apns::{ApnsClient, DeviceTokenEncryption};
 use construct_server_shared::auth::AuthManager;
+use construct_server_shared::auth_utils;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_server_shared::queue::MessageQueue;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tonic::{Request, Response, Status, metadata::MetadataMap};
+use tonic::{Request, Response, Status};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -46,17 +47,6 @@ use proto::notification_service_server::{NotificationService, NotificationServic
 
 mod core;
 mod handlers;
-
-/// Extract user_id from gRPC metadata
-fn extract_user_id(metadata: &MetadataMap) -> Result<Uuid, Status> {
-    let user_id_str = metadata
-        .get("x-user-id")
-        .ok_or_else(|| Status::unauthenticated("Missing x-user-id metadata"))?
-        .to_str()
-        .map_err(|_| Status::unauthenticated("Invalid x-user-id format"))?;
-
-    Uuid::parse_str(user_id_str).map_err(|_| Status::unauthenticated("Invalid x-user-id UUID"))
-}
 
 /// gRPC implementation of NotificationService
 struct NotificationGrpcService {
@@ -99,8 +89,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::RegisterDeviceTokenRequest>,
     ) -> Result<Response<proto::RegisterDeviceTokenResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
         let input = core::RegisterDeviceTokenInput {
@@ -140,8 +129,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::UnregisterDeviceTokenRequest>,
     ) -> Result<Response<proto::UnregisterDeviceTokenResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
         let input = core::UnregisterDeviceTokenInput {
@@ -162,8 +150,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::UpdateNotificationPreferencesRequest>,
     ) -> Result<Response<proto::UpdateNotificationPreferencesResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
         let input = core::UpdateNotificationPreferencesInput {
@@ -188,8 +175,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::RegisterVoipTokenRequest>,
     ) -> Result<Response<proto::RegisterVoipTokenResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
         let input = core::RegisterVoipTokenInput {
@@ -216,8 +202,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::UnregisterVoipTokenRequest>,
     ) -> Result<Response<proto::UnregisterVoipTokenResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id(metadata)?;
+        let user_id = auth_utils::extract_user_id(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
         let input = core::UnregisterVoipTokenInput {

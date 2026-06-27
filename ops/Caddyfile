@@ -1,32 +1,27 @@
-# ─── Construct Server — Caddyfile ─────────────────────────────────────────
-# Replaces Traefik (TLS) + Envoy (gRPC routing + JWT validation).
-# Auto TLS via Let's Encrypt. HTTP/3 is NOT served on :443/UDP —
-# SALAMANDER-obfuscated QUIC runs there (construct-transport) instead.
-#
-# Requires: caddy-jwt plugin (greenpau/caddy-jwt).
-# Build: docker build -t caddy-jwt -f ops/Dockerfile.caddy ops/
-#
-# Ports:
-#   :443  — TLS (HTTP/2), public-facing
-#   :8080 — plain h2c, for gateway proxy + quic transport (internal docker network)
-#   :80   — redirect to HTTPS
-#
-# Replace domain (single-tenant): *.konstruct.cc → your.domain
-# ──────────────────────────────────────────────────────────────────────────
-
 {
 	grace_period 10s
 	admin 127.0.0.1:2019
-	# 1000 concurrent HTTP/2 streams per connection — 250 (old default) was too low for
-	# mobile clients that share one persistent connection for heartbeat + unary RPCs.
 	servers {
 		max_concurrent_streams 1000
 	}
 }
 
-# ── Shared route definitions (imported by both :443 and :8080) ────────────
+*.konstruct.cc, konstruct.cc {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	import grpc_routes
+}
+
+:8080 {
+	import grpc_routes
+}
+
+:80 {
+	redir https://{host}{uri} permanent
+}
+
 (grpc_routes) {
-	# CORS (gRPC-web)
 	header {
 		Access-Control-Allow-Methods "GET, POST, OPTIONS"
 		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
@@ -35,40 +30,17 @@
 		Vary Origin
 	}
 
-	# ── JWT validation (caddy-jwt plugin) ─────────────────────────────
-	jwt {
-		jwks_url http://auth:8081/.well-known/jwks.json
-		jwks_cache_duration 10m
-		inject_headers {
-			x-user-id sub
-		}
-		pass_through
-		skip /.well-known*
-		skip /health
-		skip /shared.proto.services.v1.AuthService/*
-		skip /shared.proto.services.v1.DeviceService/*
-		skip /shared.proto.services.v1.UserService/CheckUsernameAvailability
-	}
-
-	# Health & Discovery
 	handle /.well-known* {
 		reverse_proxy gateway:3000
 	}
 	handle /health {
 		reverse_proxy gateway:3000
 	}
-
-	# Public gRPC services
 	handle /shared.proto.services.v1.AuthService/* {
 		reverse_proxy h2c://auth:50051
 	}
 	handle /shared.proto.services.v1.DeviceService/* {
 		reverse_proxy h2c://auth:50051
-	}
-
-	# Protected gRPC services
-	handle_path /shared.proto.services.v1.UserService/CheckUsernameAvailability {
-		reverse_proxy h2c://user:50052
 	}
 	handle /shared.proto.services.v1.UserService/* {
 		reverse_proxy h2c://user:50052
@@ -111,29 +83,7 @@
 		}
 	}
 
-	# Fallback
 	handle {
 		respond "not found" 404
 	}
-}
-
-# ── External (TLS) — port 443 ──────────────────────────────────────────────
-*.konstruct.cc, konstruct.cc {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-
-	import grpc_routes
-}
-
-# ── Internal (h2c) — port 8080 ─────────────────────────────────────────────
-# Plain HTTP/2 (no TLS). Used by gateway proxy (veil/obfs4 → caddy:8080).
-# Same JWT validation — gateway forwards Authorization header as-is.
-:8080 {
-	import grpc_routes
-}
-
-# ── HTTP → HTTPS redirect — port 80 ────────────────────────────────────────
-:80 {
-	redir https://{host}{uri} permanent
 }
