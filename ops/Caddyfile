@@ -1,13 +1,14 @@
 # ─── Construct Server — Caddyfile ─────────────────────────────────────────
 # Replaces Traefik (TLS) + Envoy (gRPC routing + JWT validation).
-# Auto TLS via Let's Encrypt, HTTP/3 (QUIC) on :443/UDP.
+# Auto TLS via Let's Encrypt. HTTP/3 is NOT served on :443/UDP —
+# SALAMANDER-obfuscated QUIC runs there (construct-transport) instead.
 #
 # Requires: caddy-jwt plugin (greenpau/caddy-jwt).
 # Build: docker build -t caddy-jwt -f ops/Dockerfile.caddy ops/
 #
 # Ports:
-#   :443  — TLS (HTTP/2 + HTTP/3), public-facing
-#   :8080 — plain h2c, for gateway proxy (internal docker network)
+#   :443  — TLS (HTTP/2), public-facing
+#   :8080 — plain h2c, for gateway proxy + quic transport (internal docker network)
 #   :80   — redirect to HTTPS
 #
 # Replace domain (single-tenant): *.konstruct.cc → your.domain
