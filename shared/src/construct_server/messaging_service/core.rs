@@ -35,7 +35,7 @@ async fn fetch_recipient_device_ids(
     }
 }
 
-/// Dispatch a pre-built KafkaMessageEnvelope to Kafka (or Redis fallback).
+/// Dispatch a pre-built KafkaMessageEnvelope to the recipient's Redis offline stream.
 ///
 /// Used by the gRPC path where the envelope is constructed without going
 /// through `EncryptedMessage` deserialization.
@@ -95,42 +95,13 @@ pub async fn dispatch_envelope(
         }
     }
 
-    if let Some(kafka_producer) = &app_context.kafka_producer {
-        if kafka_producer.is_enabled() {
-            match kafka_producer.send_message(&envelope).await {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        sender_hash = %log_safe_id(sender_id, salt),
-                        recipient_hash = %log_safe_id(recipient_id, salt),
-                        message_id = %message_id,
-                        "Kafka unavailable — falling back to Redis direct delivery"
-                    );
-                    let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
-                    let mut queue = app_context.queue.lock().await;
-                    queue
-                        .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
-                        .await
-                        .map_err(|re| {
-                            AppError::Internal(format!(
-                                "Both Kafka and Redis delivery failed: {e} / {re}"
-                            ))
-                        })?;
-                }
-            }
-        } else {
-            // Kafka disabled (test mode) — write directly to Redis
-            let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
-            let mut queue = app_context.queue.lock().await;
-            queue
-                .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
-        }
-    } else {
-        return Err(AppError::Kafka("Kafka producer not available".to_string()));
-    }
+    let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
+    let mut queue = app_context.queue.lock().await;
+    queue
+        .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+    drop(queue);
 
     tracing::info!(
         sender_hash = %log_safe_id(sender_id, salt),
@@ -329,55 +300,25 @@ pub async fn send_control_message(
     let envelope = KafkaMessageEnvelope::from(chat_message);
     let salt = &app_context.config.logging.hash_salt;
 
-    if let Some(kafka_producer) = &app_context.kafka_producer {
-        if kafka_producer.is_enabled() {
-            if let Err(e) = kafka_producer.send_message(&envelope).await {
-                tracing::error!(
-                    error = %e,
-                    sender_hash = %log_safe_id(&sender_id_str, salt),
-                    recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                    message_id = %message_id,
-                    "Failed to send END_SESSION to Kafka"
-                );
-                return Err(AppError::Kafka(e.to_string()));
-            }
-        } else {
-            tracing::info!(
-                sender_hash = %log_safe_id(&sender_id_str, salt),
-                recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                message_id = %message_id,
-                "Kafka disabled - writing END_SESSION directly to Redis (test mode)"
-            );
-
-            let mut queue = app_context.queue.lock().await;
-            if let Err(e) = queue
-                .write_message_to_user_stream(&recipient_id.to_string(), &envelope)
-                .await
-            {
-                drop(queue);
-                tracing::error!(
-                    error = %e,
-                    sender_hash = %log_safe_id(&sender_id_str, salt),
-                    recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                    message_id = %message_id,
-                    "Failed to write END_SESSION to Redis"
-                );
-                return Err(AppError::Internal(format!(
-                    "Failed to deliver control message: {}",
-                    e
-                )));
-            }
-            drop(queue);
-        }
-    } else {
+    let mut queue = app_context.queue.lock().await;
+    if let Err(e) = queue
+        .write_message_to_user_stream(&recipient_id.to_string(), &envelope)
+        .await
+    {
+        drop(queue);
         tracing::error!(
+            error = %e,
             sender_hash = %log_safe_id(&sender_id_str, salt),
             recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
             message_id = %message_id,
-            "Kafka producer not available - cannot send control message"
+            "Failed to write END_SESSION to Redis"
         );
-        return Err(AppError::Kafka("Kafka producer not available".to_string()));
+        return Err(AppError::Internal(format!(
+            "Failed to deliver control message: {}",
+            e
+        )));
     }
+    drop(queue);
 
     tracing::info!(
         sender_hash = %log_safe_id(&sender_id_str, salt),

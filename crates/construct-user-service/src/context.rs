@@ -8,7 +8,6 @@
 
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
-use construct_broker::MessageProducer;
 use construct_config::Config;
 use construct_context::AppContext;
 use construct_db::DbPool;
@@ -29,15 +28,6 @@ impl UserServiceContext {
     /// Convert to AppContext for use with existing handlers
     /// This is a temporary adapter until handlers are refactored to use traits
     pub fn to_app_context(&self) -> AppContext {
-        // User handlers don't use Kafka, so we can skip creating the producer
-        let kafka_producer = match MessageProducer::new(&self.config.kafka) {
-            Ok(producer) => Some(Arc::new(producer)),
-            Err(e) => {
-                tracing::warn!(error = %e, "Kafka producer creation failed in user service - user handlers don't use Kafka, continuing without it");
-                None
-            }
-        };
-
         // Create minimal APNs client (not used by user handlers)
         let apns_client = ApnsClient::new(self.config.apns.clone())
             .map(Arc::new)
@@ -55,19 +45,11 @@ impl UserServiceContext {
                 })
         );
 
-        // Create AppContext using builder pattern (Phase 2.8)
-        let mut builder = AppContext::builder()
+        AppContext::builder()
             .with_db_pool(self.db_pool.clone())
             .with_queue(self.queue.clone())
             .with_auth_manager(self.auth_manager.clone())
-            .with_config(self.config.clone());
-
-        // Only set kafka_producer if available (user service doesn't require it)
-        if let Some(kafka_producer) = kafka_producer {
-            builder = builder.with_kafka_producer(kafka_producer);
-        }
-
-        builder
+            .with_config(self.config.clone())
             .with_apns_client(apns_client)
             .with_token_encryption(token_encryption)
             .with_server_instance_id(uuid::Uuid::new_v4().to_string())

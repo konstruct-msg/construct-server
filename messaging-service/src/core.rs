@@ -18,7 +18,7 @@ use construct_server_shared::shared::proto::services::v1::SendBlindNotificationR
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
 
-/// Dispatch a pre-built KafkaMessageEnvelope to Kafka (or Redis fallback).
+/// Dispatch a pre-built KafkaMessageEnvelope to the recipient's Redis offline stream.
 ///
 /// Used by the gRPC path where the envelope is constructed without going
 /// through `EncryptedMessage` deserialization.
@@ -41,104 +41,46 @@ pub async fn dispatch_envelope(
         MessageType::DirectMessage | MessageType::MLSMessage
     );
 
-    if let Some(kafka_producer) = &app_context.kafka_producer {
-        if kafka_producer.is_enabled() {
-            // ── Kafka-enabled path ────────────────────────────────────────
-            // Dedup check happens before the async Kafka send (different lock window).
-            if is_user_message {
-                let mut queue = app_context.queue.lock().await;
-                match queue.is_message_duplicate(message_id).await {
-                    Ok(true) => {
-                        tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        let _ = queue.mark_message_dispatched(message_id).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
-                    }
-                }
-            }
-            let t_kafka = std::time::Instant::now();
-            match kafka_producer.send_message(&envelope).await {
-                Ok(_) => {
-                    tracing::debug!(elapsed_ms = t_kafka.elapsed().as_millis(), "Kafka send OK");
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        sender_hash = %log_safe_id(sender_id, salt),
-                        recipient_hash = %log_safe_id(recipient_id, salt),
-                        message_id = %message_id,
-                        "Kafka unavailable — falling back to Redis direct delivery"
-                    );
-                    // Kafka fallback + sender mapping in one lock to avoid double contention.
-                    let mut queue = app_context.queue.lock().await;
-                    queue
-                        .write_message_to_user_stream(recipient_id, &envelope)
-                        .await
-                        .map_err(|re| {
-                            AppError::Internal(format!(
-                                "Both Kafka and Redis delivery failed: {e} / {re}"
-                            ))
-                        })?;
-                    if !sender_id.is_empty()
-                        && let Err(se) = queue.store_message_sender(message_id, sender_id).await
-                    {
-                        tracing::warn!(error = %se, "Failed to store receipt sender (Kafka fallback)");
-                    }
-                }
-            }
-        } else {
-            // ── Kafka-disabled path (dev / test mode) ─────────────────────
-            // All Redis operations are batched inside ONE lock acquisition to avoid
-            // releasing and re-acquiring the mutex between the dedup check, the
-            // stream write, and the receipt-sender mapping.  Each lock cycle adds
-            // tokio scheduler overhead AND creates windows where poll_messages can
-            // steal the lock mid-dispatch, increasing per-message latency.
-            let t_lock = std::time::Instant::now();
-            let mut queue = app_context.queue.lock().await;
-            tracing::debug!(
-                wait_ms = t_lock.elapsed().as_millis(),
-                "queue lock acquired (dispatch)"
-            );
+    // All Redis operations are batched inside ONE lock acquisition to avoid
+    // releasing and re-acquiring the mutex between the dedup check, the
+    // stream write, and the receipt-sender mapping.
+    let t_lock = std::time::Instant::now();
+    let mut queue = app_context.queue.lock().await;
+    tracing::debug!(
+        wait_ms = t_lock.elapsed().as_millis(),
+        "queue lock acquired (dispatch)"
+    );
 
-            if is_user_message {
-                match queue.is_message_duplicate(message_id).await {
-                    Ok(true) => {
-                        tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        let _ = queue.mark_message_dispatched(message_id).await;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
-                    }
-                }
+    if is_user_message {
+        match queue.is_message_duplicate(message_id).await {
+            Ok(true) => {
+                tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
+                return Ok(());
             }
-
-            queue
-                .write_message_to_user_stream(recipient_id, &envelope)
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
-
-            if !sender_id.is_empty()
-                && let Err(e) = queue.store_message_sender(message_id, sender_id).await
-            {
-                tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
+            Ok(false) => {
+                let _ = queue.mark_message_dispatched(message_id).await;
             }
-            // Single drop — releases lock once for all three operations.
-            drop(queue);
-            tracing::debug!(
-                redis_ms = t_lock.elapsed().as_millis(),
-                "dispatch redis batch done"
-            );
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
+            }
         }
-    } else {
-        return Err(AppError::Kafka("Kafka producer not available".to_string()));
     }
+
+    queue
+        .write_message_to_user_stream(recipient_id, &envelope)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+
+    if !sender_id.is_empty()
+        && let Err(e) = queue.store_message_sender(message_id, sender_id).await
+    {
+        tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
+    }
+    drop(queue);
+    tracing::debug!(
+        redis_ms = t_lock.elapsed().as_millis(),
+        "dispatch redis batch done"
+    );
 
     let elapsed = t_start.elapsed();
     tracing::info!(
@@ -344,55 +286,25 @@ pub async fn send_control_message(
     let envelope = KafkaMessageEnvelope::from(chat_message);
     let salt = &app_context.config.logging.hash_salt;
 
-    if let Some(kafka_producer) = &app_context.kafka_producer {
-        if kafka_producer.is_enabled() {
-            if let Err(e) = kafka_producer.send_message(&envelope).await {
-                tracing::error!(
-                    error = %e,
-                    sender_hash = %log_safe_id(&sender_id_str, salt),
-                    recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                    message_id = %message_id,
-                    "Failed to send END_SESSION to Kafka"
-                );
-                return Err(AppError::Kafka(e.to_string()));
-            }
-        } else {
-            tracing::info!(
-                sender_hash = %log_safe_id(&sender_id_str, salt),
-                recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                message_id = %message_id,
-                "Kafka disabled - writing END_SESSION directly to Redis (test mode)"
-            );
-
-            let mut queue = app_context.queue.lock().await;
-            if let Err(e) = queue
-                .write_message_to_user_stream(&recipient_id.to_string(), &envelope)
-                .await
-            {
-                drop(queue);
-                tracing::error!(
-                    error = %e,
-                    sender_hash = %log_safe_id(&sender_id_str, salt),
-                    recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
-                    message_id = %message_id,
-                    "Failed to write END_SESSION to Redis"
-                );
-                return Err(AppError::Internal(format!(
-                    "Failed to deliver control message: {}",
-                    e
-                )));
-            }
-            drop(queue);
-        }
-    } else {
+    let mut queue = app_context.queue.lock().await;
+    if let Err(e) = queue
+        .write_message_to_user_stream(&recipient_id.to_string(), &envelope)
+        .await
+    {
+        drop(queue);
         tracing::error!(
+            error = %e,
             sender_hash = %log_safe_id(&sender_id_str, salt),
             recipient_hash = %log_safe_id(&recipient_id.to_string(), salt),
             message_id = %message_id,
-            "Kafka producer not available - cannot send control message"
+            "Failed to write END_SESSION to Redis"
         );
-        return Err(AppError::Kafka("Kafka producer not available".to_string()));
+        return Err(AppError::Internal(format!(
+            "Failed to deliver control message: {}",
+            e
+        )));
     }
+    drop(queue);
 
     tracing::info!(
         sender_hash = %log_safe_id(&sender_id_str, salt),

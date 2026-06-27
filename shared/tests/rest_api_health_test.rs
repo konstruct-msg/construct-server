@@ -50,15 +50,9 @@ async fn test_readiness_check_success() {
     if body["status"] == "healthy" {
         assert!(body.get("database").is_some());
         assert!(body.get("redis").is_some());
-        assert!(body.get("kafka").is_some());
 
         assert_eq!(body["database"]["status"], "healthy");
         assert_eq!(body["redis"]["status"], "healthy");
-        // Kafka might be disabled, so we check if it exists
-        if body.get("kafka").is_some() {
-            // Kafka status can be "healthy" or "disabled"
-            assert!(body["kafka"]["status"] == "healthy" || body["kafka"]["status"] == "disabled");
-        }
     }
 }
 
@@ -126,13 +120,6 @@ async fn test_readiness_check_structure() {
         assert!(body["redis"].is_object());
         assert!(body["redis"].get("status").is_some());
         assert!(body["redis"]["status"].is_string());
-
-        // Kafka status (optional, might be disabled)
-        if body.get("kafka").is_some() {
-            assert!(body["kafka"].is_object());
-            assert!(body["kafka"].get("status").is_some());
-            assert!(body["kafka"]["status"].is_string());
-        }
     }
 }
 
