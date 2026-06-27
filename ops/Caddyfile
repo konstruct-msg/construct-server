@@ -1,0 +1,140 @@
+# ─── Construct Server — Caddyfile ─────────────────────────────────────────
+# Replaces Traefik (TLS) + Envoy (gRPC routing) with one process.
+# Auto TLS via Let's Encrypt (HTTP-01 or TLS-ALPN-01).
+# HTTP/3 (QUIC) auto-enabled on :443.
+#
+# Replace with your domain (single-tenant — one domain per instance):
+#   {...}.konstruct.cc
+#
+# Upstreams are Docker service names (same compose network).
+# ──────────────────────────────────────────────────────────────────────────
+
+{
+	# Global options
+	grace_period 10s
+	# Caddy reads the domain from the site block.  If you use a placeholder
+	# like :443, Let's Encrypt won't auto-issue — set the real domain when
+	# deploying.
+
+	# JWT validation: not handled in Caddy.  Bearer tokens are forwarded to
+	# upstream services which validate them.  Public routes (AuthService,
+	# DeviceService, health, .well-known) need no auth.
+	#
+	# If you want Caddy to reject unauthenticated requests before they reach
+	# a service, build with github.com/greenpau/caddy-security or similar.
+}
+
+# ─── External API ─────────────────────────────────────────────────────────
+# All gRPC traffic enters here.  CORS headers are set for gRPC-web clients
+# that use HTTP/1.1.
+
+ams.konstruct.cc, konstruct.cc {
+	# ── TLS ──────────────────────────────────────────────────────────────
+	# Auto Let's Encrypt via HTTP-01 challenge.  Caddy serves the challenge
+	# on port 80 automatically (use `tls` directive with manual certs if
+	# port 80 is blocked).
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	# ── CORS (gRPC-web needs these) ──────────────────────────────────────
+	header {
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
+		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
+		Access-Control-Allow-Origin *
+		Vary Origin
+		# OPTIONS preflight — Caddy returns 204 automatically
+	}
+
+	# ── Global headers ───────────────────────────────────────────────────
+	header /health X-Content-Type-Options nosniff
+	header /.well-known X-Content-Type-Options nosniff
+
+	# ── Health & Discovery (gateway) ─────────────────────────────────────
+	handle /.well-known* {
+		reverse_proxy gateway:3000
+	}
+	handle /health {
+		reverse_proxy gateway:3000
+	}
+
+	# ── Public gRPC services (no auth required) ──────────────────────────
+	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://auth:50051
+	}
+	handle /shared.proto.services.v1.DeviceService/* {
+		reverse_proxy h2c://auth:50051
+	}
+
+	# ── Protected gRPC services ──────────────────────────────────────────
+	# UserService.CheckUsernameAvailability is public (pre-registration).
+	# Exact-path match must come BEFORE the prefix catch-all.
+	handle_path /shared.proto.services.v1.UserService/CheckUsernameAvailability {
+		reverse_proxy h2c://user:50052
+	}
+	handle /shared.proto.services.v1.UserService/* {
+		reverse_proxy h2c://user:50052
+	}
+
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053 {
+			# Streaming — no upstream timeout
+			flush_interval -1
+		}
+	}
+	handle /construct.message_gateway.v1.MessageGateway/* {
+		reverse_proxy h2c://messaging:50053
+	}
+
+	handle /shared.proto.services.v1.NotificationService/* {
+		reverse_proxy h2c://notification:50054
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://invite:50055
+	}
+	handle /shared.proto.services.v1.VeilService/* {
+		reverse_proxy h2c://veil:50056
+	}
+	handle /shared.proto.services.v1.KeyService/* {
+		reverse_proxy h2c://key:50057
+	}
+	handle /shared.proto.services.v1.MediaService/* {
+		reverse_proxy h2c://media:50056
+		# File uploads — generous timeout
+	}
+	handle /shared.proto.services.v1.MlsService/* {
+		reverse_proxy h2c://mls:50058
+	}
+	handle /shared.proto.services.v1.ChannelService/* {
+		reverse_proxy h2c://channel:50061
+	}
+	handle /shared.proto.sentinel.v1.SentinelService/* {
+		reverse_proxy h2c://sentinel:50059
+	}
+	handle /shared.proto.signaling.v1.SignalingService/* {
+		reverse_proxy h2c://signaling:50060 {
+			# WebRTC signalling — bidirectional streaming, no timeout
+			flush_interval -1
+		}
+	}
+
+	# ── Prometheus / Grafana (optional) ───────────────────────────────────
+	# handle /api/v1/* {
+	# 	reverse_proxy prometheus:9090
+	# }
+	# handle /grafana/* {
+	# 	reverse_proxy grafana:3000
+	# }
+
+	# ── Fallback 404 ──────────────────────────────────────────────────────
+	# Any unmatched path gets 404.  Clients should never hit this if they
+	# connect to the right service path.
+	handle {
+		respond "not found" 404
+	}
+}
+
+# ─── Internal HTTP (metrics, health probes) ─────────────────────────────
+# Caddy listens on :2019 by default for admin API.  If you need to expose
+# metrics from backends, add a separate site block on :2020 without TLS.
