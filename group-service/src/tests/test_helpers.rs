@@ -131,7 +131,7 @@ pub(crate) async fn publish_test_key_package(
     device_id: &str,
 ) -> Vec<u8> {
     let kp = format!("test-kp:{user_id}:{device_id}:{}", Uuid::new_v4()).into_bytes();
-    let kp_ref = crate::helpers::sha256_bytes(&kp);
+    let kp_ref = sha256_bytes(&kp);
     let now = Utc::now();
 
     sqlx::query(
@@ -152,4 +152,10 @@ pub(crate) async fn publish_test_key_package(
     .expect("Failed to publish test KeyPackage");
 
     kp_ref
+}
+
+pub(crate) fn sha256_bytes(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
 }
