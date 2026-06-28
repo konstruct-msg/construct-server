@@ -3,7 +3,7 @@
 	admin 127.0.0.1:2019
 }
 
-ams.konstruct.cc, konstruct.cc {
+ams.konstruct.cc {
 	tls {
 		protocols tls1.2 tls1.3
 	}
@@ -141,6 +141,4 @@ ams.konstruct.cc, konstruct.cc {
 	}
 }
 
-:80 {
-	redir https://{host}{uri} permanent
-}
+
