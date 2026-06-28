@@ -55,6 +55,9 @@ services:
       - "443:443" # TCP — TLS/HTTP2
     # UDP 443 is claimed by construct-transport (SALAMANDER obfuscated QUIC).
     # Caddy native HTTP/3 is not used — clients use SALAMANDER-QUIC instead.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # Let's Encrypt certs + OCSP staples
