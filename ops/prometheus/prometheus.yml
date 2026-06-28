@@ -23,13 +23,9 @@ scrape_configs:
     static_configs:
       - targets: ["key:8057"]
 
-  - job_name: mls
+  - job_name: group
     static_configs:
-      - targets: ["mls:8097"]
-
-  - job_name: channel
-    static_configs:
-      - targets: ["channel:8098"]
+      - targets: ["group:8097"]
 
   # Gateway serves both the HTTP API and the VEIL (obfs4) relay — relay metrics
   # are published on the same /metrics endpoint (shared Prometheus registry).

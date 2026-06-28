@@ -9,11 +9,10 @@ members = [
     "gateway",
     "media-service",
     "key-service",
-    "mls-service",
+    "group-service",
     "sentinel-service",
     "signaling-service",
     "masque-service",
-    "channel-service",
     "veil-service",
     # New modular crates
     "crates/construct-types",
