@@ -55,10 +55,10 @@ ams.konstruct.cc {
 		reverse_proxy h2c://media:50056
 	}
 	handle /shared.proto.services.v1.MlsService/* {
-		reverse_proxy h2c://mls:50058
+		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.services.v1.ChannelService/* {
-		reverse_proxy h2c://channel:50061
+		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.sentinel.v1.SentinelService/* {
 		reverse_proxy h2c://sentinel:50059
@@ -122,10 +122,10 @@ ams.konstruct.cc {
 		reverse_proxy h2c://media:50056
 	}
 	handle /shared.proto.services.v1.MlsService/* {
-		reverse_proxy h2c://mls:50058
+		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.services.v1.ChannelService/* {
-		reverse_proxy h2c://channel:50061
+		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.sentinel.v1.SentinelService/* {
 		reverse_proxy h2c://sentinel:50059
