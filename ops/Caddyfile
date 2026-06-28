@@ -3,7 +3,7 @@
 	admin 127.0.0.1:2019
 }
 
-*.konstruct.cc, konstruct.cc {
+ams.konstruct.cc, konstruct.cc {
 	tls {
 		protocols tls1.2 tls1.3
 	}
