@@ -66,8 +66,7 @@ services:
       - user
       - messaging
       - signaling
-      - mls
-      - channel
+      - group
     networks:
       - internal
 
@@ -205,36 +204,19 @@ services:
     networks:
       - internal
 
-  # mls-service is no longer a stub — MLS groups are fully implemented.
-  mls:
+  # Combined MLS + Channel service (merged 2026-06)
+  group:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
-    command: /usr/local/bin/mls-service
+    command: /usr/local/bin/group-service
     restart: unless-stopped
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
     environment:
-      PORT: "50058"
+      PORT: "8097"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      METRICS_PORT: "8097"
+      SERVICE_NAME: group
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-
-  channel:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
-    command: /usr/local/bin/channel-service
-    restart: unless-stopped
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "50061"
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      METRICS_PORT: "8098"
-      MLS_SERVICE_URL: "http://mls:50058"
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:

@@ -80,12 +80,11 @@ static_resources:
                         # Media service
                         - match: { prefix: "/shared.proto.services.v1.MediaService" }
                           route: { cluster: media_service, timeout: 60s }
-                        # MLS service — fully implemented (Phases 1-7)
+                        # Group service (MLS + channel merged)
                         - match: { prefix: "/shared.proto.services.v1.MlsService" }
-                          route: { cluster: mls_service, timeout: 30s }
-                        # Channel service
+                          route: { cluster: group_service, timeout: 30s }
                         - match: { prefix: "/shared.proto.services.v1.ChannelService" }
-                          route: { cluster: channel_service, timeout: 30s }
+                          route: { cluster: group_service, timeout: 30s }
                         # Sentinel service
                         - match: { prefix: "/shared.proto.sentinel.v1.SentinelService" }
                           route: { cluster: sentinel_service, timeout: 30s }
@@ -297,7 +296,7 @@ static_resources:
                   address:
                     socket_address: { address: key, port_value: 50057 }
 
-    - name: mls_service
+    - name: group_service
       type: STRICT_DNS
       dns_lookup_family: V4_ONLY
       connect_timeout: 5s
@@ -311,12 +310,12 @@ static_resources:
                 interval: 30s
                 timeout: 10s
       load_assignment:
-        cluster_name: mls_service
+        cluster_name: group_service
         endpoints:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: mls, port_value: 50058 }
+                    socket_address: { address: group, port_value: 50058 }
 
     - name: sentinel_service
       type: STRICT_DNS
@@ -359,27 +358,6 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: signaling, port_value: 50060 }
-
-    - name: channel_service
-      type: STRICT_DNS
-      dns_lookup_family: V4_ONLY
-      connect_timeout: 5s
-      lb_policy: ROUND_ROBIN
-      typed_extension_protocol_options:
-        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-          explicit_http_config:
-            http2_protocol_options:
-              connection_keepalive:
-                interval: 30s
-                timeout: 10s
-      load_assignment:
-        cluster_name: channel_service
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address: { address: channel, port_value: 50061 }
 
     - name: discovery_service
       type: STRICT_DNS
