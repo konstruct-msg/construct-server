@@ -28,7 +28,7 @@ use construct_server_shared::{
     auth::AuthManager,
     auth_service::{AuthServiceContext, handlers as auth_handlers},
     health,
-    kafka::types::{MessageEnvelope, ProtoEnvelopeContext},
+    message::types::{MessageEnvelope, ProtoEnvelopeContext},
     notification_service::{NotificationServiceContext, handlers as notification_handlers},
     queue::MessageQueue,
     shared::proto::services::v1::{
@@ -421,7 +421,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             ));
         }
         let message_id = uuid::Uuid::new_v4().to_string();
-        let kafka_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let msg_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
@@ -432,7 +432,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         let app_context = self.context.clone();
         construct_server_shared::messaging_service::core::dispatch_envelope(
             &app_context,
-            kafka_envelope,
+            msg_envelope,
         )
         .await
         .map_err(|e| GrpcStatus::internal(e.to_string()))?;

@@ -343,10 +343,10 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::envelope::convert_kafka_envelope_to_proto;
+    use crate::envelope::convert_envelope_to_proto;
     use crate::receipts::build_receipt_response;
     use base64::Engine as _;
-    use construct_server_shared::kafka::types::{MessageEnvelope, MessageType};
+    use construct_server_shared::message::types::{MessageEnvelope, MessageType};
     use construct_server_shared::shared::proto::services::v1 as proto;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -426,13 +426,13 @@ mod tests {
         }
     }
 
-    // ── convert_kafka_envelope_to_proto ──────────────────────────────────────
+    // ── convert_envelope_to_proto ──────────────────────────────────────
 
     #[test]
     fn test_convert_direct_message_sets_sender_recipient() {
         use construct_server_shared::shared::proto::core::v1 as core;
         let env = make_direct_envelope("alice", "bob", "dGVzdA=="); // "test" in base64
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(proto.sender.as_ref().unwrap().user_id, "alice");
         assert_eq!(proto.recipient.as_ref().unwrap().user_id, "bob");
@@ -447,7 +447,7 @@ mod tests {
     fn test_convert_end_session_maps_session_reset_content_type() {
         use construct_server_shared::shared::proto::core::v1 as core;
         let env = make_control_envelope("END_SESSION");
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(
             proto.content_type,
@@ -464,7 +464,7 @@ mod tests {
     fn test_convert_session_reset_maps_session_reset_content_type() {
         use construct_server_shared::shared::proto::core::v1 as core;
         let env = make_control_envelope("SESSION_RESET");
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(
             proto.content_type,
@@ -477,7 +477,7 @@ mod tests {
     fn test_convert_key_sync_maps_key_sync_content_type() {
         use construct_server_shared::shared::proto::core::v1 as core;
         let env = make_control_envelope("KEY_SYNC");
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(proto.content_type, i32::from(core::ContentType::KeySync));
         assert!(proto.encrypted_payload.is_empty());
@@ -488,7 +488,7 @@ mod tests {
         let sealed_bytes = b"fake-sealed-inner-bytes";
         let b64 = base64::engine::general_purpose::STANDARD.encode(sealed_bytes);
         let env = make_sealed_envelope("bob", &b64);
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert!(proto.sender.is_none(), "sealed sender must hide sender");
         assert_eq!(proto.recipient.as_ref().unwrap().user_id, "bob");
@@ -505,7 +505,7 @@ mod tests {
         let mut env = make_direct_envelope("alice", "bob", "dGVzdA==");
         env.edits_message_id = Some("original-msg-123".to_string());
 
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
         assert_eq!(
             proto.edits_message_id,
             Some("original-msg-123".to_string()),
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn test_convert_direct_message_edits_none_by_default() {
         let env = make_direct_envelope("alice", "bob", "dGVzdA==");
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
         assert!(
             proto.edits_message_id.is_none(),
             "non-edit message must not set edits_message_id"
@@ -531,12 +531,12 @@ mod tests {
         let mut env = make_direct_envelope("alice", "bob", &payload_b64);
         env.proto_content_type = Some(i32::from(core::ContentType::SessionResetInit));
 
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(
             proto.content_type,
             i32::from(core::ContentType::SessionResetInit),
-            "SESSION_RESET_INIT content_type must be preserved through Kafka round-trip"
+            "SESSION_RESET_INIT content_type must be preserved through envelope round-trip"
         );
         assert!(
             !proto.encrypted_payload.is_empty(),
@@ -552,7 +552,7 @@ mod tests {
         let env = make_direct_envelope("alice", "bob", "dGVzdA==");
         assert!(env.proto_content_type.is_none());
 
-        let proto = convert_kafka_envelope_to_proto(env).unwrap();
+        let proto = convert_envelope_to_proto(env).unwrap();
         assert_eq!(
             proto.content_type,
             i32::from(core::ContentType::E2eeSignal),

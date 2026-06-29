@@ -277,74 +277,8 @@ fn test_generated_keys_are_random() {
     assert_eq!(key1_bytes.len(), 32, "Decoded key must be 32 bytes");
 }
 
-/// Test 10: Verify batching configuration
-#[cfg(test)]
-#[test]
-#[serial]
-fn test_batching_configuration() {
-    use std::env;
-
-    // Clear env first
-    unsafe {
-        env::remove_var("DELIVERY_ACK_MODE");
-        env::remove_var("DELIVERY_SECRET_KEY");
-        env::remove_var("DELIVERY_ACK_ENABLE_BATCHING");
-        env::remove_var("DELIVERY_ACK_BATCH_BUFFER_SECS");
-    }
-
-    // Batching enabled by default
-    // Use a valid key with good entropy (16 different hex characters)
-    let valid_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    unsafe {
-        env::set_var("DELIVERY_ACK_MODE", "kafka");
-        env::set_var("DELIVERY_SECRET_KEY", valid_key);
-        env::remove_var("DELIVERY_ACK_ENABLE_BATCHING");
-    }
-    let config = DeliveryAckConfig::from_env().unwrap();
-    assert!(
-        config.enable_batching,
-        "Batching must be enabled by default"
-    );
-    assert_eq!(
-        config.batch_buffer_secs, 5,
-        "Default buffer must be 5 seconds"
-    );
-
-    // Batching can be disabled
-    // Use a valid key with good entropy (16 different hex characters)
-    let valid_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    unsafe {
-        env::set_var("DELIVERY_ACK_MODE", "kafka");
-        env::set_var("DELIVERY_SECRET_KEY", valid_key);
-        env::set_var("DELIVERY_ACK_ENABLE_BATCHING", "false");
-    }
-    let config = DeliveryAckConfig::from_env().unwrap();
-    assert!(!config.enable_batching, "Batching must be disableable");
-
-    // Custom buffer time
-    unsafe {
-        env::set_var("DELIVERY_ACK_MODE", "kafka");
-        env::set_var("DELIVERY_SECRET_KEY", valid_key);
-        env::set_var("DELIVERY_ACK_ENABLE_BATCHING", "true");
-        env::set_var("DELIVERY_ACK_BATCH_BUFFER_SECS", "10");
-    }
-    let config = DeliveryAckConfig::from_env().unwrap();
-    assert_eq!(
-        config.batch_buffer_secs, 10,
-        "Custom buffer must be configurable"
-    );
-
-    // Clean up
-    unsafe {
-        env::remove_var("DELIVERY_ACK_MODE");
-        env::remove_var("DELIVERY_SECRET_KEY");
-        env::remove_var("DELIVERY_ACK_ENABLE_BATCHING");
-        env::remove_var("DELIVERY_ACK_BATCH_BUFFER_SECS");
-    }
-}
-
 // ============================================================================
-// Integration Tests (require Redis + Kafka)
+// Integration Tests (require Redis)
 // ============================================================================
 
 #[cfg(all(test, feature = "integration_tests"))]
@@ -355,32 +289,10 @@ mod integration_tests {
     #[ignore] // Requires Redis
     async fn test_redis_mapping_ttl() {
         // TODO: Implement when integration test infrastructure is ready
-        // 1. Create KafkaDeliveryStorage with 1-second TTL
+        // 1. Create storage with 1-second TTL
         // 2. Save a mapping
         // 3. Verify it exists immediately
         // 4. Wait 2 seconds
         // 5. Verify it expired
-    }
-
-    /// Integration test: Verify Kafka ACK events contain only hashes
-    #[tokio::test]
-    #[ignore] // Requires Kafka
-    async fn test_kafka_events_contain_only_hashes() {
-        // TODO: Implement when integration test infrastructure is ready
-        // 1. Send DeliveryAckEvent to Kafka
-        // 2. Consume event from Kafka
-        // 3. Verify all fields are hashed
-        // 4. Verify no plaintext IDs in event
-    }
-
-    /// Integration test: Verify batching randomizes order
-    #[tokio::test]
-    #[ignore] // Requires Kafka
-    async fn test_batching_randomizes_order() {
-        // TODO: Implement when integration test infrastructure is ready
-        // 1. Create AckBatcher with batching enabled
-        // 2. Enqueue 10 ACK events in order
-        // 3. Flush batch
-        // 4. Verify order was randomized (not sequential)
     }
 }
