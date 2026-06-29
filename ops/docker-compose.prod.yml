@@ -21,12 +21,14 @@
 # TLS: Caddy auto-obtains Let's Encrypt certs via TLS-ALPN-01
 #
 # Data layer:
-#   Recommended: self-hosted PostgreSQL 16 + Redis 7 on a dedicated VPS
-#     (ops/docker-compose.data.yml). Keeps all user data fully under your control.
-#   Transitioning to: single-VPS mode where data and app run together (WIP).
-#   Alternative (lightweight / dev): Supabase (managed PG) + Upstash (managed Redis).
-#     Set DATABASE_URL and REDIS_URL in app.env. Not recommended for production —
-#     data leaves your infrastructure and trust boundary.
+#   PostgreSQL 16 + Redis 7 run as services in this compose file (single-VPS mode).
+#   Data is persisted in named Docker volumes: postgres-data, redis-data.
+#   No ports are exposed to the host — services connect via the internal network.
+#   DATABASE_URL and REDIS_URL in app.env must use Docker hostnames:
+#     DATABASE_URL=postgresql://construct:PASSWORD@postgres:5432/construct
+#     REDIS_URL=redis://:PASSWORD@redis:6379
+#   POSTGRES_PASSWORD and REDIS_PASSWORD are read from the .env file (same file
+#   used for IMAGE_TAG etc). Add them to /opt/construct/.env on the server.
 #
 # First-time setup (run from REPO ROOT):
 #   1. cp ops/secrets.example.env /opt/construct/secrets/app.env
@@ -42,6 +44,52 @@
 name: construct
 
 services:
+  # ─── Data Layer ───────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c max_connections=50
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c checkpoint_completion_target=0.9
+      -c maintenance_work_mem=64MB
+      -c random_page_cost=1.1
+    environment:
+      POSTGRES_DB: construct
+      POSTGRES_USER: construct
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct -d construct"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: construct-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
   # ─── Caddy (TLS + gRPC routing) ───────────────────────────────────────────
   # Replaces Traefik (TLS + Let's Encrypt) + Envoy (gRPC routing + JWT authn).
   # Vanilla caddy:alpine — no JWT plugin. Each service validates JWT itself.
@@ -84,6 +132,11 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/auth-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env # managed manually: see ops/secrets.example.env
         required: true
@@ -115,6 +168,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/user-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -133,6 +189,11 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/messaging-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -157,6 +218,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/key-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -176,6 +240,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/veil-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -195,6 +262,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/media-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -213,6 +283,11 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/group-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -230,6 +305,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/sentinel-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -246,6 +324,9 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
     command: /usr/local/bin/signaling-service
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - path: /opt/construct/secrets/app.env
         required: true
@@ -318,6 +399,8 @@ services:
       - /opt/construct/quic-certs:/certs
 
 volumes:
+  postgres-data:
+  redis-data:
   caddy-data:
   prometheus-data:
   grafana-data:
