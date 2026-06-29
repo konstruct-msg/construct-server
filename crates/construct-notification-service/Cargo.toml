@@ -12,7 +12,6 @@ construct-context        = { path = "../construct-context" }
 construct-db             = { path = "../construct-db" }
 construct-error          = { path = "../construct-error", features = ["full"] }
 construct-extractors     = { path = "../construct-extractors" }
-construct-key-management = { path = "../construct-key-management" }
 construct-queue          = { path = "../construct-queue" }
 construct-types          = { path = "../construct-types" }
 construct-utils          = { path = "../construct-utils" }

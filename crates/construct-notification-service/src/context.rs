@@ -11,7 +11,6 @@ use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_context::AppContext;
 use construct_db::DbPool;
-use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,7 +27,6 @@ pub struct NotificationServiceContext {
     pub apns_sandbox_client: Arc<ApnsClient>,
     pub token_encryption: Arc<DeviceTokenEncryption>,
     pub config: Arc<Config>,
-    pub key_management: Option<Arc<KeyManagementSystem>>,
 }
 
 impl NotificationServiceContext {

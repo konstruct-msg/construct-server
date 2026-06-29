@@ -289,7 +289,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         queue,
         auth_manager,
         config: config.clone(),
-        key_management: None,
         server_signer: None,
         token_enc_pub: None,
     });
@@ -607,7 +606,6 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
         apns_sandbox_client,
         token_encryption,
         config: config.clone(),
-        key_management: None,
     });
 
     let app = Router::new()

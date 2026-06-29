@@ -152,44 +152,6 @@ async fn main() -> Result<()> {
         },
     };
 
-    // Initialize Key Management System (optional, requires VAULT_ADDR)
-    let key_management =
-        match construct_server_shared::key_management::KeyManagementConfig::from_env() {
-            Ok(kms_config) => {
-                info!("Initializing Key Management System...");
-                match construct_server_shared::key_management::KeyManagementSystem::new(
-                    db_pool.clone(),
-                    kms_config,
-                )
-                .await
-                {
-                    Ok(kms) => {
-                        // Start background tasks (key refresh, rotation)
-                        if let Err(e) = kms.start().await {
-                            tracing::error!(error = %e, "Failed to start key management background tasks");
-                            return Err(e).context("Failed to start key management system");
-                        }
-                        info!("Key Management System initialized and started");
-                        Some(Arc::new(kms))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to initialize Key Management System - continuing without automatic key rotation"
-                        );
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::info!(
-                    error = %e,
-                    "Key Management System disabled (VAULT_ADDR not configured or invalid config)"
-                );
-                None
-            }
-        };
-
     // Initialize NotificationServiceContext for direct push (replaces gRPC round-trip)
     let notification_context = Arc::new(NotificationServiceContext {
         db_pool: db_pool.clone(),
@@ -199,7 +161,6 @@ async fn main() -> Result<()> {
         apns_sandbox_client,
         token_encryption,
         config: config.clone(),
-        key_management: key_management.clone(),
     });
     tracing::info!("Notification service context initialized (embedded in messaging-service)");
 
@@ -215,7 +176,6 @@ async fn main() -> Result<()> {
         notification_context: Some(notification_context),
         sentinel_client,
         config: config.clone(),
-        key_management,
         server_signer,
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         redis_conn,
