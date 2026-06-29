@@ -10,7 +10,6 @@ members = [
     "media-service",
     "key-service",
     "group-service",
-    "sentinel-service",
     "signaling-service",
     "veil-service",
     # New modular crates
@@ -43,7 +42,7 @@ members = [
 
 # Единая версия для всех пакетов
 [workspace.package]
-version = "0.15.4"
+version = "0.15.5"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/konstruct-msg/construct-server"

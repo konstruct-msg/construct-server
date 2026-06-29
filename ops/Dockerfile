@@ -30,7 +30,6 @@ COPY gateway ./gateway
 COPY media-service ./media-service
 COPY key-service ./key-service
 COPY group-service ./group-service
-COPY sentinel-service ./sentinel-service
 COPY signaling-service ./signaling-service
 COPY veil-service ./veil-service
 
@@ -60,7 +59,6 @@ COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 COPY --from=builder --chmod=+x /app/target/release/group-service /usr/local/bin/group-service
-COPY --from=builder --chmod=+x /app/target/release/sentinel-service /usr/local/bin/sentinel-service
 COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service
 COPY --from=builder --chmod=+x /app/target/release/veil-service /usr/local/bin/veil-service
 

@@ -14,10 +14,9 @@
 | `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
 | `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
 | `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships, invite tokens |
-| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery, APNs push (prod + sandbox) |
+| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery, APNs push (prod + sandbox), Sentinel anti-spam (in-process) |
 | `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
 | `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
-| `sentinel` | `sentinel-service` | 50059 | 8090 | Anti-spam: rate limiting, block enforcement, trust scoring |
 | `signaling` | `signaling-service` | 50060 | 8091 | WebRTC SDP/ICE signaling |
 | `group` | `group-service` | 50058 | 8097 | MLS groups (RFC 9420) + Broadcast channels (PUBLIC/PRIVATE), Sender Key encryption |
 
@@ -104,18 +103,22 @@ Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written,
 
 ```
 messaging-service
-    ├── → sentinel-service (CheckSendPermission — rate limit + block enforcement on send path)
     └── → key-service (via HTTP for key bundles, rare)
 
 auth-service
     └── → user-service (internal gRPC for profile lookup during auth)
 ```
 
-`sentinel-service` has full implementation (`CheckSendPermission`, `ReportSpam`, `GetTrustStatus`).
-**Integrated** into messaging-service send path (`grpc.rs`) via `SentinelClient` (lazy gRPC, fail-open).
-- `SENTINEL_SERVICE_URL` env var, default `http://sentinel:50059`
+`sentinel-service` **merged** into messaging-service.
+- Sentinel business logic: `construct_server_shared::sentinel_service::core::SentinelCore`
+- Sentinel gRPC service (`SentinelService` proto) is registered on messaging's gRPC port (50053)
+  — external clients (mobile apps, admin tools) hit the same proto on `messaging:50053`,
+  Caddy routes `/shared.proto.sentinel.v1.SentinelService/*` → `messaging:50053`.
+- In-process send-path enforcement: `messaging-service/src/grpc.rs` + `stream.rs` call
+  `SentinelCore::check_send_permission()` directly (no gRPC hop). Fail-open on Redis/internal
+  errors so a sentinel outage never blocks messaging.
 - Checks `sender_device_id` / `recipient_device_id` (32-char hex, NOT user UUID)
-- On any gRPC error → fail-open (message allowed through)
+- `SentinelCore` shares `PgPool` + Redis `ConnectionManager` with messaging-service
 
 ---
 

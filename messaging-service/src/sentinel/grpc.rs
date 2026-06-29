@@ -1,38 +1,30 @@
-// ============================================================================
-// SentinelService — gRPC Server
-// ============================================================================
+// SentinelService gRPC handler — embedded in messaging-service.
 //
-// Privacy-first anti-spam. Metadata-only analysis; server never reads
-// E2E encrypted message content.
-//
-// Port: 50059
-// ============================================================================
-
-mod core;
+// Implements the `SentinelService` proto trait on top of the shared
+// `SentinelCore` business logic. Replaces the former standalone
+// `sentinel-service` binary; the gRPC contract (proto package
+// `shared.proto.sentinel.v1`) is unchanged, so external clients (mobile apps,
+// admin tools) hit the same methods on a different upstream (messaging:50053
+// instead of sentinel:50059).
 
 use std::env;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tonic::transport::Server;
+
 use tonic::{Request, Response, Status};
-use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use construct_auth::AuthManager;
-use construct_config::Config;
-use construct_server_shared::sentinel::{
-    self as proto,
-    sentinel_service_server::{SentinelService, SentinelServiceServer},
-};
+use construct_server_shared::sentinel::{self as proto, sentinel_service_server::SentinelService};
+use construct_server_shared::sentinel_service::SentinelCore;
 
-use core::SentinelCore;
+/// gRPC service wrapper around `SentinelCore`.
+pub struct SentinelGrpcService {
+    pub core: std::sync::Arc<SentinelCore>,
+    pub auth: std::sync::Arc<AuthManager>,
+}
 
-// ============================================================================
-// Helpers
-// ============================================================================
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Extract and verify device_id from both x-device-id header and JWT token.
-/// This prevents header forgery attacks where an attacker spoofs x-device-id.
+/// Extract and verify device_id from both `x-device-id` header and JWT token.
+/// This prevents header forgery attacks where an attacker spoofs `x-device-id`.
 fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<String, Status> {
     // Extract header device_id
     let header_device_id = req
@@ -59,16 +51,6 @@ fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<
     // Verify header device_id matches token's device_id
     auth.verify_device_id(&header_device_id, &claims)
         .map_err(|e| Status::permission_denied(format!("Device ID mismatch: {}", e)))
-}
-
-/// Legacy function for backward compatibility - use verified_caller_device_id instead.
-#[allow(dead_code)]
-fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
-    req.metadata()
-        .get("x-device-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))
 }
 
 fn require_admin<T>(req: &Request<T>) -> Result<(), Status> {
@@ -98,21 +80,10 @@ fn spam_category_str(cat: i32) -> &'static str {
     }
 }
 
-// ============================================================================
-// Service Context
-// ============================================================================
-
-struct SentinelServiceImpl {
-    core: Arc<SentinelCore>,
-    auth: Arc<AuthManager>,
-}
-
-// ============================================================================
-// gRPC Handler Implementations
-// ============================================================================
+// ─── Trait implementation ────────────────────────────────────────────────────
 
 #[tonic::async_trait]
-impl SentinelService for SentinelServiceImpl {
+impl SentinelService for SentinelGrpcService {
     // ── ReportSpam ────────────────────────────────────────────────────────────
 
     async fn report_spam(
@@ -218,6 +189,8 @@ impl SentinelService for SentinelServiceImpl {
         &self,
         request: Request<proto::GetTrustStatusRequest>,
     ) -> Result<Response<proto::GetTrustStatusResponse>, Status> {
+        use construct_server_shared::sentinel_service::TrustLevel;
+
         let device_id = verified_caller_device_id(&request, &self.auth)?;
         let trust = self
             .core
@@ -237,11 +210,11 @@ impl SentinelService for SentinelServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let trust_level_val = match trust {
-            core::TrustLevel::New => 1,
-            core::TrustLevel::Warming => 2,
-            core::TrustLevel::Trusted => 3,
-            core::TrustLevel::Flagged => 5,
-            core::TrustLevel::Banned => 6,
+            TrustLevel::New => 1,
+            TrustLevel::Warming => 2,
+            TrustLevel::Trusted => 3,
+            TrustLevel::Flagged => 5,
+            TrustLevel::Banned => 6,
         };
 
         Ok(Response::new(proto::GetTrustStatusResponse {
@@ -327,7 +300,7 @@ impl SentinelService for SentinelServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(device_id = %req.device_id, reason = %req.reason, "admin banned device");
+        tracing::info!(device_id = %req.device_id, reason = %req.reason, "admin banned device");
 
         Ok(Response::new(proto::AdminBanDeviceResponse {
             success: true,
@@ -352,7 +325,7 @@ impl SentinelService for SentinelServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(device_id = %req.device_id, "admin unbanned device");
+        tracing::info!(device_id = %req.device_id, "admin unbanned device");
 
         Ok(Response::new(proto::AdminUnbanDeviceResponse {
             success: true,
@@ -377,72 +350,10 @@ impl SentinelService for SentinelServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(device_id = %req.device_id, "admin cleared flag");
+        tracing::info!(device_id = %req.device_id, "admin cleared flag");
 
         Ok(Response::new(proto::AdminClearFlagResponse {
             success: true,
         }))
     }
-}
-
-// ============================================================================
-// Entry Point
-// ============================================================================
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sentinel_service=debug,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    let database_url = env::var("DATABASE_URL")?;
-    let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-    let port: u16 = env::var("PORT")
-        .unwrap_or_else(|_| "50059".into())
-        .parse()?;
-    let grpc_bind_addr = format!("0.0.0.0:{}", port);
-    let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_addr).await?;
-
-    // Load config for JWT public key
-    let config = Config::from_env().map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
-    let auth = Arc::new(
-        AuthManager::new(&config).map_err(|e| anyhow::anyhow!("AuthManager error: {}", e))?,
-    );
-
-    let core = Arc::new(SentinelCore::new(&database_url, &redis_url).await?);
-
-    info!("SentinelService listening on {}", grpc_bind_addr);
-
-    // Small HTTP server for /health and /metrics
-    let http_port: u16 = env::var("METRICS_PORT")
-        .unwrap_or_else(|_| "8090".into())
-        .parse()?;
-    let http_addr: SocketAddr = format!("0.0.0.0:{}", http_port).parse()?;
-    tokio::spawn(async move {
-        let app = axum::Router::new()
-            .route("/health", axum::routing::get(|| async { "ok" }))
-            .route(
-                "/metrics",
-                axum::routing::get(construct_server_shared::metrics::metrics_handler),
-            );
-        let listener = construct_server_shared::mptcp_or_tcp_listener(&http_addr.to_string())
-            .await
-            .unwrap();
-        info!("SentinelService HTTP/metrics listening on {}", http_addr);
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    Server::builder()
-        .add_service(SentinelServiceServer::new(SentinelServiceImpl {
-            core,
-            auth,
-        }))
-        .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-        .await?;
-
-    Ok(())
 }

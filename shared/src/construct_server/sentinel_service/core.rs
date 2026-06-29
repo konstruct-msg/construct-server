@@ -18,8 +18,8 @@
 //   sentinel:rate:msg:{device_id}         → counter (TTL = 3600s, hourly window)
 //   sentinel:rate:msg:user:{user_id}      → counter (TTL = 3600s, hourly window, cross-device ceiling)
 //   sentinel:rate:rcpt:{device_id}        → counter (TTL = 86400s, daily window)
-//   sentinel:blocks:{blocker}             → SET of blocked device_ids (TTL 300s)
-//   sentinel:rate:report:{device_id}      → counter (TTL = 86400s, daily window)
+//   sentinel:blocks:{blocker}              → SET of blocked device_ids (TTL 300s)
+//   sentinel:rate:report:{device_id}       → counter (TTL = 86400s, daily window)
 //   sentinel:violations:24h               → counter (TTL = 86400s)
 // ============================================================================
 
@@ -90,7 +90,7 @@ impl TrustLevel {
 
 pub struct SentinelCore {
     pub db: PgPool,
-    pub redis: redis::Client,
+    pub redis: redis::aio::ConnectionManager,
 }
 
 // ─── Return types ────────────────────────────────────────────────────────────
@@ -112,14 +112,18 @@ pub struct ProtectionStats {
 // ─── Implementation ──────────────────────────────────────────────────────────
 
 impl SentinelCore {
-    pub async fn new(database_url: &str, redis_url: &str) -> Result<Self> {
-        let db = PgPool::connect(database_url).await?;
-        let redis = redis::Client::open(redis_url)?;
-        Ok(Self { db, redis })
+    /// Build a SentinelCore from already-initialized pools.
+    ///
+    /// Designed for embedding inside another service (e.g. messaging-service)
+    /// that already owns a `PgPool` and Redis `ConnectionManager`. Sharing the
+    /// pools avoids a second TCP/HTTP2 fan-out to the same backends.
+    pub fn new(db: PgPool, redis: redis::aio::ConnectionManager) -> Self {
+        Self { db, redis }
     }
 
+    /// Cheap clone of the shared `ConnectionManager` (Arc-based internally).
     async fn redis(&self) -> Result<redis::aio::ConnectionManager> {
-        Ok(redis::aio::ConnectionManager::new(self.redis.clone()).await?)
+        Ok(self.redis.clone())
     }
 
     // ── Trust level ───────────────────────────────────────────────────────────
@@ -334,27 +338,27 @@ impl SentinelCore {
 
         // User-level aggregate ceiling: prevents N-device bypass where an attacker
         // registers N devices and gets N × per-device limit.
-        if let Some(user_id) = caller_user_id {
-            if !user_id.is_empty() {
-                let (user_remaining, _) = match self.user_msg_quota(user_id, trust).await {
-                    Ok(q) => q,
-                    Err(e) => {
-                        tracing::error!(error = %e, user_id = %user_id, "Redis unavailable in user_msg_quota — failing closed");
-                        return Ok(SendPermission {
-                            allowed: false,
-                            denial_reason: "Rate-limit service temporarily unavailable".into(),
-                            retry_after_seconds: 30,
-                        });
-                    }
-                };
-                if user_remaining == 0 {
-                    self.record_violation().await;
+        if let Some(user_id) = caller_user_id
+            && !user_id.is_empty()
+        {
+            let (user_remaining, _) = match self.user_msg_quota(user_id, trust).await {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::error!(error = %e, user_id = %user_id, "Redis unavailable in user_msg_quota — failing closed");
                     return Ok(SendPermission {
                         allowed: false,
-                        denial_reason: "User hourly message limit reached".into(),
-                        retry_after_seconds: 3600,
+                        denial_reason: "Rate-limit service temporarily unavailable".into(),
+                        retry_after_seconds: 30,
                     });
                 }
+            };
+            if user_remaining == 0 {
+                self.record_violation().await;
+                return Ok(SendPermission {
+                    allowed: false,
+                    denial_reason: "User hourly message limit reached".into(),
+                    retry_after_seconds: 3600,
+                });
             }
         }
 

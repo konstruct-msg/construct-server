@@ -114,7 +114,7 @@ pub(crate) async fn handle_stream_request(
                     .map(|d| d.device_id.as_str())
                     .unwrap_or("");
 
-                if let Some(ref sentinel) = context.sentinel_client
+                if let Some(ref sentinel) = context.sentinel
                     && !sender_device_id.is_empty()
                 {
                     let target = if !recipient_device_id.is_empty() {
@@ -122,13 +122,29 @@ pub(crate) async fn handle_stream_request(
                     } else {
                         sender_device_id
                     };
-                    let (allowed, reason, retry_after) = sentinel
-                        .check_send_permission_with_user(
+                    // In-process call to SentinelCore — no gRPC hop.
+                    // Fails open: on Redis/internal error we allow the send
+                    // through (mirrors the previous gRPC-client fail-open
+                    // behaviour when sentinel-service was unreachable).
+                    let (allowed, reason, retry_after) = match sentinel
+                        .check_send_permission(
                             sender_device_id,
                             target,
-                            &uid.to_string(),
+                            Some(&uid.to_string()),
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(perm) => {
+                            (perm.allowed, perm.denial_reason, perm.retry_after_seconds)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "SentinelCore::check_send_permission failed — failing open"
+                            );
+                            (true, String::new(), 0)
+                        }
+                    };
 
                     if !allowed {
                         let (error_code, retryable, retry_after_ms) = if retry_after > 0 {

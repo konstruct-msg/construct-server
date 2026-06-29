@@ -404,7 +404,7 @@ impl MessagingService for MessagingGrpcService {
             .map(|d| d.device_id.as_str())
             .unwrap_or("");
 
-        if let Some(ref sentinel) = self.context.sentinel_client
+        if let Some(ref sentinel) = self.context.sentinel
             && !sender_device_id.is_empty()
         {
             let target = if !recipient_device_id.is_empty() {
@@ -413,9 +413,23 @@ impl MessagingService for MessagingGrpcService {
                 // Recipient device unknown: skip block check, only enforce sender limits.
                 sender_device_id
             };
-            let (allowed, reason, retry_after) = sentinel
-                .check_send_permission_with_user(sender_device_id, target, &sender_id.to_string())
-                .await;
+            // In-process call to SentinelCore — no gRPC hop.
+            // Fail-open semantics: on Redis/internal error we allow the send
+            // through (mirrors the previous gRPC-client fail-open behaviour
+            // when sentinel-service was unreachable).
+            let (allowed, reason, retry_after) = match sentinel
+                .check_send_permission(sender_device_id, target, Some(&sender_id.to_string()))
+                .await
+            {
+                Ok(perm) => (perm.allowed, perm.denial_reason, perm.retry_after_seconds),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "SentinelCore::check_send_permission failed — failing open"
+                    );
+                    (true, String::new(), 0)
+                }
+            };
 
             if !allowed {
                 if retry_after > 0 {
