@@ -563,7 +563,7 @@ impl MessageEnvelope {
 
         // Map proto ContentType to Kafka MessageType + payload representation.
         // SESSION_RESET=21 and KEY_SYNC=22 are control messages — store their type
-        // as the payload string so convert_kafka_envelope_to_proto can recover it.
+        // as the payload string so convert_envelope_to_proto can recover it.
         const CONTENT_TYPE_SESSION_RESET: i32 = 21;
         const CONTENT_TYPE_KEY_SYNC: i32 = 22;
 

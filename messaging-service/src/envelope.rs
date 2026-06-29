@@ -6,11 +6,11 @@ use crate::spent_tag::{DeliveryTagStatus, check_and_mark_delivery_tag};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
 /// Convert MessageEnvelope to proto Envelope
-pub(crate) fn convert_kafka_envelope_to_proto(
-    envelope: construct_server_shared::kafka::types::MessageEnvelope,
+pub(crate) fn convert_envelope_to_proto(
+    envelope: construct_server_shared::message::types::MessageEnvelope,
 ) -> anyhow::Result<construct_server_shared::shared::proto::core::v1::Envelope> {
     use base64::Engine;
-    use construct_server_shared::kafka::types::MessageType;
+    use construct_server_shared::message::types::MessageType;
     use construct_server_shared::shared::proto::core::v1 as core;
 
     // Sealed sender — reconstruct SealedSenderEnvelope, hide sender from proto.
@@ -123,7 +123,7 @@ pub(crate) async fn dispatch_sealed_sender(
     sealed: &construct_server_shared::shared::proto::core::v1::SealedSenderEnvelope,
 ) -> anyhow::Result<proto::SendMessageResponse> {
     use construct_server_shared::federation::FederationClient;
-    use construct_server_shared::kafka::types::MessageEnvelope;
+    use construct_server_shared::message::types::MessageEnvelope;
     use construct_server_shared::shared::proto::core::v1 as proto_core;
     use prost::Message;
 
@@ -206,7 +206,7 @@ pub(crate) async fn dispatch_sealed_sender(
         }
     }
 
-    let kafka_envelope = MessageEnvelope::from_sealed_sender(
+    let msg_envelope = MessageEnvelope::from_sealed_sender(
         message_id.clone(),
         recipient_id,
         sealed.sealed_inner.to_vec(),
@@ -215,7 +215,7 @@ pub(crate) async fn dispatch_sealed_sender(
     let app_context = Arc::new(context.to_app_context());
     core::dispatch_envelope(
         &app_context,
-        kafka_envelope,
+        msg_envelope,
         context.notification_context.clone(),
     )
     .await

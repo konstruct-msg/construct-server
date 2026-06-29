@@ -58,25 +58,22 @@ pub use construct_crypto::compute_message_hash;
 
 pub use cleanup::DeliveryCleanupTask;
 pub use models::{AcknowledgeMessageData, DeliveryPending};
-pub use storage::{DeliveryPendingStorage, KafkaDeliveryStorage, PostgresDeliveryStorage};
+pub use storage::{DeliveryPendingStorage, PostgresDeliveryStorage};
 
 /// Delivery ACK operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryAckMode {
     /// Delivery ACK system disabled
     Disabled,
-    /// PostgreSQL-based storage (legacy, Phases 1-4)
+    /// PostgreSQL-based storage
     /// Uses delivery_pending table with manual cleanup
     PostgreSQL,
-    /// Kafka-based storage (modern, Phase 5+)
-    /// Uses Kafka events with auto-expiry
-    Kafka,
 }
 
 /// Configuration for delivery ACK system
 #[derive(Debug, Clone)]
 pub struct DeliveryAckConfig {
-    /// Operation mode (PostgreSQL, Kafka, or Disabled)
+    /// Operation mode (PostgreSQL or Disabled)
     pub mode: DeliveryAckMode,
 
     /// Secret key for HMAC-SHA256 (must be 32 bytes)
@@ -91,30 +88,17 @@ pub struct DeliveryAckConfig {
     /// Cleanup interval in seconds
     /// How often to run the background cleanup task
     /// Default: 3600 (1 hour)
-    /// NOTE: Only used in PostgreSQL mode (Kafka uses retention.ms)
     pub cleanup_interval_secs: u64,
-
-    /// Enable ACK batching for privacy (recommended)
-    /// Buffers ACK events for N seconds before sending to Kafka
-    /// Helps prevent timing correlation attacks
-    /// Default: true (5 second buffer)
-    pub enable_batching: bool,
-
-    /// Batch buffer time in seconds (only if enable_batching=true)
-    /// Default: 5 seconds
-    pub batch_buffer_secs: u64,
 }
 
 impl DeliveryAckConfig {
     /// Load configuration from environment variables
     ///
     /// Expected environment variables:
-    /// - `DELIVERY_ACK_MODE`: "disabled", "postgres", or "kafka" (defaults to disabled)
+    /// - `DELIVERY_ACK_MODE`: "disabled" or "postgres" (defaults to disabled)
     /// - `DELIVERY_SECRET_KEY`: Hex-encoded secret key (64 chars = 32 bytes, required if mode != disabled)
     /// - `DELIVERY_EXPIRY_DAYS`: Optional, defaults to 7
     /// - `DELIVERY_CLEANUP_INTERVAL_SECS`: Optional, defaults to 3600
-    /// - `DELIVERY_ACK_ENABLE_BATCHING`: Optional, defaults to true (privacy protection)
-    /// - `DELIVERY_ACK_BATCH_BUFFER_SECS`: Optional, defaults to 5
     pub fn from_env() -> Result<Self> {
         // Parse mode
         let mode_str = std::env::var("DELIVERY_ACK_MODE")
@@ -124,7 +108,6 @@ impl DeliveryAckConfig {
         let mode = match mode_str.as_str() {
             "disabled" | "off" | "false" => DeliveryAckMode::Disabled,
             "postgres" | "postgresql" | "pg" => DeliveryAckMode::PostgreSQL,
-            "kafka" => DeliveryAckMode::Kafka,
             _ => {
                 tracing::warn!(
                     mode = %mode_str,
@@ -141,8 +124,6 @@ impl DeliveryAckConfig {
                 secret_key: vec![0u8; 32], // Dummy key, never used
                 expiry_days: 7,
                 cleanup_interval_secs: 3600,
-                enable_batching: true,
-                batch_buffer_secs: 5,
             });
         }
 
@@ -178,23 +159,11 @@ impl DeliveryAckConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(3600);
 
-        let enable_batching = std::env::var("DELIVERY_ACK_ENABLE_BATCHING")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(true); // Default: enabled for privacy
-
-        let batch_buffer_secs = std::env::var("DELIVERY_ACK_BATCH_BUFFER_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
-
         Ok(Self {
             mode,
             secret_key,
             expiry_days,
             cleanup_interval_secs,
-            enable_batching,
-            batch_buffer_secs,
         })
     }
 
@@ -359,6 +328,7 @@ impl<S: DeliveryPendingStorage> DeliveryAckManager<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_generate_secret_key() {
@@ -373,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_validation() {
         // Valid 32-byte key with good entropy (16 different hex characters)
         let valid_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -395,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_invalid_key_length() {
         // Invalid key length (not 32 bytes = 64 hex chars)
         unsafe {

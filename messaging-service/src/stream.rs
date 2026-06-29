@@ -6,7 +6,7 @@ use tonic::Status;
 
 use crate::context::MessagingServiceContext;
 use crate::core;
-use crate::envelope::{convert_kafka_envelope_to_proto, dispatch_sealed_sender};
+use crate::envelope::{convert_envelope_to_proto, dispatch_sealed_sender};
 use crate::receipts::{build_receipt_response, relay_delivery_receipt};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
@@ -229,10 +229,10 @@ pub(crate) async fn handle_stream_request(
                     }
                 }
 
-                use construct_server_shared::kafka::types::{
+                use construct_server_shared::message::types::{
                     MessageEnvelope, ProtoEnvelopeContext,
                 };
-                let kafka_envelope =
+                let msg_envelope =
                     MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
                         sender_id: uid.to_string(),
                         recipient_id,
@@ -245,7 +245,7 @@ pub(crate) async fn handle_stream_request(
                 let app_context = Arc::new(context.to_app_context());
                 match core::dispatch_envelope(
                     &app_context,
-                    kafka_envelope,
+                    msg_envelope,
                     context.notification_context.clone(),
                 )
                 .await
@@ -547,7 +547,7 @@ pub(crate) async fn poll_messages(
 
         let mut response = if matches!(
             envelope.message_type,
-            construct_server_shared::kafka::types::MessageType::Receipt
+            construct_server_shared::message::types::MessageType::Receipt
         ) {
             // Parse receipt JSON and send as MessageStreamResponse::Receipt
             match build_receipt_response(&envelope) {
@@ -559,7 +559,7 @@ pub(crate) async fn poll_messages(
                 }
             }
         } else {
-            let proto_envelope = convert_kafka_envelope_to_proto(envelope)?;
+            let proto_envelope = convert_envelope_to_proto(envelope)?;
             proto::MessageStreamResponse {
                 response: Some(proto::message_stream_response::Response::Message(
                     proto_envelope,

@@ -66,10 +66,8 @@ pub struct Config {
     pub message_ttl_days: i64,
 
     /// Deduplication key safety margin in hours
-    /// Added to Kafka retention period to prevent edge case race conditions.
-    /// If message is at end of Kafka retention and worker crashes after creating
-    /// dedup key but before committing offset, Kafka will NOT redeliver (expired).
-    /// Solution: dedup TTL = Kafka retention + safety_margin
+    /// Added to the message dedup window to prevent edge-case race conditions
+    /// between the delivery write and the dedup key SETEX.
     /// Recommendation: 2-4 hours for typical network/restart delays
     pub dedup_safety_margin_hours: i64,
 
