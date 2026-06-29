@@ -201,6 +201,7 @@ dependencies = [
  "construct-veil",
  "curve25519-dalek",
  "dotenvy",
+ "ed25519-compact",
  "ed25519-dalek",
  "hex",
  "hkdf 0.13.0",
