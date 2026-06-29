@@ -33,11 +33,13 @@ pub(crate) async fn create_test_device(db: &sqlx::PgPool) -> (Uuid, String, Sign
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
-    sqlx::query("INSERT INTO users (id, primary_device_id) VALUES ($1, NULL) ON CONFLICT (id) DO NOTHING")
-        .bind(user_id)
-        .execute(db)
-        .await
-        .expect("Failed to insert test user");
+    sqlx::query(
+        "INSERT INTO users (id, primary_device_id) VALUES ($1, NULL) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(db)
+    .await
+    .expect("Failed to insert test user");
 
     let mut hasher = Sha256::new();
     hasher.update(verifying_key.as_bytes());

@@ -59,8 +59,12 @@ pub(crate) async fn get_comment_group(
     };
 
     let mut grpc_request = Request::new(create_req);
-    grpc_request.metadata_mut().insert("x-user-id", user_id.to_string().parse().unwrap());
-    grpc_request.metadata_mut().insert("x-device-id", device_id.parse().unwrap());
+    grpc_request
+        .metadata_mut()
+        .insert("x-user-id", user_id.to_string().parse().unwrap());
+    grpc_request
+        .metadata_mut()
+        .insert("x-device-id", device_id.parse().unwrap());
 
     let create_resp = super::group_lifecycle::create_group(svc, grpc_request).await?;
     let created_group_id = create_resp.into_inner().group_id;

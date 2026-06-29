@@ -41,7 +41,6 @@
 //
 // ============================================================================
 
-pub mod batching;
 pub mod cleanup;
 // pub mod crypto; // MOVED to construct-crypto crate
 pub mod models;
@@ -57,7 +56,6 @@ use std::sync::Arc;
 // Import crypto functions (re-exported for tests)
 pub use construct_crypto::compute_message_hash;
 
-pub use batching::AckBatcher;
 pub use cleanup::DeliveryCleanupTask;
 pub use models::{AcknowledgeMessageData, DeliveryPending};
 pub use storage::{DeliveryPendingStorage, KafkaDeliveryStorage, PostgresDeliveryStorage};
