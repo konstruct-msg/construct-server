@@ -43,7 +43,7 @@ Caddy :443   (edge TLS termination, Let's Encrypt; routes by /shared.proto.servi
 ```
 
 **Shared infrastructure:**
-- **Redis Streams** — primary message delivery: per-user/per-device offline stream (`delivery:offline:{user_id}[:{device_id}]`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`). (Kafka/Redpanda transport is disabled — `KAFKA_ENABLED=false`.)
+- **Redis Streams** — message delivery transport: per-user/per-device offline stream (`delivery:offline:{user_id}[:{device_id}]`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`).
 - **PostgreSQL** — device registration, keys, `delivery_pending` (receipt routing hashes only — **message content is never stored in PostgreSQL**)
 - **Proto definitions** — `shared/proto/services/*.proto`
 
@@ -79,7 +79,7 @@ DATABASE_URL=postgres://user:pass@localhost:5432/construct_test
 REDIS_URL=redis://localhost:6379
 ```
 
-Additional per-service vars: `JWT_SECRET`, `RS256_PRIVATE_KEY`, `KAFKA_BROKERS`, etc.  
+Additional per-service vars: `JWT_SECRET`, `RS256_PRIVATE_KEY`, `REDIS_URL`, etc.  
 See `crates/construct-config/src/lib.rs` for the full list and defaults.
 
 ### gRPC services per binary
@@ -154,7 +154,6 @@ Client → MessagingService::SendMessage
             pub async fn dispatch_envelope(...)
               ├─ check recipient domain (local vs federated)
               ├─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
-              │   (Kafka transport is compiled-in but disabled — KAFKA_ENABLED=false)
               └─ store receipt routing hash in delivery_pending (PostgreSQL, async, non-critical)
                   NOTE: message content is NEVER written to PostgreSQL
 ```

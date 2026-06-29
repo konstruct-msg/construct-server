@@ -117,19 +117,13 @@ pub(crate) async fn get_group_dissolved_at(
         .map_err(map_db_error)
 }
 
-pub(crate) async fn get_group_member_count(
-    db: &PgPool,
-    group_id: Uuid,
-) -> Result<i64, Status> {
+pub(crate) async fn get_group_member_count(db: &PgPool, group_id: Uuid) -> Result<i64, Status> {
     db_mls::get_group_member_count(db, group_id)
         .await
         .map_err(map_db_error)
 }
 
-pub(crate) async fn get_group_max_members(
-    db: &PgPool,
-    group_id: Uuid,
-) -> Result<i16, Status> {
+pub(crate) async fn get_group_max_members(db: &PgPool, group_id: Uuid) -> Result<i16, Status> {
     db_mls::get_group_max_members(db, group_id)
         .await
         .map_err(map_db_error)

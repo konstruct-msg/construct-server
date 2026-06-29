@@ -55,27 +55,69 @@ lazy_static! {
 
 // ── MLS metric functions ──
 
-pub fn inc_groups_created() { GROUPS_CREATED.inc(); }
-pub fn inc_groups_dissolved() { GROUPS_DISSOLVED.inc(); }
-pub fn inc_group_messages_sent(count: u64) { GROUP_MESSAGES_SENT.inc_by(count); }
-pub fn inc_group_invites_sent(count: u64) { GROUP_INVITES_SENT.inc_by(count); }
-pub fn inc_commits_submitted() { COMMITS_SUBMITTED.inc(); }
-pub fn inc_cleanup_operations(_operation: &'static str, deleted_count: i64) { CLEANUP_DELETED.inc_by(deleted_count as u64); }
-pub fn set_active_groups(count: i64) { ACTIVE_GROUPS.set(count); }
-pub fn inc_rate_limit_violations() { RATE_LIMIT_VIOLATIONS.inc(); }
-pub fn inc_auth_failures() { AUTH_FAILURES.inc(); }
-pub fn inc_epoch_mismatches() { EPOCH_MISMATCHES.inc(); }
-pub fn observe_message_delivery_latency(latency_secs: f64) { MESSAGE_DELIVERY_LATENCY.observe(latency_secs); }
-pub fn observe_group_size(size: u64) { GROUP_SIZE.observe(size as f64); }
+pub fn inc_groups_created() {
+    GROUPS_CREATED.inc();
+}
+pub fn inc_groups_dissolved() {
+    GROUPS_DISSOLVED.inc();
+}
+pub fn inc_group_messages_sent(count: u64) {
+    GROUP_MESSAGES_SENT.inc_by(count);
+}
+pub fn inc_group_invites_sent(count: u64) {
+    GROUP_INVITES_SENT.inc_by(count);
+}
+pub fn inc_commits_submitted() {
+    COMMITS_SUBMITTED.inc();
+}
+pub fn inc_cleanup_operations(_operation: &'static str, deleted_count: i64) {
+    CLEANUP_DELETED.inc_by(deleted_count as u64);
+}
+pub fn set_active_groups(count: i64) {
+    ACTIVE_GROUPS.set(count);
+}
+pub fn inc_rate_limit_violations() {
+    RATE_LIMIT_VIOLATIONS.inc();
+}
+pub fn inc_auth_failures() {
+    AUTH_FAILURES.inc();
+}
+pub fn inc_epoch_mismatches() {
+    EPOCH_MISMATCHES.inc();
+}
+pub fn observe_message_delivery_latency(latency_secs: f64) {
+    MESSAGE_DELIVERY_LATENCY.observe(latency_secs);
+}
+pub fn observe_group_size(size: u64) {
+    GROUP_SIZE.observe(size as f64);
+}
 
 // ── Channel metric functions ──
 
-pub fn inc_channels_created() { CHANNELS_CREATED.inc(); }
-pub fn inc_channels_deleted() { CHANNELS_DELETED.inc(); }
-pub fn inc_channel_posts_published(count: u64) { CHANNEL_POSTS_PUBLISHED.inc_by(count); }
-pub fn set_channel_subscribers_total(count: i64) { CHANNEL_SUBSCRIBERS_TOTAL.set(count); }
-pub fn inc_channel_subscribe_operations() { CHANNEL_SUBSCRIBE_OPERATIONS.inc(); }
-pub fn inc_channel_unsubscribe_operations() { CHANNEL_UNSUBSCRIBE_OPERATIONS.inc(); }
-pub fn inc_channel_invite_links_created() { CHANNEL_INVITE_LINKS_CREATED.inc(); }
-pub fn inc_channel_rate_limit_violations() { CHANNEL_RATE_LIMIT_VIOLATIONS.inc(); }
-pub fn observe_channel_post_latency(latency_secs: f64) { CHANNEL_POST_LATENCY.observe(latency_secs); }
+pub fn inc_channels_created() {
+    CHANNELS_CREATED.inc();
+}
+pub fn inc_channels_deleted() {
+    CHANNELS_DELETED.inc();
+}
+pub fn inc_channel_posts_published(count: u64) {
+    CHANNEL_POSTS_PUBLISHED.inc_by(count);
+}
+pub fn set_channel_subscribers_total(count: i64) {
+    CHANNEL_SUBSCRIBERS_TOTAL.set(count);
+}
+pub fn inc_channel_subscribe_operations() {
+    CHANNEL_SUBSCRIBE_OPERATIONS.inc();
+}
+pub fn inc_channel_unsubscribe_operations() {
+    CHANNEL_UNSUBSCRIBE_OPERATIONS.inc();
+}
+pub fn inc_channel_invite_links_created() {
+    CHANNEL_INVITE_LINKS_CREATED.inc();
+}
+pub fn inc_channel_rate_limit_violations() {
+    CHANNEL_RATE_LIMIT_VIOLATIONS.inc();
+}
+pub fn observe_channel_post_latency(latency_secs: f64) {
+    CHANNEL_POST_LATENCY.observe(latency_secs);
+}

@@ -1,6 +1,6 @@
 # =============================================================================
 # Construct — Data Droplet
-# Runs: PostgreSQL 16 + Redpanda (Kafka-compatible broker)
+# Runs: PostgreSQL 16 + Redis
 #
 # Setup on data droplet:
 #   1. git clone git@github.com:konstruct-msg/construct-server.git
@@ -8,10 +8,9 @@
 #   3. nano .env.data  # fill in passwords
 #   4. docker compose -f ops/docker-compose.data.yml --env-file .env.data up -d
 #
-# Firewall: allow app droplet IP on ports 5432, 9092 (internal Kafka) and 19092 (external Kafka)
+# Firewall: allow app droplet IP on ports 5432 (Postgres) and 6379 (Redis)
 #   ufw allow from APP_DROPLET_IP to any port 5432
-#   ufw allow from APP_DROPLET_IP to any port 9092
-#   ufw allow from APP_DROPLET_IP to any port 19092
+#   ufw allow from APP_DROPLET_IP to any port 6379
 # =============================================================================
 
 name: construct-data
@@ -57,5 +56,4 @@ services:
 
 volumes:
   postgres-data:
-  redpanda-data:
   redis-data:

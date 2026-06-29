@@ -5,7 +5,9 @@ use rand::Rng;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use crate::helpers::{check_channel_admin, check_channel_owner, extract_device_id, extract_user_id};
+use crate::helpers::{
+    check_channel_admin, check_channel_owner, extract_device_id, extract_user_id,
+};
 use crate::service::GroupServiceImpl;
 
 fn generate_invite_token() -> String {

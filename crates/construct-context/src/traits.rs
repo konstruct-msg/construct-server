@@ -31,7 +31,6 @@ use construct_db::DbPool;
 use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
 
-use construct_message::MessageProducer;
 // MessageGatewayClient removed - was only used for WebSocket
 use construct_queue::MessageQueue;
 
@@ -45,7 +44,6 @@ pub trait DatabaseProvider: Send + Sync {
 #[allow(dead_code)]
 pub trait MessageProvider: Send + Sync {
     fn queue(&self) -> &Arc<Mutex<MessageQueue>>;
-    fn kafka_producer(&self) -> Option<&Arc<MessageProducer>>;
     // gateway_client removed
 }
 
@@ -109,10 +107,6 @@ impl DatabaseProvider for crate::AppContext {
 impl MessageProvider for crate::AppContext {
     fn queue(&self) -> &Arc<Mutex<MessageQueue>> {
         &self.queue
-    }
-
-    fn kafka_producer(&self) -> Option<&Arc<MessageProducer>> {
-        self.kafka_producer.as_ref()
     }
 
     // gateway_client removed

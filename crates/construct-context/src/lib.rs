@@ -21,7 +21,6 @@ use construct_federation::{PublicKeyCache, ServerSigner};
 use construct_pending::PendingMessageStorage;
 
 use construct_key_management::KeyManagementSystem;
-use construct_message::MessageProducer;
 // MessageGatewayClient removed - was only used for WebSocket message processing
 use construct_queue::MessageQueue;
 use std::sync::Arc;
@@ -31,7 +30,7 @@ use tokio::sync::Mutex;
 ///
 /// **Phase 2.7 Refactoring:** This structure will be refactored into logical groups:
 /// - DatabaseContext (db_pool)
-/// - MessageContext (queue, kafka_producer)
+/// - MessageContext (queue)
 /// - AuthContext (auth_manager, clients)
 /// - NotificationContext (apns_client, token_encryption)
 /// - FederationContext (server_signer, public_key_cache)
@@ -45,9 +44,6 @@ pub struct AppContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub config: Arc<Config>,
-    /// Kafka producer for reliable message delivery (Phase 1+)
-    /// Optional: some services (like auth) don't need Kafka
-    pub kafka_producer: Option<Arc<MessageProducer>>,
     /// APNs client for push notifications (production tokens)
     /// Optional: only required for services that send push notifications directly.
     /// messaging-service delegates push to notification-service via gRPC and leaves this None.
@@ -92,7 +88,6 @@ impl AppContext {
         queue: Arc<Mutex<MessageQueue>>,
         auth_manager: Arc<AuthManager>,
         config: Arc<Config>,
-        kafka_producer: Option<Arc<MessageProducer>>,
         apns_client: Option<Arc<ApnsClient>>,
         apns_sandbox_client: Option<Arc<ApnsClient>>,
         token_encryption: Option<Arc<DeviceTokenEncryption>>,
@@ -106,7 +101,6 @@ impl AppContext {
             queue,
             auth_manager,
             config,
-            kafka_producer,
             apns_client,
             apns_sandbox_client,
             token_encryption,
@@ -190,7 +184,6 @@ impl AppContext {
     pub fn messages(&self) -> MessageContextRef<'_> {
         MessageContextRef {
             queue: &self.queue,
-            kafka_producer: self.kafka_producer.as_ref(),
             // gateway_client removed
         }
     }
@@ -247,7 +240,6 @@ pub struct DatabaseContextRef<'a> {
 /// Message context reference (Phase 2.7)
 pub struct MessageContextRef<'a> {
     pub queue: &'a Arc<Mutex<MessageQueue>>,
-    pub kafka_producer: Option<&'a Arc<MessageProducer>>,
     // gateway_client removed
 }
 
@@ -290,7 +282,6 @@ pub struct AppContextBuilder {
     queue: Option<Arc<Mutex<MessageQueue>>>,
     auth_manager: Option<Arc<AuthManager>>,
     config: Option<Arc<Config>>,
-    kafka_producer: Option<Arc<MessageProducer>>,
     apns_client: Option<Arc<ApnsClient>>,
     apns_sandbox_client: Option<Arc<ApnsClient>>,
     token_encryption: Option<Arc<DeviceTokenEncryption>>,
@@ -309,7 +300,6 @@ impl AppContextBuilder {
             queue: None,
             auth_manager: None,
             config: None,
-            kafka_producer: None,
             apns_client: None,
             apns_sandbox_client: None,
             token_encryption: None,
@@ -339,11 +329,6 @@ impl AppContextBuilder {
 
     pub fn with_config(mut self, config: Arc<Config>) -> Self {
         self.config = Some(config);
-        self
-    }
-
-    pub fn with_kafka_producer(mut self, kafka_producer: Arc<MessageProducer>) -> Self {
-        self.kafka_producer = Some(kafka_producer);
         self
     }
 
@@ -414,7 +399,6 @@ impl AppContextBuilder {
                 .auth_manager
                 .ok_or_else(|| "auth_manager is required".to_string())?,
             config,
-            kafka_producer: self.kafka_producer,
             apns_client: self.apns_client,
             apns_sandbox_client: self.apns_sandbox_client,
             token_encryption: self.token_encryption,

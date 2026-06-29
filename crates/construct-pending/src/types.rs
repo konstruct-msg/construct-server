@@ -64,12 +64,6 @@ pub struct PendingMessageData {
 
     /// Unix timestamp when message was confirmed (Phase 2), if confirmed
     pub confirmed_at: Option<i64>,
-
-    /// Kafka partition the message was written to
-    pub kafka_partition: Option<i32>,
-
-    /// Kafka offset within the partition
-    pub kafka_offset: Option<i64>,
 }
 
 impl PendingMessageData {
@@ -87,8 +81,6 @@ impl PendingMessageData {
             status: MessageStatus::Pending,
             created_at: chrono::Utc::now().timestamp(),
             confirmed_at: None,
-            kafka_partition: None,
-            kafka_offset: None,
         }
     }
 

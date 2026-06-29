@@ -66,10 +66,7 @@ async fn test_publish_key_package_empty_list_rejected() {
         .await;
 
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err().code(),
-        tonic::Code::InvalidArgument,
-    );
+    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument,);
 }
 
 #[tokio::test]
@@ -183,10 +180,7 @@ async fn test_consume_key_package_not_found() {
         .await;
 
     assert!(result.is_err());
-    assert_eq!(
-        result.unwrap_err().code(),
-        tonic::Code::NotFound,
-    );
+    assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound,);
 }
 
 #[tokio::test]
