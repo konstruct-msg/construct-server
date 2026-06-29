@@ -1,279 +1,24 @@
 // ============================================================================
-// MessageProducer — Kafka/Redpanda implementation
-// Compiled only when the "kafka" feature is enabled.
-// Without the feature, the no-op stub below is used instead.
+// MessageProducer — no-op stub.
+//
+// The Kafka/Redpanda transport was removed (KAFKA_ENABLED was always false in
+// production; message delivery is Redis-direct). This stub keeps the public API
+// so callers that still hold a `MessageProducer` compile; every operation is a
+// no-op returning the sentinel `(-1, -1)` partition/offset.
 // ============================================================================
 
-#[cfg(feature = "kafka")]
-use anyhow::{Context, Result};
-#[cfg(feature = "kafka")]
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-#[cfg(feature = "kafka")]
-use rdkafka::util::Timeout;
-#[cfg(feature = "kafka")]
-use std::sync::Arc;
 use std::time::Duration;
-#[cfg(feature = "kafka")]
-use tracing::{error, info};
 
-#[cfg(not(feature = "kafka"))]
 use super::circuit_breaker::CircuitBreakerError;
-#[cfg(feature = "kafka")]
-use super::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError};
-#[cfg(feature = "kafka")]
-use super::config::create_client_config;
-#[cfg(feature = "kafka")]
-use super::metrics;
 use super::types::{DeliveryAckEvent, MessageEnvelope};
 use construct_config::KafkaConfig;
 
-// ============================================================================
-// Kafka implementation (feature = "kafka")
-// ============================================================================
-
-#[cfg(feature = "kafka")]
-/// Kafka message producer for reliable message delivery
-pub struct MessageProducer {
-    /// The actual Kafka producer (None when disabled)
-    producer: Option<Arc<FutureProducer>>,
-    /// Circuit breaker for fault tolerance
-    circuit_breaker: Arc<CircuitBreaker>,
-    topic: String,
-    enabled: bool,
-}
-
-#[cfg(feature = "kafka")]
-impl MessageProducer {
-    pub fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
-        let circuit_breaker_config = CircuitBreakerConfig {
-            failure_threshold: 5,
-            timeout: Duration::from_secs(3),
-            reset_timeout: Duration::from_secs(30),
-        };
-        let circuit_breaker = Arc::new(CircuitBreaker::with_config(circuit_breaker_config));
-
-        if !config.enabled {
-            info!("Kafka/Redpanda producer disabled (KAFKA_ENABLED=false)");
-            return Ok(Self {
-                producer: None,
-                circuit_breaker,
-                topic: config.topic.clone(),
-                enabled: false,
-            });
-        }
-
-        info!("Initializing Kafka producer...");
-        let mut client_config = create_client_config(config)?;
-
-        let producer: FutureProducer = client_config
-            .set("acks", &config.producer_acks)
-            .set(
-                "enable.idempotence",
-                if config.producer_enable_idempotence {
-                    "true"
-                } else {
-                    "false"
-                },
-            )
-            .set(
-                "max.in.flight.requests.per.connection",
-                config.producer_max_in_flight.to_string(),
-            )
-            .set("retries", config.producer_retries.to_string())
-            .set("compression.type", &config.producer_compression)
-            .set("linger.ms", config.producer_linger_ms.to_string())
-            .set("batch.size", config.producer_batch_size.to_string())
-            .set(
-                "request.timeout.ms",
-                config.producer_request_timeout_ms.to_string(),
-            )
-            .set(
-                "delivery.timeout.ms",
-                config.producer_delivery_timeout_ms.to_string(),
-            )
-            .create()
-            .context("Failed to create Kafka producer")?;
-
-        info!(
-            "Kafka/Redpanda producer initialized successfully for topic '{}'",
-            config.topic
-        );
-
-        Ok(Self {
-            producer: Some(Arc::new(producer)),
-            circuit_breaker,
-            topic: config.topic.clone(),
-            enabled: true,
-        })
-    }
-
-    pub async fn send_message(
-        &self,
-        envelope: &MessageEnvelope,
-    ) -> Result<(i32, i64), CircuitBreakerError<anyhow::Error>> {
-        if !self.enabled {
-            tracing::debug!(message_id = %envelope.message_id, "Kafka disabled — message skipped");
-            return Ok((-1, -1));
-        }
-        self.circuit_breaker
-            .call(async {
-                self.send_message_internal(envelope)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Kafka send failed: {}", e))
-            })
-            .await
-    }
-
-    async fn send_message_internal(
-        &self,
-        envelope: &MessageEnvelope,
-    ) -> anyhow::Result<(i32, i64)> {
-        let producer = self
-            .producer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Kafka producer not initialized"))?;
-
-        if let Err(e) = envelope.validate() {
-            return Err(e.context("Invalid message envelope"));
-        }
-
-        let payload =
-            serde_json::to_vec(envelope).context("Failed to serialize message envelope")?;
-        let key = envelope.recipient_id.as_bytes();
-        let record = FutureRecord::to(&self.topic).key(key).payload(&payload);
-        let start = std::time::Instant::now();
-
-        match producer
-            .send(record, Timeout::After(Duration::from_secs(2)))
-            .await
-        {
-            Ok(d) => {
-                let (partition, offset) = (d.partition, d.offset);
-                let latency = start.elapsed();
-                metrics::KAFKA_PRODUCE_SUCCESS.inc();
-                metrics::KAFKA_PRODUCE_LATENCY.observe(latency.as_secs_f64());
-                info!(partition, offset, message_id = %envelope.message_id, latency_ms = latency.as_millis(), "Message persisted to Kafka/Redpanda");
-                Ok((partition, offset))
-            }
-            Err((kafka_err, _)) => {
-                metrics::KAFKA_PRODUCE_FAILURE.inc();
-                error!(error = %kafka_err, message_id = %envelope.message_id, topic = %self.topic, "Failed to send message to Kafka/Redpanda");
-                Err(anyhow::anyhow!("Kafka/Redpanda send failed: {}", kafka_err))
-            }
-        }
-    }
-
-    pub async fn send_delivery_ack(&self, event: &DeliveryAckEvent) -> anyhow::Result<(i32, i64)> {
-        let producer = match &self.producer {
-            Some(p) => p,
-            None => return Ok((-1, -1)),
-        };
-
-        event.validate().context("Invalid delivery ACK event")?;
-        let payload =
-            serde_json::to_vec(event).context("Failed to serialize delivery ACK event")?;
-        let key = event.message_hash.as_bytes();
-        let ack_topic = format!("{}-delivery-ack", self.topic);
-        let record = FutureRecord::to(&ack_topic).key(key).payload(&payload);
-        let start = std::time::Instant::now();
-
-        match producer
-            .send(record, Timeout::After(Duration::from_secs(2)))
-            .await
-        {
-            Ok(d) => {
-                let (partition, offset) = (d.partition, d.offset);
-                let latency = start.elapsed();
-                metrics::KAFKA_PRODUCE_SUCCESS.inc();
-                metrics::KAFKA_PRODUCE_LATENCY.observe(latency.as_secs_f64());
-                info!(partition, offset, message_hash = %event.message_hash, latency_ms = latency.as_millis(), "Delivery ACK persisted to Kafka/Redpanda");
-                Ok((partition, offset))
-            }
-            Err((kafka_err, _)) => {
-                metrics::KAFKA_PRODUCE_FAILURE.inc();
-                error!(error = %kafka_err, message_hash = %event.message_hash, topic = %ack_topic, "Failed to send delivery ACK to Kafka/Redpanda");
-                Err(anyhow::anyhow!(
-                    "Kafka/Redpanda delivery ACK send failed: {}",
-                    kafka_err
-                ))
-            }
-        }
-    }
-
-    pub async fn flush(&self, timeout: Duration) -> anyhow::Result<()> {
-        let producer = match &self.producer {
-            Some(p) => p,
-            None => return Ok(()),
-        };
-        info!("Flushing Kafka/Redpanda producer (timeout: {:?})", timeout);
-        producer
-            .flush(Timeout::After(timeout))
-            .context("Failed to flush Kafka/Redpanda producer")?;
-        info!("Kafka/Redpanda producer flushed successfully");
-        Ok(())
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-    pub fn topic(&self) -> &str {
-        &self.topic
-    }
-
-    /// Send raw bytes to an arbitrary topic (used by DLQ and other side-channel producers).
-    ///
-    /// Unlike `send_message`, this does NOT go through the circuit breaker —
-    /// DLQ sends must always attempt delivery even when the main topic is unhealthy.
-    pub async fn send_raw_to_topic(
-        &self,
-        topic: &str,
-        key: &[u8],
-        payload: &[u8],
-    ) -> anyhow::Result<(i32, i64)> {
-        let producer = match &self.producer {
-            Some(p) => p,
-            None => return Ok((-1, -1)),
-        };
-        let record = FutureRecord::to(topic).key(key).payload(payload);
-        match producer
-            .send(record, Timeout::After(Duration::from_secs(5)))
-            .await
-        {
-            Ok(d) => Ok((d.partition, d.offset)),
-            Err((kafka_err, _)) => Err(anyhow::anyhow!(
-                "Failed to send to topic '{}': {}",
-                topic,
-                kafka_err
-            )),
-        }
-    }
-}
-
-#[cfg(feature = "kafka")]
-impl Clone for MessageProducer {
-    fn clone(&self) -> Self {
-        Self {
-            producer: self.producer.as_ref().map(Arc::clone),
-            circuit_breaker: Arc::clone(&self.circuit_breaker),
-            topic: self.topic.clone(),
-            enabled: self.enabled,
-        }
-    }
-}
-
-// ============================================================================
-// No-op stub (no "kafka" feature) — compiles without rdkafka
-// ============================================================================
-
-#[cfg(not(feature = "kafka"))]
-/// No-op MessageProducer stub used when the "kafka" feature is not enabled.
-/// All send operations succeed immediately without any network I/O.
+/// No-op MessageProducer. All send operations succeed immediately without I/O.
 #[derive(Clone)]
 pub struct MessageProducer {
     topic: String,
 }
 
-#[cfg(not(feature = "kafka"))]
 impl MessageProducer {
     pub fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
         Ok(Self {
@@ -295,12 +40,15 @@ impl MessageProducer {
     pub async fn flush(&self, _timeout: Duration) -> anyhow::Result<()> {
         Ok(())
     }
+
     pub fn is_enabled(&self) -> bool {
         false
     }
+
     pub fn topic(&self) -> &str {
         &self.topic
     }
+
     pub async fn send_raw_to_topic(
         &self,
         _topic: &str,
