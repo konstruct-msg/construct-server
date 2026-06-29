@@ -64,6 +64,8 @@ services:
       POSTGRES_DB: construct
       POSTGRES_USER: construct
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    env_file:
+      - path: /opt/construct/secrets/app.env
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -82,6 +84,8 @@ services:
     command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
+    env_file:
+      - path: /opt/construct/secrets/app.env
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
