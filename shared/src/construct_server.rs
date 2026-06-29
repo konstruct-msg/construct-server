@@ -37,7 +37,6 @@ pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;
 pub use construct_rate_limit as rate_limit; // Rate limiting & warmup sandbox
-pub mod csrf; // CSRF utilities
 pub mod user_service;
 pub use construct_utils as utils;
 
