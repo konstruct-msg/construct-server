@@ -679,26 +679,6 @@ impl MessageQueue {
         .await
     }
 
-    pub async fn mark_delivered_direct(&mut self, message_id: &str) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .mark_delivered_direct(message_id)
-        .await
-    }
-
-    pub async fn is_delivered_direct(&mut self, message_id: &str) -> Result<bool> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .is_delivered_direct(message_id)
-        .await
-    }
-
     /// Write a message directly to user's Redis stream (test mode only)
     ///
     /// This bypasses Kafka and writes directly to Redis. Used when Kafka is disabled.
