@@ -110,21 +110,22 @@ async fn create_test_config(db_name: &str) -> Config {
         .or_else(|_| dotenvy::from_filename("../.env.test"))
         .or_else(|_| dotenvy::from_filename("../../.env.test"));
 
-    // Read JWT keys directly from files - try multiple paths for workspace compatibility
-    let private_key = try_read_key_file(&[
-        "prkeys/jwt_private_key.pem",
-        "../prkeys/jwt_private_key.pem",
-    ])
-    .expect("Failed to read JWT private key file");
-    let public_key =
-        try_read_key_file(&["prkeys/jwt_public_key.pem", "../prkeys/jwt_public_key.pem"])
-            .expect("Failed to read JWT public key file");
+    // Generate a fresh Ed25519 keypair on the fly — no PEM files committed to repo
+    // or required from disk. This is the canonical PASETO v4.public test setup.
+    let kp = ed25519_compact::KeyPair::generate();
+    let priv_pem_bytes = kp.sk.to_pem();
+    let pub_pem_bytes = kp.pk.to_pem();
+    let paseto_private_key =
+        String::from_utf8(priv_pem_bytes.as_bytes().to_vec()).expect("Ed25519 private PEM");
+    let paseto_public_key =
+        String::from_utf8(pub_pem_bytes.as_bytes().to_vec()).expect("Ed25519 public PEM");
 
     // Set env vars before Config::from_env() reads them
     // SAFETY: Tests run single-threaded (--test-threads=1) so this is safe
     unsafe {
-        std::env::set_var("JWT_PRIVATE_KEY", &private_key);
-        std::env::set_var("JWT_PUBLIC_KEY", &public_key);
+        std::env::set_var("PASETO_PRIVATE_KEY", &paseto_private_key);
+        std::env::set_var("PASETO_PUBLIC_KEY", &paseto_public_key);
+        std::env::set_var("TOKEN_ISSUE_FORMAT", "paseto");
         // Low PoW difficulty for fast tests (1 leading zero bit = instant)
         std::env::set_var("POW_DIFFICULTY", "1");
         // Disable rate limiting for tests (unless already set by specific test)
@@ -289,7 +290,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         queue,
         auth_manager,
         config: config.clone(),
-        key_management: None,
         server_signer: None,
         token_enc_pub: None,
     });
@@ -607,7 +607,6 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
         apns_sandbox_client,
         token_encryption,
         config: config.clone(),
-        key_management: None,
     });
 
     let app = Router::new()

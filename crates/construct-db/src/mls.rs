@@ -808,7 +808,6 @@ pub struct NewGroupMessage {
     pub group_id: Uuid,
     pub epoch: i64,
     pub mls_ciphertext: Vec<u8>,
-    pub sequence_number: i64,
     pub client_message_id: Option<String>,
     pub thread_id: Option<Uuid>,
     pub topic_id: Option<Uuid>,
@@ -829,33 +828,23 @@ pub struct GroupMessageRow {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Atomically allocates the next sequence number for a group.
-/// Returns the new value (starts at 0 for the first message).
-pub async fn next_group_message_sequence(pool: &DbPool, group_id: Uuid) -> Result<i64> {
-    let (seq,): (i64,) = sqlx::query_as(
-        "UPDATE mls_groups SET last_sequence = last_sequence + 1 \
-         WHERE group_id = $1 RETURNING last_sequence",
-    )
-    .bind(group_id)
-    .fetch_one(pool)
-    .await
-    .context("Failed to allocate group message sequence")?;
-
-    Ok(seq)
-}
-
-/// Inserts a group message. Returns the inserted row.
-/// If `client_message_id` was already used for this group, returns the
-/// existing row (idempotent / safe to retry).
+/// Inserts a group message, atomically allocating the next sequence number.
+/// Single round-trip: CTE bumps mls_groups.last_sequence then inserts.
+/// On duplicate client_message_id returns the existing row (idempotent retry).
+/// Gaps in sequence_number are possible on retried duplicates — fine for cursors.
 pub async fn insert_group_message(pool: &DbPool, msg: &NewGroupMessage) -> Result<GroupMessageRow> {
-    // ON CONFLICT DO UPDATE with a no-op update lets us use RETURNING to
-    // retrieve the existing row on duplicate client_message_id without error.
     sqlx::query_as::<_, GroupMessageRow>(
         r#"
+        WITH seq AS (
+            UPDATE mls_groups
+               SET last_sequence = last_sequence + 1
+             WHERE group_id = $1
+         RETURNING last_sequence
+        )
         INSERT INTO group_messages
             (group_id, epoch, mls_ciphertext, sequence_number,
              client_message_id, thread_id, topic_id, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        SELECT $1, $2, $3, seq.last_sequence, $4, $5, $6, $7 FROM seq
         ON CONFLICT (group_id, client_message_id)
             WHERE client_message_id IS NOT NULL
             DO UPDATE SET group_id = EXCLUDED.group_id
@@ -866,7 +855,6 @@ pub async fn insert_group_message(pool: &DbPool, msg: &NewGroupMessage) -> Resul
     .bind(msg.group_id)
     .bind(msg.epoch)
     .bind(&msg.mls_ciphertext)
-    .bind(msg.sequence_number)
     .bind(&msg.client_message_id)
     .bind(msg.thread_id)
     .bind(msg.topic_id)

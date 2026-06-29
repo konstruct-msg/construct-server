@@ -26,7 +26,6 @@ construct-pow        = { path = "../crates/construct-pow" }
 construct-federation    = { path = "../crates/construct-federation" }
 construct-delivery-ack  = { path = "../crates/construct-delivery-ack" }
 construct-pending       = { path = "../crates/construct-pending" }
-construct-key-management = { path = "../crates/construct-key-management" }
 construct-context        = { path = "../crates/construct-context" }
 construct-extractors     = { path = "../crates/construct-extractors" }
 crypto-agility = { path = "../crates/crypto-agility" }
@@ -103,6 +102,7 @@ integration-tests = []
 reqwest = { workspace = true }
 serial_test = "3.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+ed25519-compact = { version = "2.0", features = ["pem", "random"] }
 
 [build-dependencies]
 tonic-build = "0.14.4"

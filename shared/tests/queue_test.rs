@@ -118,9 +118,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
             android_package_name: "".to_string(),
             android_cert_fingerprint: "".to_string(),
         },
-        worker: construct_config::WorkerConfig {
-            shadow_read_enabled: false,
-        },
         redis_key_prefixes: construct_config::RedisKeyPrefixes {
             processed_msg: "processed_msg:".to_string(),
             user: "user:".to_string(),
@@ -131,7 +128,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
             blocked: "blocked:".to_string(),
             key_bundle: "key_bundle:".to_string(),
             connections: "connections:".to_string(),
-            delivered_direct: "delivered_direct:".to_string(),
         },
         redis_channels: construct_config::RedisChannels {
             dead_letter_queue: "dead_letter_queue".to_string(),
@@ -145,6 +141,9 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         deep_link_base_url: "".to_string(),
         jwt_private_key: None,
         jwt_public_key: None,
+        paseto_private_key: None,
+        paseto_public_key: None,
+        token_issue_format: "paseto".to_string(),
         media: construct_config::MediaConfig {
             enabled: false,
             base_url: "".to_string(),

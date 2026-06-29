@@ -22,13 +22,14 @@ impl DbConfig {
             max_connections: std::env::var("DB_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10),
-            // Keep 2 connections warm so the first requests after cold start don't
-            // pay the TCP + auth handshake overhead to Postgres (~10 ms on Docker).
+                .unwrap_or(4),
+            // Keep 1 connection warm to avoid TCP + auth handshake on first request.
+            // On a single VPS with 10 services × 1 idle conn = 10 always-open;
+            // still well within the PG max_connections=50 budget.
             min_connections: std::env::var("DB_MIN_CONNECTIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(2),
+                .unwrap_or(1),
             acquire_timeout_secs: std::env::var("DB_ACQUIRE_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())

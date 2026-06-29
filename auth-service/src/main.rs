@@ -1561,6 +1561,22 @@ async fn well_known_construct_server(
         .as_ref()
         .map(|bytes| b64::STANDARD.encode(bytes));
 
+    // PASETO v4.public auth-token verifying key (raw 32 bytes, base64url no-pad).
+    // Published for external integrators / federation that want to verify auth
+    // tokens client-side. Internal services load this via PASETO_PUBLIC_KEY env
+    // and never read it from here.
+    let paseto_public_key = app_context
+        .config
+        .paseto_public_key
+        .as_ref()
+        .and_then(|pem| {
+            // Normalize: env files sometimes store newlines as literal "\n".
+            let pem = pem.replace("\\n", "\n");
+            ed25519_compact::PublicKey::from_pem(pem.as_str())
+                .ok()
+                .map(|pk| b64::URL_SAFE_NO_PAD.encode(pk.as_ref()))
+        });
+
     let domain = &app_context.config.instance_domain;
     let tls_enabled = public_key.is_some();
 
@@ -1576,6 +1592,9 @@ async fn well_known_construct_server(
             // to prevent relay operators from reading tokens.
             // Derived from signing_key_seed via HKDF(info="construct-token-enc-v1").
             "token_encryption_key": token_encryption_key,
+            // PASETO v4.public Ed25519 verifying key (raw 32 bytes, base64url no-pad).
+            // Null when PASETO migration is not yet deployed on this server.
+            "paseto_public_key": paseto_public_key,
         },
         "grpc_endpoint": format!("{}:443", domain),
         "services": [
@@ -1662,44 +1681,6 @@ async fn main() -> Result<()> {
             .context("Failed to initialize auth manager")?,
     );
 
-    // Initialize Key Management System (optional, requires VAULT_ADDR)
-    let key_management =
-        match construct_server_shared::key_management::KeyManagementConfig::from_env() {
-            Ok(kms_config) => {
-                info!("Initializing Key Management System...");
-                match construct_server_shared::key_management::KeyManagementSystem::new(
-                    db_pool.clone(),
-                    kms_config,
-                )
-                .await
-                {
-                    Ok(kms) => {
-                        // Start background tasks (key refresh, rotation)
-                        if let Err(e) = kms.start().await {
-                            tracing::error!(error = %e, "Failed to start key management background tasks");
-                            return Err(e).context("Failed to start key management system");
-                        }
-                        info!("Key Management System initialized and started");
-                        Some(Arc::new(kms))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to initialize Key Management System - continuing without automatic key rotation"
-                        );
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::info!(
-                    error = %e,
-                    "Key Management System disabled (VAULT_ADDR not configured or invalid config)"
-                );
-                None
-            }
-        };
-
     // Initialize server signer for sealed sender certificates
     let server_signer = config
         .federation
@@ -1747,7 +1728,6 @@ async fn main() -> Result<()> {
         queue,
         auth_manager,
         config: config.clone(),
-        key_management,
         server_signer,
         token_enc_pub,
     });
