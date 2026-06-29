@@ -11,7 +11,6 @@ use construct_config::Config;
 use construct_context::AppContext;
 use construct_db::DbPool;
 use construct_federation::ServerSigner;
-use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
 use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::notification_service::NotificationServiceContext;
@@ -30,7 +29,6 @@ pub struct MessagingServiceContext {
     /// gRPC client for sentinel-service — rate limiting and spam protection
     pub sentinel_client: Option<SentinelClient>,
     pub config: Arc<Config>,
-    pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
     pub server_signer: Option<Arc<ServerSigner>>,
     /// Stable ID for this process instance — stored in Redis at stream open.

@@ -16,13 +16,12 @@ pub(crate) async fn create_channel(
     let req = request.into_inner();
 
     crate::helpers::check_warmup_rate_limit(
+        &mut svc.redis.clone(),
         svc.db.as_ref(),
         user_id,
         "create_channel",
-        1,
-        24,
-        10,
-        24,
+        (1, 24),
+        (10, 24),
     )
     .await?;
 
@@ -43,9 +42,9 @@ pub(crate) async fn create_channel(
     };
 
     let retention_days = if req.retention_days == 0 {
-        90
-    } else if req.retention_days > 365 {
-        return Err(Status::invalid_argument("retention_days cannot exceed 365"));
+        30
+    } else if req.retention_days > 90 {
+        return Err(Status::invalid_argument("retention_days cannot exceed 90"));
     } else {
         req.retention_days as i32
     };

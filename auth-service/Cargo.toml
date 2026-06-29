@@ -55,6 +55,8 @@ construct-veil = { git = "https://github.com/konstruct-msg/construct-veil.git", 
 # RSA key parsing for JWKS endpoint
 rsa = { version = "0.9", features = ["pem"] }
 curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
+# Ed25519 PEM parsing for /.well-known/construct-server paseto_public_key field
+ed25519-compact = { version = "2.0", features = ["pem"] }
 
 [dev-dependencies]
 reqwest = { workspace = true }

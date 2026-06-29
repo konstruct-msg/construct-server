@@ -2,7 +2,7 @@ use chrono::Utc;
 use tonic::Request;
 
 use super::test_helpers::{
-    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db, get_test_redis,
 };
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
@@ -19,6 +19,7 @@ async fn test_submit_commit_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -76,6 +77,7 @@ async fn test_submit_commit_epoch_mismatch() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -108,6 +110,7 @@ async fn test_submit_commit_non_member() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 
@@ -159,6 +162,7 @@ async fn test_fetch_commits_success() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -194,6 +198,7 @@ async fn test_fetch_commits_non_member() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 

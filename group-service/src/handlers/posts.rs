@@ -19,13 +19,12 @@ pub(crate) async fn publish_post(
         .map_err(|_| Status::invalid_argument("Invalid channel_id"))?;
 
     crate::helpers::check_warmup_rate_limit(
+        &mut svc.redis.clone(),
         svc.db.as_ref(),
         user_id,
         "publish_post",
-        50,
-        1,
-        500,
-        1,
+        (50, 1),
+        (500, 1),
     )
     .await?;
 

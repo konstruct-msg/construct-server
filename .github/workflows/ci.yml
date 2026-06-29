@@ -195,6 +195,19 @@ jobs:
           cat /tmp/smoke_public.pem >> "$GITHUB_ENV"
           echo "SMOKE_EOF" >> "$GITHUB_ENV"
 
+      - name: Generate smoke test PASETO Ed25519 keypair
+        run: |
+          # Generate a fresh Ed25519 keypair for this CI run (dual-stack verify).
+          # PASETO is the primary issue format; JWT retained for legacy-token verify.
+          openssl genpkey -algorithm ed25519 -out /tmp/paseto_private.pem 2>/dev/null
+          openssl pkey -in /tmp/paseto_private.pem -pubout -out /tmp/paseto_public.pem 2>/dev/null
+          echo "SMOKE_PASETO_PRIVATE_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/paseto_private.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+          echo "SMOKE_PASETO_PUBLIC_KEY<<SMOKE_EOF" >> "$GITHUB_ENV"
+          cat /tmp/paseto_public.pem >> "$GITHUB_ENV"
+          echo "SMOKE_EOF" >> "$GITHUB_ENV"
+
       - name: Start services
         run: |
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
