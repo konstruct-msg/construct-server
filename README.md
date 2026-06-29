@@ -38,7 +38,7 @@ Signal's Security  +  Email's Openness  +  Minimal Attack Surface
 
 **Sealed sender** — The server does not learn who sent you a message. The sender's identity is encrypted inside the message envelope. To the server it's an opaque blob destined for a device.
 
-**No message persistence** — Messages are never written to a database. They travel: sender → Kafka → Redis Stream → recipient. Once delivered they are gone from the server.
+**No message persistence** — Messages are never written to a database. They travel: sender → messaging-service → Redis Stream → recipient. Once delivered they are gone from the server.
 
 **Invite-only onboarding** — No phone number. No email. Access is via cryptographic invite tokens. Zero personally identifiable information required to register.
 
@@ -124,30 +124,23 @@ alice@your-server.com  ←─ E2E encrypted ─→  bob@another-server.org
 
 ```
 Client (iOS / macOS)
-  │  gRPC over TLS (HTTP/2)
+  │  gRPC over TLS (HTTP/2) — optionally via QUIC :443/UDP or veil/obfs4 gateway :9443
   ▼
-Traefik         — edge TLS termination (Let's Encrypt ACME), SNI routing
-  ▼
-Envoy :8080     — gRPC / gRPC-web routing to microservices
+Caddy :443      — edge TLS termination (Let's Encrypt), gRPC routing to services
   │
-  ├──► auth-service         :50051  (registration, JWT, recovery)
-  ├──► user-service         :50052  (profiles)
-  ├──► messaging-service    :50053  (send/receive, streaming, receipts)
-  ├──► notification-service :50054  (silent APNs push)
-  ├──► invite-service       :50055  (cryptographic invites)
-  ├──► media-service        :50056  (encrypted attachments)
-  ├──► key-service          :50057  (X3DH prekeys, ML-KEM keys)
-  ├──► mls-service          :50058  (MLS group messaging)
-  ├──► sentinel-service     :50059  (abuse / rate-limit sentinel)
-  ├──► channel-service              (broadcast channels)
-  ├──► signaling-service            (WebRTC call signaling)
-  ├──► masque-service               (MASQUE-lite QUIC datagram relay)
-  └──► gateway              :3000   (HTTP: /health, /.well-known, /federation)
+  ├──► auth-service      :50051  (registration, JWT, PoW, device + invite tokens)
+  ├──► user-service      :50052  (profiles, search, relationships, invite redemption)
+  ├──► messaging-service :50053  (send/receive, streaming, receipts, silent APNs push)
+  ├──► media-service     :50056  (encrypted attachments)
+  ├──► key-service       :50057  (X3DH prekeys, ML-KEM keys)
+  ├──► group-service     :50058  (MLS groups RFC 9420 + broadcast channels)
+  ├──► sentinel-service  :50059  (abuse / rate-limit; called by messaging on send)
+  ├──► signaling-service :50060  (WebRTC call signaling)
+  ├──► veil-service              (veil obfuscation ticket provisioning)
+  └──► gateway           :3000   (HTTP: /health, /.well-known, /federation; veil/obfs4 proxy :9443)
 
-  delivery-worker                   (Kafka → Redis offline-stream bridge; no inbound port)
-
-Message flow:
-  sender → messaging-service → Redpanda(Kafka) → delivery-worker → Redis stream → recipient
+Message flow (Redis-direct, no Kafka):
+  sender → messaging-service → Redis stream delivery:offline:{user}[:{device}] + PUBLISH inbox:wakeup → recipient
   (never touches a SQL database — no message content persistence)
 ```
 
@@ -172,20 +165,17 @@ Message flow:
 
 ```
 construct-server/
-├── auth-service/          # Device registration, JWT, recovery
+├── auth-service/          # Device registration, JWT, PoW, invite tokens
 ├── key-service/           # X3DH prekeys, PQC Kyber keys
-├── messaging-service/     # Send/receive, streaming, receipts
-├── user-service/          # User profiles
+├── messaging-service/     # Send/receive, streaming, receipts, silent APNs push
+├── user-service/          # User profiles, search, invite redemption
 ├── media-service/         # Encrypted media upload/download
-├── invite-service/        # Cryptographic invite tokens
-├── notification-service/  # Silent APNs push
-├── mls-service/           # MLS group messaging (RFC 9420)
-├── channel-service/       # Public/private broadcast channels
+├── group-service/         # MLS group messaging (RFC 9420) + broadcast channels
 ├── signaling-service/     # WebRTC call signaling relay
 ├── masque-service/        # MASQUE-lite QUIC datagram relay (transport)
 ├── sentinel-service/      # Abuse / rate-limit sentinel
-├── gateway/               # Federation, health, discovery
-├── delivery-worker/       # Kafka → Redis offline-stream bridge
+├── veil-service/          # Veil obfuscation ticket provisioning
+├── gateway/               # Federation, health, discovery, veil/obfs4 proxy
 ├── shared/
 │   ├── proto/             # Protobuf definitions (source of truth)
 │   └── migrations/        # PostgreSQL schema (devices & keys only)

@@ -29,7 +29,6 @@ sqlx = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
-rdkafka = { version = "0.39", optional = true }
 reqwest = { workspace = true, optional = true }
 rmp-serde = { version = "1.3", optional = true }
 
@@ -38,12 +37,11 @@ rmp-serde = { version = "1.3", optional = true }
 default = ["full"]
 
 # All error conversions enabled
-full = ["database", "redis", "kafka", "jwt", "http", "serialization"]
+full = ["database", "redis", "jwt", "http", "serialization"]
 
 # Individual feature flags
 database = ["dep:sqlx"]
 redis = ["dep:redis"]
-kafka = ["dep:rdkafka"]
 jwt = ["dep:jsonwebtoken"]
 http = ["dep:reqwest"]
 serialization = ["dep:rmp-serde", "dep:uuid"]
