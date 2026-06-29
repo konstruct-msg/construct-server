@@ -16,9 +16,8 @@ mod auth_tests {
     use crate::AuthManager;
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
-        DeepLinksConfig, FederationConfig, KafkaConfig, LoggingConfig, MediaConfig,
-        MicroservicesConfig, MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
-        WorkerConfig,
+        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MicroservicesConfig,
+        MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig, WorkerConfig,
     };
     use uuid::Uuid;
 
@@ -128,26 +127,6 @@ XQIDAQAB
                 username_hmac_secret: vec![0u8; 32],
                 contact_hmac_secret: vec![0u8; 32],
                 request_envelope_key: vec![0u8; 32],
-            },
-            kafka: KafkaConfig {
-                enabled: false,
-                brokers: String::new(),
-                topic: String::new(),
-                consumer_group: String::new(),
-                ssl_enabled: false,
-                sasl_mechanism: None,
-                sasl_username: None,
-                sasl_password: None,
-                ssl_ca_location: None,
-                producer_compression: "none".to_string(),
-                producer_acks: "1".to_string(),
-                producer_linger_ms: 0,
-                producer_batch_size: 0,
-                producer_max_in_flight: 0,
-                producer_retries: 0,
-                producer_request_timeout_ms: 0,
-                producer_delivery_timeout_ms: 0,
-                producer_enable_idempotence: false,
             },
             apns: ApnsConfig {
                 enabled: false,

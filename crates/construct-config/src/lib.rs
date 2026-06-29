@@ -11,7 +11,6 @@ mod constants;
 mod database;
 mod deeplinks;
 mod federation;
-mod kafka;
 mod logging;
 mod media;
 mod messaging;
@@ -28,7 +27,6 @@ pub use constants::{
 pub use database::DbConfig;
 pub use deeplinks::DeepLinksConfig;
 pub use federation::{ApnsConfig, ApnsEnvironment, FederationConfig, MtlsConfig};
-pub use kafka::KafkaConfig;
 pub use logging::LoggingConfig;
 pub use media::MediaConfig;
 pub use messaging::MessagingConfig;
@@ -100,7 +98,6 @@ pub struct Config {
     // Sub-configurations
     pub logging: LoggingConfig,
     pub security: SecurityConfig,
-    pub kafka: KafkaConfig,
     pub apns: ApnsConfig,
     pub federation: FederationConfig,
     pub db: DbConfig,
@@ -191,7 +188,6 @@ impl Config {
         // Load sub-configurations
         let logging = LoggingConfig::from_env()?;
         let security = SecurityConfig::from_env();
-        let kafka = KafkaConfig::from_env();
         let apns = ApnsConfig::from_env()?;
         let federation = FederationConfig::from_env()?;
         let db = DbConfig::from_env();
@@ -302,7 +298,6 @@ impl Config {
 
             logging,
             security,
-            kafka,
             apns,
             federation,
             db,

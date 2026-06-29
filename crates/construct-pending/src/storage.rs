@@ -212,43 +212,6 @@ impl PendingMessageStorage {
         Ok(messages)
     }
 
-    /// Update Kafka partition/offset for a pending message
-    pub async fn update_kafka_info(
-        &self,
-        temp_id: &str,
-        partition: i32,
-        offset: i64,
-    ) -> Result<bool> {
-        let mut conn = self
-            .redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .context("Failed to connect to Redis")?;
-
-        let key = format!("{}{}", PENDING_MSG_PREFIX, temp_id);
-
-        // Get existing data
-        let mut data = match self.get_pending(temp_id).await? {
-            Some(d) => d,
-            None => return Ok(false),
-        };
-
-        // Update Kafka info
-        data.kafka_partition = Some(partition);
-        data.kafka_offset = Some(offset);
-
-        // Store updated data
-        let json_data =
-            serde_json::to_string(&data).context("Failed to serialize pending message")?;
-
-        let _: () = conn
-            .set(&key, &json_data)
-            .await
-            .context("Failed to update pending message")?;
-
-        Ok(true)
-    }
-
     /// Get metrics (for monitoring)
     pub async fn get_metrics(&self) -> Result<PendingMessageMetrics> {
         let mut conn = self
