@@ -12,7 +12,6 @@ members = [
     "group-service",
     "sentinel-service",
     "signaling-service",
-    "masque-service",
     "veil-service",
     # New modular crates
     "crates/construct-types",
