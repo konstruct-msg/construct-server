@@ -19,28 +19,20 @@ pub(crate) async fn create_group(
     let user_id = extract_user_id(request.metadata())?;
     let req = request.into_inner();
 
-    let rate_limit_key = format!("rate_limit:group_create:{}", user_id);
-
-    let recent_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rate_limit_events 
-         WHERE key = $1 AND created_at > NOW() - INTERVAL '24 hours'",
+    let rl_key = format!("rl:group_create:{}", user_id);
+    let allowed = construct_rate_limit::sliding_window_check_and_record(
+        &mut svc.redis.clone(),
+        &rl_key,
+        10,
+        24 * 3600,
     )
-    .bind(&rate_limit_key)
-    .fetch_one(svc.db.as_ref())
     .await
-    .unwrap_or(0);
-
-    if recent_count >= 10 {
+    .map_err(|e| Status::internal(format!("Rate limit error: {e}")))?;
+    if !allowed {
         return Err(Status::resource_exhausted(
             "Rate limit exceeded: maximum 10 groups per day",
         ));
     }
-
-    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
-        .bind(&rate_limit_key)
-        .execute(svc.db.as_ref())
-        .await
-        .ok();
 
     let group_id = Uuid::parse_str(&req.group_id)
         .map_err(|_| Status::invalid_argument("Invalid group_id (must be UUID)"))?;

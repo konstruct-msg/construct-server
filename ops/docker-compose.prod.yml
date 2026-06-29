@@ -20,9 +20,13 @@
 # DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
 # TLS: Caddy auto-obtains Let's Encrypt certs via TLS-ALPN-01
 #
-# External services (not in this compose):
-#   Database : Supabase (DATABASE_URL in app.env)
-#   Redis    : Upstash  (REDIS_URL in app.env)
+# Data layer:
+#   Recommended: self-hosted PostgreSQL 16 + Redis 7 on a dedicated VPS
+#     (ops/docker-compose.data.yml). Keeps all user data fully under your control.
+#   Transitioning to: single-VPS mode where data and app run together (WIP).
+#   Alternative (lightweight / dev): Supabase (managed PG) + Upstash (managed Redis).
+#     Set DATABASE_URL and REDIS_URL in app.env. Not recommended for production —
+#     data leaves your infrastructure and trust boundary.
 #
 # First-time setup (run from REPO ROOT):
 #   1. cp ops/secrets.example.env /opt/construct/secrets/app.env
