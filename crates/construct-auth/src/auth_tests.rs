@@ -173,7 +173,6 @@ XQIDAQAB
                 blocked: "blocked:".to_string(),
                 key_bundle: "key_bundle:".to_string(),
                 connections: "connections:".to_string(),
-                delivered_direct: "delivered_direct:".to_string(),
             },
             redis_channels: RedisChannels {
                 dead_letter_queue: "dlq".to_string(),

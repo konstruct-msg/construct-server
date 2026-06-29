@@ -90,7 +90,6 @@ Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written,
 | `delivery:offline:{user_id}:{device_id}` | Stream (XADD) | messaging-service | Per-device message inbox |
 | `inbox:wakeup:{user_id}` | Pub/Sub | messaging-service | Real-time wakeup signal |
 | `dispatched_msg:{message_id}` | String (SETEX) | messaging-service | Send-path idempotency dedup |
-| `delivered_direct:{message_id}` | String (SETEX) | messaging-service | Direct delivery dedup |
 | `user:{user_id}:server_instance_id` | String (SET) | messaging-service | Which server holds connection |
 | `delivery_queue:{server_instance_id}` | List/key (TTL) | messaging-service | Server heartbeat registry |
 | `rate_limit:{scope}:{id}` | String | construct-rate-limit | Sliding window counters |
