@@ -1,6 +1,6 @@
-// Sentinel business logic re-exported for embedding in messaging-service.
-// The core implementation lives here; the gRPC transport lives in messaging-service.
+// Sentinel service business logic is in crates/construct-sentinel-service.
+// This module re-exports it so existing call sites
+// (`construct_server_shared::sentinel_service::SentinelCore`) keep working
+// unchanged. The gRPC transport lives in messaging-service.
 
-pub mod core;
-
-pub use core::{ProtectionStats, SendPermission, SentinelCore, TrustLevel};
+pub use construct_sentinel_service::{ProtectionStats, SendPermission, SentinelCore, TrustLevel};

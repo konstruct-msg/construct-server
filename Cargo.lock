@@ -959,6 +959,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-sentinel-service"
+version = "0.15.5"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "redis",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "construct-server-shared"
 version = "0.15.5"
 dependencies = [
@@ -994,6 +1007,7 @@ dependencies = [
  "construct-queue",
  "construct-rate-limit",
  "construct-redis",
+ "construct-sentinel-service",
  "construct-types",
  "construct-user-service",
  "construct-utils",

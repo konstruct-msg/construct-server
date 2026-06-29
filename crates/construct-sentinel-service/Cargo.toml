@@ -1,0 +1,19 @@
+[package]
+name = "construct-sentinel-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Core runtime
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+# Database / Redis
+sqlx        = { workspace = true }
+redis       = { workspace = true }
+chrono      = { workspace = true }
+
+[dev-dependencies]
+# Unit tests for TrustLevel thresholds only — no DB/Redis required.

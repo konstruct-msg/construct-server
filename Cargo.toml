@@ -24,6 +24,7 @@ members = [
     "crates/construct-auth",
     "crates/construct-auth-service",
     "crates/construct-notification-service",
+    "crates/construct-sentinel-service",
     "crates/construct-apns",
     "crates/crypto-agility",
     "crates/construct-metrics",
