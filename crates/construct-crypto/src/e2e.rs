@@ -317,38 +317,15 @@ impl ServerCryptoValidator {
 
         // 5. SECURITY: Verify signature (Ed25519 for classical, hybrid for PQ)
         if has_hybrid_suite || !is_classical_only {
-            // Hybrid signature verification
+            // Hybrid signature verification: both Ed25519 AND ML-DSA-65 must verify
             #[cfg(feature = "post-quantum")]
             {
-                // Extract Ed25519 part from hybrid signature (first 64 bytes) for backward compatibility
-                // Full hybrid verification will be implemented when hybrid module is complete
-                let ed25519_sig_bytes: [u8; 64] =
-                    signature_bytes[0..64].try_into().map_err(|_| {
-                        anyhow::anyhow!("Failed to extract Ed25519 signature from hybrid signature")
-                    })?;
-
-                // Extract Ed25519 part from hybrid master key (first 32 bytes)
-                let ed25519_key_bytes: [u8; 32] =
-                    master_key_bytes[0..32].try_into().map_err(|_| {
-                        anyhow::anyhow!("Failed to extract Ed25519 key from hybrid master key")
-                    })?;
-
-                let verifying_key = VerifyingKey::from_bytes(&ed25519_key_bytes)
-                    .context("Invalid Ed25519 master_identity_key format in hybrid key")?;
-
-                let signature = Signature::from_bytes(&ed25519_sig_bytes);
-
-                // Verify Ed25519 signature (classical part of hybrid)
-                verifying_key
-                    .verify(&bundle_data_bytes, &signature)
-                    .context("Ed25519 signature verification failed in hybrid signature - bundle may be tampered")?;
-
-                // TODO: Verify ML-DSA-65 signature (PQ part) when hybrid module is complete
-                // This requires parsing the full hybrid signature and master key
+                use crate::pqc::verify_hybrid_signature;
+                verify_hybrid_signature(&master_key_bytes, &bundle_data_bytes, &signature_bytes)
+                    .context("Hybrid (Ed25519 + ML-DSA-65) signature verification failed - bundle may be tampered")?;
             }
             #[cfg(not(feature = "post-quantum"))]
             {
-                // Should not reach here due to validation above, but just in case
                 return Err(anyhow::anyhow!(
                     "Post-quantum hybrid signature verification requires post-quantum feature"
                 ));
