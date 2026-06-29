@@ -4,7 +4,7 @@ use tonic::Request;
 use uuid::Uuid;
 
 use super::test_helpers::{
-    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db, get_test_redis,
     publish_test_key_package,
 };
 use crate::service::GroupServiceImpl;
@@ -43,6 +43,7 @@ async fn test_invite_to_group_success() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &admin_device_id);
 
@@ -91,6 +92,7 @@ async fn test_invite_to_group_non_admin() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -153,6 +155,7 @@ async fn test_accept_group_invite_success() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -223,6 +226,7 @@ async fn test_accept_group_invite_wrong_device() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &wrong_device_id);
 
@@ -279,6 +283,7 @@ async fn test_decline_group_invite_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -346,6 +351,7 @@ async fn test_decline_group_invite_wrong_device() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&other_user_id, &other_device_id);
 
@@ -399,6 +405,7 @@ async fn test_get_pending_invites_success() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -443,6 +450,7 @@ async fn test_leave_group_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -485,6 +493,7 @@ async fn test_leave_group_creator_cannot_leave() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -523,6 +532,7 @@ async fn test_remove_member_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -598,6 +608,7 @@ async fn test_remove_member_cannot_remove_creator() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 
@@ -663,6 +674,7 @@ async fn test_accept_group_invite_epoch_mismatch_rejected() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -719,6 +731,7 @@ async fn test_accept_group_invite_epoch_match_succeeds() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&invitee_user_id, &invitee_device_id);
 
@@ -767,6 +780,7 @@ async fn test_get_pending_invites_cross_device_rejected_in_membership() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);
 

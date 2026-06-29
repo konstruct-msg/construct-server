@@ -54,7 +54,7 @@ pub(crate) async fn get_comment_group(
         initial_ratchet_tree: req.initial_ratchet_tree.clone(),
         encrypted_group_context: req.encrypted_group_context.clone(),
         max_members: 500,
-        message_retention_days: 90,
+        message_retention_days: 30,
         threads_enabled: false,
     };
 

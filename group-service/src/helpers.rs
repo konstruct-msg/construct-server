@@ -211,25 +211,20 @@ pub(crate) async fn check_channel_subscriber_or_admin(
     Ok(())
 }
 
+/// `warmup` and `established` are `(max_events, window_hours)`.
 pub(crate) async fn check_warmup_rate_limit(
     redis: &mut redis::aio::ConnectionManager,
     pool: &PgPool,
     user_id: Uuid,
     action: &str,
-    warmup_max: u32,
-    warmup_window_hours: i64,
-    established_max: u32,
-    established_window_hours: i64,
+    warmup: (u32, i64),
+    established: (u32, i64),
 ) -> Result<(), Status> {
     let in_warmup = construct_rate_limit::is_user_in_warmup_cached(redis, pool, user_id)
         .await
         .unwrap_or(true);
 
-    let (max_events, window_hours) = if in_warmup {
-        (warmup_max, warmup_window_hours)
-    } else {
-        (established_max, established_window_hours)
-    };
+    let (max_events, window_hours) = if in_warmup { warmup } else { established };
 
     let key = format!("rl:channel:{}:{}", action, user_id);
     let allowed = construct_rate_limit::sliding_window_check_and_record(

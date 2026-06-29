@@ -102,6 +102,7 @@ integration-tests = []
 reqwest = { workspace = true }
 serial_test = "3.2"
 rand_core = { version = "0.6", features = ["getrandom"] }
+ed25519-compact = { version = "2.0", features = ["pem", "random"] }
 
 [build-dependencies]
 tonic-build = "0.14.4"

@@ -141,6 +141,9 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         deep_link_base_url: "".to_string(),
         jwt_private_key: None,
         jwt_public_key: None,
+        paseto_private_key: None,
+        paseto_public_key: None,
+        token_issue_format: "paseto".to_string(),
         media: construct_config::MediaConfig {
             enabled: false,
             base_url: "".to_string(),

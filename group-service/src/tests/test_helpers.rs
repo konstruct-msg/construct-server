@@ -7,6 +7,15 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub(crate) async fn get_test_redis() -> redis::aio::ConnectionManager {
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let client = redis::Client::open(url).expect("Invalid REDIS_URL");
+    client
+        .get_connection_manager()
+        .await
+        .expect("Failed to connect to Redis")
+}
+
 pub(crate) async fn get_test_db() -> Arc<sqlx::PgPool> {
     let mut db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     if (db_url.contains("localhost") || db_url.contains("127.0.0.1"))
