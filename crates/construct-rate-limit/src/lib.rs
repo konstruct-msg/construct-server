@@ -300,6 +300,96 @@ pub async fn cleanup_rate_limits(pool: &PgPool) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+// ── Redis sliding-window primitives ──────────────────────────────────────────
+
+// TTL for the warmup cache key. 10 minutes is safe — warmup is a 48h window so
+// a stale cache entry causes at most a brief mis-classification of the user.
+const WARMUP_CACHE_TTL_SECS: u64 = 600;
+
+/// Sliding-window rate limit backed by a Redis ZSet.
+///
+/// Scores = millisecond epoch timestamps; members = nanosecond strings (unique).
+/// Each call: trims expired entries, counts remaining, records if below limit.
+///
+/// Returns `true` if the action is allowed (event recorded).
+/// Returns `false` if the rate limit has been exceeded (nothing recorded).
+pub async fn sliding_window_check_and_record(
+    conn: &mut redis::aio::ConnectionManager,
+    key: &str,
+    max_events: u32,
+    window_seconds: i64,
+) -> anyhow::Result<bool> {
+    use redis::AsyncCommands;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let window_start_ms = now_ms - window_seconds * 1000;
+
+    // Remove entries older than the window.
+    let _: i64 = conn
+        .zrembyscore(key, f64::NEG_INFINITY, window_start_ms as f64)
+        .await
+        .map_err(|e| anyhow::anyhow!("zrembyscore failed: {e}"))?;
+
+    // Count entries still in the window.
+    let count: u32 = conn
+        .zcount(key, (window_start_ms + 1) as f64, f64::INFINITY)
+        .await
+        .map_err(|e| anyhow::anyhow!("zcount failed: {e}"))?;
+
+    if count >= max_events {
+        return Ok(false);
+    }
+
+    // Record this event. Use nanosecond timestamp as a unique member; if
+    // nanoseconds are unavailable, fall back to "ms-count" which is still unique
+    // within the same process.
+    let member = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| format!("{}-{}", now_ms, count));
+
+    // pow.rs pattern: zadd(key, member, score) — member before score.
+    let _: i64 = conn
+        .zadd(key, &member, now_ms)
+        .await
+        .map_err(|e| anyhow::anyhow!("zadd failed: {e}"))?;
+
+    // Refresh TTL with a small buffer so keys clean themselves up.
+    let _: bool = conn
+        .expire(key, window_seconds + 60)
+        .await
+        .map_err(|e| anyhow::anyhow!("expire failed: {e}"))?;
+
+    Ok(true)
+}
+
+/// `is_user_in_warmup` with a 10-minute Redis cache to avoid a PG round-trip
+/// on every group/channel action.
+///
+/// On cache miss the result is fetched from PG via `is_user_in_warmup` and
+/// written back to Redis. Cache write failures are silently ignored.
+pub async fn is_user_in_warmup_cached(
+    conn: &mut redis::aio::ConnectionManager,
+    pool: &PgPool,
+    user_id: Uuid,
+) -> anyhow::Result<bool> {
+    use redis::AsyncCommands;
+
+    let key = format!("rl:warmup:{}", user_id);
+
+    let cached: Option<u8> = conn.get(&key).await.unwrap_or(None);
+    if let Some(v) = cached {
+        return Ok(v == 1);
+    }
+
+    let in_warmup = is_user_in_warmup(pool, user_id).await?;
+
+    let val: u8 = if in_warmup { 1 } else { 0 };
+    let _: Result<(), _> = conn.set_ex(&key, val, WARMUP_CACHE_TTL_SECS).await;
+
+    Ok(in_warmup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
