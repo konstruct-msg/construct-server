@@ -22,6 +22,21 @@ services:
     image: postgres:16-alpine
     container_name: construct-postgres
     restart: unless-stopped
+    # Single-VPS tuning: no replication, SSD storage, ~10 services × 4 pool conns.
+    # RAM budget: shared_buffers=256MB fixed cache; max_connections=50 caps work_mem
+    # surface (~50 × 4MB work_mem ceiling vs 100 × 4MB default = −200MB pressure).
+    # wal_level=minimal disables streaming replication and WAL archiving — acceptable
+    # on a single VPS with no replicas; requires max_wal_senders=0.
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c max_connections=50
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c checkpoint_completion_target=0.9
+      -c maintenance_work_mem=64MB
+      -c random_page_cost=1.1
     environment:
       POSTGRES_DB: construct
       POSTGRES_USER: construct

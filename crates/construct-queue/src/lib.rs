@@ -16,10 +16,13 @@
 mod cache;
 mod connection;
 mod delivery;
+mod pow;
 mod rate_limiting;
 mod replay;
 mod sessions;
 mod tokens;
+
+pub use pow::PowChallengeRecord;
 
 #[cfg(test)]
 mod tests;
@@ -676,26 +679,6 @@ impl MessageQueue {
             self.delivery_queue_prefix.clone(),
         )
         .register_server_instance(queue_key, ttl_seconds)
-        .await
-    }
-
-    pub async fn mark_delivered_direct(&mut self, message_id: &str) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .mark_delivered_direct(message_id)
-        .await
-    }
-
-    pub async fn is_delivered_direct(&mut self, message_id: &str) -> Result<bool> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .is_delivered_direct(message_id)
         .await
     }
 

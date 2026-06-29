@@ -28,13 +28,12 @@ pub(crate) async fn create_invite_link(
         .map_err(|_| Status::invalid_argument("Invalid channel_id"))?;
 
     crate::helpers::check_warmup_rate_limit(
+        &mut svc.redis.clone(),
         svc.db.as_ref(),
         user_id,
         "create_channel_invite",
-        5,
-        24,
-        50,
-        24,
+        (5, 24),
+        (50, 24),
     )
     .await?;
 

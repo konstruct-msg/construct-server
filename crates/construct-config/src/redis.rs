@@ -24,9 +24,6 @@ pub struct RedisKeyPrefixes {
     pub key_bundle: String,
     /// Prefix for connection tracking: "connections:{user_id}"
     pub connections: String,
-    /// Prefix for direct delivery deduplication: "delivered_direct:{message_id}"
-    /// Used to skip delivery-worker for messages already delivered via tx.send()
-    pub delivered_direct: String,
 }
 
 impl RedisKeyPrefixes {
@@ -48,8 +45,6 @@ impl RedisKeyPrefixes {
                 .unwrap_or_else(|_| "key_bundle:".to_string()),
             connections: std::env::var("REDIS_KEY_PREFIX_CONNECTIONS")
                 .unwrap_or_else(|_| "connections:".to_string()),
-            delivered_direct: std::env::var("REDIS_KEY_PREFIX_DELIVERED_DIRECT")
-                .unwrap_or_else(|_| "delivered_direct:".to_string()),
         }
     }
 }

@@ -24,13 +24,12 @@ pub(crate) async fn subscribe_channel(
     }
 
     crate::helpers::check_warmup_rate_limit(
+        &mut svc.redis.clone(),
         svc.db.as_ref(),
         user_id,
         "subscribe_channel",
-        20,
-        1,
-        200,
-        1,
+        (20, 1),
+        (200, 1),
     )
     .await?;
 

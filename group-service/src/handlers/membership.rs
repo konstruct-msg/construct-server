@@ -28,28 +28,21 @@ pub(crate) async fn invite_to_group(
         return Err(Status::permission_denied("NOT_ADMIN"));
     }
 
-    let rate_limit_key = format!("rate_limit:group_invite:{}", inviter_user_id);
-    let recent_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rate_limit_events
-         WHERE key = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    let rl_key = format!("rl:group_invite:{}", inviter_user_id);
+    let allowed = construct_rate_limit::sliding_window_check_and_record(
+        &mut svc.redis.clone(),
+        &rl_key,
+        100,
+        3600,
     )
-    .bind(&rate_limit_key)
-    .fetch_one(svc.db.as_ref())
     .await
-    .unwrap_or(0);
-
-    if recent_count >= 100 {
+    .map_err(|e| Status::internal(format!("Rate limit error: {e}")))?;
+    if !allowed {
         crate::metrics::inc_rate_limit_violations();
         return Err(Status::resource_exhausted(
             "RATE_LIMIT: max 100 invites per hour",
         ));
     }
-
-    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
-        .bind(&rate_limit_key)
-        .execute(svc.db.as_ref())
-        .await
-        .ok();
 
     if get_group_dissolved_at(svc.db.as_ref(), group_id)
         .await?

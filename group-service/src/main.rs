@@ -35,6 +35,10 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Arc::new(db);
 
+    let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
+    let redis_client = redis::Client::open(redis_url)?;
+    let redis = redis_client.get_connection_manager().await?;
+
     // MLS cleanup worker
     let cleanup_interval_hours: u64 = std::env::var("MLS_CLEANUP_INTERVAL_HOURS")
         .unwrap_or_else(|_| "24".to_string())
@@ -95,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         hub: service::GroupHub::new(),
         notification_client,
+        redis,
     };
 
     Server::builder()

@@ -3,7 +3,7 @@ use ed25519_dalek::Signer;
 use tonic::Request;
 
 use super::test_helpers::{
-    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db, get_test_redis,
 };
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
@@ -31,6 +31,7 @@ async fn test_delegate_admin_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -105,6 +106,7 @@ async fn test_delegate_admin_non_admin() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&member_user_id, &member_device_id);
 
@@ -165,6 +167,7 @@ async fn test_transfer_ownership_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -259,6 +262,7 @@ async fn test_transfer_ownership_non_creator() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
     let meta = create_metadata(&other_admin_user_id, &other_admin_device_id);
 

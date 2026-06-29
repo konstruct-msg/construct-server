@@ -286,7 +286,11 @@ pub async fn register_device_core(
     let max_registrations = app_context.config.security.max_registrations_per_hour;
 
     if max_registrations > 0 && client_ip != "unknown" {
-        let count = construct_db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
+        let count = app_context
+            .queue
+            .lock()
+            .await
+            .count_pow_registrations_by_ip(&client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?;
 
@@ -419,11 +423,14 @@ pub async fn register_device_core(
     }
 
     // 6. Verify PoW solution
-    let pow_challenge =
-        construct_db::get_pow_challenge(&app_context.db_pool, &pow_solution.challenge)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to fetch PoW challenge: {}", e)))?
-            .ok_or_else(|| AppError::Validation("Invalid or expired PoW challenge".to_string()))?;
+    let pow_challenge = app_context
+        .queue
+        .lock()
+        .await
+        .get_pow_challenge(&pow_solution.challenge)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch PoW challenge: {}", e)))?
+        .ok_or_else(|| AppError::Validation("Invalid or expired PoW challenge".to_string()))?;
 
     if pow_challenge.expires_at < chrono::Utc::now() {
         return Err(AppError::Validation("PoW challenge expired".to_string()));
@@ -450,7 +457,11 @@ pub async fn register_device_core(
         return Err(AppError::Validation("Invalid PoW solution".to_string()));
     }
 
-    construct_db::mark_challenge_used(&app_context.db_pool, &pow_solution.challenge)
+    app_context
+        .queue
+        .lock()
+        .await
+        .mark_pow_challenge_used(&pow_solution.challenge)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
 
@@ -820,7 +831,11 @@ pub async fn get_pow_challenge(
     // Skip rate-limit check when IP is unknown (no proxy headers) to avoid inet cast errors
     let max_challenges = app_context.config.security.max_pow_challenges_per_hour;
     let count = if max_challenges > 0 && client_ip != "unknown" {
-        construct_db::count_challenges_by_ip(&app_context.db_pool, &client_ip, 60)
+        app_context
+            .queue
+            .lock()
+            .await
+            .count_pow_challenges_by_ip(&client_ip, 60)
             .await
             .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?
     } else {
@@ -846,7 +861,11 @@ pub async fn get_pow_challenge(
     //    (b) successful registrations from this IP (registration-specific escalation)
     let base_difficulty = app_context.config.security.pow_difficulty;
     let reg_count = if client_ip != "unknown" {
-        construct_db::count_registrations_by_ip(&app_context.db_pool, &client_ip, 60)
+        app_context
+            .queue
+            .lock()
+            .await
+            .count_pow_registrations_by_ip(&client_ip, 60)
             .await
             .unwrap_or(0)
     } else {
@@ -886,15 +905,18 @@ pub async fn get_pow_challenge(
     } else {
         Some(client_ip.as_str())
     };
-    let pow_challenge = construct_db::create_pow_challenge(
-        &app_context.db_pool,
-        &challenge,
-        params.difficulty as i16,
-        requester_ip,
-        ttl_seconds,
-    )
-    .await
-    .map_err(|e| AppError::Internal(format!("Failed to create challenge: {}", e)))?;
+    let pow_challenge = app_context
+        .queue
+        .lock()
+        .await
+        .create_pow_challenge(
+            &challenge,
+            params.difficulty as i16,
+            requester_ip,
+            ttl_seconds,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to create challenge: {}", e)))?;
 
     tracing::info!(
         challenge = %challenge,

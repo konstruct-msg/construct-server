@@ -76,52 +76,6 @@ async fn test_delivery_track_user_online() {
 
 #[tokio::test]
 #[ignore] // Requires Redis
-async fn test_delivery_mark_delivered() {
-    let mut client = get_test_redis_client().await;
-    let config = get_test_config();
-
-    // Use timestamp to ensure unique message ID
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let message_id = format!("test_msg_delivery_{}", timestamp);
-
-    let mut manager =
-        delivery::DeliveryManager::new(&mut client, &config, "test:delivery:".to_string());
-
-    // Initially not delivered
-    let is_delivered = manager
-        .is_delivered_direct(&message_id)
-        .await
-        .expect("Failed to check delivery");
-
-    assert!(!is_delivered, "Message should not be delivered initially");
-
-    // Mark delivered
-    manager
-        .mark_delivered_direct(&message_id)
-        .await
-        .expect("Failed to mark delivered");
-
-    // Verify delivered
-    let is_delivered_after = manager
-        .is_delivered_direct(&message_id)
-        .await
-        .expect("Failed to check delivery after mark");
-
-    assert!(
-        is_delivered_after,
-        "Message should be delivered after marking"
-    );
-
-    // Cleanup
-    let key = format!("delivered:direct:{}", message_id);
-    client.del(&key).await.ok();
-}
-
-#[tokio::test]
-#[ignore] // Requires Redis
 async fn test_delivery_register_server_instance() {
     let mut client = get_test_redis_client().await;
     let config = get_test_config();

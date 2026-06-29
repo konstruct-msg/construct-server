@@ -33,6 +33,8 @@ tokio-stream = "0.1"
 prometheus = "0.14"
 lazy_static = "1.4"
 
+redis = { workspace = true }
+
 construct-server-shared = { path = "../shared" }
 construct-db = { path = "../crates/construct-db" }
 construct-config = { path = "../crates/construct-config" }

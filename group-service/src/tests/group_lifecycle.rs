@@ -5,7 +5,7 @@ use tonic::Request;
 use uuid::Uuid;
 
 use super::test_helpers::{
-    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db, get_test_redis,
 };
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
@@ -20,6 +20,7 @@ async fn test_create_group_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let group_id = Uuid::new_v4();
@@ -57,6 +58,7 @@ async fn test_create_group_invalid_group_id() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -87,6 +89,7 @@ async fn test_create_group_empty_ratchet_tree() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -117,6 +120,7 @@ async fn test_create_group_max_members_exceeded() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -147,6 +151,7 @@ async fn test_create_group_missing_user_id() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let mut meta = tonic::metadata::MetadataMap::new();
@@ -179,6 +184,7 @@ async fn test_get_group_state_success() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -213,6 +219,7 @@ async fn test_get_group_state_non_member() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -240,6 +247,7 @@ async fn test_dissolve_group_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -287,6 +295,7 @@ async fn test_dissolve_group_invalid_signature() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -320,6 +329,7 @@ async fn test_dissolve_group_expired_timestamp() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -365,6 +375,7 @@ async fn test_dissolve_group_non_admin() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id2);
@@ -404,6 +415,7 @@ async fn test_dissolve_group_already_dissolved() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);

@@ -5,7 +5,7 @@
 // Phase 4.6: Migrated to construct-redis for clean architecture
 
 use anyhow::{Context, Result};
-use construct_config::{Config, SECONDS_PER_DAY, SECONDS_PER_HOUR};
+use construct_config::{Config, SECONDS_PER_DAY};
 use construct_redis::{RedisClient, StreamReadOptions};
 use redis::AsyncCommands;
 use std::collections::HashMap;
@@ -483,55 +483,6 @@ impl<'a> DeliveryManager<'a> {
         tracing::debug!(queue_key = %queue_key, ttl = ttl_seconds, "Set TTL for key");
 
         Ok(())
-    }
-
-    /// Mark a message as delivered directly via tx.send() (fast path)
-    /// УМНАЯ ДЕДУПЛИКАЦИЯ (Вариант D):
-    ///
-    /// После успешного tx.send() помечаем сообщение в Redis:
-    /// SET delivered_direct:{message_id} 1 EX 3600
-    ///
-    /// delivery-worker перед доставкой проверяет:
-    /// IF EXISTS delivered_direct:{message_id} → SKIP (уже доставлено)
-    pub(crate) async fn mark_delivered_direct(&mut self, message_id: &str) -> Result<()> {
-        let key = format!(
-            "{}{}",
-            self.config.redis_key_prefixes.delivered_direct, message_id
-        );
-        const DELIVERED_DIRECT_TTL: i64 = SECONDS_PER_HOUR; // 1 hour TTL
-
-        self.client
-            .connection_mut()
-            .set_ex::<_, _, ()>(&key, "1", DELIVERED_DIRECT_TTL as u64)
-            .await?;
-
-        tracing::debug!(
-            message_id = %message_id,
-            ttl_seconds = DELIVERED_DIRECT_TTL,
-            "Marked message as delivered directly (delivery-worker will skip)"
-        );
-
-        Ok(())
-    }
-
-    /// Check if a message was already delivered directly via tx.send()
-    /// Used by delivery-worker to skip messages already delivered
-    pub(crate) async fn is_delivered_direct(&mut self, message_id: &str) -> Result<bool> {
-        let key = format!(
-            "{}{}",
-            self.config.redis_key_prefixes.delivered_direct, message_id
-        );
-
-        let exists: bool = self.client.exists(&key).await?;
-
-        if exists {
-            tracing::debug!(
-                message_id = %message_id,
-                "Message was already delivered directly - skipping delivery-worker delivery"
-            );
-        }
-
-        Ok(exists)
     }
 
     /// Write a message directly to user's Redis stream (test mode only)

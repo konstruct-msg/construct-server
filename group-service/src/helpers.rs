@@ -211,49 +211,38 @@ pub(crate) async fn check_channel_subscriber_or_admin(
     Ok(())
 }
 
+/// `warmup` and `established` are `(max_events, window_hours)`.
 pub(crate) async fn check_warmup_rate_limit(
+    redis: &mut redis::aio::ConnectionManager,
     pool: &PgPool,
     user_id: Uuid,
     action: &str,
-    warmup_max: i64,
-    warmup_window_hours: i64,
-    established_max: i64,
-    established_window_hours: i64,
+    warmup: (u32, i64),
+    established: (u32, i64),
 ) -> Result<(), Status> {
-    let in_warmup = construct_rate_limit::is_user_in_warmup(pool, user_id)
+    let in_warmup = construct_rate_limit::is_user_in_warmup_cached(redis, pool, user_id)
         .await
         .unwrap_or(true);
 
-    let (max_count, window_hours) = if in_warmup {
-        (warmup_max, warmup_window_hours)
-    } else {
-        (established_max, established_window_hours)
-    };
+    let (max_events, window_hours) = if in_warmup { warmup } else { established };
 
-    let key = format!("rate_limit:channel:{}:{}", action, user_id);
-    let recent_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rate_limit_events
-         WHERE key = $1 AND created_at > NOW() - make_interval(hours => $2)",
+    let key = format!("rl:channel:{}:{}", action, user_id);
+    let allowed = construct_rate_limit::sliding_window_check_and_record(
+        redis,
+        &key,
+        max_events,
+        window_hours * 3600,
     )
-    .bind(&key)
-    .bind(window_hours as f64)
-    .fetch_one(pool)
     .await
-    .unwrap_or(0);
+    .map_err(|e| Status::internal(format!("Rate limit error: {e}")))?;
 
-    if recent_count >= max_count {
+    if !allowed {
         crate::metrics::inc_channel_rate_limit_violations();
         return Err(Status::resource_exhausted(format!(
             "RATE_LIMIT: max {} {}/{} hours (account warming: {})",
-            max_count, action, window_hours, in_warmup
+            max_events, action, window_hours, in_warmup
         )));
     }
-
-    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
-        .bind(&key)
-        .execute(pool)
-        .await
-        .ok();
 
     Ok(())
 }

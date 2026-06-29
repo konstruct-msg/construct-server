@@ -209,7 +209,17 @@ pub async fn subscribe_to_channel(
     .context("Failed to subscribe to channel")?;
 
     match row {
-        Some((ts,)) => Ok(ts),
+        Some((ts,)) => {
+            sqlx::query(
+                "UPDATE channels SET subscriber_count = subscriber_count + 1, updated_at = NOW() \
+                 WHERE channel_id = $1",
+            )
+            .bind(channel_id)
+            .execute(pool)
+            .await
+            .context("Failed to increment subscriber_count")?;
+            Ok(ts)
+        }
         None => {
             // Already subscribed, return existing subscribed_at
             let ts: (DateTime<Utc>,) = sqlx::query_as(
@@ -244,6 +254,17 @@ pub async fn unsubscribe_from_channel(
     .execute(pool)
     .await
     .context("Failed to unsubscribe from channel")?;
+
+    if result.rows_affected() > 0 {
+        sqlx::query(
+            "UPDATE channels SET subscriber_count = GREATEST(0, subscriber_count - 1), updated_at = NOW() \
+             WHERE channel_id = $1",
+        )
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .context("Failed to decrement subscriber_count")?;
+    }
 
     Ok(result.rows_affected() > 0)
 }
@@ -359,22 +380,6 @@ pub async fn get_channel_subscriber_count(pool: &PgPool, channel_id: Uuid) -> Re
 // Posts
 // ============================================================================
 
-pub async fn next_channel_post_sequence(pool: &PgPool, channel_id: Uuid) -> Result<i64> {
-    let (seq,): (i64,) = sqlx::query_as(
-        r#"
-        SELECT COALESCE(MAX(sequence_number), 0) + 1
-        FROM channel_posts
-        WHERE channel_id = $1
-        "#,
-    )
-    .bind(channel_id)
-    .fetch_one(pool)
-    .await
-    .context("Failed to allocate post sequence")?;
-
-    Ok(seq)
-}
-
 pub async fn insert_channel_post(
     pool: &PgPool,
     channel_id: Uuid,
@@ -384,19 +389,25 @@ pub async fn insert_channel_post(
     client_message_id: Option<&str>,
     expires_at: DateTime<Utc>,
 ) -> Result<ChannelPostRecord> {
+    // Atomically bump last_post_sequence and insert in one CTE round-trip.
+    // Mirrors the mls_groups.last_sequence pattern.
     sqlx::query_as::<_, ChannelPostRecord>(
         r#"
+        WITH seq AS (
+            UPDATE channels
+               SET last_post_sequence = last_post_sequence + 1
+             WHERE channel_id = $1
+         RETURNING last_post_sequence
+        )
         INSERT INTO channel_posts
             (channel_id, sender_device_id, sequence_number, ciphertext, thread_id, client_message_id, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (channel_id, sequence_number) DO NOTHING
+        SELECT $1, $2, seq.last_post_sequence, $3, $4, $5, $6 FROM seq
         RETURNING post_id, channel_id, sender_device_id, sequence_number, ciphertext,
                   thread_id, client_message_id, sent_at, expires_at, deleted_at
         "#,
     )
     .bind(channel_id)
     .bind(sender_device_id)
-    .bind(next_channel_post_sequence(pool, channel_id).await?)
     .bind(ciphertext)
     .bind(thread_id)
     .bind(client_message_id)

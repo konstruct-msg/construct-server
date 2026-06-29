@@ -2,7 +2,6 @@
 //!
 //! Provides centralized metrics collection for monitoring:
 //! - Message delivery
-//! - Shadow-read comparisons (Kafka vs Redis)
 //! - Gateway performance
 //! - Circuit breaker states
 //! - Service health
@@ -40,55 +39,6 @@ pub static MESSAGE_DELIVERY_TIME: Lazy<Histogram> = Lazy::new(|| {
         "Histogram of message delivery times"
     )
     .expect("Failed to register MESSAGE_DELIVERY_TIME metric")
-});
-
-// ============================================================================
-// Shadow-Read Metrics (Kafka vs Redis Comparison)
-// ============================================================================
-
-/// Messages that matched between Kafka and Redis
-pub static SHADOW_READ_MATCHES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "shadow_read_matches_total",
-        "Messages that matched between Kafka and Redis offline queue"
-    ))
-    .expect("Failed to register SHADOW_READ_MATCHES metric")
-});
-
-/// Messages that differed between Kafka and Redis
-pub static SHADOW_READ_DISCREPANCIES: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "shadow_read_discrepancies_total",
-        "Messages that differed between Kafka and Redis offline queue"
-    ))
-    .expect("Failed to register SHADOW_READ_DISCREPANCIES metric")
-});
-
-/// Messages found in Kafka but not in Redis
-pub static SHADOW_READ_KAFKA_ONLY: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "shadow_read_kafka_only_total",
-        "Messages present in Kafka but not in Redis offline queue"
-    ))
-    .expect("Failed to register SHADOW_READ_KAFKA_ONLY metric")
-});
-
-/// Messages found in Redis but not in Kafka (reverse-check)
-pub static SHADOW_READ_REDIS_ONLY: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "shadow_read_redis_only_total",
-        "Messages present in Redis offline queue but not seen in Kafka"
-    ))
-    .expect("Failed to register SHADOW_READ_REDIS_ONLY metric")
-});
-
-/// Total messages processed in shadow-read mode
-pub static SHADOW_READ_PROCESSED: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "shadow_read_processed_total",
-        "Total messages processed in shadow-read mode"
-    ))
-    .expect("Failed to register SHADOW_READ_PROCESSED metric")
 });
 
 // ============================================================================

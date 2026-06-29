@@ -17,7 +17,6 @@ mod messaging;
 mod microservices;
 mod redis;
 mod security;
-mod worker;
 
 // Re-export all public types
 pub use constants::{
@@ -33,7 +32,6 @@ pub use messaging::MessagingConfig;
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use security::{CsrfConfig, SecurityConfig};
-pub use worker::WorkerConfig;
 
 use anyhow::Result;
 use constants::*;
@@ -57,6 +55,20 @@ pub struct Config {
     /// RSA public key for JWT verification (RS256)
     /// REQUIRED for all services
     pub jwt_public_key: Option<String>,
+
+    /// Ed25519 private key for PASETO v4.public signing (PEM or file path).
+    /// Required for auth-service (to create tokens) after migration cutover.
+    /// Optional for other services (verify-only mode).
+    pub paseto_private_key: Option<String>,
+
+    /// Ed25519 public key for PASETO v4.public verification (PEM or file path).
+    /// REQUIRED for all services once migration is under way.
+    pub paseto_public_key: Option<String>,
+
+    /// Token format to issue: `"paseto"` (target) or `"jwt"` (legacy, transitional).
+    /// Verification accepts both formats regardless of this setting (dual-stack).
+    /// Env: `TOKEN_ISSUE_FORMAT`, default `"paseto"`.
+    pub token_issue_format: String,
 
     pub port: u16,
     pub bind_address: String,
@@ -100,7 +112,6 @@ pub struct Config {
     pub federation: FederationConfig,
     pub db: DbConfig,
     pub deeplinks: DeepLinksConfig,
-    pub worker: WorkerConfig,
     pub redis_key_prefixes: RedisKeyPrefixes,
     pub redis_channels: RedisChannels,
     pub media: MediaConfig,
@@ -190,7 +201,6 @@ impl Config {
         let federation = FederationConfig::from_env()?;
         let db = DbConfig::from_env();
         let deeplinks = DeepLinksConfig::from_env();
-        let worker = WorkerConfig::from_env();
         let redis_key_prefixes = RedisKeyPrefixes::from_env();
         let redis_channels = RedisChannels::from_env();
         let media = MediaConfig::from_env();
@@ -212,6 +222,10 @@ impl Config {
 
             jwt_private_key: Self::load_jwt_private_key(),
             jwt_public_key: Self::load_jwt_public_key(),
+            paseto_private_key: Self::load_paseto_private_key(),
+            paseto_public_key: Self::load_paseto_public_key(),
+            token_issue_format: std::env::var("TOKEN_ISSUE_FORMAT")
+                .unwrap_or_else(|_| "paseto".to_string()),
 
             port: std::env::var("PORT")
                 .ok()
@@ -300,7 +314,6 @@ impl Config {
             federation,
             db,
             deeplinks,
-            worker,
             redis_key_prefixes,
             redis_channels,
             media,
@@ -384,6 +397,48 @@ impl Config {
                     error = %e,
                     path = %key,
                     "Failed to read JWT_PUBLIC_KEY from file, using as-is"
+                );
+                key
+            })
+        })
+    }
+
+    /// Load PASETO v4.public Ed25519 private key. Accepts PEM inline or a file path.
+    fn load_paseto_private_key() -> Option<String> {
+        std::env::var("PASETO_PRIVATE_KEY").ok().map(|key| {
+            if key.starts_with("-----BEGIN") {
+                if key.contains("PRIVATE") {
+                    tracing::warn!(
+                        "SECURITY: PASETO_PRIVATE_KEY contains PEM data directly in environment \
+                         variable. This is insecure - the key is visible in /proc/*/environ, \
+                         `ps aux`, and logs. \
+                         Recommended: Store key in a file and set PASETO_PRIVATE_KEY=/path/to/private.pem"
+                    );
+                }
+                return key;
+            }
+            std::fs::read_to_string(&key).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %key,
+                    "Failed to read PASETO_PRIVATE_KEY from file, using as-is"
+                );
+                key
+            })
+        })
+    }
+
+    /// Load PASETO v4.public Ed25519 public key. Accepts PEM inline or a file path.
+    fn load_paseto_public_key() -> Option<String> {
+        std::env::var("PASETO_PUBLIC_KEY").ok().map(|key| {
+            if key.starts_with("-----BEGIN") {
+                return key;
+            }
+            std::fs::read_to_string(&key).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %key,
+                    "Failed to read PASETO_PUBLIC_KEY from file, using as-is"
                 );
                 key
             })

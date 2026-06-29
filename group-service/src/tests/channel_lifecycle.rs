@@ -1,7 +1,7 @@
 use tonic::Request;
 use uuid::Uuid;
 
-use super::test_helpers::{create_metadata, create_test_device, get_test_db};
+use super::test_helpers::{create_metadata, create_test_device, get_test_db, get_test_redis};
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, channel_service_server::ChannelService,
@@ -15,6 +15,7 @@ async fn test_create_channel_public() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -46,6 +47,7 @@ async fn test_create_channel_private() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -75,6 +77,7 @@ async fn test_create_channel_empty_metadata() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -101,6 +104,7 @@ async fn test_create_channel_exceeds_max_subscribers() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -127,6 +131,7 @@ async fn test_get_channel_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -177,6 +182,7 @@ async fn test_get_channel_not_found() {
         db,
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -200,6 +206,7 @@ async fn test_update_channel_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -245,6 +252,7 @@ async fn test_update_channel_not_owner() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -288,6 +296,7 @@ async fn test_set_channel_visibility() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -333,6 +342,7 @@ async fn test_delete_channel_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -377,6 +387,7 @@ async fn test_delete_channel_not_owner() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
