@@ -183,7 +183,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -266,7 +266,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -286,10 +285,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -605,7 +602,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "construct-apns"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -624,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "construct-audit"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "chrono",
  "serde",
@@ -634,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -647,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "construct-auth-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -695,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "construct-context"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "construct-apns",
@@ -740,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "construct-db"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -759,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "construct-delivery-ack"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -782,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "construct-error"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -804,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "construct-extractors"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -821,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "construct-federation"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -837,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "construct-key-management"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -855,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "construct-message"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -876,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "construct-metrics"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -885,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "construct-notification-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -911,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pending"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -924,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "construct-pow"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "argon2",
  "hex",
@@ -934,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "construct-queue"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -954,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "construct-rate-limit"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -977,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "construct-server-shared"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "apns-h2",
@@ -1065,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "construct-types"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "chrono",
  "construct-crypto",
@@ -1078,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "construct-user-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1114,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "construct-utils"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "axum",
  "base64",
@@ -1731,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2515,18 +2512,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "masque-service"
-version = "0.15.3"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2553,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "media-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2588,7 +2573,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "messaging-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4663,18 +4648,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4874,22 +4847,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.4",
- "sha1 0.10.6",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4976,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "user-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5045,7 +5002,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "veil-service"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "async-trait",

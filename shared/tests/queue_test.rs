@@ -118,9 +118,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
             android_package_name: "".to_string(),
             android_cert_fingerprint: "".to_string(),
         },
-        worker: construct_config::WorkerConfig {
-            shadow_read_enabled: false,
-        },
         redis_key_prefixes: construct_config::RedisKeyPrefixes {
             processed_msg: "processed_msg:".to_string(),
             user: "user:".to_string(),

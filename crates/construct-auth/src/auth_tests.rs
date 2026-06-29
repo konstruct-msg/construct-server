@@ -17,7 +17,7 @@ mod auth_tests {
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
         DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MicroservicesConfig,
-        MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig, WorkerConfig,
+        MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
     };
     use uuid::Uuid;
 
@@ -162,9 +162,6 @@ XQIDAQAB
                 apple_team_id: String::new(),
                 android_package_name: String::new(),
                 android_cert_fingerprint: String::new(),
-            },
-            worker: WorkerConfig {
-                shadow_read_enabled: false,
             },
             redis_key_prefixes: RedisKeyPrefixes {
                 processed_msg: "processed_msg:".to_string(),
