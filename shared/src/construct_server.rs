@@ -25,9 +25,9 @@ pub use construct_db as db;
 pub use construct_delivery_ack as delivery_ack;
 pub use construct_federation as federation;
 pub mod health;
-// Broker module: re-exported from construct-broker crate (Redpanda/Kafka compatible)
+// Message envelope types: re-exported from construct-message crate (Redis-direct delivery).
 pub use construct_key_management as key_management;
-pub use construct_message as kafka;
+pub use construct_message as message;
 pub mod messaging_service;
 pub mod metrics;
 pub mod models; // Invite objects and other data models

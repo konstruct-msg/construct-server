@@ -438,7 +438,7 @@ async fn test_user_blocking() {
 // ============================================================================
 
 #[test]
-fn test_kafka_envelope_msgpack_roundtrip() {
+fn test_msg_envelope_msgpack_roundtrip() {
     use construct_message::types::{MessageEnvelope, ProtoEnvelopeContext};
 
     let ctx = ProtoEnvelopeContext {

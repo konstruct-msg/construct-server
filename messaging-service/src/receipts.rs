@@ -15,7 +15,7 @@ pub(crate) async fn relay_delivery_receipt(
     direct: construct_server_shared::shared::proto::signaling::v1::DirectReceipt,
     receipt_sender_id: String,
 ) -> anyhow::Result<()> {
-    use construct_server_shared::kafka::types::MessageEnvelope;
+    use construct_server_shared::message::types::MessageEnvelope;
 
     if direct.message_ids.is_empty() {
         return Ok(());
@@ -122,7 +122,7 @@ pub(crate) async fn relay_delivery_receipt(
 
 /// Build a MessageStreamResponse::Receipt from a Receipt-type MessageEnvelope.
 pub(crate) fn build_receipt_response(
-    envelope: &construct_server_shared::kafka::types::MessageEnvelope,
+    envelope: &construct_server_shared::message::types::MessageEnvelope,
 ) -> anyhow::Result<proto::MessageStreamResponse> {
     use construct_server_shared::shared::proto::signaling::v1 as signaling;
 

@@ -84,8 +84,6 @@ fn create_test_config() -> DeliveryAckConfig {
             .unwrap(),
         expiry_days: 7,
         cleanup_interval_secs: 3600,
-        enable_batching: true,
-        batch_buffer_secs: 5,
     }
 }
 

@@ -332,7 +332,7 @@ impl MessagingService for MessagingGrpcService {
             }
         };
 
-        use construct_server_shared::kafka::types::{MessageEnvelope, ProtoEnvelopeContext};
+        use construct_server_shared::message::types::{MessageEnvelope, ProtoEnvelopeContext};
 
         // ── Early idempotency fast-path ─────────────────────────────────────────
         // Check if this message_id was already dispatched BEFORE touching rate
@@ -568,7 +568,7 @@ impl MessagingService for MessagingGrpcService {
 
         let t_dispatch = std::time::Instant::now();
         let rate_ms = t_dispatch.duration_since(t_rate).as_millis();
-        let mut kafka_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let mut msg_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
@@ -576,13 +576,12 @@ impl MessagingService for MessagingGrpcService {
             content_type: envelope.content_type,
             edits_message_id: envelope.edits_message_id.clone(),
         });
-        kafka_envelope.max_queue_len =
-            Some(trust_level.queue_maxlen(&self.context.config.messaging));
+        msg_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(
             &app_context,
-            kafka_envelope,
+            msg_envelope,
             self.context.notification_context.clone(),
         )
         .await
@@ -651,7 +650,7 @@ impl MessagingService for MessagingGrpcService {
         let edited_at = chrono::Utc::now().timestamp_millis();
         let new_message_id = uuid::Uuid::new_v4().to_string();
 
-        use construct_server_shared::kafka::types::MessageEnvelope;
+        use construct_server_shared::message::types::MessageEnvelope;
         let envelope = MessageEnvelope::from_edit(
             new_message_id,
             sender_id.to_string(),
@@ -777,7 +776,7 @@ impl MessagingService for MessagingGrpcService {
 
                 let env = env?; // skip corrupt / wrong-recipient entries
                 use base64::Engine;
-                use construct_server_shared::kafka::types::MessageType;
+                use construct_server_shared::message::types::MessageType;
                 use construct_server_shared::shared::proto::core::v1 as core;
 
                 // Receipts are ephemeral and must be delivered via active MessageStream only.
@@ -857,7 +856,7 @@ impl MessagingService for MessagingGrpcService {
             return Err(Status::invalid_argument("recipient_user_id is required"));
         }
 
-        use construct_server_shared::kafka::types::MessageEnvelope;
+        use construct_server_shared::message::types::MessageEnvelope;
         let envelope =
             MessageEnvelope::new_key_sync(sender_id.to_string(), recipient_user_id.clone());
 
