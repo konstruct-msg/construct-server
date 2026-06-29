@@ -11,7 +11,6 @@ use construct_config::Config;
 use construct_db::DbPool;
 use construct_federation::signing::ServerSigner;
 
-use construct_key_management::KeyManagementSystem;
 use construct_queue::MessageQueue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -23,7 +22,6 @@ pub struct AuthServiceContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub config: Arc<Config>,
-    pub key_management: Option<Arc<KeyManagementSystem>>,
     pub server_signer: Option<Arc<ServerSigner>>,
     /// X25519 public key (32 bytes) used to encrypt Privacy Pass token_bytes in SealedInner.
     /// Clients encrypt tokens to this key so relay operators cannot read them in transit.

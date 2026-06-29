@@ -36,7 +36,6 @@ members = [
     "crates/construct-federation",
     "crates/construct-delivery-ack",
     "crates/construct-pending",
-    "crates/construct-key-management",
     "crates/construct-context",
     "crates/construct-extractors",
     "crates/construct-user-service",

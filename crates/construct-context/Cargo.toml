@@ -12,7 +12,6 @@ construct-federation    = { path = "../construct-federation" }
 construct-pending       = { path = "../construct-pending" }
 construct-config        = { path = "../construct-config" }
 construct-message        = { path = "../construct-message" }
-construct-key-management = { path = "../construct-key-management" }
 construct-queue         = { path = "../construct-queue" }
 
 tokio  = { workspace = true }

@@ -16,10 +16,13 @@
 mod cache;
 mod connection;
 mod delivery;
+mod pow;
 mod rate_limiting;
 mod replay;
 mod sessions;
 mod tokens;
+
+pub use pow::PowChallengeRecord;
 
 #[cfg(test)]
 mod tests;

@@ -658,7 +658,6 @@ dependencies = [
  "construct-db",
  "construct-error",
  "construct-federation",
- "construct-key-management",
  "construct-message",
  "construct-metrics",
  "construct-pow",
@@ -701,7 +700,6 @@ dependencies = [
  "construct-db",
  "construct-delivery-ack",
  "construct-federation",
- "construct-key-management",
  "construct-message",
  "construct-pending",
  "construct-queue",
@@ -833,24 +831,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "construct-key-management"
-version = "0.15.4"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "construct-db",
- "jsonwebtoken 9.3.1",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "construct-message"
 version = "0.15.4"
 dependencies = [
@@ -893,7 +873,6 @@ dependencies = [
  "construct-db",
  "construct-error",
  "construct-extractors",
- "construct-key-management",
  "construct-message",
  "construct-queue",
  "construct-types",
@@ -1000,7 +979,6 @@ dependencies = [
  "construct-error",
  "construct-extractors",
  "construct-federation",
- "construct-key-management",
  "construct-message",
  "construct-metrics",
  "construct-notification-service",
@@ -2590,7 +2568,6 @@ dependencies = [
  "construct-error",
  "construct-extractors",
  "construct-federation",
- "construct-key-management",
  "construct-message",
  "construct-metrics",
  "construct-queue",

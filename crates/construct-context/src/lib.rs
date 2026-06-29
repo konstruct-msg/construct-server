@@ -20,7 +20,6 @@ use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
 use construct_pending::PendingMessageStorage;
 
-use construct_key_management::KeyManagementSystem;
 // MessageGatewayClient removed - was only used for WebSocket message processing
 use construct_queue::MessageQueue;
 use std::sync::Arc;
@@ -71,9 +70,6 @@ pub struct AppContext {
     /// Cache for remote server public keys (for signature verification)
     pub public_key_cache: Arc<PublicKeyCache>,
     /// Key management system for automatic key rotation (optional)
-    /// When None: key management is disabled (uses static keys from config)
-    /// When Some: automatic rotation, Vault integration, hot reload
-    pub key_management: Option<Arc<KeyManagementSystem>>,
     /// Pending message storage for 2-phase commit protocol
     /// When None: 2-phase commit is disabled (legacy mode)
     /// When Some: idempotent message delivery with network failure recovery
@@ -109,7 +105,6 @@ impl AppContext {
             delivery_ack_manager: None, // Disabled by default
             server_signer,
             public_key_cache: Arc::new(PublicKeyCache::new()),
-            key_management: None,          // Disabled by default
             pending_message_storage: None, // Disabled by default
         }
     }
@@ -122,12 +117,6 @@ impl AppContext {
         manager: Arc<DeliveryAckManager<PostgresDeliveryStorage>>,
     ) -> Self {
         self.delivery_ack_manager = Some(manager);
-        self
-    }
-
-    /// Set key management system (builder pattern)
-    pub fn with_key_management(mut self, kms: Arc<KeyManagementSystem>) -> Self {
-        self.key_management = Some(kms);
         self
     }
 
@@ -288,7 +277,6 @@ pub struct AppContextBuilder {
     server_instance_id: Option<String>,
     // gateway_client removed
     delivery_ack_manager: Option<Arc<DeliveryAckManager<PostgresDeliveryStorage>>>,
-    key_management: Option<Arc<KeyManagementSystem>>,
     pending_message_storage: Option<Arc<PendingMessageStorage>>,
     server_signer_override: Option<Arc<ServerSigner>>,
 }
@@ -306,7 +294,6 @@ impl AppContextBuilder {
             server_instance_id: None,
             // gateway_client removed
             delivery_ack_manager: None,
-            key_management: None,
             pending_message_storage: None,
             server_signer_override: None,
         }
@@ -362,11 +349,6 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn with_key_management(mut self, kms: Arc<KeyManagementSystem>) -> Self {
-        self.key_management = Some(kms);
-        self
-    }
-
     pub fn with_server_signer(mut self, signer: Arc<ServerSigner>) -> Self {
         self.server_signer_override = Some(signer);
         self
@@ -409,7 +391,6 @@ impl AppContextBuilder {
             delivery_ack_manager: self.delivery_ack_manager,
             server_signer,
             public_key_cache: Arc::new(PublicKeyCache::new()),
-            key_management: self.key_management,
             pending_message_storage: self.pending_message_storage,
         })
     }
