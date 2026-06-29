@@ -1,6 +1,6 @@
 use tonic::Request;
 
-use super::test_helpers::{create_metadata, create_test_device, get_test_db};
+use super::test_helpers::{create_metadata, create_test_device, get_test_db, get_test_redis};
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, channel_service_server::ChannelService,
@@ -14,6 +14,7 @@ async fn test_add_and_list_admins() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -83,6 +84,7 @@ async fn test_remove_admin() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -150,6 +152,7 @@ async fn test_add_admin_not_owner() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

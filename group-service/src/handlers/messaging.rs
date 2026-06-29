@@ -1,6 +1,5 @@
 use construct_db::mls::{
-    get_group_retention_days, insert_group_message, list_group_messages,
-    next_group_message_sequence, NewGroupMessage,
+    get_group_retention_days, insert_group_message, list_group_messages, NewGroupMessage,
 };
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use futures_util::StreamExt;
@@ -94,15 +93,10 @@ pub(crate) async fn send_group_message(
         Some(req.client_message_id.clone())
     };
 
-    let sequence_number = next_group_message_sequence(&svc.db, group_id)
-        .await
-        .map_err(|e| Status::internal(format!("Sequence allocation failed: {e}")))?;
-
     let new_msg = NewGroupMessage {
         group_id,
         epoch: current_epoch,
         mls_ciphertext: req.mls_ciphertext.clone(),
-        sequence_number,
         client_message_id,
         thread_id,
         topic_id,

@@ -49,10 +49,10 @@ pub(crate) async fn create_group(
     }
 
     let retention_days = if req.message_retention_days == 0 {
-        90
-    } else if req.message_retention_days > 365 {
+        30
+    } else if req.message_retention_days > 90 {
         return Err(Status::invalid_argument(
-            "message_retention_days cannot exceed 365",
+            "message_retention_days cannot exceed 90",
         ));
     } else {
         req.message_retention_days

@@ -8,7 +8,17 @@ construct-config = { path = "../construct-config" }
 
 anyhow       = "1.0"
 serde        = { version = "1.0", features = ["derive"] }
+serde_json   = "1.0"
 jsonwebtoken = "9.3"
+ed25519-compact = { version = "2.0", features = ["self-verify", "pem", "random"] }
+base64       = { workspace = true }
+rand         = "0.8"
 chrono       = { version = "0.4", features = ["serde"] }
 uuid         = { version = "1.11", features = ["v4"] }
 tracing      = "0.1"
+
+[dev-dependencies]
+# Used only to generate throwaway RSA-2048 keypairs in tests (legacy dual-stack path).
+# Never linked into release binaries.
+rsa        = { version = "0.9", features = ["pem"] }
+rand_core  = "0.6"

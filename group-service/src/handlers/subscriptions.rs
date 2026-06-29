@@ -28,10 +28,8 @@ pub(crate) async fn subscribe_channel(
         svc.db.as_ref(),
         user_id,
         "subscribe_channel",
-        20,
-        1,
-        200,
-        1,
+        (20, 1),
+        (200, 1),
     )
     .await?;
 
