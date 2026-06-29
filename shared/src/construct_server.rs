@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod models; // Invite objects and other data models
 pub mod notification_service;
 pub use construct_pending as pending_messages; // 2-Phase commit protocol for message delivery
+pub mod sentinel_service;
 pub use construct_pow as pow; // Proof of Work for device registration
 // Queue module: re-exported from construct-queue crate
 pub use construct_queue as queue;

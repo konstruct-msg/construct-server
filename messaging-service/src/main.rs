@@ -7,6 +7,7 @@ mod media_routes;
 mod notification_core;
 mod notification_grpc;
 mod receipts;
+mod sentinel;
 mod spent_tag;
 mod stream;
 mod trust;
@@ -21,15 +22,17 @@ use axum::{
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_config::{ApnsEnvironment, Config};
 use construct_server_shared::auth::AuthManager;
-use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_server_shared::queue::MessageQueue;
+use construct_server_shared::sentinel::sentinel_service_server::SentinelServiceServer;
+use construct_server_shared::sentinel_service::SentinelCore;
 use construct_server_shared::shared::proto::services::v1::messaging_service_server::MessagingServiceServer;
 use construct_server_shared::shared::proto::services::v1::notification_service_server::NotificationServiceServer;
 use context::MessagingServiceContext;
 use grpc::MessagingGrpcService;
 use notification_grpc::NotificationGrpcService;
+use sentinel::SentinelGrpcService;
 use serde_json::json;
 use std::env;
 use std::sync::Arc;
@@ -135,22 +138,12 @@ async fn main() -> Result<()> {
             .context("Failed to initialize device token encryption")?,
     );
 
-    // Initialize sentinel-service gRPC client for send-path spam/rate protection
-    let sentinel_client = match env::var("SENTINEL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://sentinel:50059".to_string())
-    {
-        url if url.is_empty() => None,
-        url => match SentinelClient::new(&url) {
-            Ok(client) => {
-                info!(url = %url, "Sentinel service gRPC client initialized");
-                Some(client)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create sentinel service gRPC client — send-path protection disabled");
-                None
-            }
-        },
-    };
+    // Initialize SentinelCore (in-process rate limiting + spam protection).
+    // Formerly a separate `sentinel-service` binary connected over gRPC;
+    // the core now runs directly inside messaging-service, sharing the same
+    // PostgreSQL pool and Redis ConnectionManager.
+    let sentinel_core = Arc::new(SentinelCore::new((*db_pool).clone(), redis_conn.clone()));
+    info!("Sentinel core embedded (in-process)");
 
     // Initialize NotificationServiceContext for direct push (replaces gRPC round-trip)
     let notification_context = Arc::new(NotificationServiceContext {
@@ -174,7 +167,7 @@ async fn main() -> Result<()> {
         queue,
         auth_manager,
         notification_context: Some(notification_context),
-        sentinel_client,
+        sentinel: Some(sentinel_core),
         config: config.clone(),
         server_signer,
         server_instance_id: uuid::Uuid::new_v4().to_string(),
@@ -196,12 +189,23 @@ async fn main() -> Result<()> {
         })
         .max_decoding_message_size(512 * 1024); // 512 KB — ~100× real message
         let notification_svc = NotificationServiceServer::new(NotificationGrpcService {
-            context: grpc_context,
+            context: grpc_context.clone(),
+        });
+        // SentinelService runs on the same gRPC port as MessagingService +
+        // NotificationService — clients that used to hit sentinel:50059
+        // now hit messaging:50053 for the same proto contract.
+        let sentinel_svc = SentinelServiceServer::new(SentinelGrpcService {
+            core: grpc_context
+                .sentinel
+                .clone()
+                .expect("SentinelCore initialized in main"),
+            auth: grpc_context.auth_manager.clone(),
         });
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
                 .add_service(messaging_svc)
                 .add_service(notification_svc)
+                .add_service(sentinel_svc)
                 .serve_with_incoming_shutdown(
                     grpc_incoming,
                     construct_server_shared::shutdown_signal(),

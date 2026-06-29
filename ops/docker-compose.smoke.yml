@@ -12,7 +12,7 @@
 # Run from REPO ROOT: docker compose -f ops/docker-compose.smoke.yml up -d
 #
 # NO: Traefik, Vault, Kafka, Envoy, VEIL, media-service,
-#     sentinel-service, delivery-worker, user-service
+#     delivery-worker, user-service (sentinel merged into messaging-service)
 # YES: signaling-service (added to catch InitiateCall registration regressions)
 # =============================================================================
 

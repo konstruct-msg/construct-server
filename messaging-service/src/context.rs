@@ -12,8 +12,8 @@ use construct_context::AppContext;
 use construct_db::DbPool;
 use construct_federation::ServerSigner;
 use construct_queue::MessageQueue;
-use construct_server_shared::clients::sentinel::SentinelClient;
 use construct_server_shared::notification_service::NotificationServiceContext;
+use construct_server_shared::sentinel_service::SentinelCore;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -26,8 +26,10 @@ pub struct MessagingServiceContext {
     pub auth_manager: Arc<AuthManager>,
     /// Embedded notification context for direct push (APNs) — replaces former gRPC round-trip to notification-service
     pub notification_context: Option<Arc<NotificationServiceContext>>,
-    /// gRPC client for sentinel-service — rate limiting and spam protection
-    pub sentinel_client: Option<SentinelClient>,
+    /// Embedded Sentinel core — rate limiting and spam protection, in-process
+    /// (former gRPC round-trip to sentinel-service has been replaced by a
+    /// direct call to `SentinelCore`).
+    pub sentinel: Option<std::sync::Arc<SentinelCore>>,
     pub config: Arc<Config>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
     pub server_signer: Option<Arc<ServerSigner>>,

@@ -61,7 +61,7 @@ ams.konstruct.cc {
 		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.sentinel.v1.SentinelService/* {
-		reverse_proxy h2c://sentinel:50059
+		reverse_proxy h2c://messaging:50053
 	}
 	handle /shared.proto.signaling.v1.SignalingService/* {
 		reverse_proxy h2c://signaling:50060 {
@@ -128,7 +128,7 @@ ams.konstruct.cc {
 		reverse_proxy h2c://group:50058
 	}
 	handle /shared.proto.sentinel.v1.SentinelService/* {
-		reverse_proxy h2c://sentinel:50059
+		reverse_proxy h2c://messaging:50053
 	}
 	handle /shared.proto.signaling.v1.SignalingService/* {
 		reverse_proxy h2c://signaling:50060 {
