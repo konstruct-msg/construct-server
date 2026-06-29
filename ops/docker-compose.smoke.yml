@@ -51,6 +51,9 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
+      PASETO_PRIVATE_KEY: ${SMOKE_PASETO_PRIVATE_KEY}
+      PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
+      TOKEN_ISSUE_FORMAT: "paseto"
       INSTANCE_DOMAIN: smoke.test
 
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
@@ -81,6 +84,7 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
+      PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
 
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
     ports:
@@ -100,6 +104,7 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
+      PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
 
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
@@ -124,6 +129,7 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
+      PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
       ICE_ENABLED: "false"
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
@@ -149,6 +155,7 @@ services:
       REDIS_URL: redis://redis:6379
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
       JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
+      PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       # No DATABASE_URL — service starts without DB (contacts checks limited to Redis)
       # No CONTACT_HMAC_SECRET — uses insecure default (fine for smoke tests)
       # No NOTIFICATION_GRPC_ENDPOINT — VoIP push disabled
