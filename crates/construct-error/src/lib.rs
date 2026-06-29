@@ -299,14 +299,6 @@ impl IntoResponse for AppError {
 // Conversion from common error types
 // ============================================================================
 
-#[cfg(feature = "kafka")]
-impl From<rdkafka::error::KafkaError> for AppError {
-    fn from(err: rdkafka::error::KafkaError) -> Self {
-        tracing::error!(error = %err, "Kafka error occurred");
-        AppError::Kafka(err.to_string())
-    }
-}
-
 // ============================================================================
 // Helper functions for creating common errors
 // ============================================================================

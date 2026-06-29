@@ -26,7 +26,8 @@
 ## Code Structure
 
 ### Thin-wrapper pattern
-`auth-service`, `user-service`, `notification-service` are thin HTTP/gRPC wrappers.
+`auth-service`, `user-service` are thin HTTP/gRPC wrappers.
+(Notification logic now lives in `messaging-service`; invite logic in `user-service`.)
 Their `src/handlers.rs` literally does:
 ```rust
 pub use construct_server_shared::auth_service::handlers::*;
@@ -213,7 +214,7 @@ Total: ~5-15 ms
 - **Check on gRPC logout** (`AuthService.Logout`): server requires `access_token` in request body (`field 1`). Extracts JTI → adds to blocklist. Client **must populate** `request.accessToken` from Keychain; if empty, server returns `INVALID_ARGUMENT` (client should treat this as a non-fatal warning and continue session cleanup).
 - **Check on token verify** (`AuthService.VerifyToken`): crypto verify + `EXISTS invalidated_token:{jti}`.
 - **Check in messaging-service gRPC**: `extract_authed_user_id()` in `grpc.rs` — checks blocklist for Bearer JWT auth path (fail-closed on Redis error). `x-user-id` header path (gateway-injected) is trusted without extra check.
-- **NOT checked in**: user-service and notification-service local JWT verify — these are gateway-only services (only receive `x-user-id`, no Bearer fallback), so a revoked token cannot reach them directly.
+- **NOT checked in**: user-service (and other gateway-only services) local JWT verify — these only receive `x-user-id`, no Bearer fallback, so a revoked token cannot reach them directly.
 
 ### Refresh Token Reverse Index
 

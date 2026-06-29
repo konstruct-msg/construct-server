@@ -21,34 +21,29 @@
 
 ## Architecture Overview
 
-Konstruct is an end-to-end encrypted messenger with a fully gRPC-first backend. All client traffic terminates TLS at **Traefik** (edge, Let's Encrypt ACME) which forwards to an **Envoy proxy** (port 8080); Envoy routes to individual microservices by gRPC service path prefix. There are no REST endpoints for core functionality — authentication, messaging, and key management are all gRPC.
+Konstruct is an end-to-end encrypted messenger with a fully gRPC-first backend. All client traffic terminates TLS at **Caddy** (edge, Let's Encrypt) which routes to individual microservices by gRPC service path prefix (`h2c` backends). There are no REST endpoints for core functionality — authentication, messaging, and key management are all gRPC.
 
 ```
 Client
   │
   ▼
-Traefik      (edge TLS termination, ACME, SNI routing)
-  ▼
-Envoy :8080  (routes by /shared.proto.services.v1.<ServiceName>/*)
+Caddy :443   (edge TLS termination, Let's Encrypt; routes by /shared.proto.services.v1.<ServiceName>/*)
   │
   ├─► auth-service       :50051  (AuthService, DeviceService)
-  ├─► user-service        :50052  (UserService)
-  ├─► messaging-service   :50053  (MessagingService)
-  ├─► notification-service :50054  (NotificationService)
-  ├─► invite-service      :50055  (InviteService)
+  ├─► user-service        :50052  (UserService, InviteService)
+  ├─► messaging-service   :50053  (MessagingService, MessageGateway, NotificationService)
   ├─► media-service       :50056  (MediaService)
   ├─► key-service         :50057  (KeyService)
-  ├─► mls-service         :50058  (MlsService)
-  ├─► sentinel-service    :50059  (SentinelService)
-  ├─► channel-service             (ChannelService — broadcast channels)
-  ├─► signaling-service           (SignalingService — WebRTC call signaling)
+  ├─► group-service       :50058  (MlsService, ChannelService)
+  ├─► sentinel-service    :50059  (SentinelService — called by messaging on send)
+  ├─► signaling-service   :50060  (SignalingService — WebRTC call signaling)
+  ├─► veil-service                (VeilService — obfuscation ticket provisioning)
   ├─► masque-service              (MASQUE-lite QUIC datagram relay)
-  └─► gateway             :3000   (HTTP: /health, /.well-known, /federation)
+  └─► gateway             :3000   (HTTP: /health, /.well-known, /federation; veil/obfs4 proxy :9443)
 ```
 
 **Shared infrastructure:**
-- **Kafka (Redpanda)** — primary message delivery (topic `messages`); Redis is the fallback if Kafka is unavailable
-- **Redis Streams** — per-user offline stream (`delivery:offline:{user_id}`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`)
+- **Redis Streams** — primary message delivery: per-user/per-device offline stream (`delivery:offline:{user_id}[:{device_id}]`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`). (Kafka/Redpanda transport is disabled — `KAFKA_ENABLED=false`.)
 - **PostgreSQL** — device registration, keys, `delivery_pending` (receipt routing hashes only — **message content is never stored in PostgreSQL**)
 - **Proto definitions** — `shared/proto/services/*.proto`
 
@@ -68,17 +63,14 @@ Each service is an independent Rust binary. `main()` in each service:
 | auth-service | `auth-service/src/main.rs` | 50051 | `AUTH_GRPC_BIND_ADDRESS` |
 | user-service | `user-service/src/main.rs` | 50052 | `USER_GRPC_BIND_ADDRESS` |
 | messaging-service | `messaging-service/src/main.rs` | 50053 | `MESSAGING_GRPC_BIND_ADDRESS` |
-| notification-service | `notification-service/src/main.rs` | 50054 | `NOTIFICATION_GRPC_BIND_ADDRESS` |
-| invite-service | `invite-service/src/main.rs` | 50055 | `INVITE_GRPC_BIND_ADDRESS` |
 | media-service | `media-service/src/main.rs` | 50056 | `MEDIA_GRPC_BIND_ADDRESS` |
 | key-service | `key-service/src/main.rs` | 50057 | `KEY_GRPC_BIND_ADDRESS` |
-| mls-service | `mls-service/src/main.rs` | 50058 | `MLS_GRPC_BIND_ADDRESS` |
+| group-service | `group-service/src/main.rs` | 50058 | `PORT` (metrics: `METRICS_PORT` 8097) |
 | sentinel-service | `sentinel-service/src/main.rs` | 50059 | *(PORT env var)* |
-| channel-service | `channel-service/src/main.rs` | (own gRPC port) | — |
-| signaling-service | `signaling-service/src/main.rs` | (own gRPC port) | — |
+| signaling-service | `signaling-service/src/main.rs` | 50060 | *(PORT env var)* |
+| veil-service | `veil-service/src/main.rs` | (own gRPC port) | — |
 | masque-service | `masque-service/src/main.rs` | (UDP/WS relay) | — |
 | gateway | `gateway/src/main.rs` | 3000 (HTTP) | `PORT` |
-| delivery-worker | `delivery-worker/src/main.rs` | *(no inbound port)* | — |
 
 ### Required environment variables (all services)
 
@@ -95,16 +87,14 @@ See `crates/construct-config/src/lib.rs` for the full list and defaults.
 | Binary | gRPC services exposed |
 |--------|----------------------|
 | auth-service | `AuthService`, `DeviceService` |
-| user-service | `UserService` |
-| messaging-service | `MessagingService`, `MessageGateway` |
-| notification-service | `NotificationService` |
-| invite-service | `InviteService` |
+| user-service | `UserService`, `InviteService` |
+| messaging-service | `MessagingService`, `MessageGateway`, `NotificationService` |
 | media-service | `MediaService` |
 | key-service | `KeyService` |
-| mls-service | `MlsService` |
+| group-service | `MlsService`, `ChannelService` |
 | sentinel-service | `SentinelService` |
-| channel-service | `ChannelService` |
 | signaling-service | `SignalingService` |
+| veil-service | `VeilService` |
 | masque-service | MASQUE-lite relay (no gRPC service) |
 
 Proto package: `shared.proto.services.v1`  
@@ -163,8 +153,8 @@ Client → MessagingService::SendMessage
         └─► messaging-service/src/core.rs
             pub async fn dispatch_envelope(...)
               ├─ check recipient domain (local vs federated)
-              ├─ send to Kafka producer (primary path)
-              │   Kafka disabled → write directly to Redis Stream
+              ├─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
+              │   (Kafka transport is compiled-in but disabled — KAFKA_ENABLED=false)
               └─ store receipt routing hash in delivery_pending (PostgreSQL, async, non-critical)
                   NOTE: message content is NEVER written to PostgreSQL
 ```
@@ -223,16 +213,9 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                   │
                              dispatch_envelope
                                   │
-                    ┌─────────────┴──────────────┐
-                    │                            │
-              Kafka producer              Redis fallback
-              (primary path)             (Kafka unavailable)
-                    │                            │
-                    └──────────┬─────────────────┘
-                               │
-                     Delivery Worker reads Kafka
-                     and writes to Redis:
+                     writes directly to Redis:
                      XADD delivery:offline:{bob_user}
+                     XADD delivery:offline:{bob_user}:{device}
                                │
                      PUBLISH inbox:wakeup:{bob_user}
                                │
@@ -345,7 +328,7 @@ Key tables:
 | `invites` | Invite tokens (used for invite-only onboarding) |
 | `mls_groups` | MLS group state (stub) |
 
-> **Message content is never stored in PostgreSQL.** Messages travel Kafka → Delivery Worker → Redis Stream → client. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
+> **Message content is never stored in PostgreSQL.** Messages travel messaging-service → Redis Stream → client. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
 
 Run migrations:
 ```bash
@@ -484,22 +467,22 @@ WHERE deleted_at IS NULL
 GROUP BY device_id;
 ```
 
-### Inspect Envoy routing (production/Docker)
+### Inspect Caddy routing (production/Docker)
 
 ```bash
-# Envoy admin UI
-curl http://localhost:9901/clusters
-curl http://localhost:9901/stats | grep upstream_rq
+# Caddy admin API (bound to 127.0.0.1:2019)
+curl http://localhost:2019/config/ | jq .
+docker logs construct-caddy --tail 50
 ```
 
 ### Trace a message end-to-end
 
 1. **Send** — add `RUST_LOG=debug` to messaging-service, watch `dispatch_envelope` logs
-2. **Kafka** — check Redpanda topic `messages` for the envelope
-3. **Redis** — `XRANGE delivery:offline:<recipient_user_id> - +` confirms delivery to stream
+2. **Redis** — `XRANGE delivery:offline:<recipient_user_id> - +` confirms delivery to stream (also `delivery:offline:<user>:<device>` per-device)
+3. **Wakeup** — `SUBSCRIBE inbox:wakeup:<recipient_user_id>` confirms the real-time wakeup fired
 4. **Receipt** — `XRANGE delivery:offline:<sender_user_id> - +` confirms the delivery receipt arrived
 
-> Messages are **never** in PostgreSQL. If a message is missing, check Kafka first, then Redis Stream.
+> Messages are **never** in PostgreSQL. If a message is missing, check the Redis Stream.
 
 ---
 
@@ -509,7 +492,7 @@ curl http://localhost:9901/stats | grep upstream_rq
 
 **Transport & Auth:**
 - gRPC-only architecture (REST removed from all core paths)
-- Envoy proxy routing by proto path prefix
+- Caddy edge routing by proto path prefix (h2c backends, Let's Encrypt TLS)
 - Passwordless device auth (Ed25519 + JWT RS256)
 - Proof-of-Work anti-spam on registration
 - Invite-code-only onboarding
@@ -543,8 +526,8 @@ curl http://localhost:9901/stats | grep upstream_rq
 
 ### ⚠️ Stub / partial
 
-- MLS group messaging (`mls-service` — RFC 9420, partial)
-- Broadcast channels (`channel-service`)
+- MLS group messaging (`group-service` — RFC 9420, partial)
+- Broadcast channels (`group-service`)
 - WebRTC call signaling (`signaling-service`)
 - MASQUE-lite QUIC relay (`masque-service` — transport / DPI resistance)
 - Sentinel service (rate-limit sentinel — partial)
