@@ -1,7 +1,7 @@
 use tonic::Request;
 
 use super::test_helpers::{
-    create_metadata, create_test_device, create_test_group_in_db, get_test_db,
+    create_metadata, create_test_device, create_test_group_in_db, get_test_db, get_test_redis,
 };
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
@@ -18,6 +18,7 @@ async fn test_send_group_message_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -52,6 +53,7 @@ async fn test_send_group_message_non_member() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;
@@ -86,6 +88,7 @@ async fn test_send_group_message_epoch_mismatch() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -117,6 +120,7 @@ async fn test_send_group_message_dissolved_group() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     use chrono::Utc;
@@ -163,6 +167,7 @@ async fn test_send_group_message_empty_ciphertext() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let req = proto::SendGroupMessageRequest {
@@ -193,6 +198,7 @@ async fn test_fetch_group_messages_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     for i in 0..3 {
@@ -245,6 +251,7 @@ async fn test_fetch_group_messages_pagination() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let metadata = create_metadata(&user_id, &device_id);
@@ -317,6 +324,7 @@ async fn test_fetch_group_messages_non_member() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;

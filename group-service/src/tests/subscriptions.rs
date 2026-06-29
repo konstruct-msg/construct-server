@@ -1,6 +1,6 @@
 use tonic::Request;
 
-use super::test_helpers::{create_metadata, create_test_device, get_test_db};
+use super::test_helpers::{create_metadata, create_test_device, get_test_db, get_test_redis};
 use crate::service::GroupServiceImpl;
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, channel_service_server::ChannelService,
@@ -14,6 +14,7 @@ async fn test_subscribe_public_channel() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -60,6 +61,7 @@ async fn test_subscribe_private_no_token() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -103,6 +105,7 @@ async fn test_unsubscribe_success() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -160,6 +163,7 @@ async fn test_owner_cannot_unsubscribe() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -202,6 +206,7 @@ async fn test_list_subscriptions() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -242,6 +247,7 @@ async fn test_get_subscriber_count() {
         db: db.clone(),
         hub: crate::service::GroupHub::new(),
         notification_client: None,
+        redis: get_test_redis().await,
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

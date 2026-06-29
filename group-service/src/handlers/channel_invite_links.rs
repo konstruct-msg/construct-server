@@ -32,10 +32,8 @@ pub(crate) async fn create_invite_link(
         svc.db.as_ref(),
         user_id,
         "create_channel_invite",
-        5,
-        24,
-        50,
-        24,
+        (5, 24),
+        (50, 24),
     )
     .await?;
 
