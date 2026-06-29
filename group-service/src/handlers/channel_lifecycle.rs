@@ -16,6 +16,7 @@ pub(crate) async fn create_channel(
     let req = request.into_inner();
 
     crate::helpers::check_warmup_rate_limit(
+        &mut svc.redis.clone(),
         svc.db.as_ref(),
         user_id,
         "create_channel",

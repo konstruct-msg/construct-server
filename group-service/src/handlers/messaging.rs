@@ -24,28 +24,20 @@ pub(crate) async fn send_group_message(
     let device_id = extract_device_id(meta)?;
     let req = request.into_inner();
 
-    let rate_limit_key = format!("rate_limit:group_msg:{}", user_id);
-
-    let recent_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rate_limit_events 
-         WHERE key = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    let rl_key = format!("rl:group_msg:{}", user_id);
+    let allowed = construct_rate_limit::sliding_window_check_and_record(
+        &mut svc.redis.clone(),
+        &rl_key,
+        1000,
+        3600,
     )
-    .bind(&rate_limit_key)
-    .fetch_one(svc.db.as_ref())
     .await
-    .unwrap_or(0);
-
-    if recent_count >= 1000 {
+    .map_err(|e| Status::internal(format!("Rate limit error: {e}")))?;
+    if !allowed {
         return Err(Status::resource_exhausted(
             "Rate limit exceeded: maximum 1000 messages per hour",
         ));
     }
-
-    sqlx::query("INSERT INTO rate_limit_events (key, created_at) VALUES ($1, NOW())")
-        .bind(&rate_limit_key)
-        .execute(svc.db.as_ref())
-        .await
-        .ok();
 
     let group_id = req
         .group_id

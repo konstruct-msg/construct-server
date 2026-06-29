@@ -42,4 +42,5 @@ pub(crate) struct GroupServiceImpl {
     pub(crate) db: Arc<sqlx::PgPool>,
     pub(crate) hub: Arc<GroupHub>,
     pub(crate) notification_client: Option<NotificationClient>,
+    pub(crate) redis: redis::aio::ConnectionManager,
 }
