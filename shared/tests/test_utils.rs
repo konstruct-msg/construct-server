@@ -123,9 +123,22 @@ async fn create_test_config(db_name: &str) -> Config {
     // Set env vars before Config::from_env() reads them
     // SAFETY: Tests run single-threaded (--test-threads=1) so this is safe
     unsafe {
+        // PASETO v4.public is the primary test path — generate inline.
         std::env::set_var("PASETO_PRIVATE_KEY", &paseto_private_key);
         std::env::set_var("PASETO_PUBLIC_KEY", &paseto_public_key);
         std::env::set_var("TOKEN_ISSUE_FORMAT", "paseto");
+
+        // Override legacy JWT env vars inherited from `.env` (or `.env.test`).
+        // Set to empty strings rather than `remove_var`, because `Config::from_env()`
+        // below calls `dotenvy::dotenv()` which re-sets unset vars from `.env`.
+        // `dotenvy` does not override existing vars, so setting them to "" here
+        // prevents the stale `prkeys/jwt_public_key.pem` path from being restored.
+        // Empty string is treated as "no key" by `load_jwt_*_key()` (via the
+        // `is_valid_key` trim check), yielding `None` — which is what we want:
+        // tests use PASETO only, legacy JWT verify-disabled.
+        std::env::set_var("JWT_PRIVATE_KEY", "");
+        std::env::set_var("JWT_PUBLIC_KEY", "");
+
         // Low PoW difficulty for fast tests (1 leading zero bit = instant)
         std::env::set_var("POW_DIFFICULTY", "1");
         // Disable rate limiting for tests (unless already set by specific test)
