@@ -128,7 +128,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
             blocked: "blocked:".to_string(),
             key_bundle: "key_bundle:".to_string(),
             connections: "connections:".to_string(),
-            delivered_direct: "delivered_direct:".to_string(),
         },
         redis_channels: construct_config::RedisChannels {
             dead_letter_queue: "dead_letter_queue".to_string(),
