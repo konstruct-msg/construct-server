@@ -17,7 +17,6 @@ mod messaging;
 mod microservices;
 mod redis;
 mod security;
-mod worker;
 
 // Re-export all public types
 pub use constants::{
@@ -33,7 +32,6 @@ pub use messaging::MessagingConfig;
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use security::{CsrfConfig, SecurityConfig};
-pub use worker::WorkerConfig;
 
 use anyhow::Result;
 use constants::*;
@@ -100,7 +98,6 @@ pub struct Config {
     pub federation: FederationConfig,
     pub db: DbConfig,
     pub deeplinks: DeepLinksConfig,
-    pub worker: WorkerConfig,
     pub redis_key_prefixes: RedisKeyPrefixes,
     pub redis_channels: RedisChannels,
     pub media: MediaConfig,
@@ -190,7 +187,6 @@ impl Config {
         let federation = FederationConfig::from_env()?;
         let db = DbConfig::from_env();
         let deeplinks = DeepLinksConfig::from_env();
-        let worker = WorkerConfig::from_env();
         let redis_key_prefixes = RedisKeyPrefixes::from_env();
         let redis_channels = RedisChannels::from_env();
         let media = MediaConfig::from_env();
@@ -300,7 +296,6 @@ impl Config {
             federation,
             db,
             deeplinks,
-            worker,
             redis_key_prefixes,
             redis_channels,
             media,
