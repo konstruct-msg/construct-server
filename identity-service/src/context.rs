@@ -1,3 +1,5 @@
+use construct_config::Config;
+use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
@@ -6,8 +8,6 @@ use construct_server_shared::{
     federation::signing::ServerSigner,
     queue::MessageQueue,
 };
-use construct_config::Config;
-use construct_server_shared::clients::notification::NotificationClient;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
