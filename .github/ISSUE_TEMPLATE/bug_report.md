@@ -26,7 +26,7 @@ Paste relevant logs here
 ```
 
 ## Environment
-- Service: (gateway / messaging-service / auth-service / etc.)
+- Service: (gateway / messaging-service / identity-service / etc.)
 - Version:
 - Platform: (Fly.io / local / docker)
 
