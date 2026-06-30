@@ -25,14 +25,12 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose as b64};
-use context::IdentityServiceContext;
 use construct_config::Config;
 use construct_server_shared::{
-    auth_service::AuthServiceContext,
-    db::DbPool,
-    queue::MessageQueue,
+    auth_service::AuthServiceContext, db::DbPool, queue::MessageQueue,
     user_service::UserServiceContext,
 };
+use context::IdentityServiceContext;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
@@ -123,14 +121,13 @@ impl AuthService for IdentityGrpcService {
         _request: Request<proto::GetPowChallengeRequest>,
     ) -> Result<Response<proto::GetPowChallengeResponse>, Status> {
         let app_context = Arc::new(self.context.to_app_context());
-        let axum::Json(challenge) =
-            construct_server_shared::auth_service::core::get_pow_challenge(
-                app_context,
-                axum::http::HeaderMap::new(),
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .1;
+        let axum::Json(challenge) = construct_server_shared::auth_service::core::get_pow_challenge(
+            app_context,
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .1;
         Ok(Response::new(proto::GetPowChallengeResponse {
             challenge: challenge.challenge,
             difficulty: challenge.difficulty,
@@ -449,7 +446,11 @@ impl AuthService for IdentityGrpcService {
         let signed_prekey_public = public_keys.signed_prekey_public.clone();
         let signed_prekey_signature = public_keys.signed_prekey_signature.clone();
 
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         construct_server_shared::db::create_device(
             self.context.db_pool.as_ref(),
@@ -486,8 +487,7 @@ impl AuthService for IdentityGrpcService {
 
         {
             let mut queue = app_context.queue.lock().await;
-            let ttl =
-                app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
+            let ttl = app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
             if let Err(e) = queue
                 .store_refresh_token(&refresh_jti, &user_id.to_string(), ttl)
                 .await
@@ -714,8 +714,10 @@ impl AuthService for IdentityGrpcService {
 
         let verifying_key = decode(&join_data.verifying_key_b64, "verifying_key_b64")?;
         let identity_public = decode(&join_data.identity_public_b64, "identity_public_b64")?;
-        let signed_prekey_public =
-            decode(&join_data.signed_prekey_public_b64, "signed_prekey_public_b64")?;
+        let signed_prekey_public = decode(
+            &join_data.signed_prekey_public_b64,
+            "signed_prekey_public_b64",
+        )?;
         let signed_prekey_signature = decode(
             &join_data.signed_prekey_signature_b64,
             "signed_prekey_signature_b64",
@@ -728,7 +730,11 @@ impl AuthService for IdentityGrpcService {
             req.crypto_suite
         };
 
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.pending_device_id.clone(),
@@ -903,27 +909,24 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
         let user_id = uuid::Uuid::parse_str(&claims.sub)
             .map_err(|_| Status::internal("invalid user id in token"))?;
 
-        let devices =
-            construct_db::get_devices_by_user_id(self.context.db_pool.as_ref(), &user_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        let devices = construct_db::get_devices_by_user_id(self.context.db_pool.as_ref(), &user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let items: Vec<Result<proto::ListDevicesResponse, Status>> = devices
             .into_iter()
             .map(|d| {
                 Ok(proto::ListDevicesResponse {
                     device: Some(proto::DeviceInfo {
-                        device: Some(
-                            construct_server_shared::shared::proto::core::v1::DeviceId {
-                                user: None,
-                                device_id: d.device_id.clone(),
-                                platform: 0,
-                                device_name: None,
-                                registered_at: d.registered_at.timestamp(),
-                                last_seen: 0,
-                                capabilities: 0,
-                            },
-                        ),
+                        device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
+                            user: None,
+                            device_id: d.device_id.clone(),
+                            platform: 0,
+                            device_name: None,
+                            registered_at: d.registered_at.timestamp(),
+                            last_seen: 0,
+                            capabilities: 0,
+                        }),
                         device_name: String::new(),
                         platform: 0,
                         last_seen: 0,
@@ -957,11 +960,10 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
             return Err(Status::invalid_argument("device_id is required"));
         }
 
-        let device =
-            construct_db::get_device_by_id(self.context.db_pool.as_ref(), &req.device_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::not_found("device not found"))?;
+        let device = construct_db::get_device_by_id(self.context.db_pool.as_ref(), &req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("device not found"))?;
 
         if device.user_id != Some(user_id) {
             return Err(Status::permission_denied(
@@ -1188,7 +1190,11 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         let signed_prekey_public = public_keys.signed_prekey_public;
         let signed_prekey_signature = public_keys.signed_prekey_signature;
 
-        verify_spk_signature(&verifying_key, &signed_prekey_public, &signed_prekey_signature)?;
+        verify_spk_signature(
+            &verifying_key,
+            &signed_prekey_public,
+            &signed_prekey_signature,
+        )?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.device_id.clone(),
@@ -1378,11 +1384,10 @@ impl UserService for IdentityGrpcService {
         let user_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
 
-        let user =
-            construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .ok_or_else(|| Status::not_found("user not found"))?;
+        let user = construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("user not found"))?;
 
         Ok(Response::new(proto::GetUserProfileResponse {
             profile: Some(proto::UserProfile {
@@ -1412,14 +1417,21 @@ impl UserService for IdentityGrpcService {
 
         let normalized_username = req.username.and_then(|u| {
             let trimmed = u.trim().to_lowercase();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         });
 
         if let Some(ref username) = normalized_username {
             if username.len() < 3 || username.len() > 20 {
                 return Err(Status::invalid_argument("username must be 3-20 characters"));
             }
-            if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if !username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 return Err(Status::invalid_argument(
                     "username can only contain letters, numbers, and underscores",
                 ));
@@ -1472,7 +1484,9 @@ impl UserService for IdentityGrpcService {
         &self,
         _request: Request<proto::UpdateProfilePictureRequest>,
     ) -> Result<Response<proto::UpdateProfilePictureResponse>, Status> {
-        Err(Status::unimplemented("update_profile_picture not implemented"))
+        Err(Status::unimplemented(
+            "update_profile_picture not implemented",
+        ))
     }
 
     async fn get_user_capabilities(
@@ -1714,7 +1728,9 @@ impl UserService for IdentityGrpcService {
         let normalized = req.username.to_lowercase();
         let valid_format = normalized.len() >= 3
             && normalized.len() <= 30
-            && normalized.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
 
         if !valid_format {
             return Ok(Response::new(proto::CheckUsernameAvailabilityResponse {
@@ -1749,11 +1765,10 @@ impl UserService for IdentityGrpcService {
         let discoverable = request.into_inner().discoverable;
 
         if discoverable {
-            let user =
-                construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?
-                    .ok_or_else(|| Status::not_found("user not found"))?;
+            let user = construct_server_shared::db::get_user_by_id(&self.context.db_pool, &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::not_found("user not found"))?;
 
             if user.username_hash.is_none() {
                 return Err(Status::failed_precondition(
@@ -1805,7 +1820,9 @@ impl UserService for IdentityGrpcService {
         let normalized = req.username.trim().to_lowercase();
         let valid_format = normalized.len() >= 3
             && normalized.len() <= 30
-            && normalized.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !valid_format {
             return Err(Status::not_found("user not found"));
         }
@@ -1857,18 +1874,20 @@ impl UserService for IdentityGrpcService {
             }
         }
 
-        let searchable =
-            construct_db::is_user_searchable(&self.context.db_pool, &to_user_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        let searchable = construct_db::is_user_searchable(&self.context.db_pool, &to_user_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         if !searchable {
             return Err(Status::not_found("user not found"));
         }
 
-        let is_blocked =
-            construct_server_shared::db::is_blocked_by(&self.context.db_pool, &to_user_id, &caller_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        let is_blocked = construct_server_shared::db::is_blocked_by(
+            &self.context.db_pool,
+            &to_user_id,
+            &caller_id,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
         if is_blocked {
             return Err(Status::not_found("user not found"));
         }
@@ -1900,8 +1919,10 @@ impl UserService for IdentityGrpcService {
                         .ok_or_else(|| Status::internal("Caller user not found"))?;
 
                     if let Some(ref stored_hash) = caller.username_hash {
-                        let supplied_hash =
-                            construct_crypto::hash_username(&sec.username_hmac_secret, &normalized_username);
+                        let supplied_hash = construct_crypto::hash_username(
+                            &sec.username_hmac_secret,
+                            &normalized_username,
+                        );
                         if supplied_hash != *stored_hash {
                             return Err(Status::invalid_argument(
                                 "from_identity.username does not match caller's username",
@@ -1929,8 +1950,8 @@ impl UserService for IdentityGrpcService {
                     username: snapshot_username,
                     display_name,
                 };
-                let json_bytes = serde_json::to_vec(&snapshot)
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                let json_bytes =
+                    serde_json::to_vec(&snapshot).map_err(|e| Status::internal(e.to_string()))?;
                 let enc =
                     construct_crypto::envelope_encrypt(&sec.request_envelope_key, &json_bytes)
                         .map_err(|e| Status::internal(e.to_string()))?;
@@ -1984,14 +2005,13 @@ impl UserService for IdentityGrpcService {
             })
             .collect();
 
-        let sent_raw =
-            construct_db::get_sent_contact_requests(
-                &self.context.db_pool,
-                caller_id,
-                &sec.contact_hmac_secret,
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let sent_raw = construct_db::get_sent_contact_requests(
+            &self.context.db_pool,
+            caller_id,
+            &sec.contact_hmac_secret,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         let sent = sent_raw
             .into_iter()
@@ -2116,9 +2136,14 @@ impl UserService for IdentityGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            construct_server_shared::db::block_user(&self.context.db_pool, &caller_id, &sender_id, None)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            construct_server_shared::db::block_user(
+                &self.context.db_pool,
+                &caller_id,
+                &sender_id,
+                None,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         }
 
         Ok(Response::new(proto::RespondToContactRequestResponse {
@@ -2166,8 +2191,7 @@ impl InviteService for IdentityGrpcService {
         request: Request<proto::GenerateInviteRequest>,
     ) -> Result<Response<proto::GenerateInviteResponse>, Status> {
         let metadata = request.metadata();
-        let user_id =
-            extract_user_id_from_metadata(&self.context.auth_manager, metadata)?;
+        let user_id = extract_user_id_from_metadata(&self.context.auth_manager, metadata)?;
         let device_id = metadata
             .get("x-device-id")
             .and_then(|v| v.to_str().ok())
@@ -2200,8 +2224,7 @@ impl InviteService for IdentityGrpcService {
         request: Request<proto::AcceptInviteRequest>,
     ) -> Result<Response<proto::AcceptInviteResponse>, Status> {
         let metadata = request.metadata();
-        let accepter_user_id =
-            extract_user_id_from_metadata(&self.context.auth_manager, metadata)?;
+        let accepter_user_id = extract_user_id_from_metadata(&self.context.auth_manager, metadata)?;
         let req = request.into_inner();
 
         let invite_token = req
@@ -2537,7 +2560,8 @@ async fn main() -> Result<()> {
                 let seed_bytes = b64::STANDARD.decode(seed_b64.trim()).ok()?;
                 let hk = Hkdf::<Sha256>::new(None, &seed_bytes);
                 let mut x25519_seed = [0u8; 32];
-                hk.expand(b"construct-token-enc-v1", &mut x25519_seed).ok()?;
+                hk.expand(b"construct-token-enc-v1", &mut x25519_seed)
+                    .ok()?;
                 let priv_key = X25519StaticSecret::from(x25519_seed);
                 let pub_key = X25519PublicKey::from(&priv_key);
                 tracing::info!(
@@ -2665,7 +2689,10 @@ async fn main() -> Result<()> {
             tracing::error!(error = %e, "Identity gRPC server failed");
         }
     });
-    info!("Identity gRPC listening on {} (AuthService + DeviceService + DeviceLinkService + UserService + InviteService)", grpc_bind_address);
+    info!(
+        "Identity gRPC listening on {} (AuthService + DeviceService + DeviceLinkService + UserService + InviteService)",
+        grpc_bind_address
+    );
 
     // HTTP router — sub-routers with their own state, merged into one app
     let auth_http = Router::new()
@@ -2722,7 +2749,11 @@ async fn main() -> Result<()> {
         .merge(auth_http)
         .merge(user_http)
         .merge(identity_http)
-        .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()).into_inner());
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_http())
+                .into_inner(),
+        );
 
     info!("Identity Service HTTP listening on {}", config.bind_address);
 
