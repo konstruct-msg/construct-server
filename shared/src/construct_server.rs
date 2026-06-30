@@ -1,9 +1,4 @@
 use anyhow::{Context, Result};
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::signal;
-use tokio::sync::Mutex;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // Re-export types from modular crates (Phase 4)
 pub use construct_crypto::{
@@ -40,10 +35,12 @@ pub use construct_rate_limit as rate_limit; // Rate limiting & warmup sandbox
 pub mod user_service;
 pub use construct_utils as utils;
 
-use auth::AuthManager;
-use construct_config::Config;
-use context::AppContext;
-use queue::MessageQueue;
+// Network + gRPC server helpers — re-exported from construct-utils for backward
+// compatibility with service binaries that still use `construct_server_shared::*`.
+// Prefer importing from `construct_utils::net` directly in new code.
+pub use construct_utils::net::{
+    grpc_server, mptcp_incoming, mptcp_or_tcp_listener, shutdown_signal,
+};
 
 // Monolithic server - simplified to HTTP-only (WebSocket removed)
 // NOTE: This is kept for development/testing only. Production uses microservices.
