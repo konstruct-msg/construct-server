@@ -1,0 +1,194 @@
+# =============================================================================
+# Construct Server — Lean Relay Docker Compose
+# =============================================================================
+# Deployment profile for resource-constrained environments (e.g. Raspberry Pi 4/5).
+# Drops optional services: media, group, signaling, veil, quic.
+# Retains core message routing + federation for censorship-resistant relay.
+#
+# Services:
+#   postgres + redis — data layer
+#   caddy            — TLS termination (Let's Encrypt), gRPC routing
+#   gateway          — .well-known, obfuscation proxy
+#   identity         — auth, user, device, invite (combined)
+#   messaging        — message delivery, S2S federation inbound, push
+#   key              — E2EE pre-key management
+#
+# Secrets: /opt/construct/secrets/app.env (same template as prod — unused vars ignored)
+#   FEDERATION_ENABLED=true — enable S2S federation
+#   SERVER_SIGNING_KEY      — Ed25519 seed (openssl rand -base64 32)
+#
+# Usage:
+#   cp ops/secrets.relay.example.env /opt/construct/secrets/app.env
+#   # edit /opt/construct/secrets/app.env
+#   chmod 600 /opt/construct/secrets/app.env
+#   docker compose -f ops/docker-compose.relay.yml --env-file .env up -d
+# =============================================================================
+
+name: construct-relay
+
+services:
+  # ─── Data Layer ───────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: construct-relay-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=512MB
+      -c max_connections=20
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c checkpoint_completion_target=0.9
+      -c maintenance_work_mem=64MB
+      -c random_page_cost=1.1
+    environment:
+      POSTGRES_DB: construct
+      POSTGRES_USER: construct
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U construct -d construct"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: construct-relay-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # ─── Caddy (TLS + gRPC routing) ───────────────────────────────────────────
+
+  caddy:
+    image: caddy:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./Caddyfile.relay:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - identity
+      - messaging
+    networks:
+      - internal
+
+  # ─── Core Services ─────────────────────────────────────────────────────────
+
+  identity:
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
+    command: /usr/local/bin/identity-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      PORT: "8081"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: identity
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      APNS_ENABLED: "false"
+      ICE_ENABLED: "false"
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+
+  messaging:
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
+    command: /usr/local/bin/messaging-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      PORT: "8083"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: messaging
+      MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-500}
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
+      DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
+      APNS_ENABLED: ${APNS_ENABLED:-true}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
+      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+
+  key:
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
+    command: /usr/local/bin/key-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: key
+      USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+
+  gateway:
+    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
+    command: /usr/local/bin/gateway
+    restart: unless-stopped
+    env_file:
+      - path: /opt/construct/secrets/app.env
+        required: true
+    environment:
+      PORT: "3000"
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
+      SERVICE_NAME: gateway
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
+      ICE_ENABLED: "false"
+    volumes:
+      - /opt/construct/secrets:/secrets:ro
+    networks:
+      - internal
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+
+networks:
+  internal:
+    driver: bridge

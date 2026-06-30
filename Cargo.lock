@@ -2611,6 +2611,7 @@ dependencies = [
  "construct-message",
  "construct-metrics",
  "construct-queue",
+ "construct-rate-limit",
  "construct-server-shared",
  "construct-types",
  "construct-utils",
