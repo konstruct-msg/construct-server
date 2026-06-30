@@ -182,56 +182,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "auth-service"
-version = "0.15.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "bcrypt",
- "chacha20poly1305",
- "chrono",
- "construct-config",
- "construct-crypto",
- "construct-db",
- "construct-error",
- "construct-extractors",
- "construct-server-shared",
- "construct-veil",
- "curve25519-dalek",
- "dotenvy",
- "ed25519-compact",
- "ed25519-dalek",
- "hex",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "jsonwebtoken 10.3.0",
- "prometheus",
- "prost",
- "rand 0.10.1",
- "redis",
- "reqwest",
- "rsa",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4970,45 +4920,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
-]
-
-[[package]]
-name = "user-service"
-version = "0.15.6"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "bcrypt",
- "chrono",
- "construct-config",
- "construct-crypto",
- "construct-db",
- "construct-error",
- "construct-extractors",
- "construct-server-shared",
- "construct-types",
- "crypto-agility",
- "dotenvy",
- "ed25519-dalek",
- "hex",
- "jsonwebtoken 10.3.0",
- "prometheus",
- "redis",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
 ]
 
 [[package]]
