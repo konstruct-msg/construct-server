@@ -180,7 +180,7 @@ pub struct Config {
     /// Each entry should be `host:port`.  Port 443 = TLS-wrapped obfs4 (Traefik terminates TLS).
     /// Port 9443 = legacy plain obfs4.
     ///
-    /// Example: `"ice.msk.konstruct.cc:443"` — or multiple: `"ice.msk.konstruct.cc:443,ice.sgp.konstruct.cc:443"`
+    /// Example: `"ice.ams.konstruct.cc:443"` — or multiple: `"ice.ams.konstruct.cc:443,ice.sgp.konstruct.cc:443"`
     pub veil_relay_addresses: Vec<String>,
 }
 
