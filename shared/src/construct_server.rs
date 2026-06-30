@@ -16,7 +16,6 @@ pub use construct_delivery_ack as delivery_ack;
 pub use construct_federation as federation;
 pub mod health;
 pub use construct_message as message;
-pub mod messaging_service;
 pub mod metrics;
 pub mod models;
 pub mod notification_service;
