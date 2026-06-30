@@ -23,13 +23,19 @@ ams.konstruct.cc {
 		reverse_proxy gateway:3000
 	}
 	handle /shared.proto.services.v1.AuthService/* {
-		reverse_proxy h2c://auth:50051
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.DeviceService/* {
-		reverse_proxy h2c://auth:50051
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceLinkService/* {
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.UserService/* {
-		reverse_proxy h2c://user:50052
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.MessagingService/* {
 		reverse_proxy h2c://messaging:50053 {
@@ -41,9 +47,6 @@ ams.konstruct.cc {
 	}
 	handle /shared.proto.services.v1.NotificationService/* {
 		reverse_proxy h2c://messaging:50053
-	}
-	handle /shared.proto.services.v1.InviteService/* {
-		reverse_proxy h2c://user:50052
 	}
 	handle /shared.proto.services.v1.VeilService/* {
 		reverse_proxy h2c://veil:50056
@@ -90,13 +93,19 @@ ams.konstruct.cc {
 		reverse_proxy gateway:3000
 	}
 	handle /shared.proto.services.v1.AuthService/* {
-		reverse_proxy h2c://auth:50051
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.DeviceService/* {
-		reverse_proxy h2c://auth:50051
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceLinkService/* {
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.UserService/* {
-		reverse_proxy h2c://user:50052
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.MessagingService/* {
 		reverse_proxy h2c://messaging:50053 {
@@ -108,9 +117,6 @@ ams.konstruct.cc {
 	}
 	handle /shared.proto.services.v1.NotificationService/* {
 		reverse_proxy h2c://messaging:50053
-	}
-	handle /shared.proto.services.v1.InviteService/* {
-		reverse_proxy h2c://user:50052
 	}
 	handle /shared.proto.services.v1.VeilService/* {
 		reverse_proxy h2c://veil:50056

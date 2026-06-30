@@ -66,8 +66,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U construct -d construct"]
       interval: 10s
@@ -116,8 +114,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # Let's Encrypt certs + OCSP staples
     depends_on:
-      - auth
-      - user
+      - identity
       - messaging
       - signaling
       - group
@@ -130,9 +127,10 @@ services:
   #   - Only non-secret env vars (PORT, RUST_LOG, INSTANCE_DOMAIN) set here
   #   - Read secrets from /opt/construct/secrets/app.env (managed manually on server)
 
-  auth:
+  # auth-service + user-service + invite merged into identity-service (2026-06-30)
+  identity:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
-    command: /usr/local/bin/auth-service
+    command: /usr/local/bin/identity-service
     restart: unless-stopped
     depends_on:
       postgres:
@@ -145,7 +143,7 @@ services:
     environment:
       PORT: "8081"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      SERVICE_NAME: auth
+      SERVICE_NAME: identity
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
@@ -161,27 +159,7 @@ services:
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
-    volumes:
-      - /opt/construct/secrets:/secrets:ro
-    networks:
-      - internal
-
-  user:
-    image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-0.15.0}
-    command: /usr/local/bin/user-service
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - path: /opt/construct/secrets/app.env
-        required: true
-    environment:
-      PORT: "8082"
-      RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
-      SERVICE_NAME: user
-      USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -344,8 +322,8 @@ services:
       ICE_UPSTREAM: "caddy:8080"
       # Relay addresses advertised in /.well-known/construct-server.
       # Port 443 = TLS-wrapped obfs4 (Caddy terminates TLS).
-      # Add more relays as comma-separated list: "ice.msk.konstruct.cc:443,ice.ams.konstruct.cc:443"
-      VEIL_RELAY_ADDRESSES: ${VEIL_RELAY_ADDRESSES:-ice.msk.konstruct.cc:443,ice.ams.konstruct.cc:443}
+      # Add more relays as comma-separated list: "veil.ams.konstruct.cc:443"
+      VEIL_RELAY_ADDRESSES: ${VEIL_RELAY_ADDRESSES:-veil.ams.konstruct.cc:443}
       # ICE_TLS_CERT_PATH / ICE_TLS_KEY_PATH: not set here — Caddy terminates TLS.
       # Set these only for deployments where gateway is exposed directly without Caddy.
     ports:
