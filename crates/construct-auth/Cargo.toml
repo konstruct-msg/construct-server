@@ -16,6 +16,8 @@ rand         = "0.8"
 chrono       = { version = "0.4", features = ["serde"] }
 uuid         = { version = "1.11", features = ["v4"] }
 tracing      = "0.1"
+prometheus   = { workspace = true }
+once_cell    = { workspace = true }
 
 [dev-dependencies]
 # Used only to generate throwaway RSA-2048 keypairs in tests (legacy dual-stack path).

@@ -590,6 +590,8 @@ dependencies = [
  "construct-config",
  "ed25519-compact",
  "jsonwebtoken 9.3.1",
+ "once_cell",
+ "prometheus",
  "rand 0.8.6",
  "rand_core 0.6.4",
  "rsa",
