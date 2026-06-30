@@ -472,5 +472,5 @@ mod tests {
     }
 }
 
-pub mod request_signing;
 pub mod net;
+pub mod request_signing;
