@@ -23,9 +23,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY .sqlx ./.sqlx
 COPY crates ./crates
 COPY shared ./shared
-COPY auth-service ./auth-service
 COPY messaging-service ./messaging-service
-COPY user-service ./user-service
+COPY identity-service ./identity-service
 COPY gateway ./gateway
 COPY media-service ./media-service
 COPY key-service ./key-service
@@ -53,8 +52,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 # Copy all binaries from builder with execute permissions
 COPY --from=builder --chmod=+x /app/target/release/gateway /usr/local/bin/gateway
-COPY --from=builder --chmod=+x /app/target/release/auth-service /usr/local/bin/auth-service
-COPY --from=builder --chmod=+x /app/target/release/user-service /usr/local/bin/user-service
+COPY --from=builder --chmod=+x /app/target/release/identity-service /usr/local/bin/identity-service
 COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/bin/messaging-service
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
