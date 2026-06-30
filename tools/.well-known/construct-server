@@ -6,10 +6,10 @@
     "relays": [
       {
         "id": "ams-het-1",
-        "addr": "ice.ams.konstruct.cc",
+        "addr": "veil.ams.konstruct.cc",
         "port": 443,
         "domain": "ams-het-1.relay.konstruct.cc",
-        "sni": "ice.ams.konstruct.cc",
+        "sni": "veil.ams.konstruct.cc",
         "spki_sha256": "510d465a5c4736548e3386570ede6ba24600c4c9a2e369d24dde1ad7915eeebd",
         "bridge_cert": "voFt3ilLSKx2xYuZsjxOnXtHTktUE4EaExIYRG+Bh89frHzI5QVrBNvT41zdS7Maiu6gPA",
         "wt_path": "/construct-veil",
