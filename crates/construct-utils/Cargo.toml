@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 construct-types = { path = "../construct-types" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 hyper = { version = "1.5", features = ["full"] }
 axum = { workspace = true }
 sha2 = "0.11"
@@ -12,3 +15,6 @@ base64 = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 hex = { workspace = true }
+socket2 = { version = "0.5", features = ["all"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14.5"
