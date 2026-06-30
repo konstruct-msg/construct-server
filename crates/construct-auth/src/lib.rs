@@ -5,11 +5,26 @@ use ed25519_compact::{PublicKey, SecretKey, Signature};
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };
+use once_cell::sync::Lazy;
+use prometheus::{IntCounterVec, opts, register_int_counter_vec};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use construct_config::Config;
+
+/// Counts token verifications split by format ("paseto" | "jwt").
+/// Used to decide when JWT volume reaches zero and Phase 4 (cleanup) can begin.
+static TOKEN_VERIFY_FORMAT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_auth_token_verify_format_total",
+            "Token verifications by format (paseto | jwt)"
+        ),
+        &["format"]
+    )
+    .expect("Failed to register TOKEN_VERIFY_FORMAT_TOTAL")
+});
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -242,8 +257,10 @@ impl AuthManager {
     /// Returns the parsed `Claims` on success, error on invalid/expired/unsupported.
     pub fn verify_token(&self, token: &str) -> Result<Claims> {
         if token.starts_with("v4.public.") {
+            TOKEN_VERIFY_FORMAT_TOTAL.with_label_values(&["paseto"]).inc();
             self.verify_paseto(token)
         } else {
+            TOKEN_VERIFY_FORMAT_TOTAL.with_label_values(&["jwt"]).inc();
             self.verify_jwt(token)
         }
     }

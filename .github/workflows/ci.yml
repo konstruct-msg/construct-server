@@ -233,28 +233,28 @@ jobs:
               -proto services/auth_service.proto \
               -d '{}' localhost:50051 \
               shared.proto.services.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
-              && { echo "✅ identity-service ready"; break; }
+              && { echo "identity-service ready"; break; }
             echo "  attempt $i/40..."; sleep 2
           done
 
           # Wait for messaging-service port (TCP open = gRPC stack is up).
           echo "Waiting for messaging-service port..."
           for i in $(seq 1 30); do
-            nc -z localhost 50052 && { echo "✅ messaging-service ready"; break; }
+            nc -z localhost 50052 && { echo "messaging-service ready"; break; }
             echo "  attempt $i/30..."; sleep 2
           done
 
           # Wait for key-service port
           echo "Waiting for key-service port..."
           for i in $(seq 1 30); do
-            nc -z localhost 50057 && { echo "✅ key-service ready"; break; }
+            nc -z localhost 50057 && { echo "key-service ready"; break; }
             echo "  attempt $i/30..."; sleep 2
           done
 
           # Wait for signaling-service port
           echo "Waiting for signaling-service port..."
           for i in $(seq 1 30); do
-            nc -z localhost 50060 && { echo "✅ signaling-service ready"; break; }
+            nc -z localhost 50060 && { echo "signaling-service ready"; break; }
             echo "  attempt $i/30..."; sleep 2
           done
 
