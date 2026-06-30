@@ -72,6 +72,10 @@ ams.konstruct.cc {
 		}
 	}
 
+	handle /federation/v1/* {
+		reverse_proxy h2c://messaging:8083
+	}
+
 	handle {
 		respond "not found" 404
 	}
@@ -140,6 +144,10 @@ ams.konstruct.cc {
 		reverse_proxy h2c://signaling:50060 {
 			flush_interval -1
 		}
+	}
+
+	handle /federation/v1/* {
+		reverse_proxy h2c://messaging:8083
 	}
 
 	handle {

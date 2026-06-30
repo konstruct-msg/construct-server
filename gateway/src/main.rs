@@ -18,6 +18,7 @@
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::Response};
 use construct_config::Config;
+use construct_federation::ServerSigner;
 use construct_server_shared::metrics;
 use serde_json::json;
 use std::sync::Arc;
@@ -37,6 +38,9 @@ struct GatewayState {
     /// Populated from `TOKEN_ENCRYPTION_PUBLIC_KEY` env var.
     /// Should match the value derived on auth-service from SERVER_SIGNING_KEY via HKDF.
     token_encryption_key: Option<String>,
+    /// Base64-encoded Ed25519 public key for S2S federation signature verification.
+    /// Derived from SERVER_SIGNING_KEY. None if federation is disabled.
+    federation_public_key: Option<String>,
 }
 
 #[tokio::main]
@@ -64,10 +68,32 @@ async fn main() -> Result<()> {
         );
     }
 
+    let federation_public_key = if config.federation.enabled {
+        config.federation.signing_key_seed.as_ref().and_then(|seed| {
+            match ServerSigner::from_seed_base64(seed, config.federation.instance_domain.clone()) {
+                Ok(signer) => {
+                    let pk = signer.public_key_base64();
+                    info!(public_key = %pk, "Federation public key derived for .well-known/konstruct");
+                    Some(pk)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Federation enabled but SERVER_SIGNING_KEY is invalid — omitting public_key from .well-known"
+                    );
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+
     let state = GatewayState {
         config: config.clone(),
         bundle_verification_key,
         token_encryption_key,
+        federation_public_key,
     };
 
     // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
@@ -399,6 +425,22 @@ async fn well_known_construct_server(
         if let Some(server_obj) = body.get_mut("server").and_then(|s| s.as_object_mut()) {
             server_obj.insert("token_encryption_key".to_string(), json!(tk));
         }
+    }
+
+    // Expose federation section when federation is enabled.
+    // Remote servers use this to discover our public key and S2S endpoints.
+    if let Some(pk) = &state.federation_public_key {
+        body["public_key"] = json!(pk);
+        body["federation"] = json!({
+            "enabled": true,
+            "public_key": pk,
+            "protocol_version": "1.0",
+            "endpoints": {
+                "messages": "/federation/v1/messages",
+                "sealed": "/federation/v1/sealed",
+                "health": "/health"
+            }
+        });
     }
     (
         StatusCode::OK,
