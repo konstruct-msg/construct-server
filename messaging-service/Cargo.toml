@@ -42,6 +42,7 @@ hex = {workspace = true}
 zeroize = {workspace = true}
 prometheus = {workspace = true}
 construct-metrics = { path = "../crates/construct-metrics" }
+construct-rate-limit = { path = "../crates/construct-rate-limit" }
 tonic = "0.14.2"
 prost = "0.14.3"
 futures-core = "0.3"

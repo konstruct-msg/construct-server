@@ -177,6 +177,9 @@ pub struct FederationConfig {
     pub signing_key_seed: Option<String>,
     /// mTLS configuration for S2S federation
     pub mtls: MtlsConfig,
+    /// Max inbound requests per origin server per hour (sliding window).
+    /// Default: 1000. Zero or negative disables per-origin rate limiting.
+    pub max_requests_per_origin_per_hour: i64,
 }
 
 impl FederationConfig {
@@ -244,6 +247,11 @@ impl FederationConfig {
             })
             .unwrap_or_default();
 
+        let max_requests_per_origin_per_hour = std::env::var("FEDERATION_MAX_PER_ORIGIN_PER_HOUR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+
         Ok(Self {
             instance_domain,
             base_domain,
@@ -262,6 +270,7 @@ impl FederationConfig {
                     .unwrap_or(true),
                 pinned_certs,
             },
+            max_requests_per_origin_per_hour,
         })
     }
 }
