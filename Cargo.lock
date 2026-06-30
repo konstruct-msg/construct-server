@@ -1113,6 +1113,7 @@ dependencies = [
 name = "construct-utils"
 version = "0.15.6"
 dependencies = [
+ "anyhow",
  "axum",
  "base64",
  "construct-types",
@@ -1121,6 +1122,11 @@ dependencies = [
  "hyper",
  "serde_json",
  "sha2 0.11.0",
+ "socket2 0.5.10",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
