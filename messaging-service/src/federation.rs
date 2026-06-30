@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine as _;
 use construct_federation::{FederatedEnvelope, PublicKeyCache, ServerSigner};
+use construct_rate_limit::sliding_window_check_and_record;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -50,6 +51,38 @@ pub(crate) struct FederationResponse {
     pub(crate) message_id: String,
 }
 
+// ── Rate limiting helper ──────────────────────────────────────────────────
+
+/// Check per-origin sliding window rate limit.
+/// Returns `Ok(())` if allowed, `Err(429)` if exceeded.
+async fn check_origin_rate_limit(
+    context: &MessagingServiceContext,
+    origin_server: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let max_per_hour = context.config.federation.max_requests_per_origin_per_hour;
+    if max_per_hour <= 0 {
+        return Ok(());
+    }
+
+    let mut conn = context.redis_conn.clone();
+    let key = format!("rl:federation:origin:{}", origin_server);
+    match sliding_window_check_and_record(&mut conn, &key, max_per_hour as u32, 3600).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(origin = %origin_server, limit = max_per_hour, "Per-origin rate limit exceeded");
+            Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "rate limit exceeded"})),
+            ))
+        }
+        Err(e) => {
+            // Fail-open on Redis error — don't block messages due to rate limiter outage
+            tracing::warn!(origin = %origin_server, error = %e, "Rate limit check failed (fail-open)");
+            Ok(())
+        }
+    }
+}
+
 // ── Sealed sender handler ─────────────────────────────────────────────────
 
 /// POST /federation/v1/sealed
@@ -67,6 +100,9 @@ pub(crate) async fn handle_inbound_sealed(
             Json(serde_json::json!({"error": "federation not enabled"})),
         ));
     }
+
+    // ── Per-origin rate limit ────────────────────────────────────────────
+    check_origin_rate_limit(&context, &req.origin_server).await?;
 
     // ── Payload hash integrity check ─────────────────────────────────────
     let expected_hash = FederatedEnvelope::hash_payload(&req.sealed_inner);
@@ -181,6 +217,9 @@ pub(crate) async fn handle_inbound_message(
         ));
     }
 
+    // ── Per-origin rate limit ────────────────────────────────────────────
+    check_origin_rate_limit(&context, &req.origin_server).await?;
+
     // ── Payload hash integrity check ─────────────────────────────────────
     let expected_hash = FederatedEnvelope::hash_payload(&req.ciphertext);
     if expected_hash != req.payload_hash {
@@ -291,5 +330,153 @@ pub(crate) async fn handle_inbound_message(
                 Json(serde_json::json!({"error": format!("delivery failed: {}", e)})),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_inbound_sealed_request_deserialize() {
+        let json_str = json!({
+            "messageId": "msg-123",
+            "sealedInner": "dGhpcyBpcyBzZWFsZWQgZGF0YQ==",
+            "originServer": "server-a.com",
+            "timestamp": 1700000000,
+            "payloadHash": "abc123hash",
+            "serverSignature": "sig123"
+        })
+        .to_string();
+
+        let req: InboundSealedRequest = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(req.message_id, "msg-123");
+        assert_eq!(req.origin_server, "server-a.com");
+        assert_eq!(req.timestamp, 1700000000);
+        assert_eq!(req.payload_hash, "abc123hash");
+        assert_eq!(req.server_signature, Some("sig123".to_string()));
+        assert_eq!(req.sealed_inner, "dGhpcyBpcyBzZWFsZWQgZGF0YQ==");
+    }
+
+    #[test]
+    fn test_inbound_sealed_request_no_signature() {
+        let json_str = json!({
+            "messageId": "msg-456",
+            "sealedInner": "dGVzdA==",
+            "originServer": "server-b.com",
+            "timestamp": 1700000001,
+            "payloadHash": "def456hash"
+        })
+        .to_string();
+
+        let req: InboundSealedRequest = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(req.message_id, "msg-456");
+        assert!(req.server_signature.is_none());
+    }
+
+    #[test]
+    fn test_inbound_message_request_deserialize() {
+        let json_str = json!({
+            "messageId": "msg-789",
+            "from": "alice@server-a.com",
+            "to": "bob@server-b.com",
+            "ciphertext": "ZW5jcnlwdGVk",
+            "originServer": "server-a.com",
+            "timestamp": 1700000002,
+            "payloadHash": "ghi789hash",
+            "serverSignature": "sig456"
+        })
+        .to_string();
+
+        let req: InboundMessageRequest = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(req.message_id, "msg-789");
+        assert_eq!(req.from, "alice@server-a.com");
+        assert_eq!(req.to, "bob@server-b.com");
+        assert_eq!(req.ciphertext, "ZW5jcnlwdGVk");
+        assert_eq!(req.server_signature, Some("sig456".to_string()));
+    }
+
+    #[test]
+    fn test_federated_envelope_sealed_round_trip() {
+        let seed_b64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+        let signer =
+            ServerSigner::from_seed_base64(seed_b64, "origin.konstruct.cc".to_string()).unwrap();
+
+        let sealed_inner_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"fake-sealed-inner");
+        let payload_hash = FederatedEnvelope::hash_payload(&sealed_inner_b64);
+        let envelope = FederatedEnvelope {
+            message_id: "test-sealed-001".to_string(),
+            from: String::new(),
+            to: String::new(),
+            origin_server: "origin.konstruct.cc".to_string(),
+            destination_server: "dest.konstruct.cc".to_string(),
+            timestamp: 1704067200,
+            payload_hash: payload_hash.clone(),
+        };
+
+        let signature = signer.sign_message(&envelope);
+        let public_key = signer.public_key_base64();
+
+        let verify_envelope = FederatedEnvelope {
+            message_id: "test-sealed-001".to_string(),
+            from: String::new(),
+            to: String::new(),
+            origin_server: "origin.konstruct.cc".to_string(),
+            destination_server: "dest.konstruct.cc".to_string(),
+            timestamp: 1704067200,
+            payload_hash,
+        };
+
+        let result = ServerSigner::verify_signature(&public_key, &verify_envelope, &signature);
+        assert!(result.is_ok(), "Signature should verify correctly");
+    }
+
+    #[test]
+    fn test_federated_envelope_message_round_trip() {
+        let seed_b64 = "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=";
+        let signer =
+            ServerSigner::from_seed_base64(seed_b64, "origin.konstruct.cc".to_string()).unwrap();
+
+        let payload_hash = FederatedEnvelope::hash_payload("encrypted-content");
+        let envelope = FederatedEnvelope {
+            message_id: "msg-regular-001".to_string(),
+            from: "alice@origin.konstruct.cc".to_string(),
+            to: "bob@dest.konstruct.cc".to_string(),
+            origin_server: "origin.konstruct.cc".to_string(),
+            destination_server: "dest.konstruct.cc".to_string(),
+            timestamp: 1704067200,
+            payload_hash: payload_hash.clone(),
+        };
+
+        let signature = signer.sign_message(&envelope);
+        let public_key = signer.public_key_base64();
+
+        let result = ServerSigner::verify_signature(&public_key, &envelope, &signature);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_payload_hash_integrity() {
+        let hash1 = FederatedEnvelope::hash_payload("same-content");
+        let hash2 = FederatedEnvelope::hash_payload("same-content");
+        assert_eq!(hash1, hash2);
+
+        let hash3 = FederatedEnvelope::hash_payload("different-content");
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_federation_response_serialize() {
+        let resp = FederationResponse {
+            status: "accepted".to_string(),
+            message_id: "msg-001".to_string(),
+        };
+
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["status"], "accepted");
+        assert_eq!(parsed["messageId"], "msg-001");
     }
 }

@@ -1,0 +1,130 @@
+{
+	grace_period 10s
+	admin 127.0.0.1:2019
+}
+
+# ── Lean Relay Caddyfile ─────────────────────────────────────────────
+# Replace RELAY_DOMAIN with your actual domain (e.g., relay.example.com).
+# TLS certificates are auto-obtained from Let's Encrypt.
+#
+# Only routes services present in docker-compose.relay.yml:
+#   identity, messaging, key, gateway
+# (No media, group/MLS, signaling, or veil services.)
+
+RELAY_DOMAIN {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
+		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
+		Access-Control-Allow-Origin *
+		Vary Origin
+	}
+
+	handle /.well-known* {
+		reverse_proxy gateway:3000
+	}
+	handle /health {
+		reverse_proxy gateway:3000
+	}
+	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceLinkService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.UserService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /construct.message_gateway.v1.MessageGateway/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.NotificationService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.KeyService/* {
+		reverse_proxy h2c://key:50057
+	}
+	handle /shared.proto.sentinel.v1.SentinelService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+
+	handle /federation/v1/* {
+		reverse_proxy h2c://messaging:8083
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
+
+:8080 {
+	header {
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
+		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
+		Access-Control-Allow-Origin *
+		Vary Origin
+	}
+
+	handle /.well-known* {
+		reverse_proxy gateway:3000
+	}
+	handle /health {
+		reverse_proxy gateway:3000
+	}
+	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceLinkService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.UserService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /construct.message_gateway.v1.MessageGateway/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.NotificationService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.KeyService/* {
+		reverse_proxy h2c://key:50057
+	}
+	handle /shared.proto.sentinel.v1.SentinelService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+
+	handle /federation/v1/* {
+		reverse_proxy h2c://messaging:8083
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
