@@ -52,25 +52,10 @@ fn stop_service(mut child: Child) {
     let _ = child.wait();
 }
 
-/// Basic smoke test - verify auth service starts and responds
+/// Basic smoke test - verify identity service starts and responds
 #[test]
-fn test_auth_service_starts() {
-    let mut service = start_service("auth-service", 18001);
-
-    // Simple HTTP check would go here
-    // For now, just verify the process is running
-    assert!(
-        service.try_wait().unwrap().is_none(),
-        "Service should be running"
-    );
-
-    stop_service(service);
-}
-
-/// Basic smoke test - verify user service starts and responds
-#[test]
-fn test_user_service_starts() {
-    let mut service = start_service("user-service", 18003);
+fn test_identity_service_starts() {
+    let mut service = start_service("identity-service", 18001);
 
     assert!(
         service.try_wait().unwrap().is_none(),
