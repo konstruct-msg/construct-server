@@ -1,6 +1,7 @@
 mod context;
 mod core;
 mod envelope;
+mod federation;
 mod grpc;
 mod handlers;
 mod media_routes;
@@ -270,6 +271,15 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/notifications/preferences",
             put(handlers::update_preferences),
+        )
+        // Federation S2S inbound endpoints
+        .route(
+            "/federation/v1/sealed",
+            post(federation::handle_inbound_sealed),
+        )
+        .route(
+            "/federation/v1/messages",
+            post(federation::handle_inbound_message),
         )
         // Apply middleware
         .layer(

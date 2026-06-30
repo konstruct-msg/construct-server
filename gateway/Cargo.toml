@@ -21,6 +21,7 @@ construct-db = { path = "../crates/construct-db" }
 construct-types = { path = "../crates/construct-types" }
 construct-utils = { path = "../crates/construct-utils" }
 construct-extractors = { path = "../crates/construct-extractors" }
+construct-federation = { path = "../crates/construct-federation" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 # Workspace deps
