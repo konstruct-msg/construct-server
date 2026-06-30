@@ -22,6 +22,7 @@ use axum::routing::{get, post, put};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::{ApnsEnvironment, Config};
 use construct_context::AppContext;
+use construct_error::AppError;
 use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
@@ -39,7 +40,6 @@ use construct_server_shared::{
     },
     user_service::UserServiceContext,
 };
-use construct_error::AppError;
 use construct_utils::log_safe_id;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_core::Stream;
@@ -549,8 +549,7 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
                             "Invalid authenticated user ID".to_string(),
                         )
                     })?;
-                    let result = confirm_pending_message_for_test(ctx, uid, &data.temp_id)
-                        .await?;
+                    let result = confirm_pending_message_for_test(ctx, uid, &data.temp_id).await?;
                     Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, Json(result)))
                 },
             ),
