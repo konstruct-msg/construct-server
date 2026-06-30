@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
                                 }
                             };
                             if let Err(e) = proxy_result {
-                                tracing::debug!(peer = %peer, error = %e, "ICE tunnel closed");
+                                tracing::debug!(peer = %peer, error = %e, "VEIL tunnel closed");
                             }
                         });
                     }
@@ -328,7 +328,7 @@ where
 {
     match tokio::net::TcpStream::connect(upstream).await {
         Ok(mut envoy_stream) => {
-            tracing::info!(peer = %peer, upstream = %upstream, "ICE connection proxying");
+            tracing::info!(peer = %peer, upstream = %upstream, "VEIL connection proxying");
             let mut ice_pinned = Box::pin(ice_stream);
             tokio::io::copy_bidirectional(&mut ice_pinned, &mut envoy_stream).await?;
         }
@@ -376,7 +376,7 @@ async fn well_known_construct_server(
             "signaling.SignalingService"
         ],
         "veil": {
-            "primary": format!("ice.{}:443", domain),
+            "primary": format!("veil.{}:443", domain),
             "relays": config.veil_relay_addresses,
         },
         "capabilities": {
