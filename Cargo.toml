@@ -6,6 +6,7 @@ members = [
     "auth-service",
     "messaging-service",
     "user-service",
+    "identity-service",
     "gateway",
     "media-service",
     "key-service",
