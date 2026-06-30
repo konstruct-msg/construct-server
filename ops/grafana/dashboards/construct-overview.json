@@ -1024,7 +1024,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "ice_connections_active",
+          "expr": "veil_connections_active",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -1071,7 +1071,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "rate(ice_bytes_total{direction=\"in\"}[5m])",
+          "expr": "rate(veil_bytes_total{direction=\"in\"}[5m])",
           "legendFormat": "in {{instance}}",
           "refId": "A"
         },
@@ -1080,7 +1080,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "rate(ice_bytes_total{direction=\"out\"}[5m])",
+          "expr": "rate(veil_bytes_total{direction=\"out\"}[5m])",
           "legendFormat": "out {{instance}}",
           "refId": "B"
         }
@@ -1127,7 +1127,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "rate(ice_handshakes_total{result=\"ok\"}[5m])",
+          "expr": "rate(veil_handshakes_total{result=\"ok\"}[5m])",
           "legendFormat": "ok",
           "refId": "A"
         },
@@ -1136,7 +1136,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "rate(ice_handshakes_total{result=\"fail\"}[5m])",
+          "expr": "rate(veil_handshakes_total{result=\"fail\"}[5m])",
           "legendFormat": "fail",
           "refId": "B"
         },
@@ -1145,7 +1145,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "rate(ice_replay_rejections_total[5m])",
+          "expr": "rate(veil_replay_rejections_total[5m])",
           "legendFormat": "replay-rejected",
           "refId": "C"
         }
