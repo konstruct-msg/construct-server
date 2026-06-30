@@ -1,149 +1,45 @@
-# API Testing Scripts
+# Scripts
 
-Automated tests for Construct Server passwordless authentication endpoints.
+Utility and testing scripts for Construct Server.
 
-## Prerequisites
+## Smoke Tests
 
-```bash
-# Install HTTPie (if not installed)
-brew install httpie  # macOS
-# or
-apt install httpie   # Linux
-# or
-pip install httpie   # Python
-
-# Install jq for JSON parsing
-brew install jq      # macOS
-apt install jq       # Linux
-```
-
-## Quick Start
-
-### Test Production (Fly.io)
-```bash
-./scripts/test-registration-flow.sh https://construct-user-service.fly.dev
-```
-
-### Test Local Development
-```bash
-./scripts/test-registration-flow.sh http://localhost:8080
-```
-
-## Test Scripts
-
-### 1. `test-registration-flow.sh`
-**Complete passwordless registration flow test**
-
-Tests:
-- ✅ Health check (`GET /health`)
-- ✅ PoW challenge retrieval (`GET /api/v1/register/challenge`)
-- ⚠️  PoW solving (simulated - requires Argon2id implementation)
-- ✅ Registration endpoint structure (`POST /api/v1/register/v2`)
-
-Example output:
-```
-═══════════════════════════════════════════════════════════
-  Construct Server - Registration Flow Test
-═══════════════════════════════════════════════════════════
-
-Testing against: https://construct-user-service.fly.dev
-
-[1/4] Health Check...
-  ✓ Server is healthy
-
-[2/4] Getting PoW challenge...
-  ✓ Challenge received
-    Challenge: e3b0c44298fc1c149afbf4c8996fb9...
-    Difficulty: 8 leading zeros
-
-[3/4] Solving PoW challenge...
-  ⚠  PoW solving requires Argon2id implementation
-  ⚠  Expected: ~3-7 seconds @ 38 H/s
-
-[4/4] Testing registration endpoint structure...
-  → Sending registration request...
-  ⚠  Registration rejected (expected - PoW not solved)
-```
-
-## Manual Testing with HTTPie
-
-### Get PoW Challenge
-```bash
-http GET https://construct-user-service.fly.dev/api/v1/register/challenge
-```
-
-Expected response:
-```json
-{
-  "challenge": "550e8400-e29b-41d4-a716-446655440000",
-  "difficulty": 8,
-  "expiresAt": "2026-02-04T19:05:00Z"
-}
-```
-
-### Register Device (with solved PoW)
-```bash
-http POST https://construct-user-service.fly.dev/api/v1/register/v2 \
-  deviceId="abc123def456" \
-  username="alice" \
-  verifyingKey="base64encodedkey..." \
-  identityPublic="base64encodedkey..." \
-  signedPrekeyPublic="base64encodedkey..." \
-  suiteId="Curve25519+Ed25519" \
-  powSolution:='{"challenge":"550e8400...","nonce":"0000000000000000"}'
-```
-
-Expected success response:
-```json
-{
-  "success": true,
-  "deviceId": "abc123def456",
-  "server": "construct-user-service.fly.dev",
-  "federatedId": "abc123def456@construct-user-service.fly.dev"
-}
-```
-
-## Full PoW Implementation Test
-
-For complete end-to-end testing including PoW solving, use the Python script:
+Run against a locally running `docker-compose.smoke.yml` stack:
 
 ```bash
-python3 scripts/test_pow_registration.py https://construct-user-service.fly.dev
+# Start the stack first
+docker compose -f ops/docker-compose.smoke.yml up -d
+
+# Run smoke tests
+./scripts/smoke-test.sh
 ```
 
-This script:
-1. Gets challenge
-2. Actually solves Argon2id PoW (~3-7 seconds)
-3. Completes registration with valid solution
-4. Verifies account creation
+Optional args to override default hosts:
+```
+./scripts/smoke-test.sh [auth_host] [msg_host] [key_host] [gateway_host] [signaling_host]
+# Defaults: localhost:50051 localhost:50052 localhost:50057 localhost:8080 localhost:50060
+```
 
-## API Documentation
+## Key Management
 
-Full API specification: [`docs/api/DEVICE_AUTH_API_SPEC.md`](../docs/api/DEVICE_AUTH_API_SPEC.md)
-
-## Future Test Scripts
-
-### Planned (Priority 5):
-- [ ] `test-warmup-limits.sh` - Rate limiting enforcement
-- [ ] `test-recovery.sh` - Account recovery flow  
-- [ ] `test-device-auth.sh` - Ed25519 signature verification
-- [ ] CI/CD integration (GitHub Actions smoke tests)
-
-## Troubleshooting
-
-### "Connection refused"
-Server is not running. Check:
 ```bash
-flyctl status --app construct-user-service  # Production
-curl http://localhost:8080/health           # Local
+./scripts/generate_test_keys.sh     # Generate keys for local/CI testing
+./scripts/cleanup_test_keys.sh      # Remove generated test keys
+./scripts/generate_delivery_key.sh  # Generate delivery HMAC key
+./scripts/rotate-secret.sh          # Rotate a single secret on the VPS
+./scripts/emergency-rotate-all.sh   # Rotate all secrets (emergency use)
+./scripts/check-secret-expiry.sh    # Check when secrets were last rotated
+./scripts/create-secrets.sh         # Bootstrap secrets on a new VPS
 ```
 
-### "Invalid PoW solution"
-The test script uses a simulated nonce. Use `test_pow_registration.py` for real PoW solving.
+## Dev Setup
 
-### "Challenge expired"
-Challenges expire after 5 minutes. Re-run the test to get a fresh challenge.
+```bash
+./scripts/dev-setup.sh   # Set up local development environment
+```
 
-## Contributing
+## Version Management
 
-When adding new endpoints, add corresponding test scripts here.
+```bash
+./scripts/bump-version.sh [patch|minor|major]
+```

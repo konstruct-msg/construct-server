@@ -213,7 +213,7 @@ jobs:
           docker compose -f ops/docker-compose.smoke.yml up -d postgres redis
           sleep 5
           IMAGE_TAG=${{ needs.docker.outputs.version }} docker compose -f ops/docker-compose.smoke.yml up -d \
-            auth-service messaging-service key-service gateway signaling-service
+            identity messaging-service key-service gateway signaling-service
 
       - name: Wait for services to be healthy
         run: |
@@ -224,16 +224,16 @@ jobs:
             echo "  attempt $i/30..."; sleep 2
           done
 
-          # Wait for auth-service to be truly ready (GetPowChallenge requires DB).
+          # Wait for identity-service to be truly ready (GetPowChallenge requires DB).
           # Uses the actual RPC — grpcurl exits 0 only if the call succeeds.
-          echo "Waiting for auth-service (GetPowChallenge)..."
+          echo "Waiting for identity-service (GetPowChallenge)..."
           for i in $(seq 1 40); do
             grpcurl -plaintext -connect-timeout 2 \
               -import-path shared/proto \
               -proto services/auth_service.proto \
               -d '{}' localhost:50051 \
               shared.proto.services.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
-              && { echo "✅ auth-service ready"; break; }
+              && { echo "✅ identity-service ready"; break; }
             echo "  attempt $i/40..."; sleep 2
           done
 
@@ -264,8 +264,8 @@ jobs:
       - name: Dump service logs on failure
         if: failure()
         run: |
-          echo "=== auth-service logs ==="
-          docker compose -f ops/docker-compose.smoke.yml logs auth-service
+          echo "=== identity-service logs ==="
+          docker compose -f ops/docker-compose.smoke.yml logs identity
           echo "=== messaging-service logs ==="
           docker compose -f ops/docker-compose.smoke.yml logs messaging-service
           echo "=== key-service logs ==="
