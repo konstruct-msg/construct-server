@@ -624,6 +624,8 @@ pub struct Device {
     pub crypto_suites: serde_json::Value, // JSONB array
     pub registered_at: DateTime<Utc>,     // Needed for warmup logic
     pub is_active: bool,
+    /// Client-declared support for SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
+    pub supports_pq_ratchet: bool,
 }
 
 /// Data for creating a new device
@@ -638,6 +640,8 @@ pub struct CreateDeviceData {
     /// Required for X3DH session initialization
     pub signed_prekey_signature: Vec<u8>,
     pub crypto_suites: String, // JSONB string like '["Curve25519+Ed25519"]'
+    /// Client-declared support for SuiteID::PQ_RATCHET (continuous sparse PQ ratchet).
+    pub supports_pq_ratchet: bool,
 }
 
 /// Create a new device (device registration)
@@ -678,11 +682,12 @@ where
             signed_prekey_signature,
             crypto_suites,
             registered_at,
-            is_active
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), TRUE)
+            is_active,
+            supports_pq_ratchet
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), TRUE, $9)
         RETURNING device_id, server_hostname, user_id, verifying_key,
                   identity_public, signed_prekey_public, signed_prekey_signature,
-                  crypto_suites, registered_at, is_active
+                  crypto_suites, registered_at, is_active, supports_pq_ratchet
         "#,
     )
     .bind(&data.device_id)
@@ -693,6 +698,7 @@ where
     .bind(&data.signed_prekey_public)
     .bind(&data.signed_prekey_signature)
     .bind(&data.crypto_suites)
+    .bind(data.supports_pq_ratchet)
     .fetch_one(executor)
     .await
     .map_err(|e| {
@@ -725,7 +731,8 @@ where
 pub async fn get_device_by_id(pool: &DbPool, device_id: &str) -> Result<Option<Device>> {
     let device = sqlx::query_as::<_, Device>(
         "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
-                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active
+                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at,
+                is_active, supports_pq_ratchet
          FROM devices WHERE device_id = $1",
     )
     .bind(device_id)
@@ -756,7 +763,8 @@ pub async fn get_device_by_id(pool: &DbPool, device_id: &str) -> Result<Option<D
 pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec<Device>> {
     let devices = sqlx::query_as::<_, Device>(
         "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
-                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at, is_active
+                signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at,
+                is_active, supports_pq_ratchet
          FROM devices WHERE user_id = $1 AND is_active = TRUE ORDER BY registered_at DESC",
     )
     .bind(user_id)
