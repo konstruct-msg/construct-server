@@ -1104,6 +1104,36 @@ pub async fn store_hybrid_identity(
     Ok(())
 }
 
+/// Persist the client's declaration of PQ_RATCHET support (SuiteID=3 capability).
+/// Called from UploadPreKeys handler. This flag is then served in PreKeyBundles
+/// so that peers can negotiate Suite 3 sessions (sparse continuous ratchet, no OTPK after bootstrap).
+pub async fn set_device_supports_pq_ratchet(
+    db: &PgPool,
+    device_id: &str,
+    supports: bool,
+) -> Result<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND is_active = true)",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+
+    if !exists {
+        anyhow::bail!("Device not found or inactive");
+    }
+
+    sqlx::query(
+        "UPDATE devices SET supports_pq_ratchet = $2, key_updated_at = NOW() WHERE device_id = $1 AND is_active = true",
+    )
+    .bind(device_id)
+    .bind(supports)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
 // ============================================================================
 // Signed Pre-Key Operations
 // ============================================================================

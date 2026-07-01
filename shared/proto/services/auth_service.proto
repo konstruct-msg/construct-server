@@ -151,6 +151,11 @@ message DevicePublicKeys {
   // Hybrid signature over the SPK sign-message (3373 bytes); proves the SPK under the
   // hybrid key in addition to signed_prekey_signature. (scope B)
   optional bytes signed_prekey_hybrid_signature = 8;
+
+  // Supports SuiteID::PQ_RATCHET (3) for sparse continuous post-quantum ratchet.
+  // When true, other peers may open new sessions with suite 3 (self-sustaining PQ
+  // material, no further OTPK consumption after the first message).
+  bool supports_pq_ratchet = 9;
 }
 
 message PowSolution {

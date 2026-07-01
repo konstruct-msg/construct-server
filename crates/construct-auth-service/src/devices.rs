@@ -163,6 +163,11 @@ pub struct DevicePublicKeys {
     /// Crypto suite identifier (e.g., "Curve25519+Ed25519", "ML-KEM-768+Ed25519")
     #[serde(default = "default_crypto_suite")]
     pub crypto_suite: String,
+
+    /// Whether this device supports SuiteID::PQ_RATCHET (3) for sparse continuous PQ ratchet.
+    /// Default false for backward compat.
+    #[serde(default)]
+    pub supports_pq_ratchet: bool,
 }
 
 fn default_crypto_suite() -> String {
@@ -179,6 +184,9 @@ pub struct DevicePublicKeysBinary {
     pub signed_prekey_signature: Vec<u8>,
     /// Crypto suite identifier (e.g., "Curve25519+Ed25519")
     pub crypto_suite: String,
+
+    /// PQ ratchet support flag (see DevicePublicKeys).
+    pub supports_pq_ratchet: bool,
 }
 
 /// Request to register a new device (privacy-focused)
@@ -478,6 +486,7 @@ pub async fn register_device_core(
         signed_prekey_public,
         signed_prekey_signature,
         crypto_suites,
+        supports_pq_ratchet: keys.supports_pq_ratchet,
     };
 
     let username_hash_opt: Option<Vec<u8>> = normalized_username
@@ -789,6 +798,7 @@ pub async fn get_device_profile(
             signed_prekey_public: BASE64.encode(&device.signed_prekey_public),
             signed_prekey_signature,
             crypto_suite,
+            supports_pq_ratchet: device.supports_pq_ratchet,
         },
     }))
 }
