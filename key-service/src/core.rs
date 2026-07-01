@@ -71,6 +71,9 @@ pub struct PreKeyBundle {
     /// KT inclusion proof for the hybrid identity key (leaf kind 1). `None` when the device
     /// has no hybrid key or the KT log is not populated (dev/test).
     pub hybrid_kt_proof: Option<crate::kt::KtProof>,
+
+    /// Capability flag: device supports SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
+    pub supports_pq_ratchet: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -288,7 +291,8 @@ pub async fn get_prekey_bundle(
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
-                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
+                   supports_pq_ratchet
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -306,7 +310,8 @@ pub async fn get_prekey_bundle(
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
-                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
+                   supports_pq_ratchet
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -390,6 +395,7 @@ pub async fn get_prekey_bundle(
         signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
         kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
         hybrid_kt_proof: None,
+        supports_pq_ratchet: device.supports_pq_ratchet,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
     if let Some(sk) = bundle_signing_key {
@@ -437,7 +443,8 @@ pub async fn get_prekey_bundles(
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
-                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
+                   supports_pq_ratchet
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -454,7 +461,8 @@ pub async fn get_prekey_bundles(
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
-                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature
+                   signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
+                   supports_pq_ratchet
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -535,6 +543,7 @@ pub async fn get_prekey_bundles(
             signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
             kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
             hybrid_kt_proof: None,
+            supports_pq_ratchet: device.supports_pq_ratchet,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
         if let Some(sk) = bundle_signing_key {
@@ -1360,6 +1369,9 @@ struct DeviceRow {
     hybrid_identity_signature: Option<Vec<u8>>,
     signed_prekey_hybrid_signature: Option<Vec<u8>>,
     kyber_signed_pre_key_hybrid_signature: Option<Vec<u8>>,
+
+    // PQ ratchet capability (additive, for Suite 3)
+    supports_pq_ratchet: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1644,6 +1656,7 @@ mod tests {
             signed_prekey_hybrid_signature: None,
             kyber_pre_key_hybrid_signature: None,
             hybrid_kt_proof: None,
+            supports_pq_ratchet: false,
         }
     }
 
