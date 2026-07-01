@@ -12,7 +12,7 @@
 //
 // ============================================================================
 
-use crate::mtls::{build_rustls_client_config, FederationTrustStore, MtlsConfig};
+use crate::mtls::{FederationTrustStore, MtlsConfig, build_rustls_client_config};
 use crate::signing::{FederatedEnvelope, ServerSigner};
 use anyhow::{Context, Result};
 use base64::Engine as _;
