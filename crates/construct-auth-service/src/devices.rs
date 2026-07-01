@@ -503,6 +503,13 @@ pub async fn register_device_core(
         None
     };
 
+    // 6c. Compute route_id from identity_public_key if provided (without consuming identity_pubkey)
+    let route_id: Option<construct_types::RouteId> = identity_pubkey.as_ref().map(|key| {
+        let key_type = identity_key_type.unwrap_or(1) as i16;
+        construct_types::RouteId::compute(key, key_type)
+    });
+    let route_id_str: Option<&str> = route_id.as_ref().map(|r| r.as_str());
+
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();
 
@@ -543,6 +550,7 @@ pub async fn register_device_core(
         username_hash_opt.as_deref(),
         device_data,
         identity_pubkey,
+        route_id_str,
     )
     .await
     .map_err(|e| {

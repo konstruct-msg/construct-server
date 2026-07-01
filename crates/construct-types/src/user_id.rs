@@ -158,6 +158,62 @@ impl std::fmt::Display for UserIdError {
 
 impl std::error::Error for UserIdError {}
 
+// ============================================================================
+// RouteId — DHT routing identifier for pubkey-as-identity (Epic E)
+// ============================================================================
+
+/// A DHT routing identifier derived from a user's identity public key.
+///
+/// `route_id = SHA-256(identity_key_type || identity_public_key)`
+///
+/// The identity_key_type is encoded as a big-endian 2-byte integer before
+/// hashing, ensuring that different algorithms produce distinct route_ids
+/// and preventing algorithm confusion attacks.
+///
+/// Displayed as 64 lowercase hex characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RouteId(String);
+
+impl RouteId {
+    /// Compute a RouteId from an identity public key and its algorithm type.
+    ///
+    /// # Algorithm types
+    /// - 1 = Ed25519 (32 bytes)
+    /// - 2 = ML-DSA-65 (1952 bytes)
+    /// - 3 = Hybrid Ed25519+ML-DSA (1984 bytes)
+    pub fn compute(identity_public_key: &[u8], identity_key_type: i16) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(identity_key_type.to_be_bytes());
+        hasher.update(identity_public_key);
+        RouteId(hex::encode(hasher.finalize()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RouteId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for RouteId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Invalid RouteId: must be 64 hex characters, got '{}'",
+                s
+            ));
+        }
+        Ok(RouteId(s.to_lowercase()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

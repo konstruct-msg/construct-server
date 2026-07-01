@@ -21,5 +21,9 @@ chrono = { workspace = true }
 # UUID
 uuid = { workspace = true }
 
+# Hashing (RouteId computation)
+sha2 = "0.11"
+hex = { workspace = true }
+
 [dev-dependencies]
 # For testing

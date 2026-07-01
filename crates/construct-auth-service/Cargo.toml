@@ -16,6 +16,7 @@ construct-apns        = { path = "../construct-apns" }
 construct-error       = { path = "../construct-error", features = ["full"] }
 construct-metrics     = { path = "../construct-metrics" }
 construct-pow         = { path = "../construct-pow" }
+construct-types       = { path = "../construct-types" }
 construct-utils       = { path = "../construct-utils" }
 
 anyhow  = "1.0"
