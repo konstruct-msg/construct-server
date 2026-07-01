@@ -246,6 +246,12 @@ message PreKeyBundle {
   // Hybrid signature (3373 bytes) over the Kyber-SPK sign-message
   // "KonstruktX3DH-v1" || [0x00, suite_id] || kyber_pre_key. (scope B)
   optional bytes kyber_pre_key_hybrid_signature = 23;
+
+  // Supports SuiteID::PQ_RATCHET (3) for sparse continuous post-quantum ratchet.
+  // When true, initiators that also support it may open new sessions with suite 3
+  // (self-sustaining PQ material, no further OTPK consumption after the first message).
+  // Additive capability flag (see PQ_RATCHET_AND_OTPK_ELIMINATION_SPEC).
+  bool supports_pq_ratchet = 24;
 }
 
 // ============================================================================

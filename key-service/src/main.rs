@@ -265,6 +265,7 @@ impl KeyService for KeyGrpcService {
                         hybrid_identity_signature: b.hybrid_identity_signature,
                         signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
                         kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
+                        supports_pq_ratchet: b.supports_pq_ratchet,
                     }),
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
@@ -757,6 +758,7 @@ impl KeyService for KeyGrpcService {
                     hybrid_identity_signature: b.hybrid_identity_signature,
                     signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
                     kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
+                    supports_pq_ratchet: b.supports_pq_ratchet,
                 }),
                 platform: 0, // Unknown
                 kt_proof: b.kt_proof.map(to_proto_kt_proof),
