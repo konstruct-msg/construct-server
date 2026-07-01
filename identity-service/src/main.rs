@@ -168,6 +168,8 @@ impl AuthService for IdentityGrpcService {
                         nonce: pow_solution.nonce,
                         hash: pow_solution.hash,
                     },
+                    identity_public_key: req.identity_public_key,
+                    identity_key_type: req.identity_key_type,
                 },
             )
             .await

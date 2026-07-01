@@ -169,6 +169,15 @@ message RegisterDeviceRequest {
   string device_id = 2;
   DevicePublicKeys public_keys = 3;
   PowSolution pow_solution = 4;
+
+  // Identity public key for global user identity (Epic E).
+  // Used to derive route_id = SHA-256(identity_key_type || identity_public_key)
+  // for DHT-based routing. Optional for backward compatibility.
+  optional bytes identity_public_key = 5;
+
+  // Key algorithm type: 1=Ed25519 (32 bytes), 2=ML-DSA-65 (1952 bytes),
+  // 3=Hybrid Ed25519+ML-DSA (1984 bytes). Defaults to 1 (Ed25519).
+  optional uint32 identity_key_type = 6;
 }
 
 message AuthenticateDeviceRequest {

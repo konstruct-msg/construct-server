@@ -73,6 +73,13 @@ pub struct RegisterDeviceRequest {
     pub device_id: String,
     pub public_keys: DevicePublicKeys,
     pub pow_solution: PowSolution,
+    /// Identity public key for global user identity, base64-encoded (Epic E).
+    /// Optional for backward compatibility with existing clients.
+    #[serde(default)]
+    pub identity_public_key: Option<String>,
+    /// Key algorithm type: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid. Defaults to 1.
+    #[serde(default)]
+    pub identity_key_type: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +118,13 @@ pub async fn register_device(
         .map_err(|_| {
             AppError::Validation("signed_prekey_signature must be valid base64".to_string())
         })?;
+    let identity_public_key = match request.identity_public_key {
+        Some(ref k) if k.is_empty() => None,
+        Some(ref k) => Some(BASE64.decode(k).map_err(|_| {
+            AppError::Validation("identity_public_key must be valid base64".to_string())
+        })?),
+        None => None,
+    };
     core::register_device(
         app_state(&context).0,
         headers,
@@ -130,6 +144,8 @@ pub async fn register_device(
                 nonce: request.pow_solution.nonce,
                 hash: request.pow_solution.hash,
             },
+            identity_public_key,
+            identity_key_type: request.identity_key_type,
         },
     )
     .await

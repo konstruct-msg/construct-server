@@ -41,6 +41,12 @@ pub struct RegisterDeviceInput {
     pub device_id: String,
     pub public_keys: DevicePublicKeysInput,
     pub pow_solution: PowSolutionInput,
+    /// Identity public key for global user identity (Epic E).
+    /// 32 bytes for Ed25519 (type 1). Should be provided by new clients.
+    pub identity_public_key: Option<Vec<u8>>,
+    /// Key algorithm type: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid.
+    /// Defaults to 1 (Ed25519) when identity_public_key is present.
+    pub identity_key_type: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +203,8 @@ pub async fn register_device(
             nonce: input.pow_solution.nonce,
             hash: input.pow_solution.hash,
         },
+        input.identity_public_key,
+        input.identity_key_type,
     )
     .await
 }
