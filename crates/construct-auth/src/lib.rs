@@ -257,7 +257,9 @@ impl AuthManager {
     /// Returns the parsed `Claims` on success, error on invalid/expired/unsupported.
     pub fn verify_token(&self, token: &str) -> Result<Claims> {
         if token.starts_with("v4.public.") {
-            TOKEN_VERIFY_FORMAT_TOTAL.with_label_values(&["paseto"]).inc();
+            TOKEN_VERIFY_FORMAT_TOTAL
+                .with_label_values(&["paseto"])
+                .inc();
             self.verify_paseto(token)
         } else {
             TOKEN_VERIFY_FORMAT_TOTAL.with_label_values(&["jwt"]).inc();
