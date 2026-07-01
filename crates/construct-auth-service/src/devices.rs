@@ -273,6 +273,7 @@ pub struct UpdateProfileRequest {
 /// Called from:
 /// - REST path (via `handlers.rs` which decodes base64 at the JSON boundary)
 /// - gRPC path (proto `bytes` fields are already `Vec<u8>`)
+#[allow(clippy::too_many_arguments)]
 pub async fn register_device_core(
     app_context: Arc<AppContext>,
     headers: HeaderMap,
@@ -280,6 +281,8 @@ pub async fn register_device_core(
     device_id: String,
     keys: DevicePublicKeysBinary,
     pow_solution: PowSolution,
+    identity_public_key: Option<Vec<u8>>,
+    identity_key_type: Option<u32>,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     let client_ip = extract_client_ip(&headers);
 
@@ -473,6 +476,33 @@ pub async fn register_device_core(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
 
+    // 6b. Validate identity_public_key if provided
+    let identity_pubkey = if let Some(ref key) = identity_public_key {
+        let key_type = identity_key_type.unwrap_or(1);
+        let expected_len = match key_type {
+            1 => 32,   // Ed25519
+            2 => 1952, // ML-DSA-65
+            3 => 1984, // Hybrid Ed25519+ML-DSA
+            other => {
+                return Err(AppError::Validation(format!(
+                    "Unsupported identity_key_type: {}. Supported: 1 (Ed25519), 2 (ML-DSA-65), 3 (Hybrid)",
+                    other
+                )));
+            }
+        };
+        if key.len() != expected_len {
+            return Err(AppError::Validation(format!(
+                "identity_public_key must be {} bytes for type {}, got {}",
+                expected_len,
+                key_type,
+                key.len()
+            )));
+        }
+        Some(key.as_slice())
+    } else {
+        None
+    };
+
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();
 
@@ -512,6 +542,7 @@ pub async fn register_device_core(
         &app_context.db_pool,
         username_hash_opt.as_deref(),
         device_data,
+        identity_pubkey,
     )
     .await
     .map_err(|e| {

@@ -30,6 +30,14 @@ pub struct User {
     /// NULL for anonymous accounts.
     pub username_hash: Option<Vec<u8>>,
     pub recovery_public_key: Option<Vec<u8>>,
+    /// Public key for global user identity (Epic E).
+    /// 32 bytes for Ed25519 (type 1), 1952 for ML-DSA-65 (type 2),
+    /// 1984 for hybrid (type 3). NULL for legacy users without one.
+    /// route_id = SHA-256(identity_key_type || identity_public_key).
+    pub identity_public_key: Option<Vec<u8>>,
+    /// Key algorithm type: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid.
+    /// NOT NULL DEFAULT 1 in the DB — always present after migration.
+    pub identity_key_type: i16,
     pub last_recovery_at: Option<DateTime<Utc>>,
     pub primary_device_id: Option<String>,
 }
@@ -70,7 +78,8 @@ pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbP
 pub async fn get_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username_hash, recovery_public_key, identity_public_key,
+               identity_key_type, last_recovery_at, primary_device_id
         FROM users
         WHERE id = $1
         "#,
@@ -89,7 +98,8 @@ pub async fn get_user_by_username_hash(
 ) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        SELECT id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
+               last_recovery_at, primary_device_id
         FROM users
         WHERE username_hash = $1
         "#,
@@ -115,7 +125,8 @@ pub async fn update_user_username(
         UPDATE users
         SET username_hash = $1
         WHERE id = $2
-        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
+                  last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -141,7 +152,8 @@ pub async fn create_user_passwordless(
         r#"
         INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, $2)
-        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
+                  last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -794,6 +806,7 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
 /// * `pool` - Database pool
 /// * `username` - Optional username (NULL = maximum privacy)
 /// * `device_data` - Device creation data
+/// * `identity_public_key` - Optional identity public key bytes (32 for Ed25519, key_type defaults to 1)
 ///
 /// # Returns
 /// Tuple of (User, Device)
@@ -801,6 +814,7 @@ pub async fn create_user_with_first_device(
     pool: &DbPool,
     username_hash: Option<&[u8]>,
     device_data: CreateDeviceData,
+    identity_public_key: Option<&[u8]>,
 ) -> Result<(User, Device)> {
     // Start transaction
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -809,12 +823,14 @@ pub async fn create_user_with_first_device(
     //    Plaintext username is never stored — only the HMAC hash.
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username_hash, primary_device_id)
-        VALUES (gen_random_uuid(), $1, NULL)
-        RETURNING id, username_hash, recovery_public_key, last_recovery_at, primary_device_id
+        INSERT INTO users (id, username_hash, primary_device_id, identity_public_key)
+        VALUES (gen_random_uuid(), $1, NULL, $2)
+        RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
+                  last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
+    .bind(identity_public_key)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
