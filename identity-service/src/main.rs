@@ -161,6 +161,7 @@ impl AuthService for IdentityGrpcService {
                             signed_prekey_public: public_keys.signed_prekey_public,
                             signed_prekey_signature: public_keys.signed_prekey_signature,
                             crypto_suite: public_keys.crypto_suite,
+                            supports_pq_ratchet: public_keys.supports_pq_ratchet,
                         },
                     pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
                         challenge: pow_solution.challenge,
@@ -462,6 +463,7 @@ impl AuthService for IdentityGrpcService {
                 signed_prekey_public,
                 signed_prekey_signature,
                 crypto_suites: format!(r#"["{}"]"#, public_keys.crypto_suite),
+                supports_pq_ratchet: false,
             },
             Some(user_id),
         )
@@ -744,6 +746,7 @@ impl AuthService for IdentityGrpcService {
             signed_prekey_public,
             signed_prekey_signature,
             crypto_suites: format!("[\"{crypto_suite}\"]"),
+            supports_pq_ratchet: false,
         };
 
         construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))
@@ -1204,6 +1207,7 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
             signed_prekey_public,
             signed_prekey_signature,
             crypto_suites: format!("[\"{}\"]", public_keys.crypto_suite),
+            supports_pq_ratchet: false,
         };
 
         construct_db::create_device(self.context.db_pool.as_ref(), device_data, Some(user_id))

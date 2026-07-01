@@ -351,6 +351,12 @@ message UploadPreKeysRequest {
   // ("KonstruktX3DH-v1" || [0x00, 0x10] || kyber_signed_pre_key_public). (scope B)
   optional bytes kyber_signed_pre_key_hybrid_signature = 17;
 
+  // Capability declaration: this device supports SuiteID::PQ_RATCHET (3) for
+  // sparse continuous post-quantum ratchet on established sessions.
+  // Server persists it and advertises in PreKeyBundle responses.
+  // Clients should set this to true when they are capable (post-regen of bindings etc.).
+  bool supports_pq_ratchet = 18;
+
   // Reserved for future options
   reserved 4 to 10;
 }
