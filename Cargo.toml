@@ -11,7 +11,8 @@ members = [
     "group-service",
     "signaling-service",
     "veil-service",
-    # New modular crates
+
+    # modular crates
     "crates/construct-types",
     "crates/construct-error",
     "crates/construct-crypto",
@@ -27,7 +28,8 @@ members = [
     "crates/construct-apns",
     "crates/crypto-agility",
     "crates/construct-metrics",
-    # Infrastructure crates
+
+    # infrastructure crates
     "crates/construct-utils",
     "crates/construct-audit",
     "crates/construct-rate-limit",
@@ -40,7 +42,7 @@ members = [
     "crates/construct-user-service",
 ]
 
-# Единая версия для всех пакетов
+# One versuin for all packages
 [workspace.package]
 version = "0.16.0"
 edition = "2024"
