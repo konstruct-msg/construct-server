@@ -42,7 +42,7 @@ members = [
     "crates/construct-user-service",
 ]
 
-# One versuin for all packages
+# One version for all packages
 [workspace.package]
 version = "0.16.0"
 edition = "2024"
