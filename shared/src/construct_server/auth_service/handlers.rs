@@ -49,6 +49,9 @@ pub struct DevicePublicKeys {
     pub signed_prekey_signature: String,
     #[serde(default = "default_crypto_suite")]
     pub crypto_suite: String,
+    /// Whether this device supports SuiteID::PQ_RATCHET (3).
+    #[serde(default)]
+    pub supports_pq_ratchet: bool,
 }
 
 fn default_crypto_suite() -> String {
@@ -120,6 +123,7 @@ pub async fn register_device(
                 signed_prekey_public,
                 signed_prekey_signature,
                 crypto_suite: request.public_keys.crypto_suite,
+                supports_pq_ratchet: request.public_keys.supports_pq_ratchet,
             },
             pow_solution: core::PowSolutionInput {
                 challenge: request.pow_solution.challenge,

@@ -24,6 +24,8 @@ pub struct DevicePublicKeysInput {
     pub signed_prekey_public: Vec<u8>,
     pub signed_prekey_signature: Vec<u8>,
     pub crypto_suite: String,
+    /// Client-declared support for SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
+    pub supports_pq_ratchet: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +190,7 @@ pub async fn register_device(
             signed_prekey_public: input.public_keys.signed_prekey_public,
             signed_prekey_signature: input.public_keys.signed_prekey_signature,
             crypto_suite: input.public_keys.crypto_suite,
+            supports_pq_ratchet: input.public_keys.supports_pq_ratchet,
         },
         devices::PowSolution {
             challenge: input.pow_solution.challenge,
