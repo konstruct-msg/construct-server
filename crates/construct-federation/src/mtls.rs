@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls_pki_types::pem::PemObject;
 
 /// Configuration for mTLS federation
@@ -175,9 +173,7 @@ pub fn build_rustls_client_config(
             rustls_pki_types::CertificateDer::pem_file_iter(cert_path)
                 .map_err(|e| anyhow::anyhow!("failed to read client cert at {cert_path}: {e}"))?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    anyhow::anyhow!("failed to parse client cert at {cert_path}: {e}")
-                })?;
+                .map_err(|e| anyhow::anyhow!("failed to parse client cert at {cert_path}: {e}"))?;
         let key = rustls_pki_types::PrivateKeyDer::from_pem_file(key_path)
             .map_err(|e| anyhow::anyhow!("failed to read client key at {key_path}: {e}"))?;
         builder
@@ -205,7 +201,10 @@ impl std::fmt::Debug for PinnedCertVerifier {
         f.debug_struct("PinnedCertVerifier")
             .field("required", &self.required)
             .field("verify_server_cert", &self.verify_server_cert)
-            .field("signature_algorithms", &self.signature_algorithms.supported_schemes().len())
+            .field(
+                "signature_algorithms",
+                &self.signature_algorithms.supported_schemes().len(),
+            )
             .finish()
     }
 }
