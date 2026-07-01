@@ -38,6 +38,9 @@ pub struct User {
     /// Key algorithm type: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid.
     /// NOT NULL DEFAULT 1 in the DB — always present after migration.
     pub identity_key_type: i16,
+    /// SHA-256(identity_key_type || identity_public_key), 64 hex chars.
+    /// Cached for O(1) DHT routing lookups. NULL for legacy rows.
+    pub route_id: Option<String>,
     pub last_recovery_at: Option<DateTime<Utc>>,
     pub primary_device_id: Option<String>,
 }
@@ -79,7 +82,7 @@ pub async fn get_user_by_id(pool: &DbPool, user_id: &Uuid) -> Result<Option<User
     let user = sqlx::query_as::<_, User>(
         r#"
         SELECT id, username_hash, recovery_public_key, identity_public_key,
-               identity_key_type, last_recovery_at, primary_device_id
+               identity_key_type, route_id, last_recovery_at, primary_device_id
         FROM users
         WHERE id = $1
         "#,
@@ -98,7 +101,7 @@ pub async fn get_user_by_username_hash(
 ) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
         r#"
-        SELECT id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
+        SELECT id, username_hash, recovery_public_key, identity_public_key, identity_key_type, route_id,
                last_recovery_at, primary_device_id
         FROM users
         WHERE username_hash = $1
@@ -126,7 +129,7 @@ pub async fn update_user_username(
         SET username_hash = $1
         WHERE id = $2
         RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
-                  last_recovery_at, primary_device_id
+                  route_id, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -153,7 +156,7 @@ pub async fn create_user_passwordless(
         INSERT INTO users (id, username_hash, primary_device_id)
         VALUES (gen_random_uuid(), $1, $2)
         RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
-                  last_recovery_at, primary_device_id
+                  route_id, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
@@ -249,6 +252,63 @@ pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Find a user by their identity_public_key (Epic E).
+pub async fn get_user_by_identity_pubkey(
+    pool: &DbPool,
+    identity_public_key: &[u8],
+) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, username_hash, recovery_public_key, identity_public_key,
+               identity_key_type, route_id, last_recovery_at, primary_device_id
+        FROM users
+        WHERE identity_public_key = $1
+        "#,
+    )
+    .bind(identity_public_key)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Find a user by their route_id (64 hex chars, Epic E).
+pub async fn get_user_by_route_id(pool: &DbPool, route_id: &str) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT id, username_hash, recovery_public_key, identity_public_key,
+               identity_key_type, route_id, last_recovery_at, primary_device_id
+        FROM users
+        WHERE route_id = $1
+        "#,
+    )
+    .bind(route_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Get all distinct home relay domains for a user's active devices.
+/// Used by Epics E/F to determine where to forward messages addressed by route_id.
+pub async fn get_user_home_relays(pool: &DbPool, user_id: &Uuid) -> Result<Vec<String>> {
+    let relays = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT d.server_hostname
+        FROM devices d
+        WHERE d.user_id = $1
+          AND d.is_active = TRUE
+        ORDER BY d.server_hostname
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to get user home relays")?;
+
+    Ok(relays)
 }
 
 /// Check if `user_id` has enabled discoverable search (`searchable = TRUE`).
@@ -807,6 +867,7 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
 /// * `username` - Optional username (NULL = maximum privacy)
 /// * `device_data` - Device creation data
 /// * `identity_public_key` - Optional identity public key bytes (32 for Ed25519, key_type defaults to 1)
+/// * `route_id` - Optional route_id (64 hex chars). Should be provided when identity_public_key is set.
 ///
 /// # Returns
 /// Tuple of (User, Device)
@@ -815,6 +876,7 @@ pub async fn create_user_with_first_device(
     username_hash: Option<&[u8]>,
     device_data: CreateDeviceData,
     identity_public_key: Option<&[u8]>,
+    route_id: Option<&str>,
 ) -> Result<(User, Device)> {
     // Start transaction
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -823,14 +885,15 @@ pub async fn create_user_with_first_device(
     //    Plaintext username is never stored — only the HMAC hash.
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username_hash, primary_device_id, identity_public_key)
-        VALUES (gen_random_uuid(), $1, NULL, $2)
+        INSERT INTO users (id, username_hash, primary_device_id, identity_public_key, route_id)
+        VALUES (gen_random_uuid(), $1, NULL, $2, $3)
         RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
-                  last_recovery_at, primary_device_id
+                  route_id, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
     .bind(identity_public_key)
+    .bind(route_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {

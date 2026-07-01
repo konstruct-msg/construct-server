@@ -621,6 +621,7 @@ dependencies = [
  "construct-metrics",
  "construct-pow",
  "construct-queue",
+ "construct-types",
  "construct-utils",
  "ed25519-dalek",
  "hex",
@@ -1020,10 +1021,12 @@ version = "0.16.0"
 dependencies = [
  "chrono",
  "construct-crypto",
+ "hex",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2 0.11.0",
  "uuid",
 ]
 
