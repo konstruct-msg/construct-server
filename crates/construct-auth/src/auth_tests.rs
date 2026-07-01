@@ -155,6 +155,7 @@ mod auth_tests {
                 instance_domain: "test.local".to_string(),
                 base_domain: "test.local".to_string(),
                 signing_key_seed: None,
+                max_requests_per_origin_per_hour: 1000,
                 mtls: MtlsConfig {
                     required: false,
                     client_cert_path: None,
