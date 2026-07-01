@@ -442,6 +442,16 @@ impl KeyService for KeyGrpcService {
                 .map_err(|e| Status::invalid_argument(format!("hybrid identity rejected: {e}")))?;
         }
 
+        // Persist the PQ ratchet capability flag (additive, for Suite 3 support declaration).
+        // This is used to advertise in PreKeyBundle so peers can choose PQ_RATCHET sessions.
+        core::set_device_supports_pq_ratchet(
+            &self.context.db,
+            &req.device_id,
+            req.supports_pq_ratchet,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
         Ok(Response::new(proto::UploadPreKeysResponse {
             success: true,
             pre_key_count: classic_count,
