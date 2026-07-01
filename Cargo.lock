@@ -782,6 +782,8 @@ dependencies = [
  "construct-types",
  "ed25519-dalek",
  "reqwest",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
