@@ -38,6 +38,14 @@ pub struct MessagingServiceContext {
     /// Standalone Redis ConnectionManager for rate-limiting and caching.
     /// Cloned lock-free without acquiring the queue Mutex.
     pub redis_conn: redis::aio::ConnectionManager,
+    /// Privacy Pass token issuer scalar `k` (`TOKEN_ISSUER_KEY`), shared with
+    /// identity-service's `IssueTokens`. `None` disables redemption regardless
+    /// of `config.messaging.stealth_token_policy`.
+    pub token_issuer_key: Option<[u8; 32]>,
+    /// X25519 static secret for opening `SealedInner.token_bytes`, derived from
+    /// `federation.signing_key_seed` — same derivation identity-service uses to
+    /// publish the public half at `/.well-known/construct-server`.
+    pub token_enc_static_secret: Option<x25519_dalek::StaticSecret>,
 }
 
 impl MessagingServiceContext {

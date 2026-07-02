@@ -32,10 +32,8 @@ use construct_server_shared::{
 };
 use context::IdentityServiceContext;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
-use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
 use std::{env, sync::Arc};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -43,7 +41,7 @@ use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
+use x25519_dalek::PublicKey as X25519PublicKey;
 
 use construct_server_shared::shared::proto::services::v1::{
     self as proto,
@@ -2562,19 +2560,14 @@ async fn main() -> Result<()> {
             .federation
             .signing_key_seed
             .as_ref()
-            .and_then(|seed_b64| {
-                let seed_bytes = b64::STANDARD.decode(seed_b64.trim()).ok()?;
-                let hk = Hkdf::<Sha256>::new(None, &seed_bytes);
-                let mut x25519_seed = [0u8; 32];
-                hk.expand(b"construct-token-enc-v1", &mut x25519_seed)
-                    .ok()?;
-                let priv_key = X25519StaticSecret::from(x25519_seed);
+            .and_then(|seed_b64| construct_crypto::privacy_pass::derive_token_enc_static_secret(seed_b64))
+            .map(|priv_key| {
                 let pub_key = X25519PublicKey::from(&priv_key);
                 tracing::info!(
                     public_key = %b64::STANDARD.encode(pub_key.as_bytes()),
                     "Token encryption key initialized"
                 );
-                Some(*pub_key.as_bytes())
+                *pub_key.as_bytes()
             });
 
     let notification_url = env::var("NOTIFICATION_SERVICE_URL")

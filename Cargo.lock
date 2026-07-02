@@ -675,8 +675,10 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "curve25519-dalek",
  "ed25519-dalek",
  "hex",
+ "hkdf 0.13.0",
  "hmac 0.13.0",
  "ml-dsa",
  "prost",
@@ -685,6 +687,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "subtle",
  "thiserror 2.0.18",
@@ -2646,6 +2649,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x25519-dalek",
  "zeroize",
 ]
 

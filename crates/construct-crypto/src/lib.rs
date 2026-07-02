@@ -32,6 +32,10 @@ pub use hmac_hash::hmac_sha256;
 pub mod envelope;
 pub use envelope::{envelope_decrypt, envelope_encrypt};
 
+/// ConstructPrivacyPass server-side primitives (VOPRF token redemption, sealed-box
+/// opening) for stealth-sender anti-abuse. Always available, no feature flag.
+pub mod privacy_pass;
+
 /// End-to-end encryption primitives (Signal Protocol)
 #[cfg(feature = "e2ee")]
 pub mod e2e;
