@@ -53,6 +53,8 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 | `construct-context` | `AppContext` adapter (bridges old context to shared services) |
 | `construct-federation` | Server signing keys (Ed25519) |
 | `construct-metrics` | Prometheus metrics helpers |
+| `construct-db` | Postgres ORM: `User`, `BlockedUser`, `Device` etc + all CRUD queries |
+| `construct-types` | Domain types: `UserId`, `RouteId`, timestamp parsing, hex/UUID helpers |
 
 ---
 
@@ -233,6 +235,53 @@ Total: ~5-15 ms
 
 ---
 
+## Identity & Routing (Epic E — pubkey-as-identity)
+
+Additive identity model: `identity_public_key` + `identity_key_type` alongside UUID (not replacement).
+
+### Users table columns (added via migration 064)
+
+| Column | Type | Purpose |
+|---|---|---|
+| `identity_public_key` | `BYTEA` | Public key (32 bytes Ed25519, 1952 ML-DSA-65, 1984 hybrid) |
+| `identity_key_type` | `SMALLINT NOT NULL DEFAULT 1` | Algorithm: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid |
+| `route_id` | `VARCHAR(64) UNIQUE` | `SHA-256(identity_key_type \|\| identity_public_key)`, hex-encoded |
+
+- `recovery_public_key` values are copied into `identity_public_key` for existing users (migration backfill)
+- Route_id `NULL` for legacy rows until they next register
+
+### RouteId type (`construct-types/src/user_id.rs`)
+
+```rust
+RouteId::compute(public_key: &[u8], key_type: i16) -> RouteId
+```
+
+- `SHA-256(type || key)` prevents algorithm confusion attacks
+- Output: 64-char hex string (32 bytes)
+
+### Lookup functions (`construct-db`)
+
+| Function | SQL | Returns |
+|---|---|---|
+| `get_user_by_identity_pubkey(pool, &[u8])` | `WHERE identity_public_key = $1` | `Option<User>` |
+| `get_user_by_route_id(pool, &str)` | `WHERE route_id = $1` | `Option<User>` |
+| `get_user_home_relays(pool, &Uuid)` | `SELECT DISTINCT server_hostname FROM devices WHERE user_id = $1 AND server_hostname IS NOT NULL` | `Vec<String>` |
+
+### Registration flow
+
+In `construct-auth-service/src/devices.rs`:
+1. Client sends `identity_public_key` (proto field 5) + `identity_key_type` (proto field 6) in `RegisterDeviceRequest`
+2. Server validates key length by type: Ed25519 expects 32 bytes, ML-DSA-65 expects 1952, hybrid expects 1984
+3. Computes `route_id` via `RouteId::compute(key, type)`
+4. Stores all three in `users` table via `create_user_with_first_device()`
+
+### E.3 (next)
+
+- Dual addressing: `UserId::parse()` to accept `ed25519:<hex>` format
+- `dispatch_sealed_sender` route_id → UUID → relay resolution
+
+---
+
 ## Known Issues / Tech Debt
 
 1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients are initialized in `messaging-service/main.rs` even though `to_app_context()` doesn't use them. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
@@ -240,6 +289,8 @@ Total: ~5-15 ms
 2. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
 
 3. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
+
+4. **Identity & Routing (Epic E)** — E.1 (identity_public_key + registration) and E.2 (RouteId + lookup functions) are complete. E.3 (dual addressing in `UserId::parse` + `dispatch_sealed_sender` route resolution) is pending. `dispatch_sealed_sender` in `messaging-service/src/envelope.rs` still routes by UUID only — no route_id/DHT integration exists.
 
 ---
 
