@@ -54,6 +54,7 @@ rmp-serde = "1.3"
 hmac = "0.13"
 rand = "0.10"
 sha2 = "0.11"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 [dev-dependencies]
 reqwest = { workspace = true }

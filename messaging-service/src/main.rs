@@ -11,6 +11,7 @@ mod receipts;
 mod sentinel;
 mod spent_tag;
 mod stream;
+mod token_redeem;
 mod trust;
 
 use anyhow::{Context, Result};
@@ -162,6 +163,48 @@ async fn main() -> Result<()> {
     let server_signer =
         construct_server_shared::context::AppContext::init_server_signer_pub(&config);
 
+    // Privacy Pass token issuer key (stealth-sealed-sender-v2 Phase 1) — same
+    // TOKEN_ISSUER_KEY secret as identity-service's IssueTokens, loaded the same way.
+    let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
+        Ok(hex_str) => {
+            let bytes = (0..hex_str.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16))
+                .collect::<Result<Vec<u8>, _>>();
+            match bytes {
+                Ok(b) if b.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&b);
+                    info!("Privacy Pass token issuer key loaded — sealed-sender redemption enabled");
+                    Some(arr)
+                }
+                _ => {
+                    tracing::warn!(
+                        "TOKEN_ISSUER_KEY must be 64 hex chars — sealed-sender redemption disabled"
+                    );
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            info!("TOKEN_ISSUER_KEY not set — sealed-sender redemption disabled");
+            None
+        }
+    };
+
+    // X25519 static secret for opening SealedInner.token_bytes — derived independently
+    // from the same signing_key_seed identity-service uses to publish the public half.
+    let token_enc_static_secret = config
+        .federation
+        .signing_key_seed
+        .as_ref()
+        .and_then(|seed| construct_crypto::privacy_pass::derive_token_enc_static_secret(seed));
+    if token_enc_static_secret.is_none() {
+        tracing::warn!(
+            "token encryption static secret unavailable (SERVER_SIGNING_KEY not set) — sealed-sender redemption disabled"
+        );
+    }
+
     // Create service context
     let context = Arc::new(MessagingServiceContext {
         db_pool,
@@ -173,6 +216,8 @@ async fn main() -> Result<()> {
         server_signer,
         server_instance_id: uuid::Uuid::new_v4().to_string(),
         redis_conn,
+        token_issuer_key,
+        token_enc_static_secret,
     });
 
     // handlers module is local (messaging-service/src/handlers.rs)

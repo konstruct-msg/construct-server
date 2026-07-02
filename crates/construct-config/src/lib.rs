@@ -28,7 +28,7 @@ pub use deeplinks::DeepLinksConfig;
 pub use federation::{ApnsConfig, ApnsEnvironment, FederationConfig, MtlsConfig};
 pub use logging::LoggingConfig;
 pub use media::MediaConfig;
-pub use messaging::MessagingConfig;
+pub use messaging::{MessagingConfig, StealthTokenPolicy};
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use security::{CsrfConfig, SecurityConfig};

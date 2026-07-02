@@ -9,6 +9,33 @@
 // Environment variable prefix: MSG_
 // ============================================================================
 
+/// Enforcement mode for Privacy Pass token redemption on sealed-sender messages
+/// (stealth-sealed-sender-v2 Phase 1). See
+/// `construct-docs/decisions/stealth-sealed-sender-v2-always-on.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StealthTokenPolicy {
+    /// Skip token redemption entirely (current behavior).
+    #[default]
+    Off,
+    /// Attempt redemption, log + record metrics on failure, never reject the send.
+    Warn,
+    /// Attempt redemption, reject the send on any failure (including Redis errors).
+    Enforce,
+}
+
+impl std::str::FromStr for StealthTokenPolicy {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "warn" => Ok(Self::Warn),
+            "enforce" => Ok(Self::Enforce),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Anti-spam and connection policy for the messaging service.
 #[derive(Clone, Debug)]
 pub struct MessagingConfig {
@@ -84,6 +111,11 @@ pub struct MessagingConfig {
     /// Minimum Redis XREAD latency (ms) that triggers a "slow" log entry.
     /// Default: 50
     pub stream_xread_slow_ms: u128,
+
+    // ── Stealth sealed-sender: Privacy Pass redemption ─────────────────────
+    /// Enforcement mode for token redemption on sealed-sender messages.
+    /// Default: off (unknown/missing values also fall back to off).
+    pub stealth_token_policy: StealthTokenPolicy,
 }
 
 impl MessagingConfig {
@@ -178,6 +210,11 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50),
+
+            stealth_token_policy: std::env::var("MSG_STEALTH_TOKEN_POLICY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
         }
     }
 }

@@ -163,6 +163,55 @@ pub(crate) async fn dispatch_sealed_sender(
         anyhow::bail!("SealedInner.recipient_user_id is required");
     }
 
+    // ── Privacy Pass token redemption (stealth-sealed-sender-v2 Phase 1) ───
+    // Gate cheapest-first, before the delivery-tag check and dispatch. See
+    // construct-docs/decisions/stealth-sealed-sender-v2-always-on.md §3 Phase 1.
+    use construct_config::StealthTokenPolicy;
+    let policy = context.config.messaging.stealth_token_policy;
+    if policy != StealthTokenPolicy::Off {
+        let mode_label = match policy {
+            StealthTokenPolicy::Warn => "warn",
+            StealthTokenPolicy::Enforce => "enforce",
+            StealthTokenPolicy::Off => unreachable!(),
+        };
+
+        construct_metrics::STEALTH_SEALED_LOCAL_TOTAL.inc();
+        let has_token = !sealed_inner.token_nonce.is_empty() && !sealed_inner.token_bytes.is_empty();
+        construct_metrics::STEALTH_TOKEN_PRESENT_TOTAL
+            .with_label_values(&[if has_token { "present" } else { "absent" }])
+            .inc();
+
+        let mut conn = context.redis_conn.clone();
+        let result = crate::token_redeem::redeem_token_checked(
+            &mut conn,
+            context.token_issuer_key.as_ref(),
+            context.token_enc_static_secret.as_ref(),
+            &sealed_inner.token_nonce,
+            &sealed_inner.token_bytes,
+        )
+        .await;
+
+        let result_label = result.as_label();
+        construct_metrics::STEALTH_TOKEN_CHECK_TOTAL
+            .with_label_values(&[mode_label, result_label])
+            .inc();
+
+        if result != crate::token_redeem::TokenRedeemResult::Ok {
+            if policy == StealthTokenPolicy::Enforce {
+                tracing::warn!(
+                    result = result_label,
+                    "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
+                );
+                anyhow::bail!("privacy pass token redemption failed: {}", result_label);
+            } else {
+                tracing::info!(
+                    result = result_label,
+                    "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
+                );
+            }
+        }
+    }
+
     // ── Delivery-tag anti-replay (two-layer) ───────────────────────────────
     // SealedInner.delivery_tag is a per-message random nonce (32 bytes).
     // We check it against:

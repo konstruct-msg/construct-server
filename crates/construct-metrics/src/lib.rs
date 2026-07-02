@@ -341,6 +341,48 @@ pub static AUTH_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // ============================================================================
+// Stealth Sealed Sender — Privacy Pass Redemption (Phase 1)
+// ============================================================================
+
+/// Sealed-sender messages dispatched locally (i.e. actually decoded and
+/// evaluated for token redemption — excludes opaque cross-server forwards).
+pub static STEALTH_SEALED_LOCAL_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_stealth_sealed_local_total",
+        "Sealed-sender messages dispatched to a local recipient"
+    ))
+    .expect("Failed to register STEALTH_SEALED_LOCAL_TOTAL metric")
+});
+
+/// Whether a locally-dispatched sealed message carried a Privacy Pass token.
+/// Label `presence`: "present" | "absent"
+pub static STEALTH_TOKEN_PRESENT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_stealth_token_present_total",
+            "Sealed-sender messages by whether a Privacy Pass token was attached"
+        ),
+        &["presence"]
+    )
+    .expect("Failed to register STEALTH_TOKEN_PRESENT_TOTAL metric")
+});
+
+/// Result of a Privacy Pass token redemption attempt.
+/// Label `mode`: "warn" | "enforce"
+/// Label `result`: "ok" | "missing_token" | "decrypt_failed" | "invalid_token"
+///   | "double_spent" | "redis_error" | "not_configured"
+pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_stealth_token_check_total",
+            "Privacy Pass token redemption outcomes for sealed-sender messages"
+        ),
+        &["mode", "result"]
+    )
+    .expect("Failed to register STEALTH_TOKEN_CHECK_TOTAL metric")
+});
+
+// ============================================================================
 // Metrics Collection
 // ============================================================================
 
