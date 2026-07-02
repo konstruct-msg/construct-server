@@ -21,17 +21,6 @@ Signal's Security  +  Email's Openness  +  Minimal Attack Surface
 
 ## Privacy Guarantees
 
-### What the server never sees
-
-| Data | Signal | Telegram | **Konstruct** |
-|------|--------|----------|---------------|
-| Message content | ✅ never | ❌ sees | ✅ never |
-| Contact list | ⚠️ sees hashes | ❌ sees | ✅ never stored |
-| Who you talk to | ⚠️ metadata | ❌ sees | ✅ sealed sender |
-| When you were last online | ❌ sees | ❌ sees | ✅ never |
-| Your real name | ⚠️ via phone | ❌ sees | ✅ not required |
-| Phone number | ❌ required | ❌ required | ✅ not required |
-
 ### How this is enforced technically
 
 **End-to-end encryption** — Messages are encrypted on the sender's device using the recipient's public key. The ciphertext is what travels over the network. The server stores nothing readable.
@@ -68,13 +57,10 @@ Double Ratchet session initialized — every message gets a fresh key
 
 The server supports two crypto suites simultaneously:
 
-| Suite | Keys | Status |
-|-------|------|--------|
-| `0x01` ClassicX25519 | Ed25519 + X25519 | Active |
-| `0x10` HybridKyber768X25519 | Ed25519 + ML-KEM-768 ⊕ X25519 | Active |
-
-> The internal suite enum is historically named `HybridKyber1024X25519`, but the actual
-> KEM is **ML-KEM-768** (FIPS 203), not 1024 — the wire and key sizes are ML-KEM-768's.
+| Suite ID | Name | Keys | Status |
+|----------|------|------|--------|
+| `1` | ClassicX25519 | Ed25519 + X25519 | Active |
+| `2` | PQHybridKyber | Ed25519 + ML-KEM-768 ⊕ X25519 | Active |
 
 Hybrid PQC means: even if ML-KEM-768 has an undiscovered flaw, X25519 still protects you. Even if a quantum computer breaks X25519, ML-KEM-768 still protects you.
 
@@ -128,23 +114,24 @@ Client (iOS / macOS)
   ▼
 Caddy :443      — edge TLS termination (Let's Encrypt), gRPC routing to services
   │
-  ├──► auth-service      :50051  (registration, JWT, PoW, device + invite tokens)
-  ├──► user-service      :50052  (profiles, search, relationships, invite redemption)
-  ├──► messaging-service :50053  (send/receive, streaming, receipts, silent APNs push)
+  ├──► identity-service  :50051  (Auth, Device, DeviceLink, User, Invite — merged)
+  ├──► messaging-service :50053  (Messaging, Notification, Sentinel — merged)
   ├──► media-service     :50056  (encrypted attachments)
+  ├──► veil-service      :50056  (VEIL ticket provisioning — separate deployment)
   ├──► key-service       :50057  (X3DH prekeys, ML-KEM keys)
   ├──► group-service     :50058  (MLS groups RFC 9420 + broadcast channels)
-  ├──► sentinel-service  :50059  (abuse / rate-limit; called by messaging on send)
   ├──► signaling-service :50060  (WebRTC call signaling)
-  ├──► veil-service              (veil obfuscation ticket provisioning)
   └──► gateway           :3000   (HTTP: /health, /.well-known, /federation; veil/obfs4 proxy :9443)
+
+Non-gRPC services:
+  └──► masque-service    :9200   (WebSocket MASQUE-lite QUIC datagram relay)
 
 Message flow (Redis-direct, no Kafka):
   sender → messaging-service → Redis stream delivery:offline:{user}[:{device}] + PUBLISH inbox:wakeup → recipient
   (never touches a SQL database — no message content persistence)
 ```
 
-**Pure gRPC architecture.** No REST. No WebSockets. Binary protocol end-to-end.
+**gRPC-first architecture.** Core messaging, auth, and key management are gRPC. REST endpoints exist only for health, discovery, notification registration, and federation S2S.
 
 ---
 
@@ -165,24 +152,26 @@ Message flow (Redis-direct, no Kafka):
 
 ```
 construct-server/
-├── auth-service/          # Device registration, JWT, PoW, invite tokens
+├── gateway/               # Federation, health, discovery, veil/obfs4 proxy
+├── identity-service/      # Merged auth + user + invite (Phase 2.7)
 ├── key-service/           # X3DH prekeys, PQC Kyber keys
-├── messaging-service/     # Send/receive, streaming, receipts, silent APNs push
-├── user-service/          # User profiles, search, invite redemption
+├── masque-service/        # WebSocket MASQUE-lite QUIC datagram relay
 ├── media-service/         # Encrypted media upload/download
+├── messaging-service/     # Send/receive, streaming, receipts, APNs push, sentinel
 ├── group-service/         # MLS group messaging (RFC 9420) + broadcast channels
 ├── signaling-service/     # WebRTC call signaling relay
-├── masque-service/        # MASQUE-lite QUIC datagram relay (transport)
-├── sentinel-service/      # Abuse / rate-limit sentinel
-├── veil-service/          # Veil obfuscation ticket provisioning
-├── gateway/               # Federation, health, discovery, veil/obfs4 proxy
+├── veil-service/          # VEIL obfuscation ticket provisioning
 ├── shared/
 │   ├── proto/             # Protobuf definitions (source of truth)
-│   └── migrations/        # PostgreSQL schema (devices & keys only)
-└── crates/                # Shared libraries
+│   ├── migrations/        # PostgreSQL schema (65 migrations, 001–064)
+│   └── tests/             # Integration tests
+└── crates/                # Shared libraries (26 crates)
     ├── construct-crypto/  # Crypto primitives
     ├── construct-auth/    # JWT, PoW
-    ├── construct-db/      # Database queries
+    ├── construct-db/      # Database ORM + queries
+    ├── construct-pow/     # Proof-of-Work challenge/verify
+    ├── construct-apns/    # APNs HTTP/2 push client
+    ├── construct-rate-limit/ # Redis sliding window rate limiter
     └── ...
 ```
 
@@ -203,7 +192,7 @@ docker compose -f ops/docker-compose.dev.yml up -d
 DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test \
 REDIS_URL=redis://localhost:6379 \
 RUST_LOG=info \
-cargo run -p auth-service
+cargo run -p identity-service
 ```
 
 ### Run tests
@@ -242,7 +231,7 @@ Contributions are welcome. Before contributing, read the threat model below.
 ### Rules for contributors
 
 1. **Privacy is non-negotiable.** No feature ships that adds server-side visibility into user behavior, content, or metadata.
-2. **No new REST endpoints.** The architecture is gRPC-only. REST was removed deliberately.
+2. **No new REST endpoints for core functionality.** The architecture is gRPC-first. REST endpoints exist only for health, discovery, federation S2S, and notification registration.
 3. **No PII in logs.** User IDs are HMAC-hashed before logging. IPs are never logged.
 4. **Test your crypto changes.** Security-critical code requires unit tests with known vectors.
 5. **Secrets never in source.** No keys, tokens, or credentials in any committed file — not even test fixtures.
