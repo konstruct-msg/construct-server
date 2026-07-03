@@ -176,7 +176,8 @@ pub(crate) async fn dispatch_sealed_sender(
         };
 
         construct_metrics::STEALTH_SEALED_LOCAL_TOTAL.inc();
-        let has_token = !sealed_inner.token_nonce.is_empty() && !sealed_inner.token_bytes.is_empty();
+        let has_token =
+            !sealed_inner.token_nonce.is_empty() && !sealed_inner.token_bytes.is_empty();
         construct_metrics::STEALTH_TOKEN_PRESENT_TOTAL
             .with_label_values(&[if has_token { "present" } else { "absent" }])
             .inc();

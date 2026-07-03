@@ -2555,20 +2555,21 @@ async fn main() -> Result<()> {
             .ok()
         });
 
-    let token_enc_pub: Option<[u8; 32]> =
-        config
-            .federation
-            .signing_key_seed
-            .as_ref()
-            .and_then(|seed_b64| construct_crypto::privacy_pass::derive_token_enc_static_secret(seed_b64))
-            .map(|priv_key| {
-                let pub_key = X25519PublicKey::from(&priv_key);
-                tracing::info!(
-                    public_key = %b64::STANDARD.encode(pub_key.as_bytes()),
-                    "Token encryption key initialized"
-                );
-                *pub_key.as_bytes()
-            });
+    let token_enc_pub: Option<[u8; 32]> = config
+        .federation
+        .signing_key_seed
+        .as_ref()
+        .and_then(|seed_b64| {
+            construct_crypto::privacy_pass::derive_token_enc_static_secret(seed_b64)
+        })
+        .map(|priv_key| {
+            let pub_key = X25519PublicKey::from(&priv_key);
+            tracing::info!(
+                public_key = %b64::STANDARD.encode(pub_key.as_bytes()),
+                "Token encryption key initialized"
+            );
+            *pub_key.as_bytes()
+        });
 
     let notification_url = env::var("NOTIFICATION_SERVICE_URL")
         .unwrap_or_else(|_| "http://messaging:50053".to_string());

@@ -621,6 +621,50 @@ impl MessagingService for MessagingGrpcService {
         }))
     }
 
+    /// SendSealedMessage — stealth-sealed-sender-v2 Phase 2: unauthenticated sealed
+    /// send. Deliberately does NOT call `extract_authed_user_id` — anti-abuse is
+    /// per-IP rate limiting here plus Privacy Pass token redemption + delivery-tag
+    /// replay checking inside `dispatch_sealed_sender` (Phase 1, unchanged).
+    async fn send_sealed_message(
+        &self,
+        request: Request<proto::SendSealedMessageRequest>,
+    ) -> Result<Response<proto::SendMessageResponse>, Status> {
+        let client_ip = extract_client_ip(request.metadata());
+        let mut conn = self.context.redis_conn.clone();
+        match construct_rate_limit::sliding_window_check_and_record(
+            &mut conn,
+            &format!("sealed_ip:{client_ip}"),
+            self.context.config.messaging.sealed_ip_rate_limit_per_min,
+            60,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(Status::resource_exhausted(
+                    "sealed-sender rate limit exceeded for this IP",
+                ));
+            }
+            Err(e) => {
+                // Fail-open: Redis unavailable shouldn't block delivery — consistent
+                // with this service's other Redis fail-open paths (delivery-tag cache).
+                tracing::error!(error = %e, "sealed_ip rate limit check unavailable — proceeding");
+            }
+        }
+
+        let req = request.into_inner();
+        let attempt_id = req.attempt_id.clone();
+        let sealed = req
+            .sealed_sender
+            .ok_or_else(|| Status::invalid_argument("sealed_sender is required"))?;
+
+        let mut resp = dispatch_sealed_sender(&self.context, &sealed)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        resp.attempt_id = attempt_id;
+        Ok(Response::new(resp))
+    }
+
     async fn edit_message(
         &self,
         request: Request<proto::EditMessageRequest>,
@@ -913,6 +957,26 @@ pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
 // ============================================================================
 // Auth Helpers
 // ============================================================================
+
+/// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
+/// Caddy's `reverse_proxy`). Used only for the unauthenticated `SendSealedMessage`
+/// rate limit — mirrors `construct-auth-service::devices::extract_client_ip`,
+/// adapted from axum `HeaderMap` to tonic `MetadataMap`.
+fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
+    if let Some(forwarded) = metadata
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        let ip = forwarded.split(',').next().unwrap_or("").trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+    if let Some(real_ip) = metadata.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return real_ip.trim().to_string();
+    }
+    "unknown".to_string()
+}
 
 /// Extract the authenticated user UUID from gRPC request metadata.
 ///

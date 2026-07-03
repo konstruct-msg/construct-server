@@ -22,6 +22,13 @@ service MessagingService {
   // Use for one-off messages, prefer MessageStream for active sessions
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 
+  // SendSealedMessage - Stealth sealed-sender send (stealth-sealed-sender-v2 Phase 2).
+  // Carries ONLY the SealedSenderEnvelope — no outer Envelope, no sender/conversation_id/
+  // content_type. Server does NOT require authentication for this RPC; anti-abuse is
+  // Privacy Pass token redemption (see dispatch_sealed_sender) + per-IP rate limiting.
+  // Idempotency key = SealedInner.delivery_tag (already unique and replay-checked).
+  rpc SendSealedMessage(SendSealedMessageRequest) returns (SendMessageResponse);
+
   // EditMessage - Edit existing message (FUTURE - append-only revisions)
   // Not implemented yet - reserved for future append-only edit chain
   rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
@@ -260,6 +267,17 @@ message SendMessageRequest {
 
   // Reserved for future features
   reserved 3 to 10;
+}
+
+// SendSealedMessageRequest - stealth-sealed-sender-v2 Phase 2.
+// Deliberately carries nothing but the sealed envelope + attempt correlation ID —
+// no sender, no conversation_id, no content_type on the wire.
+message SendSealedMessageRequest {
+  shared.proto.core.v1.SealedSenderEnvelope sealed_sender = 1;
+
+  // Client-assigned attempt ID echoed in the response (same purpose as
+  // SendMessageRequest.attempt_id).
+  optional string attempt_id = 2;
 }
 
 // RateLimitChallenge - Proof-of-Work challenge issued on soft rate-limit breach.

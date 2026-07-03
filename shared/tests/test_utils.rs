@@ -460,6 +460,13 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         }))
     }
 
+    async fn send_sealed_message(
+        &self,
+        _: GrpcRequest<proto_svc::SendSealedMessageRequest>,
+    ) -> Result<GrpcResponse<proto_svc::SendMessageResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("send_sealed_message"))
+    }
+
     async fn edit_message(
         &self,
         _: GrpcRequest<proto_svc::EditMessageRequest>,
