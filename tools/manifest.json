@@ -1,0 +1,33 @@
+{
+  "bundle_signing_key": "kDGyaafEFExKTdB7MJXl4xYf0pFnxEg7bZJh7BDP9LI=",
+  "bundle_verification_key": "kDGyaafEFExKTdB7MJXl4xYf0pFnxEg7bZJh7BDP9LI=",
+  "capabilities": {
+    "max_file_size_bytes": 100000000,
+    "max_message_size_bytes": 100000,
+    "supports_grpc_web": true,
+    "supports_streaming": true
+  },
+  "grpc_endpoint": "ams.konstruct.cc:443",
+  "protocol": "grpc",
+  "server": {
+    "domain": "ams.konstruct.cc",
+    "version": "0.14"
+  },
+  "services": [
+    "auth.AuthService",
+    "user.UserService",
+    "messaging.MessagingService",
+    "notification.NotificationService",
+    "invite.InviteService",
+    "media.MediaService",
+    "signaling.SignalingService"
+  ],
+  "signaling_endpoint": "ams.konstruct.cc:443",
+  "signed_at": "2026-06-26T06:52:52Z",
+  "token_encryption_key": "K1/DTucp4ajSTAxyeeC5T3VKpLzCk0GvX1CPKFX6Vlk=",
+  "veil": {
+    "primary": "ice.konstruct.cc:443"
+  },
+  "version": "1.0",
+  "signature": "ed25519:R67uFIcknxJV0X5L5VVdwO1eriGwyHqiPYzj3IDcDP3xkSjFfu7nW5spn6QXhC5CnfJGOGUCERh-lkt-JgPgCQ"
+}

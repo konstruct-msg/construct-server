@@ -207,6 +207,32 @@ def cmd_sign(args):
     )
 
 
+def cmd_resign(args):
+    """Re-sign an existing manifest file AS-IS (all fields preserved).
+
+    Use this for the merged discovery manifest (capabilities/endpoints/
+    token_encryption_key + veil section) that isn't produced by `sign` —
+    hand-editing the file after signing invalidates the signature; this
+    recomputes it over the current content.
+    """
+    sk = load_private_key(args.key)
+    path = Path(args.manifest)
+    if not path.exists():
+        print(f"ERROR: {path} not found")
+        sys.exit(1)
+
+    payload = json.loads(path.read_text())
+    signed = sign_manifest(payload, sk)
+
+    out_path = Path(args.out) if args.out else path
+    out_path.write_text(json.dumps(signed, indent=2, ensure_ascii=False) + "\n")
+
+    print(f"✅ Re-signed manifest written to: {out_path}")
+    print(f"   Public key: {public_key_hex(sk)}")
+    print("   Verify:  python3 sign_relay_manifest.py verify "
+          f"{out_path} --pubkey {public_key_hex(sk)}")
+
+
 def cmd_verify(args):
     """Verify a signed manifest file."""
     manifest_path = Path(args.manifest)
@@ -230,12 +256,17 @@ def cmd_verify(args):
 
     print(f"Manifest version : {version}")
     if signed_at:
-        import datetime
+        # signed_at is a unix int in script-produced manifests, an ISO-8601
+        # string in the merged discovery manifest — print both as-is-friendly.
+        if isinstance(signed_at, (int, float)):
+            import datetime
 
-        dt = datetime.datetime.utcfromtimestamp(signed_at).strftime(
-            "%Y-%m-%d %H:%M UTC"
-        )
-        print(f"Signed at        : {dt}")
+            dt = datetime.datetime.fromtimestamp(
+                signed_at, datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M UTC")
+            print(f"Signed at        : {dt}")
+        else:
+            print(f"Signed at        : {signed_at}")
     print(f"Relays           : {len(relays)}")
     for r in relays:
         wt = f" [WebTunnel: {r.get('wt_path')}]" if r.get("wt_path") else ""
@@ -291,13 +322,23 @@ def main():
         help="Base64 Ed25519 public key to embed as bundle_signing_key (for client bundle verification)",
     )
 
+    # resign
+    p_resign = sub.add_parser(
+        "resign", help="Re-sign an existing manifest as-is (all fields preserved)"
+    )
+    p_resign.add_argument("manifest", help="Path to manifest file to re-sign")
+    p_resign.add_argument("--key", required=True, help="Path to private key hex file")
+    p_resign.add_argument("--out", help="Output path (default: overwrite input)")
+
     # verify
     p_verify = sub.add_parser("verify", help="Verify and inspect a signed manifest")
     p_verify.add_argument("manifest", help="Path to signed manifest file")
     p_verify.add_argument("--pubkey", help="Ed25519 public key hex to verify signature")
 
     args = parser.parse_args()
-    {"keygen": cmd_keygen, "sign": cmd_sign, "verify": cmd_verify}[args.cmd](args)
+    {"keygen": cmd_keygen, "sign": cmd_sign, "resign": cmd_resign, "verify": cmd_verify}[
+        args.cmd
+    ](args)
 
 
 if __name__ == "__main__":
