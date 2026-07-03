@@ -31,7 +31,7 @@ use construct_server_shared::{
     user_service::UserServiceContext,
 };
 use context::IdentityServiceContext;
-use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::Arc};
@@ -61,6 +61,13 @@ struct IdentityGrpcService {
     context: Arc<IdentityServiceContext>,
     veil_bridge_cert: Option<String>,
     token_issuer_key: Option<[u8; 32]>,
+    /// Signs `SenderCertificate` (`BUNDLE_SIGNING_KEY`, same secret key-service
+    /// signs prekey bundles / KT tree heads with). Clients verify certificates
+    /// against `bundle_verification_key` from well-known, so certs must be
+    /// signed by this key — NOT the federation signer (`SERVER_SIGNING_KEY`),
+    /// whose public half clients never see. Falls back to the federation
+    /// signer when unset (single-key dev setups).
+    cert_signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -620,11 +627,11 @@ impl AuthService for IdentityGrpcService {
         use construct_server_shared::shared::proto::core::v1::SenderCertificate;
         use prost::Message;
 
-        let signer = self.context.server_signer.as_ref().ok_or_else(|| {
-            Status::unavailable(
-                "sealed sender not available: federation signing key not configured",
-            )
-        })?;
+        if self.cert_signing_key.is_none() && self.context.server_signer.is_none() {
+            return Err(Status::unavailable(
+                "sealed sender not available: no certificate signing key configured",
+            ));
+        }
 
         let token = request_token(request.metadata())?;
         let claims = self
@@ -657,7 +664,7 @@ impl AuthService for IdentityGrpcService {
 
         let now = chrono::Utc::now().timestamp();
         let expires_at = now + 86400;
-        let domain = signer.instance_domain().to_string();
+        let domain = self.context.config.federation.instance_domain.clone();
 
         let sign_payload = build_sender_cert_sign_payload(
             user_id,
@@ -668,7 +675,17 @@ impl AuthService for IdentityGrpcService {
             expires_at,
         );
 
-        let signature = signer.sign_bytes(&sign_payload);
+        let signature = if let Some(sk) = &self.cert_signing_key {
+            sk.sign(&sign_payload).to_bytes().to_vec()
+        } else {
+            // Fallback for single-key deployments — only valid when
+            // bundle_verification_key in well-known is the federation key's public half.
+            self.context
+                .server_signer
+                .as_ref()
+                .expect("checked above")
+                .sign_bytes(&sign_payload)
+        };
         let cert = SenderCertificate {
             sender_user_id: user_id.to_string(),
             sender_domain: domain,
@@ -2659,6 +2676,40 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Sender-certificate signing key — same BUNDLE_SIGNING_KEY key-service signs
+    // prekey bundles / KT tree heads with, so clients can verify certificates
+    // against the bundle_verification_key they already cache from well-known.
+    let cert_signing_key: Option<SigningKey> = match env::var("BUNDLE_SIGNING_KEY") {
+        Ok(b64_str) => match b64::STANDARD.decode(b64_str.trim()) {
+            Ok(bytes) => match <[u8; 32]>::try_from(bytes) {
+                Ok(seed) => {
+                    let sk = SigningKey::from_bytes(&seed);
+                    info!(
+                        public_key = %b64::STANDARD.encode(sk.verifying_key().to_bytes()),
+                        "BUNDLE_SIGNING_KEY loaded — sender certificates signed with bundle key"
+                    );
+                    Some(sk)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "BUNDLE_SIGNING_KEY must be 32 bytes — falling back to federation signer for sender certificates"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decode BUNDLE_SIGNING_KEY — falling back to federation signer for sender certificates");
+                None
+            }
+        },
+        Err(_) => {
+            tracing::warn!(
+                "BUNDLE_SIGNING_KEY not set — sender certificates will be signed with the federation signer; clients verify against bundle_verification_key, so these certificates will NOT verify unless the two keys match"
+            );
+            None
+        }
+    };
+
     // Build sub-contexts for HTTP handlers that delegate to existing shared handlers
     let auth_svc_ctx = Arc::new(AuthServiceContext {
         db_pool: identity_ctx.db_pool.clone(),
@@ -2690,6 +2741,7 @@ async fn main() -> Result<()> {
             context: grpc_ctx,
             veil_bridge_cert: grpc_veil,
             token_issuer_key,
+            cert_signing_key,
         };
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
