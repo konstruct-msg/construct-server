@@ -142,11 +142,11 @@ fn derive_token(n_compressed: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
 /// and compare against the client-presented `token` in constant time.
 ///
 /// `k_scalar_bytes` is the server's Privacy Pass issuer scalar (`TOKEN_ISSUER_KEY`).
+/// Interpreted with `from_bytes_mod_order` to match identity-service's `IssueTokens` —
+/// a non-canonical key encoding must map to the same scalar on both sides, otherwise
+/// every token issues fine but fails redemption.
 pub fn verify_token(token: &[u8; 32], nonce: &[u8; 32], k_scalar_bytes: &[u8; 32]) -> bool {
-    let k = match Option::<Scalar>::from(Scalar::from_canonical_bytes(*k_scalar_bytes)) {
-        Some(k) => k,
-        None => return false,
-    };
+    let k = Scalar::from_bytes_mod_order(*k_scalar_bytes);
 
     let t = hash_to_ristretto(nonce);
     let n = k * t;
@@ -190,6 +190,25 @@ mod tests {
 
         // Server: verify
         assert!(verify_token(&token, &nonce, &k.to_bytes()));
+    }
+
+    /// A non-canonical key encoding (≥ group order, e.g. raw random bytes with high
+    /// bits set) must still round-trip: issuance (`from_bytes_mod_order` in
+    /// identity-service) and redemption must reduce it to the same scalar.
+    #[test]
+    fn voprf_round_trip_with_non_canonical_key_bytes() {
+        let k_bytes = [0xff_u8; 32]; // far above the ristretto255 group order
+        let k = Scalar::from_bytes_mod_order(k_bytes);
+        let nonce = random_bytes32();
+
+        let t = hash_to_ristretto(&nonce);
+        let r = Scalar::from_bytes_mod_order(random_bytes32());
+        let blinded = r * t;
+        let z = k * blinded;
+        let n = r.invert() * z;
+        let token = derive_token(&n.compress().to_bytes(), &nonce);
+
+        assert!(verify_token(&token, &nonce, &k_bytes));
     }
 
     #[test]
