@@ -116,6 +116,11 @@ pub struct MessagingConfig {
     /// Enforcement mode for token redemption on sealed-sender messages.
     /// Default: off (unknown/missing values also fall back to off).
     pub stealth_token_policy: StealthTokenPolicy,
+
+    // ── Stealth sealed-sender: unauthenticated transport (Phase 2) ─────────
+    /// Per-IP rate limit for `SendSealedMessage` (unauthenticated RPC), events per
+    /// 60-second sliding window. Default: 30.
+    pub sealed_ip_rate_limit_per_min: u32,
 }
 
 impl MessagingConfig {
@@ -215,6 +220,11 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
+
+            sealed_ip_rate_limit_per_min: std::env::var("MSG_SEALED_IP_RATE_LIMIT_PER_MIN")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
         }
     }
 }

@@ -226,10 +226,8 @@ mod tests {
 
     #[test]
     fn sealed_box_round_trip() {
-        let seed_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            random_bytes32(),
-        );
+        let seed_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, random_bytes32());
         let server_secret = derive_token_enc_static_secret(&seed_b64).unwrap();
         let server_pub = X25519PublicKey::from(&server_secret);
 

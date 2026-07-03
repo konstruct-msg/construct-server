@@ -72,9 +72,7 @@ pub async fn redeem_token_checked(
     token_bytes: &[u8],
 ) -> TokenRedeemResult {
     match (token_issuer_key, server_secret) {
-        (Some(k), Some(secret)) => {
-            redeem_token(conn, k, secret, token_nonce, token_bytes).await
-        }
+        (Some(k), Some(secret)) => redeem_token(conn, k, secret, token_nonce, token_bytes).await,
         _ => TokenRedeemResult::NotConfigured,
     }
 }

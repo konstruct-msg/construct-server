@@ -175,7 +175,9 @@ async fn main() -> Result<()> {
                 Ok(b) if b.len() == 32 => {
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&b);
-                    info!("Privacy Pass token issuer key loaded — sealed-sender redemption enabled");
+                    info!(
+                        "Privacy Pass token issuer key loaded — sealed-sender redemption enabled"
+                    );
                     Some(arr)
                 }
                 _ => {
