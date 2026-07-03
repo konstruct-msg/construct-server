@@ -1,6 +1,14 @@
 {
 	grace_period 10s
 	admin 127.0.0.1:2019
+	servers {
+		# TCP-only: UDP 443 on the host belongs to construct-transport
+		# (SALAMANDER obfuscated QUIC, rcgen self-signed cert). Without this,
+		# Caddy advertises `alt-svc: h3=":443"` and iOS URLSession follows it
+		# onto SALAMANDER → TLS -1200 on every URLSession fetch (e.g.
+		# ServerKeyManager's well-known fetch for the stealth token key).
+		protocols h1 h2
+	}
 }
 
 ams.konstruct.cc {
