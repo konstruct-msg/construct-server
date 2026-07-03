@@ -429,6 +429,10 @@ message SenderCertificate {
 
   // Ed25519 signature by sender's home server
   // Signs: sender_user_id || sender_domain || sender_identity_key || sender_device_id || issued_at || expires_at
+  // Direct byte concatenation, no separators; issued_at/expires_at are raw big-endian
+  // 8-byte integers (not ASCII). This is the only accepted format — pinned in
+  // stealth-sealed-sender-v2 Phase 3 (identity-service::build_sender_cert_sign_payload,
+  // iOS StealthSenderService.buildCertPayload).
   bytes server_signature = 7;
 
   // Reserved for future cert fields (e.g., PQ signature, capabilities)

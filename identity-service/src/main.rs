@@ -101,6 +101,28 @@ fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Stat
         .ok_or_else(|| Status::unauthenticated("authorization must be Bearer token"))
 }
 
+/// Canonical `SenderCertificate.server_signature` payload — stealth-sealed-sender-v2
+/// Phase 3: direct concatenation, no separators, `issued_at`/`expires_at` as raw
+/// big-endian 8-byte integers. Must match the iOS client's
+/// `StealthSenderService.buildCertPayload` exactly.
+fn build_sender_cert_sign_payload(
+    user_id: &str,
+    domain: &str,
+    identity_key: &[u8],
+    device_id: &str,
+    issued_at: i64,
+    expires_at: i64,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(user_id.as_bytes());
+    payload.extend_from_slice(domain.as_bytes());
+    payload.extend_from_slice(identity_key);
+    payload.extend_from_slice(device_id.as_bytes());
+    payload.extend_from_slice(&issued_at.to_be_bytes());
+    payload.extend_from_slice(&expires_at.to_be_bytes());
+    payload
+}
+
 fn extract_user_id_from_metadata(
     auth_manager: &Arc<construct_server_shared::auth::AuthManager>,
     metadata: &tonic::metadata::MetadataMap,
@@ -637,18 +659,14 @@ impl AuthService for IdentityGrpcService {
         let expires_at = now + 86400;
         let domain = signer.instance_domain().to_string();
 
-        let mut sign_payload = Vec::new();
-        sign_payload.extend_from_slice(user_id.as_bytes());
-        sign_payload.push(b':');
-        sign_payload.extend_from_slice(domain.as_bytes());
-        sign_payload.push(b':');
-        sign_payload.extend_from_slice(&identity_key);
-        sign_payload.push(b':');
-        sign_payload.extend_from_slice(device_id.as_bytes());
-        sign_payload.push(b':');
-        sign_payload.extend_from_slice(now.to_string().as_bytes());
-        sign_payload.push(b':');
-        sign_payload.extend_from_slice(expires_at.to_string().as_bytes());
+        let sign_payload = build_sender_cert_sign_payload(
+            user_id,
+            &domain,
+            &identity_key,
+            &device_id,
+            now,
+            expires_at,
+        );
 
         let signature = signer.sign_bytes(&sign_payload);
         let cert = SenderCertificate {
@@ -2767,4 +2785,33 @@ async fn main() -> Result<()> {
         .context("Failed to start HTTP server")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_sender_cert_sign_payload_is_direct_concat_no_separators_be_times() {
+        let payload = build_sender_cert_sign_payload(
+            "user-123",
+            "construct.example",
+            &[0xAB; 32],
+            "device-1",
+            1_000,
+            2_000,
+        );
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"user-123");
+        expected.extend_from_slice(b"construct.example");
+        expected.extend_from_slice(&[0xAB; 32]);
+        expected.extend_from_slice(b"device-1");
+        expected.extend_from_slice(&1_000i64.to_be_bytes());
+        expected.extend_from_slice(&2_000i64.to_be_bytes());
+
+        assert_eq!(payload, expected);
+        // No colon separators anywhere in the payload (old variant 2 used ':').
+        assert!(!payload.contains(&b':'));
+    }
 }
