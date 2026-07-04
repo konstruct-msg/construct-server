@@ -44,7 +44,7 @@ members = [
 
 # One version for all packages
 [workspace.package]
-version = "0.16.1"
+version = "0.16.2"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/konstruct-msg/construct-server"
