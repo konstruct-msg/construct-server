@@ -627,9 +627,18 @@ impl AuthService for IdentityGrpcService {
         use construct_server_shared::shared::proto::core::v1::SenderCertificate;
         use prost::Message;
 
-        if self.cert_signing_key.is_none() && self.context.server_signer.is_none() {
+        // Fail closed (sealed-sender-resilience C′): sign ONLY with the dedicated bundle
+        // key clients verify against. The old federation-signer fallback produced
+        // certificates that were valid *only if* the federation key happened to equal the
+        // published bundle_verification_key — a condition never checked, so on any real
+        // deployment it silently yielded 100% unverifiable certs (dropped at every
+        // recipient). Refusing here surfaces the misconfiguration at issuance (the client's
+        // degraded-send path engages, counted) instead of downstream as silent message loss.
+        if self.cert_signing_key.is_none() {
             return Err(Status::unavailable(
-                "sealed sender not available: no certificate signing key configured",
+                "sealed sender not available: BUNDLE_SIGNING_KEY not configured — refusing \
+                 to sign sender certificates with the federation signer (they would fail \
+                 client verification against bundle_verification_key)",
             ));
         }
 
@@ -675,17 +684,13 @@ impl AuthService for IdentityGrpcService {
             expires_at,
         );
 
-        let signature = if let Some(sk) = &self.cert_signing_key {
-            sk.sign(&sign_payload).to_bytes().to_vec()
-        } else {
-            // Fallback for single-key deployments — only valid when
-            // bundle_verification_key in well-known is the federation key's public half.
-            self.context
-                .server_signer
-                .as_ref()
-                .expect("checked above")
-                .sign_bytes(&sign_payload)
-        };
+        let signature = self
+            .cert_signing_key
+            .as_ref()
+            .expect("checked above")
+            .sign(&sign_payload)
+            .to_bytes()
+            .to_vec();
         let cert = SenderCertificate {
             sender_user_id: user_id.to_string(),
             sender_domain: domain,
@@ -2692,23 +2697,41 @@ async fn main() -> Result<()> {
                 }
                 Err(_) => {
                     tracing::warn!(
-                        "BUNDLE_SIGNING_KEY must be 32 bytes — falling back to federation signer for sender certificates"
+                        "BUNDLE_SIGNING_KEY must be 32 bytes — sender certificates will be UNAVAILABLE (sealed sender disabled) until it is fixed"
                     );
                     None
                 }
             },
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to decode BUNDLE_SIGNING_KEY — falling back to federation signer for sender certificates");
+                tracing::warn!(error = %e, "Failed to decode BUNDLE_SIGNING_KEY — sender certificates will be UNAVAILABLE (sealed sender disabled) until it is fixed");
                 None
             }
         },
         Err(_) => {
             tracing::warn!(
-                "BUNDLE_SIGNING_KEY not set — sender certificates will be signed with the federation signer; clients verify against bundle_verification_key, so these certificates will NOT verify unless the two keys match"
+                "BUNDLE_SIGNING_KEY not set — sender certificates will be UNAVAILABLE (sealed sender disabled). Set it to the same 32-byte seed key-service uses; the service now refuses to sign with the federation signer rather than issue certs that fail client verification"
             );
             None
         }
     };
+
+    // Cross-service consistency guard (sealed-sender-resilience C′): if the deployment also
+    // hands this service the gateway's published bundle key (BUNDLE_SIGNING_PUBLIC_KEY, what
+    // clients verify certs/KT against), assert the key we SIGN with equals it. A mismatch is
+    // the silent 100%-sealed-drop failure mode — fail fast at boot instead of shipping
+    // unverifiable certificates. No-op when the public var isn't provided to this service.
+    if let (Some(sk), Ok(published)) = (&cert_signing_key, env::var("BUNDLE_SIGNING_PUBLIC_KEY")) {
+        let signing_pub = b64::STANDARD.encode(sk.verifying_key().to_bytes());
+        if signing_pub != published.trim() {
+            tracing::error!(
+                signing_public_key = %signing_pub,
+                published_public_key = %published.trim(),
+                "BUNDLE_SIGNING_KEY does not match BUNDLE_SIGNING_PUBLIC_KEY — sender certificates would fail client verification against the published bundle key. Refusing to start."
+            );
+            std::process::exit(1);
+        }
+        info!("BUNDLE_SIGNING_KEY matches published BUNDLE_SIGNING_PUBLIC_KEY ✓");
+    }
 
     // Build sub-contexts for HTTP handlers that delegate to existing shared handlers
     let auth_svc_ctx = Arc::new(AuthServiceContext {
