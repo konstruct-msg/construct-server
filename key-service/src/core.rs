@@ -1058,31 +1058,87 @@ pub async fn store_hybrid_identity(
     )?;
 
     // 2. SPK hybrid signature (over the current classic SPK), if present.
-    if let Some(sig) = &upload.signed_prekey_hybrid_signature {
-        validate_hybrid_signature(sig)?;
-        let message =
-            construct_crypto::pqc::build_prekey_sign_message(0x01, &row.signed_prekey_public);
-        construct_crypto::pqc::verify_hybrid_signature(&upload.hybrid_identity_key, &message, sig)
-            .map_err(|e| anyhow::anyhow!("SPK hybrid signature verification failed: {}", e))?;
-    }
+    //
+    // This signature is OPTIONAL and verified BEST-EFFORT. It is checked against the SPK the
+    // server currently stores (`row.signed_prekey_public`); that can legitimately mismatch the
+    // SPK the client signed over when the device's SPK is momentarily desynced from the server
+    // (e.g. an SPK rotation whose RPC previously failed). Rejecting the whole upload in that case
+    // is a DEADLOCK: the hybrid identity update (which is what SPK rotation later verifies its new
+    // signature against) can never land, so the SPK can never re-sync, so the hybrid SPK signature
+    // can never verify. Instead: verify best-effort, and on failure skip persisting THIS signature
+    // while still updating the hybrid identity key — which the cross-signature above already bound
+    // to the device. Once the identity is stored, a normal SPK rotation re-syncs the SPK and
+    // re-attaches a fresh, verifying hybrid SPK signature. (A malformed/oversized signature is
+    // still skipped, never persisted.) See otpk-session-init-deadlock (SPK↔hybrid deadlock).
+    let spk_hybrid_sig_to_persist: Option<&[u8]> =
+        match &upload.signed_prekey_hybrid_signature {
+            Some(sig) if validate_hybrid_signature(sig).is_ok() => {
+                let message = construct_crypto::pqc::build_prekey_sign_message(
+                    0x01,
+                    &row.signed_prekey_public,
+                );
+                match construct_crypto::pqc::verify_hybrid_signature(
+                    &upload.hybrid_identity_key,
+                    &message,
+                    sig,
+                ) {
+                    Ok(()) => Some(sig.as_slice()),
+                    Err(e) => {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            error = %e,
+                            "SPK hybrid signature did not verify over the stored SPK (likely SPK \
+                             desync) — accepting the hybrid identity update and skipping this \
+                             signature so the device can re-sync its SPK and re-attach"
+                        );
+                        None
+                    }
+                }
+            }
+            Some(_) => {
+                tracing::warn!(device_id = %device_id, "malformed SPK hybrid signature — skipping");
+                None
+            }
+            None => None,
+        };
 
-    // 3. Kyber SPK hybrid signature (over the current Kyber SPK), if present.
-    if let Some(sig) = &upload.kyber_pre_key_hybrid_signature {
-        validate_hybrid_signature(sig)?;
-        let kyber = row.kyber_signed_pre_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("kyber_pre_key_hybrid_signature provided but device has no Kyber SPK")
-        })?;
-        construct_crypto::pqc::verify_hybrid_kyber_key_signature(
-            &upload.hybrid_identity_key,
-            0x10,
-            kyber,
-            sig,
-        )
-        .map_err(|e| anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e))?;
-    }
+    // 3. Kyber SPK hybrid signature (over the current Kyber SPK), if present. Same best-effort
+    //    treatment as the classic SPK signature above.
+    let kyber_hybrid_sig_to_persist: Option<&[u8]> =
+        match &upload.kyber_pre_key_hybrid_signature {
+            Some(sig) if validate_hybrid_signature(sig).is_ok() => {
+                match row.kyber_signed_pre_key.as_ref() {
+                    Some(kyber)
+                        if construct_crypto::pqc::verify_hybrid_kyber_key_signature(
+                            &upload.hybrid_identity_key,
+                            0x10,
+                            kyber,
+                            sig,
+                        )
+                        .is_ok() =>
+                    {
+                        Some(sig.as_slice())
+                    }
+                    _ => {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            "Kyber SPK hybrid signature did not verify over the stored Kyber SPK \
+                             (or no Kyber SPK stored) — accepting hybrid identity, skipping it"
+                        );
+                        None
+                    }
+                }
+            }
+            Some(_) => {
+                tracing::warn!(device_id = %device_id, "malformed Kyber SPK hybrid signature — skipping");
+                None
+            }
+            None => None,
+        };
 
-    // All present signatures verified — persist. COALESCE keeps an existing hybrid
-    // prekey signature when this upload omits it (e.g. identity-only republish).
+    // Persist. The hybrid identity key + cross-signature are always updated (the cross-signature
+    // was verified against the device identity above). COALESCE keeps an existing prekey hybrid
+    // signature when this upload omits it or it failed best-effort verification (NULL).
     sqlx::query(
         r#"
         UPDATE devices
@@ -1096,8 +1152,8 @@ pub async fn store_hybrid_identity(
     .bind(device_id)
     .bind(&upload.hybrid_identity_key)
     .bind(&upload.hybrid_identity_signature)
-    .bind(upload.signed_prekey_hybrid_signature.as_deref())
-    .bind(upload.kyber_pre_key_hybrid_signature.as_deref())
+    .bind(spk_hybrid_sig_to_persist)
+    .bind(kyber_hybrid_sig_to_persist)
     .execute(db)
     .await?;
 
