@@ -1133,15 +1133,26 @@ pub async fn store_hybrid_identity(
     };
 
     // Persist. The hybrid identity key + cross-signature are always updated (the cross-signature
-    // was verified against the device identity above). COALESCE keeps an existing prekey hybrid
-    // signature when this upload omits it or it failed best-effort verification (NULL).
+    // was verified against the device identity above).
+    //
+    // The prekey hybrid signatures are written OUTRIGHT (not COALESCE'd): a stored SPK hybrid
+    // signature is only meaningful relative to a specific (hybrid_identity_key, signed_prekey)
+    // pair, and we are advancing hybrid_identity_key here — so any previously-stored signature
+    // (whether set by an earlier hybrid publish or by store_signed_prekey) is now under the OLD
+    // hybrid key and is therefore STALE. Keeping it (the old COALESCE behaviour) served a
+    // self-inconsistent bundle {new hybrid_key, old spkSig} that every peer hard-rejects as
+    // "SPK hybrid signature invalid" and can never recover from (build 496 regression). So when
+    // the upload's signature doesn't verify over the stored SPK ($4/$5 → NULL), we NULL the
+    // column: the bundle is then honestly "hybrid identity present, SPK not yet hybrid-signed",
+    // which a peer can degrade on (classic SPK signature) instead of hard-blocking. A subsequent
+    // SPK rotation re-attaches a fresh, verifying signature. See otpk-session-init-deadlock.
     sqlx::query(
         r#"
         UPDATE devices
         SET hybrid_identity_key       = $2,
             hybrid_identity_signature = $3,
-            signed_prekey_hybrid_signature        = COALESCE($4, signed_prekey_hybrid_signature),
-            kyber_signed_pre_key_hybrid_signature = COALESCE($5, kyber_signed_pre_key_hybrid_signature)
+            signed_prekey_hybrid_signature        = $4,
+            kyber_signed_pre_key_hybrid_signature = $5
         WHERE device_id = $1 AND is_active = true
         "#,
     )
