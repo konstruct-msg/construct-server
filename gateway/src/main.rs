@@ -35,12 +35,55 @@ struct GatewayState {
     bundle_verification_key: Option<String>,
     /// Base64-encoded X25519 public key used by clients to encrypt Privacy Pass tokens
     /// inside SealedInner (so VEIL relays can't read them).
-    /// Populated from `TOKEN_ENCRYPTION_PUBLIC_KEY` env var.
-    /// Should match the value derived on auth-service from SERVER_SIGNING_KEY via HKDF.
+    /// Derived from `SERVER_SIGNING_KEY` via HKDF(info="construct-token-enc-v1").
+    /// Matches the value published by auth-service/identity-service.
     token_encryption_key: Option<String>,
     /// Base64-encoded Ed25519 public key for S2S federation signature verification.
     /// Derived from SERVER_SIGNING_KEY. None if federation is disabled.
     federation_public_key: Option<String>,
+}
+
+/// Derive the X25519 token-encryption public key from an optional base64 seed.
+///
+/// The same HKDF derivation is used by auth-service and identity-service so
+/// that clients always fetch a key that matches the server's private half.
+fn derive_token_encryption_key_from_seed(seed: Option<&str>) -> Option<String> {
+    seed.and_then(construct_crypto::privacy_pass::derive_token_enc_public_key_base64)
+}
+
+/// Derive the X25519 token-encryption public key from `SERVER_SIGNING_KEY`.
+///
+/// If the legacy `TOKEN_ENCRYPTION_PUBLIC_KEY` env var is still set, we compare
+/// it with the derived value and warn on mismatch, but always prefer the
+/// derived key.
+fn derive_token_encryption_key(config: &Config) -> Option<String> {
+    let derived =
+        derive_token_encryption_key_from_seed(config.federation.signing_key_seed.as_deref());
+
+    if let Some(env_key) = std::env::var("TOKEN_ENCRYPTION_PUBLIC_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+    {
+        match &derived {
+            Some(d) if d == &env_key => {
+                info!("TOKEN_ENCRYPTION_PUBLIC_KEY env var matches derived key");
+            }
+            Some(d) => {
+                tracing::warn!(
+                    derived_prefix = %&d[..8.min(d.len())],
+                    env_prefix = %&env_key[..8.min(env_key.len())],
+                    "TOKEN_ENCRYPTION_PUBLIC_KEY env var mismatches derived key; using derived key"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    "TOKEN_ENCRYPTION_PUBLIC_KEY env var is set but SERVER_SIGNING_KEY is missing or invalid; env var ignored"
+                );
+            }
+        }
+    }
+
+    derived
 }
 
 #[tokio::main]
@@ -61,10 +104,10 @@ async fn main() -> Result<()> {
         info!("Bundle verification key loaded — .well-known will advertise it");
     }
 
-    let token_encryption_key = std::env::var("TOKEN_ENCRYPTION_PUBLIC_KEY").ok();
+    let token_encryption_key = derive_token_encryption_key(&config);
     if token_encryption_key.is_some() {
         info!(
-            "Token encryption public key loaded — .well-known will advertise token_encryption_key for sealed sender / Privacy Pass"
+            "Token encryption public key derived — .well-known will advertise token_encryption_key for sealed sender / Privacy Pass"
         );
     }
 
@@ -466,5 +509,65 @@ async fn metrics_endpoint() -> Result<Response<String>, StatusCode> {
             tracing::error!("Failed to gather metrics: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[test]
+    fn test_derive_token_encryption_key_from_seed_produces_valid_base64() {
+        let seed = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        let key = derive_token_encryption_key_from_seed(Some(&seed));
+        assert!(key.is_some(), "valid seed must produce a key");
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(key.unwrap())
+            .expect("key must be valid base64");
+        assert_eq!(decoded.len(), 32, "X25519 public key must be 32 bytes");
+    }
+
+    #[test]
+    fn test_derive_token_encryption_key_from_seed_is_consistent() {
+        let seed = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let a = derive_token_encryption_key_from_seed(Some(&seed));
+        let b = derive_token_encryption_key_from_seed(Some(&seed));
+        assert_eq!(a, b, "same seed must produce same public key");
+    }
+
+    #[test]
+    fn test_derive_token_encryption_key_from_seed_none_or_invalid() {
+        assert!(
+            derive_token_encryption_key_from_seed(None).is_none(),
+            "missing seed must produce no key"
+        );
+        assert!(
+            derive_token_encryption_key_from_seed(Some("not-base64!!!")).is_none(),
+            "invalid base64 must produce no key"
+        );
+    }
+
+    #[test]
+    fn test_derive_token_encryption_key_matches_privacy_pass_derivation() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+
+        let seed = STANDARD.encode([42u8; 32]);
+        let derived =
+            derive_token_encryption_key_from_seed(Some(&seed)).expect("seed must be valid");
+
+        // Independently derive the public key using the same primitives as
+        // auth-service / identity-service.
+        let static_secret = construct_crypto::privacy_pass::derive_token_enc_static_secret(&seed)
+            .expect("seed must derive a static secret");
+        let public_key = x25519_dalek::PublicKey::from(&static_secret);
+        let expected = STANDARD.encode(public_key.as_bytes());
+
+        assert_eq!(
+            derived, expected,
+            "derived public key must match independent derivation"
+        );
     }
 }

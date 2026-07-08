@@ -35,6 +35,12 @@ pub enum NotificationFilter {
 }
 
 /// APNs payload structure
+///
+/// SECURITY: the entire payload is constructed by the server and visible to
+/// Apple/APNs. It MUST only be used for OS wake-up / CallKit UI hints. The
+/// client MUST verify all call state (caller identity, call id, fingerprints)
+/// against its own E2EE signaling state and MUST NOT accept a call solely
+/// because this payload arrived.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApnsPayload {
     pub aps: ApsData,
@@ -78,6 +84,11 @@ pub struct ConstructData {
     pub conversation_id: Option<String>,
 }
 
+/// VoIP call metadata attached to a PushKit push.
+///
+/// SECURITY: this data is server-visible. `caller_id`/`caller_name` are only
+/// hints for CallKit. The recipient client MUST confirm the caller and call
+/// details through the E2EE signaling path before trusting them.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConstructCallData {
     pub call_id: String,

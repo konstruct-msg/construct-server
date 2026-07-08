@@ -31,6 +31,20 @@ pub static MESSAGES_SENT_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .expect("Failed to register MESSAGES_SENT_TOTAL metric")
 });
 
+/// Legacy edit RPC usage counter.
+/// Incremented when a client calls the deprecated EditMessage RPC.
+/// Used to gauge fleet migration before the RPC is fully removed.
+pub static LEGACY_EDIT_USAGE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_legacy_edit_usage_total",
+            "Deprecated EditMessage RPC usage by source"
+        ),
+        &["source"]
+    )
+    .expect("Failed to register LEGACY_EDIT_USAGE_TOTAL metric")
+});
+
 /// Histogram of message delivery times
 #[allow(dead_code)]
 pub static MESSAGE_DELIVERY_TIME: Lazy<Histogram> = Lazy::new(|| {

@@ -747,7 +747,14 @@ pub async fn send_key_rotation_wake(
     Ok(SendKeyRotationWakeOutput { success: sent_any })
 }
 
-/// Send a VoIP push notification for an incoming call
+/// Send a VoIP push notification for an incoming call.
+///
+/// SECURITY: the push payload is server-constructed and visible to Apple/APNs.
+/// It only wakes the device / CallKit. The actual call authorization (caller
+/// identity, DTLS fingerprint, etc.) happens inside the E2EE signaling path.
+///
+/// TODO: add per-caller/per-recipient rate limiting here to reduce the impact
+/// of a compromised server account trying to spam call invites.
 pub async fn send_voip_incoming_call(
     context: &NotificationServiceContext,
     input: SendVoipIncomingCallInput,

@@ -191,7 +191,10 @@ message VoiceMessage {
 
 // ReactionMessage - Emoji reaction to a message
 message ReactionMessage {
-  // Message ID being reacted to
+  // Message ID being reacted to.
+  //
+  // SECURITY: this MUST be the sender-generated E2E id that lives inside the
+  // encrypted KNST/MessageContent header, never the server-visible envelope id.
   string target_message_id = 1;
 
   // Emoji unicode (UTF-8)
@@ -219,7 +222,10 @@ enum ReactionAction {
 
 // EditMessage - Edit existing message
 message EditMessage {
-  // Message ID being edited
+  // Message ID being edited.
+  //
+  // SECURITY: this MUST be the sender-generated E2E id that lives inside the
+  // encrypted KNST/MessageContent header, never the server-visible envelope id.
   string target_message_id = 1;
 
   // New content (replaces original)

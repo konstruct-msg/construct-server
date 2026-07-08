@@ -71,6 +71,19 @@ pub fn derive_token_enc_static_secret(seed_b64: &str) -> Option<X25519StaticSecr
     Some(X25519StaticSecret::from(x25519_seed))
 }
 
+/// Derive the base64-encoded X25519 public key used to encrypt Privacy Pass tokens
+/// in `SealedInner`. This is the value published at `/.well-known/construct-server`
+/// as `token_encryption_key`.
+///
+/// Returns `None` if `seed_b64` is not valid base64.
+pub fn derive_token_enc_public_key_base64(seed_b64: &str) -> Option<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let static_secret = derive_token_enc_static_secret(seed_b64)?;
+    let public_key = X25519PublicKey::from(&static_secret);
+    Some(STANDARD.encode(public_key.as_bytes()))
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Sealed-box opening (X25519 + HKDF-SHA256 + ChaChaPoly)
 // ──────────────────────────────────────────────────────────────────────────

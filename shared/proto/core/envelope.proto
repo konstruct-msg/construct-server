@@ -36,9 +36,13 @@ message Envelope {
     GroupMessageId group_message_id = 21; // MOVED TO FIELD 21 (2-byte)
   }
 
-  // Server timestamp (rounded to 5-second buckets for privacy)
-  // Prevents server from learning precise message timing
-  // For precise timestamps, see encrypted_metadata
+  // Server timestamp (rounded to 5-second buckets for privacy).
+  // Prevents server from learning precise message timing.
+  //
+  // SECURITY: this is transport metadata only. It is server-visible and
+  // server-mutable; clients MUST NOT use it as the authoritative sent-time of
+  // the message. The sender-generated timestamp lives inside the encrypted
+  // payload and wins when present.
   int64 timestamp = 7;
 
   // TTL (time-to-live) in seconds
@@ -59,8 +63,14 @@ message Envelope {
 
   // === Routing & Metadata (fields 11-15) ===
 
-  // Conversation ID (1-to-1 or group)
-  // Format: "direct:{user1}:{user2}" or "group:{group_id}"
+  // DEPRECATED: conversation_id is server-visible metadata and is not populated
+  // by the messaging service. It exists on the wire only for backward
+  // compatibility with old clients.
+  //
+  // SECURITY: clients MUST NOT use this field for E2E semantics (identity,
+  // reply/edit routing, or sender/recipient recovery). Any reference a device
+  // makes to a peer's data must use a sender-generated id inside the encrypted
+  // payload.
   string conversation_id = 11;
 
   // Server-assigned metadata (added by server, read-only for clients)
@@ -86,8 +96,11 @@ message Envelope {
   // Field 17 is reserved to prevent accidental reuse.
   reserved 17;
 
-  // Edit of message ID (for message editing)
-  optional string edits_message_id = 18;
+  // DEPRECATED: edits_message_id was server-visible metadata and leaked which
+  // message was edited. Edit references are now carried inside the encrypted
+  // payload as MessageContent.edit. Field 18 is reserved to prevent reuse.
+  reserved 18;
+  reserved "edits_message_id";
 
   // Reactions (emoji reactions to this message)
   repeated Reaction reactions = 19;
@@ -271,8 +284,12 @@ message EncryptedMetadataContent {
 }
 
 // ClientMetadata - Optional client-provided metadata
+//
+// SECURITY: every field here is visible to the server. These values are useful
+// for tracing and debugging but must never drive E2E semantics.
 message ClientMetadata {
-  // Client-generated timestamp (may differ from server_timestamp)
+  // Client-generated timestamp (may differ from server_timestamp).
+  // For tracing only; authoritative sent-time lives inside encrypted_payload.
   int64 client_timestamp = 1;
 
   // Client version (for debugging)

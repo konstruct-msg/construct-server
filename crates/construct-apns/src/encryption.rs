@@ -79,10 +79,13 @@ impl DeviceTokenEncryption {
     ///
     /// # Example
     /// ```rust
+    /// use std::collections::HashMap;
+    /// use construct_apns::DeviceTokenEncryption;
+    ///
     /// let mut keys = HashMap::new();
-    /// keys.insert(1, "old_key_hex...".to_string());
-    /// keys.insert(2, "new_key_hex...".to_string());
-    /// let encryption = DeviceTokenEncryption::from_keys(keys, 2)?;
+    /// keys.insert(1, "0".repeat(64));
+    /// keys.insert(2, "1".repeat(64));
+    /// let encryption = DeviceTokenEncryption::from_keys(keys, 2).unwrap();
     /// ```
     pub fn from_keys(keys: HashMap<u8, String>, current_version: u8) -> Result<Self> {
         if keys.is_empty() {

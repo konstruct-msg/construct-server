@@ -588,7 +588,6 @@ impl MessagingService for MessagingGrpcService {
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
             content_type: envelope.content_type,
-            edits_message_id: envelope.edits_message_id.clone(),
         });
         msg_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
@@ -674,77 +673,20 @@ impl MessagingService for MessagingGrpcService {
             .await
             .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
 
-        let req = request.into_inner();
-        if req.message_id.is_empty() {
-            return Err(Status::invalid_argument("message_id is required"));
-        }
-        if req.recipient_user_id.is_empty() {
-            return Err(Status::invalid_argument("recipient_user_id is required"));
-        }
-        if req.new_encrypted_content.is_empty() {
-            return Err(Status::invalid_argument(
-                "new_encrypted_content is required",
-            ));
-        }
+        let _req = request.into_inner();
 
-        // Increment edit count in Redis. Key: edits:{message_id}, TTL 7 days.
-        // This lets the client display "edited N times" and lets the server
-        // enforce a hard cap to prevent edit-spam.
-        const MAX_EDITS: u32 = 20;
-        const EDIT_TTL_SECS: u64 = 7 * 24 * 3600;
-        let edit_count = {
-            let mut queue = self.context.queue.lock().await;
-            queue
-                .increment_edit_count(&req.message_id, EDIT_TTL_SECS)
-                .await
-                .map_err(|e| Status::internal(format!("Redis error: {e}")))?
-        };
-        if edit_count > MAX_EDITS {
-            return Err(Status::resource_exhausted(format!(
-                "edit limit of {MAX_EDITS} exceeded"
-            )));
-        }
-
-        let edited_at = chrono::Utc::now().timestamp_millis();
-        let new_message_id = uuid::Uuid::new_v4().to_string();
-
-        use construct_server_shared::message::types::MessageEnvelope;
-        let envelope = MessageEnvelope::from_edit(
-            new_message_id,
-            sender_id.to_string(),
-            req.recipient_user_id.clone(),
-            req.message_id.clone(),
-            req.new_encrypted_content.to_vec(),
-        );
-
-        // Deliver the edit through the same path as a regular message
-        // (dispatch_envelope → Redis stream + wakeup + live push), NOT a raw write_message_to_user_stream.
-        // A raw write bypasses dedup, receipt routing, and push notification side-effects, so a
-        // connected recipient never received the edit envelope (and thus edits_message_id),
-        // leaving the original message un-updated. dispatch_envelope preserves
-        // edits_message_id (see envelope.rs to_proto) and pushes it live.
-        let app_context = std::sync::Arc::new(self.context.to_app_context());
-        core::dispatch_envelope(
-            &app_context,
-            envelope,
-            self.context.notification_context.clone(),
-        )
-        .await
-        .map_err(|e| Status::internal(format!("Failed to dispatch edit: {e}")))?;
-
-        tracing::info!(
+        // Telemetry: detect usage of the deprecated EditMessage RPC before removal.
+        construct_metrics::LEGACY_EDIT_USAGE_TOTAL
+            .with_label_values(&["edit_message_rpc"])
+            .inc();
+        tracing::warn!(
             sender = %sender_id,
-            recipient = %req.recipient_user_id,
-            original_message_id = %req.message_id,
-            edit_count = edit_count,
-            "Message edit dispatched"
+            "Deprecated EditMessage RPC called; edits should be sent as encrypted MessageContent.edit"
         );
 
-        Ok(Response::new(proto::EditMessageResponse {
-            success: true,
-            edited_at,
-            edit_count,
-        }))
+        Err(Status::unimplemented(
+            "EditMessage is deprecated: embed the edit reference inside the encrypted MessageContent.edit payload",
+        ))
     }
 
     // =========================================================================
@@ -753,46 +695,20 @@ impl MessagingService for MessagingGrpcService {
 
     async fn add_reaction(
         &self,
-        request: Request<proto::AddReactionRequest>,
+        _request: Request<proto::AddReactionRequest>,
     ) -> Result<Response<proto::AddReactionResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.message_id.is_empty() {
-            return Err(Status::invalid_argument("message_id is required"));
-        }
-        if req.encrypted_reaction.is_empty() {
-            return Err(Status::invalid_argument("encrypted_reaction is required"));
-        }
-
-        // TODO: Implement add reaction
-        // 1. Get authenticated user
-        // 2. Validate message exists and user has access
-        // 3. Store reaction (encrypted: sender + emoji)
-        // 4. Notify message owner via streaming
-
-        Err(Status::unimplemented("AddReaction not implemented yet"))
+        Err(Status::unimplemented(
+            "AddReaction is deprecated: send reactions as encrypted MessageContent.reaction messages",
+        ))
     }
 
     async fn remove_reaction(
         &self,
-        request: Request<proto::RemoveReactionRequest>,
+        _request: Request<proto::RemoveReactionRequest>,
     ) -> Result<Response<proto::RemoveReactionResponse>, Status> {
-        let req = request.into_inner();
-
-        if req.message_id.is_empty() {
-            return Err(Status::invalid_argument("message_id is required"));
-        }
-        if req.reaction_id.is_empty() {
-            return Err(Status::invalid_argument("reaction_id is required"));
-        }
-
-        // TODO: Implement remove reaction
-        // 1. Get authenticated user
-        // 2. Validate user owns this reaction
-        // 3. Remove reaction from storage
-        // 4. Notify message owner via streaming
-
-        Err(Status::unimplemented("RemoveReaction not implemented yet"))
+        Err(Status::unimplemented(
+            "RemoveReaction is deprecated: send reactions as encrypted MessageContent.reaction messages",
+        ))
     }
 
     async fn get_pending_messages(
