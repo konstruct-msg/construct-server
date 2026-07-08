@@ -391,7 +391,6 @@ mod tests {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -416,7 +415,6 @@ mod tests {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -441,7 +439,6 @@ mod tests {
             server_signature: None,
             is_sealed_sender: true,
             sealed_inner_b64: Some(sealed_b64.to_string()),
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -518,29 +515,6 @@ mod tests {
         assert_eq!(
             sealed.sealed_inner, sealed_bytes,
             "sealed_inner bytes must round-trip"
-        );
-    }
-
-    #[test]
-    fn test_convert_direct_message_propagates_edits_message_id() {
-        let mut env = make_direct_envelope("alice", "bob", "dGVzdA==");
-        env.edits_message_id = Some("original-msg-123".to_string());
-
-        let proto = convert_envelope_to_proto(env).unwrap();
-        assert_eq!(
-            proto.edits_message_id,
-            Some("original-msg-123".to_string()),
-            "edits_message_id must be propagated to proto"
-        );
-    }
-
-    #[test]
-    fn test_convert_direct_message_edits_none_by_default() {
-        let env = make_direct_envelope("alice", "bob", "dGVzdA==");
-        let proto = convert_envelope_to_proto(env).unwrap();
-        assert!(
-            proto.edits_message_id.is_none(),
-            "non-edit message must not set edits_message_id"
         );
     }
 

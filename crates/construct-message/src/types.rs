@@ -140,12 +140,6 @@ pub struct MessageEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sealed_inner_b64: Option<String>,
 
-    // ===== Edit Fields =====
-    /// Original message ID that this envelope replaces (edit flow).
-    /// When set, the recipient client replaces the original message in their local store.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub edits_message_id: Option<String>,
-
     // ===== Anti-Spam Fields =====
     /// Override MAXLEN for recipient's offline queue.
     /// None = use default (10,000). Set to 100 when sender is TrustLevel::New
@@ -194,7 +188,6 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -236,7 +229,6 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: true,
             sealed_inner_b64: Some(sealed_b64),
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -276,7 +268,6 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -311,7 +302,6 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -430,7 +420,6 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -483,7 +472,6 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     server_signature: None,
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
-                    edits_message_id: None,
                     max_queue_len: None,
                     proto_content_type: None,
                 }
@@ -515,7 +503,6 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     server_signature: None,
                     is_sealed_sender: false,
                     sealed_inner_b64: None,
-                    edits_message_id: None,
                     max_queue_len: None,
                     proto_content_type: None,
                 }
@@ -548,9 +535,6 @@ pub struct ProtoEnvelopeContext {
     /// Proto ContentType value (from Envelope.content_type).
     /// Used to classify control messages (SESSION_RESET=21, KEY_SYNC=22).
     pub content_type: i32,
-    /// Propagated from proto Envelope.edits_message_id — links this message to the
-    /// original message being edited. None for new (non-edit) messages.
-    pub edits_message_id: Option<String>,
 }
 
 impl MessageEnvelope {
@@ -601,55 +585,8 @@ impl MessageEnvelope {
             server_signature: None,
             is_sealed_sender: false,
             sealed_inner_b64: None,
-            edits_message_id: ctx.edits_message_id.clone(),
             max_queue_len: None,
             proto_content_type: Some(ctx.content_type),
-        }
-    }
-
-    /// Create a MessageEnvelope for an edit operation.
-    ///
-    /// Delivers a new encrypted payload to the recipient that replaces
-    /// the original message identified by `original_message_id`.
-    /// The server tracks edit count via Redis externally (`edits:{original_message_id}`).
-    pub fn from_edit(
-        new_message_id: String,
-        sender_id: String,
-        recipient_id: String,
-        original_message_id: String,
-        new_encrypted_payload: Vec<u8>,
-    ) -> Self {
-        use base64::Engine;
-        let ciphertext_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&new_encrypted_payload);
-
-        let mut hasher = Sha256::new();
-        hasher.update(new_message_id.as_bytes());
-        hasher.update(&new_encrypted_payload);
-        hasher.update(original_message_id.as_bytes());
-        let content_hash = hex::encode(hasher.finalize());
-
-        Self {
-            message_id: new_message_id,
-            sender_id,
-            recipient_id,
-            timestamp: chrono::Utc::now().timestamp(),
-            message_type: MessageType::DirectMessage,
-            ephemeral_public_key: None,
-            message_number: None,
-            mls_payload: None,
-            group_id: None,
-            encrypted_payload: ciphertext_b64,
-            content_hash,
-            crypto_suite_id: 0,
-            origin_server: None,
-            federated: false,
-            server_signature: None,
-            is_sealed_sender: false,
-            sealed_inner_b64: None,
-            edits_message_id: Some(original_message_id),
-            max_queue_len: None,
-            proto_content_type: None,
         }
     }
 }
@@ -788,7 +725,6 @@ mod tests {
             message_id: "msg-uuid".to_string(),
             encrypted_payload: fake_ciphertext.to_vec(),
             content_type: 0,
-            edits_message_id: None,
         };
 
         let envelope = MessageEnvelope::from_proto_envelope(&ctx);
@@ -828,7 +764,6 @@ mod tests {
             message_id: "reset-init-1".to_string(),
             encrypted_payload: b"x3dh-init-payload".to_vec(),
             content_type: 24, // SESSION_RESET_INIT
-            edits_message_id: None,
         };
 
         let env = MessageEnvelope::from_proto_envelope(&ctx);
@@ -876,7 +811,6 @@ mod tests {
             message_id: "msg-rt".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 24,
-            edits_message_id: None,
         };
         let env = MessageEnvelope::from_proto_envelope(&ctx);
 
@@ -887,112 +821,7 @@ mod tests {
         assert_eq!(restored.proto_content_type, Some(24));
     }
 
-    // ── from_edit ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_from_edit_sets_edits_message_id() {
-        let env = MessageEnvelope::from_edit(
-            "new-msg-id".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-            "original-msg-id".to_string(),
-            b"new encrypted content".to_vec(),
-        );
-
-        assert_eq!(
-            env.edits_message_id,
-            Some("original-msg-id".to_string()),
-            "from_edit must set edits_message_id to the original message id"
-        );
-        assert_eq!(env.message_id, "new-msg-id");
-        assert_eq!(env.sender_id, "alice");
-        assert_eq!(env.recipient_id, "bob");
-        assert_eq!(env.message_type, MessageType::DirectMessage);
-        assert!(!env.is_sealed_sender);
-    }
-
-    #[test]
-    fn test_from_edit_payload_is_base64_of_ciphertext() {
-        use base64::Engine;
-        let ciphertext = b"opaque-encrypted-edit-bytes";
-        let env = MessageEnvelope::from_edit(
-            "e-id".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-            "orig-id".to_string(),
-            ciphertext.to_vec(),
-        );
-
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&env.encrypted_payload)
-            .expect("from_edit payload must be valid base64");
-        assert_eq!(decoded, ciphertext, "payload must be base64(ciphertext)");
-    }
-
-    #[test]
-    fn test_from_edit_content_hash_includes_original_id() {
-        // Two edits with different original_message_ids must have different content hashes
-        // even if new_message_id and ciphertext are the same.
-        let env_a = MessageEnvelope::from_edit(
-            "new-id".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-            "original-A".to_string(),
-            b"same ciphertext".to_vec(),
-        );
-        let env_b = MessageEnvelope::from_edit(
-            "new-id".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-            "original-B".to_string(),
-            b"same ciphertext".to_vec(),
-        );
-
-        assert_ne!(
-            env_a.content_hash, env_b.content_hash,
-            "content hash must include original_message_id to prevent cross-edit collisions"
-        );
-    }
-
     // ── Serde round-trips ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_serde_edits_message_id_none_is_absent_in_json() {
-        // edits_message_id has skip_serializing_if = "Option::is_none"
-        // Backward compatibility: existing consumers must not break on new field.
-        let env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
-            sender_id: "alice".to_string(),
-            recipient_id: "bob".to_string(),
-            message_id: "msg-1".to_string(),
-            encrypted_payload: b"payload".to_vec(),
-            content_type: 0,
-            edits_message_id: None,
-        });
-
-        let json = serde_json::to_string(&env).expect("serialize must succeed");
-        assert!(
-            !json.contains("editsMessageId"),
-            "editsMessageId must be absent from JSON when None (backward compat)"
-        );
-    }
-
-    #[test]
-    fn test_serde_edits_message_id_some_is_present_in_json() {
-        let env = MessageEnvelope::from_edit(
-            "new-id".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-            "original-id".to_string(),
-            b"payload".to_vec(),
-        );
-
-        let json = serde_json::to_string(&env).expect("serialize must succeed");
-        assert!(
-            json.contains("editsMessageId"),
-            "editsMessageId must be present in JSON when Some"
-        );
-        assert!(json.contains("original-id"));
-    }
 
     #[test]
     fn test_serde_direct_message_round_trip() {
@@ -1014,13 +843,12 @@ mod tests {
         assert_eq!(restored.recipient_id, env.recipient_id);
         assert_eq!(restored.message_type, env.message_type);
         assert_eq!(restored.message_number, env.message_number);
-        assert!(restored.edits_message_id.is_none());
     }
 
     #[test]
-    fn test_serde_old_message_without_edits_field_deserializes_as_none() {
-        // Simulate a JSON payload from an older server that doesn't have editsMessageId.
-        // Deserialization must succeed and edits_message_id must be None.
+    fn test_serde_old_message_without_unknown_fields_deserializes() {
+        // Simulate a JSON payload from an older server. Deserialization must succeed
+        // even if the local struct no longer contains legacy fields.
         let json = r#"{
             "messageId": "old-msg",
             "senderId": "alice",
@@ -1035,11 +863,8 @@ mod tests {
         }"#;
 
         let env: MessageEnvelope = serde_json::from_str(json)
-            .expect("old message without editsMessageId must deserialize");
-        assert!(
-            env.edits_message_id.is_none(),
-            "editsMessageId must default to None for old messages"
-        );
+            .expect("old message JSON must deserialize without legacy fields");
+        assert_eq!(env.message_id, "old-msg");
     }
 
     #[test]
@@ -1078,7 +903,6 @@ mod tests {
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
-            edits_message_id: None,
         });
         assert!(env.validate().is_ok());
     }
@@ -1101,7 +925,6 @@ mod tests {
             message_id: "mls-1".to_string(),
             encrypted_payload: b"mls-ciphertext".to_vec(),
             content_type: 0,
-            edits_message_id: None,
         });
         env.message_type = MessageType::MLSMessage;
         env.mls_payload = None; // missing required field
@@ -1120,7 +943,6 @@ mod tests {
             message_id: "fed-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
-            edits_message_id: None,
         });
         env.message_type = MessageType::FederatedMessage;
         env.server_signature = Some("sig".to_string());

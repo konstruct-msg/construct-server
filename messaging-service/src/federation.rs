@@ -290,7 +290,6 @@ pub(crate) async fn handle_inbound_message(
         mls_payload: None,
         group_id: None,
         crypto_suite_id: 0,
-        edits_message_id: None,
         max_queue_len: None,
         proto_content_type: None,
     };

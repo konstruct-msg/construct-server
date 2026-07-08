@@ -401,7 +401,6 @@ fn test_msg_envelope_msgpack_roundtrip() {
         message_id: "2860d048-cca3-437f-9392-3d070846de94".to_string(),
         encrypted_payload: vec![0xAB; 200],
         content_type: 0,
-        edits_message_id: None,
     };
     let env = MessageEnvelope::from_proto_envelope(&ctx);
 

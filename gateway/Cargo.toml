@@ -68,3 +68,4 @@ rustls-pemfile = "2"
 
 [dev-dependencies]
 reqwest = { workspace = true }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }

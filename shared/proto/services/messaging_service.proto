@@ -29,20 +29,29 @@ service MessagingService {
   // Idempotency key = SealedInner.delivery_tag (already unique and replay-checked).
   rpc SendSealedMessage(SendSealedMessageRequest) returns (SendMessageResponse);
 
-  // EditMessage - Edit existing message (FUTURE - append-only revisions)
-  // Not implemented yet - reserved for future append-only edit chain
-  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
+  // DEPRECATED: EditMessage relied on a server-visible message id reference.
+  // Edits are now sent as regular E2EE messages with MessageContent.edit inside
+  // the encrypted payload. Kept as a stub returning UNIMPLEMENTED for old clients.
+  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse) {
+    option deprecated = true;
+  };
 
   // =========================================================================
   // Reactions (Future Implementation)
   // =========================================================================
 
-  // AddReaction - Add emoji reaction to message
-  // Encrypted: reaction is E2EE, server only sees message_id
-  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+  // DEPRECATED: Reactions are sent as regular E2EE messages with
+  // MessageContent.reaction inside the encrypted payload. The server must not
+  // see which message is being reacted to. Kept as stubs returning UNIMPLEMENTED.
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse) {
+    option deprecated = true;
+  };
 
-  // RemoveReaction - Remove reaction from message
-  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
+  // DEPRECATED: removal is handled by MessageContent.reaction with
+  // ReactionAction.REMOVE.
+  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse) {
+    option deprecated = true;
+  };
 
   // GetPendingMessages - Fetch pending messages (unary, for background fetch)
   // Use this for iOS BackgroundFetchManager / silent push wake-up.
@@ -320,34 +329,43 @@ message SendMessageResponse {
 }
 
 // EditMessageRequest - Edit message
+//
+// DEPRECATED: the server no longer learns which message is being edited.
+// Clients should send edits as regular E2EE messages with MessageContent.edit.
 message EditMessageRequest {
+  option deprecated = true;
+
   // Message ID to edit
-  string message_id = 1;
+  string message_id = 1 [deprecated = true];
 
   // Conversation ID
-  string conversation_id = 2;
+  string conversation_id = 2 [deprecated = true];
 
   // New content (encrypted)
-  bytes new_encrypted_content = 3;
+  bytes new_encrypted_content = 3 [deprecated = true];
 
   // Reserved for future features
   reserved 4 to 10;
 
   // Recipient user ID — required for server-side routing.
   // The server cannot infer this from the original message (no message DB).
-  string recipient_user_id = 11;
+  string recipient_user_id = 11 [deprecated = true];
 }
 
 // EditMessageResponse - Edit confirmation
+//
+// DEPRECATED: EditMessage is no longer implemented.
 message EditMessageResponse {
+  option deprecated = true;
+
   // Success
-  bool success = 1;
+  bool success = 1 [deprecated = true];
 
   // Edited timestamp
-  int64 edited_at = 2;
+  int64 edited_at = 2 [deprecated = true];
 
   // Edit count
-  uint32 edit_count = 3;
+  uint32 edit_count = 3 [deprecated = true];
 }
 
 // ============================================================================
@@ -355,87 +373,109 @@ message EditMessageResponse {
 // ============================================================================
 
 // AddReactionRequest - Add reaction to message
+//
+// DEPRECATED: reactions are sent as encrypted MessageContent.reaction messages.
 message AddReactionRequest {
+  option deprecated = true;
+
   // Message ID to react to
-  string message_id = 1;
+  string message_id = 1 [deprecated = true];
 
   // Conversation ID (for routing)
-  string conversation_id = 2;
+  string conversation_id = 2 [deprecated = true];
 
   // Encrypted reaction (E2EE blob)
   // Contains: emoji, timestamp, sender info
   // Encrypted with conversation key
-  bytes encrypted_reaction = 3;
+  bytes encrypted_reaction = 3 [deprecated = true];
 
   // Reaction ID (client-generated UUID for deduplication)
-  string reaction_id = 4;
+  string reaction_id = 4 [deprecated = true];
 
   // Reserved for future options
   reserved 5 to 10;
 }
 
 // AddReactionResponse - Reaction added confirmation
+//
+// DEPRECATED: AddReaction is no longer implemented.
 message AddReactionResponse {
+  option deprecated = true;
+
   // Success
-  bool success = 1;
+  bool success = 1 [deprecated = true];
 
   // Server timestamp
-  int64 reacted_at = 2;
+  int64 reacted_at = 2 [deprecated = true];
 
   // Reaction ID (echo back)
-  string reaction_id = 3;
+  string reaction_id = 3 [deprecated = true];
 
   // Error if failed
-  optional MessageError error = 4;
+  optional MessageError error = 4 [deprecated = true];
 }
 
 // RemoveReactionRequest - Remove reaction from message
+//
+// DEPRECATED: removal is handled by MessageContent.reaction with
+// ReactionAction.REMOVE.
 message RemoveReactionRequest {
+  option deprecated = true;
+
   // Message ID
-  string message_id = 1;
+  string message_id = 1 [deprecated = true];
 
   // Conversation ID
-  string conversation_id = 2;
+  string conversation_id = 2 [deprecated = true];
 
   // Reaction ID to remove
-  string reaction_id = 3;
+  string reaction_id = 3 [deprecated = true];
 
   // Reserved for future options
   reserved 4 to 10;
 }
 
 // RemoveReactionResponse - Reaction removed confirmation
+//
+// DEPRECATED: RemoveReaction is no longer implemented.
 message RemoveReactionResponse {
+  option deprecated = true;
+
   // Success
-  bool success = 1;
+  bool success = 1 [deprecated = true];
 
   // Removal timestamp
-  int64 removed_at = 2;
+  int64 removed_at = 2 [deprecated = true];
 }
 
 // ReactionEvent - Reaction notification (via MessageStream)
 // Sent to other participants when someone reacts
+//
+// DEPRECATED: reaction state is synchronized through regular E2EE messages;
+// the server does not distribute reaction events.
 message ReactionEvent {
+  option deprecated = true;
+
   // Reaction added or removed?
-  ReactionEventType event_type = 1;
+  ReactionEventType event_type = 1 [deprecated = true];
 
   // Message ID that was reacted to
-  string message_id = 2;
+  string message_id = 2 [deprecated = true];
 
   // Conversation ID
-  string conversation_id = 3;
+  string conversation_id = 3 [deprecated = true];
 
   // Encrypted reaction (for ADD events)
-  optional bytes encrypted_reaction = 4;
+  optional bytes encrypted_reaction = 4 [deprecated = true];
 
   // Reaction ID
-  string reaction_id = 5;
+  string reaction_id = 5 [deprecated = true];
 
   // Event timestamp
-  int64 timestamp = 6;
+  int64 timestamp = 6 [deprecated = true];
 
   // Sender device ID (for multi-device sync)
-  string sender_device_id = 7;
+  string sender_device_id = 7 [deprecated = true];
 }
 
 // ReactionEventType - Type of reaction event
@@ -484,7 +524,11 @@ message PendingMessage {
   // Server never reads this field.
   bytes encrypted_payload = 7;
 
-  // Server-assigned receive timestamp (Unix seconds). Client ignores sender's timestamp.
+  // Server-assigned receive timestamp (Unix seconds).
+  //
+  // SECURITY: this is transport ordering/cursor metadata only. The client MUST
+  // NOT render it as the message sent-time. The authoritative timestamp lives
+  // inside the encrypted payload and must be used for UI ordering when present.
   int64 timestamp = 8;
 
   // Content type — required for control messages (SESSION_RESET = 21, KEY_SYNC = 22).

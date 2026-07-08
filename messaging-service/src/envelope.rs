@@ -43,7 +43,6 @@ pub(crate) fn convert_envelope_to_proto(
             client_metadata: None,
             forwarding_path: vec![],
             ephemeral_seconds: None,
-            edits_message_id: None,
             reactions: vec![],
             mentions: vec![],
             sealed_sender: Some(core::SealedSenderEnvelope {
@@ -103,12 +102,13 @@ pub(crate) fn convert_envelope_to_proto(
         ttl: 0,
         priority: core::MessagePriority::Normal.into(),
         encrypted_payload: payload_bytes,
+        // conversation_id is intentionally empty: it is server-visible metadata
+        // and must not carry E2E semantics. See envelope.proto for details.
         conversation_id: String::new(),
         server_metadata: None,
         client_metadata: None,
         forwarding_path: vec![],
         ephemeral_seconds: None,
-        edits_message_id: envelope.edits_message_id,
         reactions: vec![],
         mentions: vec![],
         sealed_sender: None,

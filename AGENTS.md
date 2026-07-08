@@ -282,6 +282,25 @@ In `construct-auth-service/src/devices.rs`:
 
 ---
 
+## Server-influence minimization
+
+When reviewing any feature where device A references data on device B, apply the
+checklist from `construct-docs/decisions/server-influence-minimization.md`:
+
+1. **Identity** — reference uses a sender-generated id from the encrypted payload.
+2. **Tamper surface** — lookup scoped to `(id, fromUserId)`, never bare global id.
+3. **Silent failure** — unresolved references log an error.
+4. **Envelope fields** — no outer-envelope field is load-bearing.
+5. **Both delivery paths** — live stream and background fetch behave identically.
+6. **Old-peer compat** — graceful degradation + metric/log + documented removal trigger.
+
+Server-visible fields (`Envelope.message_id`, `Envelope.timestamp`,
+`Envelope.conversation_id`, `Envelope.edits_message_id`) are transport-only and
+must not enter E2E semantics. Edits, replies, reactions, deletes, pins MUST use
+`MessageContent` / `SealedInner` fields.
+
+---
+
 ## Known Issues / Tech Debt
 
 1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients are initialized in `messaging-service/main.rs` even though `to_app_context()` doesn't use them. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
