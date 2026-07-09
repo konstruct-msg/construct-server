@@ -276,8 +276,9 @@ impl MessagingService for MessagingGrpcService {
         request: Request<proto::SendMessageRequest>,
     ) -> Result<Response<proto::SendMessageResponse>, Status> {
         // Authenticate the caller before consuming the request body.
-        // For sealed-sender, sender identity is intentionally hidden — skip auth
-        // (dispatch_sealed_sender enforces its own authentication internally).
+        // Legacy sealed sender over SendMessage stays auth-gated until the old
+        // transport is fully sunset. The dedicated SendSealedMessage RPC is the
+        // only intentional unauthenticated ingress for sealed traffic.
         let authed_user_id = extract_authed_user_id(request.metadata(), &self.context).await;
 
         let req = request.into_inner();
@@ -288,6 +289,7 @@ impl MessagingService for MessagingGrpcService {
 
         // ── Sealed Sender path ──────────────────────────────────────────────
         if let Some(sealed) = &envelope.sealed_sender {
+            require_legacy_sealed_sender_auth(authed_user_id)?;
             let resp = dispatch_sealed_sender(&self.context, sealed)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -894,6 +896,16 @@ fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
     "unknown".to_string()
 }
 
+fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Result<(), Status> {
+    if authed_user_id.is_some() {
+        Ok(())
+    } else {
+        Err(Status::unauthenticated(
+            "legacy sealed sender over SendMessage requires authentication; use SendSealedMessage for unauthenticated sealed transport",
+        ))
+    }
+}
+
 /// Extract the authenticated user UUID from gRPC request metadata.
 ///
 /// Resolution order:
@@ -999,5 +1011,17 @@ mod tests {
     fn test_payload_size_over_64kb_rejected() {
         let payload = vec![0u8; 65537];
         assert!(validate_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn test_legacy_sealed_sender_requires_auth() {
+        let err = require_legacy_sealed_sender_auth(None).expect_err("auth must be required");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn test_legacy_sealed_sender_accepts_authenticated_user() {
+        require_legacy_sealed_sender_auth(Some(uuid::Uuid::new_v4()))
+            .expect("authenticated legacy sealed sender must be allowed");
     }
 }

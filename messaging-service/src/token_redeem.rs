@@ -126,6 +126,68 @@ async fn redeem_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chacha20poly1305::{
+        ChaCha20Poly1305, Key, Nonce,
+        aead::{Aead, KeyInit},
+    };
+    use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+    use hkdf::Hkdf;
+    use rand::RngExt;
+    use sha2::Sha256;
+    use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
+
+    fn random_bytes32() -> [u8; 32] {
+        let mut b = [0u8; 32];
+        rand::rng().fill(&mut b);
+        b
+    }
+
+    fn hash_to_ristretto(data: &[u8; 32]) -> RistrettoPoint {
+        use sha2_dalek_compat::{Digest, Sha512};
+
+        let mut h = Sha512::new();
+        h.update(data);
+        RistrettoPoint::from_hash(h)
+    }
+
+    fn derive_token(n_compressed: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
+        let ikm: Vec<u8> = n_compressed.iter().chain(nonce.iter()).copied().collect();
+        let hk = Hkdf::<sha2::Sha512>::new(None, &ikm);
+        let mut out = [0u8; 32];
+        hk.expand(b"ConstructPP-v1", &mut out).unwrap();
+        out
+    }
+
+    fn issue_client_token(token_issuer_key: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
+        let k = Scalar::from_bytes_mod_order(*token_issuer_key);
+        let t = hash_to_ristretto(nonce);
+        let r = Scalar::from_bytes_mod_order(random_bytes32());
+        let blinded = r * t;
+        let z = k * blinded;
+        let n = r.invert() * z;
+        derive_token(&n.compress().to_bytes(), nonce)
+    }
+
+    fn seal_token_for_server(token: &[u8; 32], server_secret: &X25519StaticSecret) -> Vec<u8> {
+        let server_pub = X25519PublicKey::from(server_secret);
+        let ephemeral_secret = X25519StaticSecret::from(random_bytes32());
+        let ephemeral_pub = X25519PublicKey::from(&ephemeral_secret);
+        let shared = ephemeral_secret.diffie_hellman(&server_pub);
+        let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
+        let mut sym_key = [0u8; 32];
+        hk.expand(b"construct-token-seal-v1", &mut sym_key).unwrap();
+
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+        let nonce_bytes = random_bytes32();
+        let aead_nonce = Nonce::from_slice(&nonce_bytes[..12]);
+        let ciphertext = cipher.encrypt(aead_nonce, token.as_slice()).unwrap();
+
+        let mut sealed = Vec::with_capacity(32 + 12 + ciphertext.len());
+        sealed.extend_from_slice(ephemeral_pub.as_bytes());
+        sealed.extend_from_slice(&nonce_bytes[..12]);
+        sealed.extend_from_slice(&ciphertext);
+        sealed
+    }
 
     #[test]
     fn labels_are_distinct() {
@@ -140,5 +202,70 @@ mod tests {
         ];
         let labels: std::collections::HashSet<_> = all.iter().map(|r| r.as_label()).collect();
         assert_eq!(labels.len(), all.len());
+    }
+
+    #[tokio::test]
+    async fn issued_token_round_trips_through_redemption_and_double_spend_check() {
+        let token_issuer_key = random_bytes32();
+        let server_secret = X25519StaticSecret::from(random_bytes32());
+        let token_nonce = random_bytes32();
+        let token = issue_client_token(&token_issuer_key, &token_nonce);
+        let sealed_token = seal_token_for_server(&token, &server_secret);
+
+        let opened =
+            open_sealed_token_bytes(&sealed_token, &server_secret).expect("sealed token must open");
+        let opened_token: [u8; 32] = opened
+            .try_into()
+            .expect("opened plaintext must be exactly 32 bytes");
+        assert_eq!(
+            opened_token, token,
+            "server must recover the original token bytes"
+        );
+        assert!(
+            verify_token(&opened_token, &token_nonce, &token_issuer_key),
+            "issued token must verify on the redemption path before Redis double-spend logic"
+        );
+
+        let redis_client =
+            redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
+        let Ok(mut conn) = redis::aio::ConnectionManager::new(redis_client).await else {
+            eprintln!(
+                "skipping Redis-backed double-spend portion: redis://127.0.0.1:6379 unavailable"
+            );
+            return;
+        };
+
+        let spent_key = format!("spent:{}", hex::encode(Sha256::digest(token_nonce)));
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_key)
+            .query_async(&mut conn)
+            .await
+            .expect("test cleanup must succeed");
+
+        let first = redeem_token_checked(
+            &mut conn,
+            Some(&token_issuer_key),
+            Some(&server_secret),
+            &token_nonce,
+            &sealed_token,
+        )
+        .await;
+        assert_eq!(first, TokenRedeemResult::Ok);
+
+        let second = redeem_token_checked(
+            &mut conn,
+            Some(&token_issuer_key),
+            Some(&server_secret),
+            &token_nonce,
+            &sealed_token,
+        )
+        .await;
+        assert_eq!(second, TokenRedeemResult::DoubleSpent);
+
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_key)
+            .query_async(&mut conn)
+            .await
+            .expect("test cleanup must succeed");
     }
 }
