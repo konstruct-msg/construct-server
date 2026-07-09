@@ -61,6 +61,10 @@ reqwest = { workspace = true }
 serial_test = "3"
 tokio = { workspace = true }
 uuid = { workspace = true }
+curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.13"
+sha2-dalek-compat = { package = "sha2", version = "0.10" }
 
 [features]
 integration_tests = []
