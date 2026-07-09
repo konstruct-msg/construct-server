@@ -317,6 +317,7 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: gateway
+      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       ICE_ENABLED: ${ICE_ENABLED:-true}
       ICE_SERVER_KEY: ${ICE_SERVER_KEY}
