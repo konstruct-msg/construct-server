@@ -234,6 +234,7 @@ pub async fn logout_user(
     all_devices: bool,
     access_jti: Option<&str>,
     access_exp: Option<i64>,
+    device_id: Option<&str>,
 ) -> Result<(), AppError> {
     // Invalidate the current access token so it cannot be reused after logout.
     // TTL is set to the token's remaining lifetime so the entry self-expires.
@@ -261,11 +262,69 @@ pub async fn logout_user(
             "Logged out from all devices"
         );
     } else {
+        // Single-device sign-out. For a *secondary* (linked) device this also
+        // unregisters it (Signal-like) so it stops appearing in ListDevices and
+        // can no longer authenticate — the fix for "logout leaves a ghost".
+        // The user's *primary* device is never deactivated here: it owns the
+        // account (passwordless identity), so deactivating it would look like
+        // account loss. Best-effort — never fail the logout on cleanup errors.
+        deactivate_secondary_device_on_logout(&app_context, &user_id, device_id).await;
+
         tracing::info!(
             user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-            "Logout requested (single device logout requires refresh token)"
+            "Single-device logout processed"
         );
     }
 
     Ok(())
+}
+
+/// Deactivate the requesting device on single-device logout, unless it is the
+/// user's primary device. Best-effort: logs and returns on any error.
+async fn deactivate_secondary_device_on_logout(
+    app_context: &Arc<AppContext>,
+    user_id: &Uuid,
+    device_id: Option<&str>,
+) {
+    let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
+        // No device_id in the token (older clients) — nothing to unregister.
+        return;
+    };
+
+    let user = match construct_db::get_user_by_id(&app_context.db_pool, user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!(error = %e, "logout: failed to load user for device cleanup");
+            return;
+        }
+    };
+
+    // Never deactivate the account-owning primary device on a normal sign-out.
+    if user.primary_device_id.as_deref() == Some(device_id) {
+        tracing::info!(
+            user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
+            "logout: primary device — keeping registration (token revoked only)"
+        );
+        return;
+    }
+
+    match construct_db::deactivate_device(&app_context.db_pool, device_id).await {
+        Ok(true) => {
+            let mut queue = app_context.queue.lock().await;
+            if let Err(e) = queue.revoke_all_sessions(device_id).await {
+                tracing::error!(error = %e, "logout: failed to revoke device sessions");
+            }
+            tracing::info!(
+                device_id = %device_id,
+                "logout: secondary device unregistered"
+            );
+        }
+        Ok(false) => {
+            // Already inactive or unknown — nothing to do.
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "logout: failed to deactivate secondary device");
+        }
+    }
 }
