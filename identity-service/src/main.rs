@@ -954,6 +954,10 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
         let user_id = uuid::Uuid::parse_str(&claims.sub)
             .map_err(|_| Status::internal("invalid user id in token"))?;
 
+        // Device that owns the calling token — marked is_current so the client
+        // can render it under "THIS DEVICE" instead of "OTHER DEVICES".
+        let current_device_id = claims.device_id.clone();
+
         let devices = construct_db::get_devices_by_user_id(self.context.db_pool.as_ref(), &user_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -961,6 +965,7 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
         let items: Vec<Result<proto::ListDevicesResponse, Status>> = devices
             .into_iter()
             .map(|d| {
+                let is_current = Some(d.device_id.as_str()) == current_device_id.as_deref();
                 Ok(proto::ListDevicesResponse {
                     device: Some(proto::DeviceInfo {
                         device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
@@ -977,7 +982,7 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
                         last_seen: 0,
                         created_at: d.registered_at.timestamp(),
                         push_provider: None,
-                        is_current: false,
+                        is_current,
                         capabilities: 0,
                     }),
                 })
