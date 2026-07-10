@@ -200,7 +200,7 @@ impl AuthService for IdentityGrpcService {
                 },
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(app_error_to_status)?;
 
         Ok(Response::new(proto::RegisterDeviceResponse {
             tokens: Some(proto::AuthTokensResponse {
@@ -229,7 +229,7 @@ impl AuthService for IdentityGrpcService {
                 },
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(app_error_to_status)?;
 
         Ok(Response::new(proto::AuthenticateDeviceResponse {
             tokens: Some(proto::AuthTokensResponse {
@@ -323,9 +323,10 @@ impl AuthService for IdentityGrpcService {
             req.all_devices,
             Some(&claims.jti),
             Some(claims.exp),
+            claims.device_id.as_deref(),
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(app_error_to_status)?;
 
         Ok(Response::new(proto::LogoutResponse { success: true }))
     }
@@ -465,6 +466,7 @@ impl AuthService for IdentityGrpcService {
             app_context.clone(),
             user_id,
             true,
+            None,
             None,
             None,
         )

@@ -203,6 +203,9 @@ pub async fn logout(
         request.all_devices,
         None,
         None,
+        // REST logout has no device_id context (TrustedUser is user-scoped);
+        // device unregistration happens on the gRPC path used by the apps.
+        None,
     )
     .await?;
     Ok((
