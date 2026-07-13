@@ -86,6 +86,7 @@ mod auth_tests {
             jwt_public_key: jwt_pub.map(|s| s.to_string()),
             paseto_private_key: paseto_priv.map(|s| s.to_string()),
             paseto_public_key: paseto_pub.map(|s| s.to_string()),
+            paseto_public_key_previous: Vec::new(),
             token_issue_format: issue_format.to_string(),
             port: 8080,
             bind_address: "127.0.0.1".to_string(),
@@ -314,6 +315,97 @@ mod auth_tests {
             paseto_priv,
             paseto_pub,
         )
+    }
+
+    // ── PASETO key rotation (overlap window) ──────────────────────────────────
+
+    /// A token signed by a superseded key must still verify while that key is in
+    /// `PASETO_PUBLIC_KEY_PREVIOUS`, and must fail once it is dropped. This is the
+    /// core invariant that makes non-disruptive PASETO key rotation possible.
+    #[test]
+    fn test_paseto_rotation_overlap_accepts_previous_key() {
+        let (old_priv, old_pub) = make_ed25519_keypair();
+        let (new_priv, new_pub) = make_ed25519_keypair();
+        let user_id = Uuid::new_v4();
+
+        // A server still on the OLD key issues a token.
+        let old_cfg = make_config(
+            None,
+            None,
+            Some(&old_priv),
+            Some(&old_pub),
+            "construct-test",
+            1,
+            "paseto",
+        );
+        let old_auth = AuthManager::new(&old_cfg).expect("old AuthManager");
+        let (old_token, _, _) = old_auth.create_token(&user_id).expect("sign with old key");
+
+        // Post-rotation server: signs with NEW key, keeps OLD pub as previous.
+        let mut overlap_cfg = make_config(
+            None,
+            None,
+            Some(&new_priv),
+            Some(&new_pub),
+            "construct-test",
+            1,
+            "paseto",
+        );
+        overlap_cfg.paseto_public_key_previous = vec![old_pub.clone()];
+        let overlap_auth = AuthManager::new(&overlap_cfg).expect("overlap AuthManager");
+
+        // Old-key token still verifies during the overlap window.
+        let claims = overlap_auth
+            .verify_token(&old_token)
+            .expect("old-key token verifies during overlap");
+        assert_eq!(claims.sub, user_id.to_string());
+
+        // A freshly issued (new-key) token also verifies.
+        let (new_token, _, _) = overlap_auth
+            .create_token(&user_id)
+            .expect("sign with new key");
+        assert!(
+            overlap_auth.verify_token(&new_token).is_ok(),
+            "new-key token verifies"
+        );
+
+        // Once the overlap window closes (previous key dropped), the old token fails.
+        let closed_cfg = make_config(
+            None,
+            None,
+            Some(&new_priv),
+            Some(&new_pub),
+            "construct-test",
+            1,
+            "paseto",
+        );
+        let closed_auth = AuthManager::new(&closed_cfg).expect("post-overlap AuthManager");
+        assert!(
+            closed_auth.verify_token(&old_token).is_err(),
+            "old-key token must be rejected after the previous key is dropped"
+        );
+    }
+
+    /// A malformed `PASETO_PUBLIC_KEY_PREVIOUS` entry is a hard error at construction —
+    /// silently dropping it would leave a rotation without overlap coverage.
+    #[test]
+    fn test_paseto_rotation_rejects_malformed_previous_key() {
+        let (new_priv, new_pub) = make_ed25519_keypair();
+        let mut cfg = make_config(
+            None,
+            None,
+            Some(&new_priv),
+            Some(&new_pub),
+            "construct-test",
+            1,
+            "paseto",
+        );
+        cfg.paseto_public_key_previous =
+            vec!["-----BEGIN PUBLIC KEY-----\nnonsense\n-----END PUBLIC KEY-----".to_string()];
+        assert!(
+            AuthManager::new(&cfg).is_err(),
+            "malformed previous key must fail construction"
+        );
     }
 
     // ── PASETO v4.public round trips ──────────────────────────────────────────

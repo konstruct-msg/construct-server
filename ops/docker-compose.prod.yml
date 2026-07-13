@@ -184,6 +184,7 @@ services:
       PORT: "8083"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: messaging
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
@@ -213,6 +214,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: key
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       # USERNAME_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -235,6 +237,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: veil
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       VEIL_GRPC_BIND_ADDRESS: "[::]:50056"
       # VEIL_ISSUER_SEED + VEIL_RELAY_* come from env_file (app.env). Do NOT list them
       # here as ${VEIL_*}: compose would substitute from the project .env (not app.env),
@@ -258,6 +261,7 @@ services:
       PORT: "8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: media
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -281,6 +285,7 @@ services:
       PORT: "8097"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: group
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
     volumes:
       - /opt/construct/secrets:/secrets:ro
@@ -300,6 +305,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: signaling
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       PORT: "50060"
       METRICS_PORT: "8091"
       # CONTACT_HMAC_SECRET + TURN_SECRET come from env_file (app.env) — do NOT re-list

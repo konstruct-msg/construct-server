@@ -79,6 +79,7 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: key-service
     environment:
+      INSTANCE_DOMAIN: smoke.test
       KEY_SERVICE_GRPC_ADDR: "0.0.0.0:50057"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
@@ -150,6 +151,7 @@ services:
     image: ghcr.io/konstruct-msg/construct-server:${IMAGE_TAG:-latest}
     command: signaling-service
     environment:
+      INSTANCE_DOMAIN: smoke.test
       PORT: "50060"
       METRICS_PORT: "8091"
       REDIS_URL: redis://redis:6379

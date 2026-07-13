@@ -24,6 +24,8 @@ fn get_test_config() -> Config {
         std::env::set_var("DATABASE_URL", "postgres://test:test@localhost/test");
         std::env::set_var("REDIS_URL", "redis://localhost:6379");
         std::env::set_var("JWT_SECRET", "test_secret_key_for_testing_only_32bytes!");
+        // INSTANCE_DOMAIN is required by FederationConfig::from_env (no silent default).
+        std::env::set_var("INSTANCE_DOMAIN", "test.local");
     }
 
     Config::from_env().expect("Failed to create test config")

@@ -26,6 +26,21 @@ static TOKEN_VERIFY_FORMAT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register TOKEN_VERIFY_FORMAT_TOTAL")
 });
 
+/// Counts PASETO verifications by which key in the set succeeded ("current" |
+/// "previous"). During a key rotation, watch `previous` fall to zero — that is the
+/// signal that every token signed by the old key has expired and it can be dropped
+/// from `PASETO_PUBLIC_KEY_PREVIOUS`.
+static PASETO_VERIFY_KEY_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_auth_paseto_verify_key_total",
+            "PASETO verifications by key age (current | previous)"
+        ),
+        &["key"]
+    )
+    .expect("Failed to register PASETO_VERIFY_KEY_TOTAL")
+});
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // user_id
@@ -63,6 +78,10 @@ pub struct AuthManager {
     paseto_signing_key: Option<SecretKey>,
     /// Ed25519 public key for PASETO verification — None if PASETO verify disabled.
     paseto_verifying_key: Option<PublicKey>,
+    /// Previous PASETO verify keys kept active during a rotation overlap window.
+    /// Tried after `paseto_verifying_key` so tokens signed by a superseded key still
+    /// verify until they expire. Signing always uses the current key only.
+    paseto_verifying_keys_previous: Vec<PublicKey>,
 
     // ── Sign policy ───────────────────────────────────────────────────────────
     /// Token format to issue on `create_token*` / `create_refresh_token*`.
@@ -130,6 +149,42 @@ impl AuthManager {
             (None, None)
         };
 
+        // ── Previous PASETO verify keys (rotation overlap window) ─────────────
+        // Only meaningful when a current verify key is loaded. Parsed strictly: a
+        // malformed previous key is a hard error (it would silently drop overlap
+        // coverage otherwise). De-dup against the current key so a copy-paste of the
+        // current key into the previous list is harmless.
+        let mut paseto_verifying_keys_previous: Vec<PublicKey> = Vec::new();
+        if let Some(ref current) = paseto_verifying_key {
+            let current_bytes: &[u8] = current.as_ref();
+            for pem in &config.paseto_public_key_previous {
+                let pk = PublicKey::from_pem(pem)
+                    .context("Failed to parse PASETO_PUBLIC_KEY_PREVIOUS entry as Ed25519 PEM")?;
+                let pk_bytes: &[u8] = pk.as_ref();
+                if pk_bytes == current_bytes {
+                    continue; // same as current — not a distinct previous key
+                }
+                if paseto_verifying_keys_previous.iter().any(|e| {
+                    let e_bytes: &[u8] = e.as_ref();
+                    e_bytes == pk_bytes
+                }) {
+                    continue; // duplicate entry
+                }
+                paseto_verifying_keys_previous.push(pk);
+            }
+            if !paseto_verifying_keys_previous.is_empty() {
+                tracing::info!(
+                    count = paseto_verifying_keys_previous.len(),
+                    "PASETO rotation overlap active — accepting {} previous verify key(s)",
+                    paseto_verifying_keys_previous.len()
+                );
+            }
+        } else if !config.paseto_public_key_previous.is_empty() {
+            tracing::warn!(
+                "PASETO_PUBLIC_KEY_PREVIOUS set but PASETO_PUBLIC_KEY is not — previous keys ignored"
+            );
+        }
+
         // ── Load legacy JWT RS256 keys (dual-stack verify) ───────────────────
         let has_jwt_public = is_valid_key(&config.jwt_public_key);
         let has_jwt_private = is_valid_key(&config.jwt_private_key);
@@ -175,6 +230,7 @@ impl AuthManager {
             jwt_decoding_key,
             paseto_signing_key,
             paseto_verifying_key,
+            paseto_verifying_keys_previous,
             issue_format,
             access_token_ttl_hours: config.access_token_ttl_hours,
             session_ttl_days: config.session_ttl_days,
@@ -359,8 +415,24 @@ impl AuthManager {
         let signature = Signature::from_slice(signature_bytes)
             .context("Failed to parse PASETO signature (expected 64 bytes)")?;
 
-        pk.verify(&pre_auth, &signature)
-            .map_err(|e| anyhow::anyhow!("PASETO signature verification failed: {e}"))?;
+        // Try the current verify key first, then any previous keys within the rotation
+        // overlap window. Record which key matched so ops can watch `previous` usage
+        // fall to zero — the signal that the old key can be removed.
+        if pk.verify(&pre_auth, &signature).is_ok() {
+            PASETO_VERIFY_KEY_TOTAL
+                .with_label_values(&["current"])
+                .inc();
+        } else if self
+            .paseto_verifying_keys_previous
+            .iter()
+            .any(|prev| prev.verify(&pre_auth, &signature).is_ok())
+        {
+            PASETO_VERIFY_KEY_TOTAL
+                .with_label_values(&["previous"])
+                .inc();
+        } else {
+            anyhow::bail!("PASETO signature verification failed against all active keys");
+        }
 
         let claims: Claims =
             serde_json::from_slice(message).context("Failed to parse PASETO claims JSON")?;

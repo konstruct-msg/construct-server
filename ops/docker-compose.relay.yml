@@ -135,6 +135,7 @@ services:
       PORT: "8083"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: messaging
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-500}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
@@ -160,6 +161,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: key
+      INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro

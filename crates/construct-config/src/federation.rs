@@ -184,8 +184,25 @@ pub struct FederationConfig {
 
 impl FederationConfig {
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        let instance_domain =
-            std::env::var("INSTANCE_DOMAIN").unwrap_or_else(|_| "eu.konstruct.cc".to_string());
+        // INSTANCE_DOMAIN is REQUIRED — no silent default. It goes into the
+        // SenderCertificate payload (`userID ‖ domain ‖ …`), the federation origin,
+        // invite links, and the federation id (`user@domain`). The previous
+        // `eu.konstruct.cc` fallback let services disagree on their own domain when the
+        // var was set on only some of them (2026-07-13: identity=ams vs messaging=eu,
+        // because messaging's compose block omitted INSTANCE_DOMAIN). Fail loud so a
+        // missing value is a boot error, never a silently-wrong domain.
+        let instance_domain = std::env::var("INSTANCE_DOMAIN")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "INSTANCE_DOMAIN is required but unset/empty. Set it (e.g. \
+                     ams.konstruct.cc) identically on EVERY service — it is part of \
+                     SenderCertificates, invite links, and the federation id."
+                )
+            })?;
+        // NOTE: FEDERATION_BASE_DOMAIN still defaults to "konstruct.cc" — a separate
+        // hardcode, left as a follow-up (only relevant when federation is enabled).
         let base_domain =
             std::env::var("FEDERATION_BASE_DOMAIN").unwrap_or_else(|_| "konstruct.cc".to_string());
         let enabled = std::env::var("FEDERATION_ENABLED")
