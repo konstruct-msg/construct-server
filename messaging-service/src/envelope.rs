@@ -215,9 +215,7 @@ pub(crate) async fn dispatch_sealed_sender(
             // client→server VOPRF round-trip works end-to-end (first redemption of a real
             // client token). Mirrors the client's "sealed send WITH token" log. Only in
             // warn (temporary validation); enforce keeps the success path silent.
-            tracing::info!(
-                "sealed sender: Privacy Pass token redeemed OK (warn-mode validation)"
-            );
+            tracing::info!("sealed sender: Privacy Pass token redeemed OK (warn-mode validation)");
         }
     }
 
