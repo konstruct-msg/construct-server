@@ -210,6 +210,14 @@ pub(crate) async fn dispatch_sealed_sender(
                     "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
                 );
             }
+        } else if policy == StealthTokenPolicy::Warn {
+            // Success-path visibility for the warn-mode validation window: confirms the
+            // client→server VOPRF round-trip works end-to-end (first redemption of a real
+            // client token). Mirrors the client's "sealed send WITH token" log. Only in
+            // warn (temporary validation); enforce keeps the success path silent.
+            tracing::info!(
+                "sealed sender: Privacy Pass token redeemed OK (warn-mode validation)"
+            );
         }
     }
 
