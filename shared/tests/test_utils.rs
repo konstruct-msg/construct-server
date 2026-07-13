@@ -134,6 +134,13 @@ async fn create_test_config(db_name: &str) -> Config {
         // set explicitly so the test doesn't depend on a local `.env` being present.
         std::env::set_var("INSTANCE_DOMAIN", "test.local");
 
+        // Set valid throwaway values so the secret-hygiene fail-fast in Config::from_env
+        // doesn't inherit a MALFORMED value from an ambient `.env`/CI (e.g. a hex-encoded
+        // SERVER_SIGNING_KEY → 48 bytes). All-zeros is a valid Ed25519 seed / issuer
+        // scalar; federation is disabled in tests, so these are never used cryptographically.
+        std::env::set_var("SERVER_SIGNING_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
+
         // Override legacy JWT env vars inherited from `.env` (or `.env.test`).
         // Set to empty strings rather than `remove_var`, because `Config::from_env()`
         // below calls `dotenvy::dotenv()` which re-sets unset vars from `.env`.

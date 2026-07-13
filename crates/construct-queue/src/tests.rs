@@ -26,6 +26,11 @@ fn get_test_config() -> Config {
         std::env::set_var("JWT_SECRET", "test_secret_key_for_testing_only_32bytes!");
         // INSTANCE_DOMAIN is required by FederationConfig::from_env (no silent default).
         std::env::set_var("INSTANCE_DOMAIN", "test.local");
+        // Valid throwaway crypto keys so the secret-hygiene fail-fast doesn't inherit a
+        // malformed ambient value (e.g. hex SERVER_SIGNING_KEY → 48 bytes). Zeros are a
+        // valid base64-32 seed / 64-hex issuer scalar; unused cryptographically here.
+        std::env::set_var("SERVER_SIGNING_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
     }
 
     Config::from_env().expect("Failed to create test config")
