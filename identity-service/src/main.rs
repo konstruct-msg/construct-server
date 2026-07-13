@@ -61,6 +61,13 @@ struct IdentityGrpcService {
     context: Arc<IdentityServiceContext>,
     veil_bridge_cert: Option<String>,
     token_issuer_key: Option<[u8; 32]>,
+    /// Hourly Privacy Pass token issuance cap per user (`TOKEN_ISSUANCE_MAX_PER_HOUR`,
+    /// default 120). Raised from the original hardcoded 20/hr for the per-message
+    /// sealed-sender scope (stealth-sealed-sender-v2 Phase B): under `enforce` every
+    /// sealed message spends a token, so 20/hr throttled active conversations. This is
+    /// the effective sealed-send rate limit — the anti-abuse backstop. Per-call batch
+    /// size stays bounded (≤20 blinded points) as a request-size guard.
+    token_issuance_max_per_hour: u32,
     /// Signs `SenderCertificate` (`BUNDLE_SIGNING_KEY`, same secret key-service
     /// signs prekey bundles / KT tree heads with). Clients verify certificates
     /// against `bundle_verification_key` from well-known, so certs must be
@@ -889,10 +896,11 @@ impl AuthService for IdentityGrpcService {
             .increment_token_issuance_count(&user_id, blinded_points.len() as u64)
             .await
             .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
-        if count > 20 {
-            return Err(Status::resource_exhausted(
-                "token issuance rate limit exceeded (20/hr)",
-            ));
+        if count > self.token_issuance_max_per_hour {
+            return Err(Status::resource_exhausted(format!(
+                "token issuance rate limit exceeded ({}/hr)",
+                self.token_issuance_max_per_hour
+            )));
         }
 
         let mut evaluated_points: Vec<Vec<u8>> = Vec::with_capacity(blinded_points.len());
@@ -2688,6 +2696,18 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Hourly Privacy Pass issuance cap (default 120). Raised from 20 for per-message
+    // sealed sending (Phase B) — this is the effective sealed-send rate limit.
+    let token_issuance_max_per_hour: u32 = env::var("TOKEN_ISSUANCE_MAX_PER_HOUR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(120);
+    info!(
+        "Privacy Pass issuance cap: {}/hr per user",
+        token_issuance_max_per_hour
+    );
+
     // Sender-certificate signing key — same BUNDLE_SIGNING_KEY key-service signs
     // prekey bundles / KT tree heads with, so clients can verify certificates
     // against the bundle_verification_key they already cache from well-known.
@@ -2771,6 +2791,7 @@ async fn main() -> Result<()> {
             context: grpc_ctx,
             veil_bridge_cert: grpc_veil,
             token_issuer_key,
+            token_issuance_max_per_hour,
             cert_signing_key,
         };
         if let Err(e) =
