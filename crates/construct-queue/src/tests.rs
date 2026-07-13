@@ -29,7 +29,10 @@ fn get_test_config() -> Config {
         // Valid throwaway crypto keys so the secret-hygiene fail-fast doesn't inherit a
         // malformed ambient value (e.g. hex SERVER_SIGNING_KEY → 48 bytes). Zeros are a
         // valid base64-32 seed / 64-hex issuer scalar; unused cryptographically here.
-        std::env::set_var("SERVER_SIGNING_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        std::env::set_var(
+            "SERVER_SIGNING_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
         std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
     }
 
