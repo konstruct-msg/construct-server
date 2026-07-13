@@ -160,8 +160,10 @@ services:
       USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
-      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
-      TOKEN_ISSUER_KEY: ${TOKEN_ISSUER_KEY}
+      # SERVER_SIGNING_KEY + TOKEN_ISSUER_KEY come from env_file (app.env). Do NOT list
+      # them here: an interpolated ${VAR} that is unset silently overrides env_file with
+      # an empty string (identity then logs "Seed must be 32 bytes, got 0" / "TOKEN_ISSUER_KEY
+      # must be 64 hex chars"). Same footgun already fixed for the VEIL keys below.
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -191,8 +193,9 @@ services:
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
       MSG_STEALTH_TOKEN_POLICY: ${MSG_STEALTH_TOKEN_POLICY:-warn}
-      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
-      TOKEN_ISSUER_KEY: ${TOKEN_ISSUER_KEY}
+      # SERVER_SIGNING_KEY + TOKEN_ISSUER_KEY come from env_file (app.env). Do NOT list
+      # them here: an unset interpolated ${VAR} silently overrides env_file with an empty
+      # string, breaking token-encryption seal/open and VOPRF redemption. See identity above.
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
