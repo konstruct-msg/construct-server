@@ -156,9 +156,8 @@ services:
       OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
       ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
       ICE_ENABLED: ${ICE_ENABLED:-true}
-      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
-      USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+      # ICE_SERVER_KEY, USERNAME_HMAC_SECRET, CONTACT_HMAC_SECRET come from env_file
+      # (app.env). Do NOT re-list as ${VAR} — an unset interpolation blanks them.
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
       # SERVER_SIGNING_KEY + TOKEN_ISSUER_KEY come from env_file (app.env). Do NOT list
       # them here: an interpolated ${VAR} that is unset silently overrides env_file with
@@ -191,7 +190,7 @@ services:
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
       APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+      # CONTACT_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
       MSG_STEALTH_TOKEN_POLICY: ${MSG_STEALTH_TOKEN_POLICY:-warn}
       # SERVER_SIGNING_KEY + TOKEN_ISSUER_KEY come from env_file (app.env). Do NOT list
       # them here: an unset interpolated ${VAR} silently overrides env_file with an empty
@@ -214,7 +213,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: key
-      USERNAME_HMAC_SECRET: ${USERNAME_HMAC_SECRET}
+      # USERNAME_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
     volumes:
       - /opt/construct/secrets:/secrets:ro
     networks:
@@ -303,9 +302,9 @@ services:
       SERVICE_NAME: signaling
       PORT: "50060"
       METRICS_PORT: "8091"
-      CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
+      # CONTACT_HMAC_SECRET + TURN_SECRET come from env_file (app.env) — do NOT re-list
+      # as ${VAR} (unset interpolation blanks them, breaking HMAC + TURN credentials).
       TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.msk.konstruct.cc}
-      TURN_SECRET: ${TURN_SECRET}
       TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
       NOTIFICATION_GRPC_ENDPOINT: "http://messaging:50053"
     volumes:
@@ -324,10 +323,11 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: gateway
-      SERVER_SIGNING_KEY: ${SERVER_SIGNING_KEY}
+      # SERVER_SIGNING_KEY + ICE_SERVER_KEY come from env_file (app.env). Do NOT re-list
+      # as ${VAR}: an unset interpolation blanked SERVER_SIGNING_KEY, so the gateway
+      # derived+published a bogus token_encryption_key from an empty seed.
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       ICE_ENABLED: ${ICE_ENABLED:-true}
-      ICE_SERVER_KEY: ${ICE_SERVER_KEY}
       ICE_UPSTREAM: "caddy:8080"
       # Relay addresses advertised in /.well-known/construct-server.
       # Port 443 = TLS-wrapped obfs4 (Caddy terminates TLS).

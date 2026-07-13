@@ -60,11 +60,19 @@ impl std::error::Error for PrivacyPassError {}
 /// signing key seed (base64). Same derivation identity-service uses to publish
 /// the public half at `/.well-known/construct-server` as `token_encryption_key`.
 ///
-/// Returns `None` if `seed_b64` is not valid base64.
+/// Returns `None` if `seed_b64` is not valid base64 or does not decode to exactly
+/// 32 bytes (matches the federation signer's invariant).
 pub fn derive_token_enc_static_secret(seed_b64: &str) -> Option<X25519StaticSecret> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let seed_bytes = STANDARD.decode(seed_b64.trim()).ok()?;
+    // Require a full 32-byte seed. HKDF will happily expand an empty or short IKM into
+    // a deterministic *wrong* key, which silently masks an unset SERVER_SIGNING_KEY (an
+    // empty `${VAR}` interpolation) as a "working" token_encryption_key — callers then
+    // publish a bogus key instead of logging "unavailable". Fail loud instead.
+    if seed_bytes.len() != 32 {
+        return None;
+    }
     let hk = Hkdf::<Sha256>::new(None, &seed_bytes);
     let mut x25519_seed = [0u8; 32];
     hk.expand(TOKEN_ENC_INFO, &mut x25519_seed).ok()?;
@@ -222,6 +230,27 @@ mod tests {
         let token = derive_token(&n.compress().to_bytes(), &nonce);
 
         assert!(verify_token(&token, &nonce, &k_bytes));
+    }
+
+    /// An empty or short seed must yield `None`, never a bogus key derived from a
+    /// short HKDF IKM — otherwise an unset `SERVER_SIGNING_KEY` (empty `${VAR}`
+    /// interpolation) silently masquerades as a working token_encryption_key.
+    #[test]
+    fn token_enc_derivation_rejects_empty_and_short_seed() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        assert!(derive_token_enc_static_secret("").is_none(), "empty seed");
+        // 16 bytes base64-encoded — decodes fine but is too short.
+        let short = STANDARD.encode([0u8; 16]);
+        assert!(
+            derive_token_enc_static_secret(&short).is_none(),
+            "16-byte seed"
+        );
+        // Exactly 32 bytes derives a key.
+        let ok = STANDARD.encode([7u8; 32]);
+        assert!(
+            derive_token_enc_static_secret(&ok).is_some(),
+            "32-byte seed"
+        );
     }
 
     #[test]
