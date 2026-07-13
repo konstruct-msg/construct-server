@@ -1,0 +1,80 @@
+{
+	grace_period 10s
+	admin 127.0.0.1:2019
+}
+
+# ── Domestic-Island Caddyfile ────────────────────────────────────────
+# Same routing as Caddyfile.relay, but uses Caddy's INTERNAL CA instead of
+# Let's Encrypt — because under an allowlist the ACME endpoints may be
+# unreachable. The relay↔relay (S2S) leg needs no public CA: peers accept each
+# other by SHA-256 SPKI fingerprint via FEDERATION_PINNED_CERTS. Domestic
+# CLIENTS must trust this cert too — prefer client-side SPKI pinning (the app
+# already pins the VEIL relay SPKI), or install the internal CA root for the
+# region, or point `tls` at a domestic ACME/CA that is reachable in-zone.
+#
+# Replace RELAY_DOMAIN with this node's INSTANCE_DOMAIN (e.g. relay.a.local).
+# See construct-docs/decisions/domestic-island-deployment.md.
+
+RELAY_DOMAIN {
+	tls internal {
+		# Long-lived so an offline/air-gapped island doesn't churn certs.
+		# Extract the fingerprint peers must pin with the openssl snippet in
+		# ops/island.env.example.
+	}
+
+	header {
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type, Authorization, X-Grpc-Web, X-User-Agent, X-CSRF-Token, Grpc-Timeout"
+		Access-Control-Expose-Headers "Grpc-Status, Grpc-Message, Grpc-Encoding, Grpc-Accept-Encoding"
+		Access-Control-Allow-Origin *
+		Vary Origin
+	}
+
+	handle /.well-known* {
+		reverse_proxy gateway:3000
+	}
+	handle /health {
+		reverse_proxy gateway:3000
+	}
+	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.DeviceLinkService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.UserService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.InviteService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /construct.message_gateway.v1.MessageGateway/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.NotificationService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+	handle /shared.proto.services.v1.KeyService/* {
+		reverse_proxy h2c://key:50057
+	}
+	handle /shared.proto.sentinel.v1.SentinelService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+
+	# Inbound S2S federation (Epic A receiver, messaging-service :8083).
+	handle /federation/v1/* {
+		reverse_proxy h2c://messaging:8083
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
