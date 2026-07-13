@@ -130,6 +130,9 @@ async fn create_test_config(db_name: &str) -> Config {
         std::env::set_var("PASETO_PRIVATE_KEY", &paseto_private_key);
         std::env::set_var("PASETO_PUBLIC_KEY", &paseto_public_key);
         std::env::set_var("TOKEN_ISSUE_FORMAT", "paseto");
+        // INSTANCE_DOMAIN is required by FederationConfig::from_env (no silent default);
+        // set explicitly so the test doesn't depend on a local `.env` being present.
+        std::env::set_var("INSTANCE_DOMAIN", "test.local");
 
         // Override legacy JWT env vars inherited from `.env` (or `.env.test`).
         // Set to empty strings rather than `remove_var`, because `Config::from_env()`

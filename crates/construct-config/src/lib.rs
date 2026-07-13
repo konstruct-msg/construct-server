@@ -66,6 +66,14 @@ pub struct Config {
     /// REQUIRED for all services once migration is under way.
     pub paseto_public_key: Option<String>,
 
+    /// Previous PASETO v4.public Ed25519 verify keys, kept active during a key
+    /// rotation overlap window so tokens signed by a superseded key still verify.
+    /// Comma-separated list of PEM blocks or file paths. Env:
+    /// `PASETO_PUBLIC_KEY_PREVIOUS`. Empty when not mid-rotation. Verify-only — the
+    /// current `paseto_private_key` always signs. Drop entries once every token
+    /// signed by them has expired (refresh-token TTL).
+    pub paseto_public_key_previous: Vec<String>,
+
     /// Token format to issue: `"paseto"` (target) or `"jwt"` (legacy, transitional).
     /// Verification accepts both formats regardless of this setting (dual-stack).
     /// Env: `TOKEN_ISSUE_FORMAT`, default `"paseto"`.
@@ -231,6 +239,7 @@ impl Config {
             jwt_public_key: Self::load_jwt_public_key(),
             paseto_private_key: Self::load_paseto_private_key(),
             paseto_public_key: Self::load_paseto_public_key(),
+            paseto_public_key_previous: Self::load_paseto_public_key_previous(),
             token_issue_format: std::env::var("TOKEN_ISSUE_FORMAT")
                 .unwrap_or_else(|_| "paseto".to_string()),
 
@@ -437,18 +446,41 @@ impl Config {
 
     /// Load PASETO v4.public Ed25519 public key. Accepts PEM inline or a file path.
     fn load_paseto_public_key() -> Option<String> {
-        std::env::var("PASETO_PUBLIC_KEY").ok().map(|key| {
-            if key.starts_with("-----BEGIN") {
-                return key;
-            }
-            std::fs::read_to_string(&key).unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = %e,
-                    path = %key,
-                    "Failed to read PASETO_PUBLIC_KEY from file, using as-is"
-                );
-                key
+        std::env::var("PASETO_PUBLIC_KEY")
+            .ok()
+            .map(|key| Self::resolve_pem_or_path(key, "PASETO_PUBLIC_KEY"))
+    }
+
+    /// Load previous PASETO verify keys for a rotation overlap window.
+    /// `PASETO_PUBLIC_KEY_PREVIOUS` is a comma-separated list of PEM blocks or file
+    /// paths (the Ed25519 base64 alphabet and PEM contain no commas, so splitting on
+    /// `,` is unambiguous). Empty/unset ⇒ no previous keys.
+    fn load_paseto_public_key_previous() -> Vec<String> {
+        std::env::var("PASETO_PUBLIC_KEY_PREVIOUS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Self::resolve_pem_or_path(s.to_string(), "PASETO_PUBLIC_KEY_PREVIOUS"))
+                    .collect()
             })
+            .unwrap_or_default()
+    }
+
+    /// Resolve a public-key env value that is either inline PEM or a file path.
+    /// (Detect PEM first so a base64 `/` isn't mistaken for a path and logged.)
+    fn resolve_pem_or_path(value: String, var: &str) -> String {
+        if value.starts_with("-----BEGIN") {
+            return value;
+        }
+        std::fs::read_to_string(&value).unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                path = %value,
+                "Failed to read {var} from file, using as-is"
+            );
+            value
         })
     }
 }

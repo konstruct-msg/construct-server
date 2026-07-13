@@ -144,6 +144,7 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         jwt_public_key: None,
         paseto_private_key: None,
         paseto_public_key: None,
+        paseto_public_key_previous: Vec::new(),
         token_issue_format: "paseto".to_string(),
         media: construct_config::MediaConfig {
             enabled: false,
