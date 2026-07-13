@@ -143,6 +143,10 @@ async fn create_test_config(db_name: &str) -> Config {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         );
         std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
+        // APNS device-token encryption key: 64-hex (32 bytes). Overridden here so the
+        // fail-fast doesn't inherit a malformed ambient value from `.env.test`; matches
+        // the all-zeros value CI already sets in the workflow. Unused in these tests.
+        std::env::set_var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY", "0".repeat(64));
 
         // Override legacy JWT env vars inherited from `.env` (or `.env.test`).
         // Set to empty strings rather than `remove_var`, because `Config::from_env()`

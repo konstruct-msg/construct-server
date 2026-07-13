@@ -34,6 +34,7 @@ fn get_test_config() -> Config {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         );
         std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
+        std::env::set_var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY", "0".repeat(64));
     }
 
     Config::from_env().expect("Failed to create test config")
