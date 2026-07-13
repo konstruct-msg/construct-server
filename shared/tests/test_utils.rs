@@ -138,7 +138,10 @@ async fn create_test_config(db_name: &str) -> Config {
         // doesn't inherit a MALFORMED value from an ambient `.env`/CI (e.g. a hex-encoded
         // SERVER_SIGNING_KEY → 48 bytes). All-zeros is a valid Ed25519 seed / issuer
         // scalar; federation is disabled in tests, so these are never used cryptographically.
-        std::env::set_var("SERVER_SIGNING_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        std::env::set_var(
+            "SERVER_SIGNING_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
         std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
 
         // Override legacy JWT env vars inherited from `.env` (or `.env.test`).
