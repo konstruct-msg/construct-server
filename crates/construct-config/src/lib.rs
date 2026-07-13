@@ -16,6 +16,7 @@ mod media;
 mod messaging;
 mod microservices;
 mod redis;
+mod secret_hygiene;
 mod security;
 
 // Re-export all public types
@@ -193,6 +194,12 @@ impl Config {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
+
+        // Fail-fast on malformed secrets BEFORE building any sub-config, so a bad value
+        // (quoted, wrong length, hex-vs-base64) is a loud boot error rather than a service
+        // that starts "successfully" and then silently corrupts/drops traffic. Only errors
+        // on present-but-malformed values; absent/empty is left to per-service handling.
+        secret_hygiene::validate()?;
 
         // Load sub-configurations
         let logging = LoggingConfig::from_env()?;
