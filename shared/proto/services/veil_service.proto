@@ -63,4 +63,27 @@ message IssueVeilCapabilityResponse {
   // Формат выданной capability: 1 = B2 (bearer, AUTH v2), 2 = B1 (key-bound, AUTH
   // v3). Зависит от того, был ли в запросе задан veil_pk.
   uint32 capability_version = 6;
+
+  // EntryDirectory v1 (decisions/entry-directory-design.md, Source 1): пред-выданные
+  // альтернативные входы. Каждый — самодостаточная связка {coords + capability} на
+  // ДРУГОЙ релей, так что при блокировке основного фронта клиент переключается на
+  // закешированную альтернативу БЕЗ раунд-трипа к мёртвому фронту (закрывает
+  // chicken-egg: смена входа требует capability для него).
+  //
+  // Backend выдаёт ротируемое K-подмножество из N сконфигурированных релеев на
+  // пользователя (Salmon-lite: server-side квота ограничивает enumeration). Пусто,
+  // если сконфигурирован ≤1 релей. capability каждого выпущена тем же путём
+  // (bearer/key-bound), что и основная — по наличию veil_pk в запросе.
+  repeated EntryPoint alternates = 7;
+}
+
+// Один альтернативный вход: те же поля, что и в основном ответе, но для другого
+// релея. Клиент кеширует их (VeilTicketStore) и ранжирует своим RelaySelector.
+message EntryPoint {
+  bytes capability = 1; // канонный подписанный blob (layout как в основном ответе)
+  string relay_address = 2;
+  string spki = 3; // hex SHA-256 SPKI pin
+  string sni = 4;
+  int64 not_after = 5;
+  uint32 capability_version = 6;
 }
