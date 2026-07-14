@@ -19,6 +19,15 @@ use uuid::Uuid;
 /// Default capability validity: 60 days (aligned with Let's Encrypt rotation).
 pub const DEFAULT_TICKET_TTL_SECS: i64 = 60 * 24 * 3600;
 
+/// EntryDirectory v1: default number of pre-issued **alternate** fronts (K) returned
+/// alongside the primary capability. See `decisions/entry-directory-design.md` Source 1.
+pub const DEFAULT_ALTERNATES_K: usize = 3;
+
+/// Rotation epoch for alternate-front selection (24h). The K fronts a given user sees
+/// are stable within an epoch and rotate across epochs — Salmon-lite: each account
+/// learns a bounded, rotating subset, which bounds (does not prevent) enumeration.
+pub const ALT_ROTATION_SECS: i64 = 24 * 3600;
+
 /// Domain-separation prefix for the capability signing message. MUST match
 /// `construct_veil_protocol::capability::CAP_DOMAIN`.
 const CAP_DOMAIN: &[u8] = b"veil-cap-v1";
@@ -332,9 +341,162 @@ pub async fn issue_capability_v2(
     })
 }
 
+/// Issue one capability, dispatching bearer (B2) vs key-bound (B1) exactly as the
+/// public RPC does: an empty `veil_pk` yields a bearer capability, otherwise a
+/// key-bound one bound to `veil_pk`/`role`.
+async fn issue_one(
+    ctx: &VeilServiceContext,
+    user_id: Uuid,
+    relay_address: &str,
+    veil_pk: &[u8],
+    role: u32,
+) -> Result<IssuedCapability, IssueError> {
+    if veil_pk.is_empty() {
+        issue_capability(ctx, user_id, relay_address).await
+    } else {
+        issue_capability_v2(ctx, user_id, relay_address, veil_pk, role).await
+    }
+}
+
+/// Stable, dependency-free rank for `(user_id, addr, epoch)` (FNV-1a-64). Used only to
+/// pick a rotating alternate subset; it is not a security primitive — enumeration is
+/// bounded by K, not by this hash's unpredictability.
+fn alt_rank(user_id: Uuid, addr: &str, epoch: i64) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+    };
+    mix(user_id.as_bytes());
+    mix(addr.as_bytes());
+    mix(&epoch.to_le_bytes());
+    h
+}
+
+/// Deterministically pick up to `k` alternate relay addresses (excluding `primary`)
+/// for this user in the current epoch. Stable within an epoch, rotates across epochs.
+fn select_alternate_addresses(
+    relays: &HashMap<String, RelayInfo>,
+    primary: &str,
+    user_id: Uuid,
+    k: usize,
+    epoch: i64,
+) -> Vec<String> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(u64, &String)> = relays
+        .keys()
+        .filter(|a| a.as_str() != primary)
+        .map(|a| (alt_rank(user_id, a, epoch), a))
+        .collect();
+    // Primary sort by rank; tie-break by address so the order is fully deterministic.
+    ranked.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)));
+    ranked.into_iter().take(k).map(|(_, a)| a.clone()).collect()
+}
+
+/// A primary capability plus its pre-issued alternate fronts (EntryDirectory v1).
+pub struct IssuedBundle {
+    pub primary: IssuedCapability,
+    /// Up to K capabilities on *other* configured relays, chosen per-user/epoch.
+    pub alternates: Vec<IssuedCapability>,
+}
+
+/// Issue the primary capability for `relay_address` and pre-issue up to `k` alternates
+/// on other configured relays (in-band ranked handout, `decisions/entry-directory-design.md`).
+///
+/// Alternates use the **same** issuance path (bearer vs key-bound) as the primary, so a
+/// key-bound request yields key-bound alternates bound to the same `veil_pk`. If ≤1 relay
+/// is configured, `alternates` is empty and behaviour is identical to the pre-v1 handler.
+pub async fn issue_bundle(
+    ctx: &VeilServiceContext,
+    user_id: Uuid,
+    relay_address: &str,
+    veil_pk: &[u8],
+    role: u32,
+    k: usize,
+) -> Result<IssuedBundle, IssueError> {
+    let primary = issue_one(ctx, user_id, relay_address, veil_pk, role).await?;
+
+    let epoch = unix_now() / ALT_ROTATION_SECS;
+    let alt_addrs = select_alternate_addresses(&ctx.relays, relay_address, user_id, k, epoch);
+
+    let mut alternates = Vec::with_capacity(alt_addrs.len());
+    for addr in alt_addrs {
+        // A single misconfigured alternate must not fail the whole issuance — the
+        // primary already succeeded. Skip and log; the client still gets a usable set.
+        match issue_one(ctx, user_id, &addr, veil_pk, role).await {
+            Ok(cap) => alternates.push(cap),
+            Err(e) => tracing::warn!(relay = %addr, error = %e, "skipping alternate front"),
+        }
+    }
+
+    Ok(IssuedBundle {
+        primary,
+        alternates,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relay_set(addrs: &[&str]) -> HashMap<String, RelayInfo> {
+        addrs
+            .iter()
+            .map(|a| {
+                (
+                    a.to_string(),
+                    RelayInfo {
+                        scope: "ru".into(),
+                        spki: "pin".into(),
+                        sni: "sni".into(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alternates_exclude_primary_and_bound_by_k() {
+        let relays = relay_set(&["a:1", "b:1", "c:1", "d:1"]);
+        let user = Uuid::from_u128(42);
+        let alts = select_alternate_addresses(&relays, "a:1", user, 2, 100);
+        assert_eq!(alts.len(), 2);
+        assert!(!alts.contains(&"a:1".to_string()));
+    }
+
+    #[test]
+    fn alternates_stable_within_epoch_rotate_across_epochs() {
+        let relays = relay_set(&["a:1", "b:1", "c:1", "d:1", "e:1"]);
+        let user = Uuid::from_u128(7);
+        let e0a = select_alternate_addresses(&relays, "a:1", user, 3, 100);
+        let e0b = select_alternate_addresses(&relays, "a:1", user, 3, 100);
+        assert_eq!(e0a, e0b, "selection must be stable within an epoch");
+        // Across many epochs the set should not be frozen (rotation happens).
+        let rotated = (101..200)
+            .any(|epoch| select_alternate_addresses(&relays, "a:1", user, 3, epoch) != e0a);
+        assert!(rotated, "selection must rotate across epochs");
+    }
+
+    #[test]
+    fn fewer_relays_than_k_yields_all_others() {
+        let relays = relay_set(&["a:1", "b:1"]);
+        let user = Uuid::from_u128(1);
+        let alts = select_alternate_addresses(&relays, "a:1", user, 3, 100);
+        assert_eq!(alts, vec!["b:1".to_string()]);
+    }
+
+    #[test]
+    fn single_relay_yields_no_alternates() {
+        let relays = relay_set(&["a:1"]);
+        let user = Uuid::from_u128(1);
+        assert!(select_alternate_addresses(&relays, "a:1", user, 3, 100).is_empty());
+    }
 
     #[test]
     fn blob_layout_is_canonical_length() {

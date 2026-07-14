@@ -53,30 +53,42 @@ impl VeilService for VeilGrpcService {
             }
         };
 
-        // B1: a non-empty veil_pk requests a key-bound CapabilityV2 (AUTH v3)
-        // instead of a B2 bearer capability. See decisions/veil-ticket-provisioning-system.md.
-        let issued = if req.veil_pk.is_empty() {
-            core::issue_capability(&self.context, user_id, &req.relay_address)
-                .await
-                .map_err(map_issue_err)?
-        } else {
-            core::issue_capability_v2(
-                &self.context,
-                user_id,
-                &req.relay_address,
-                &req.veil_pk,
-                req.role,
-            )
-            .await
-            .map_err(map_issue_err)?
-        };
+        // EntryDirectory v1: issue the requested (primary) capability plus up to K
+        // pre-issued alternate fronts on other configured relays. A non-empty veil_pk
+        // requests key-bound CapabilityV2 (AUTH v3) for all of them; otherwise bearer
+        // B2. See decisions/{veil-ticket-provisioning-system,entry-directory-design}.md.
+        let bundle = core::issue_bundle(
+            &self.context,
+            user_id,
+            &req.relay_address,
+            &req.veil_pk,
+            req.role,
+            core::DEFAULT_ALTERNATES_K,
+        )
+        .await
+        .map_err(map_issue_err)?;
 
+        let issued = bundle.primary;
         info!(
             user_id = %user_id,
             relay = %issued.relay_address,
             capability_version = issued.capability_version,
+            alternates = bundle.alternates.len(),
             "issued veil capability"
         );
+
+        let alternates = bundle
+            .alternates
+            .into_iter()
+            .map(|a| proto::EntryPoint {
+                capability: a.blob,
+                relay_address: a.relay_address,
+                spki: a.spki,
+                sni: a.sni,
+                not_after: a.not_after,
+                capability_version: a.capability_version,
+            })
+            .collect();
 
         Ok(Response::new(proto::IssueVeilCapabilityResponse {
             capability: issued.blob,
@@ -85,6 +97,7 @@ impl VeilService for VeilGrpcService {
             sni: issued.sni,
             not_after: issued.not_after,
             capability_version: issued.capability_version,
+            alternates,
         }))
     }
 }
@@ -93,21 +106,50 @@ async fn health_check() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok", "service": "veil-service" }))
 }
 
-/// Build the relay registry from env (MVP single relay).
+/// Build the relay registry from env.
+///
+/// Two sources, merged (EntryDirectory v1 needs N>1 fronts — see
+/// `decisions/entry-directory-design.md`):
+///   - `VEIL_RELAYS`: `;`-separated records, each `address,scope,spki,sni`. The
+///     multi-front source; whitespace around fields is trimmed, blank records skipped.
+///   - `VEIL_RELAY_ADDRESS` (+ `_SCOPE`/`_SPKI`/`_SNI`): the legacy single-relay vars,
+///     kept for back-compat. Added if `VEIL_RELAYS` did not already define that address.
 fn load_relays() -> HashMap<String, RelayInfo> {
     let mut relays = HashMap::new();
+
+    if let Ok(spec) = env::var("VEIL_RELAYS") {
+        for record in spec.split(';') {
+            let record = record.trim();
+            if record.is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = record.split(',').map(|s| s.trim()).collect();
+            match f.as_slice() {
+                [addr, scope, spki, sni] if !addr.is_empty() => {
+                    relays.insert(
+                        addr.to_string(),
+                        RelayInfo {
+                            scope: scope.to_string(),
+                            spki: spki.to_string(),
+                            sni: sni.to_string(),
+                        },
+                    );
+                }
+                _ => tracing::warn!(record, "skipping malformed VEIL_RELAYS record (want address,scope,spki,sni)"),
+            }
+        }
+    }
+
     if let Ok(addr) = env::var("VEIL_RELAY_ADDRESS")
         && !addr.is_empty()
     {
-        relays.insert(
-            addr,
-            RelayInfo {
-                scope: env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
-                spki: env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
-                sni: env::var("VEIL_RELAY_SNI").unwrap_or_default(),
-            },
-        );
+        relays.entry(addr).or_insert_with(|| RelayInfo {
+            scope: env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
+            spki: env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
+            sni: env::var("VEIL_RELAY_SNI").unwrap_or_default(),
+        });
     }
+
     relays
 }
 
