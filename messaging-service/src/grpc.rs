@@ -1044,7 +1044,9 @@ mod sealed_dispatch_error_tests {
 
     #[test]
     fn token_rejected_maps_to_failed_precondition_with_prefix() {
-        let err = anyhow::Error::new(TokenRejected { label: "missing_token" });
+        let err = anyhow::Error::new(TokenRejected {
+            label: "missing_token",
+        });
         let status = map_sealed_dispatch_error(err);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         assert_eq!(status.message(), "privacy_pass:missing_token");
@@ -1061,7 +1063,9 @@ mod sealed_dispatch_error_tests {
     fn token_rejected_display_prefix_survives_anyhow_to_string() {
         // The stream path sends `e.to_string()` in MessageError.error_message —
         // the client parses the "privacy_pass:" prefix there.
-        let err = anyhow::Error::new(TokenRejected { label: "double_spent" });
+        let err = anyhow::Error::new(TokenRejected {
+            label: "double_spent",
+        });
         assert_eq!(err.to_string(), "privacy_pass:double_spent");
     }
 }
