@@ -159,8 +159,16 @@ enum SessionResetReason {
   // Device changed (new device, old session invalid)
   SESSION_RESET_REASON_DEVICE_CHANGED = 4;
 
+  // The sender, acting as RESPONDER, could not reproduce the 4-DH one-time-prekey that the
+  // peer's last X3DH used (OTPK id not found / no longer backed by a private key). Carried
+  // on a SessionControl END signal (see content.proto) to ask the initiator to re-init
+  // WITHOUT a one-time prekey (3-DH), which is always reproducible from identity + signed
+  // prekey; retrying 4-DH would loop as every re-fetched OTPK hits the same unbackable
+  // state. See otpk-session-init-deadlock.
+  SESSION_RESET_REASON_OTPK_UNREPRODUCIBLE = 5;
+
   // Reserved for future reasons
-  reserved 5 to 15;
+  reserved 6 to 15;
 }
 
 // IdentityKeyChangeNotification - Alert when contact's identity key changes

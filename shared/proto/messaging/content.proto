@@ -2,6 +2,10 @@ syntax = "proto3";
 
 package shared.proto.messaging.v1;
 
+// SessionResetReason (used by SessionControl.reason for the OTPK-unreproducible 3-DH
+// recovery hint) is defined alongside SessionResetMessage in e2ee.proto.
+import "messaging/e2ee.proto";
+
 // MessageContent - Decrypted message content
 // This is the plaintext content after E2EE decryption
 // Never transmitted in plaintext over network
@@ -467,4 +471,10 @@ message SessionControl {
   // Correlation nonce (replaces the per-signal UUID embedded in the legacy magic
   // string); lets the receiver dedup retransmitted control signals.
   string nonce = 2;
+
+  // Optional recovery hint on an END / RESET_INIT signal so the receiver can pick the
+  // right re-initialisation strategy. Reuses the SessionResetReason enum from e2ee.proto;
+  // notably SESSION_RESET_REASON_OTPK_UNREPRODUCIBLE asks the initiator to re-init WITHOUT
+  // a one-time prekey (3-DH). Added 2026-07; older peers that predate this field ignore it.
+  SessionResetReason reason = 3;
 }
