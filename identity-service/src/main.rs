@@ -715,6 +715,16 @@ impl AuthService for IdentityGrpcService {
         Ok(Response::new(proto::GetSenderCertificateResponse {
             certificate: cert.encode_to_vec(),
             expires_at,
+            // Piggyback the static X25519 token-encryption public key onto the cert the
+            // client already fetches before every sealed send (same 24h lifecycle, same
+            // authenticated channel). Lets clients that cannot reach the HTTP well-known
+            // still seal Privacy Pass tokens. Empty vec when unconfigured — the client
+            // keeps its prior cache / HTTP fallback and degrades to a token-less send.
+            token_encryption_key: self
+                .context
+                .token_enc_pub
+                .map(|k| k.to_vec())
+                .unwrap_or_default(),
         }))
     }
 
