@@ -225,7 +225,9 @@ pub(crate) async fn dispatch_sealed_sender(
                     result = result_label,
                     "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
                 );
-                return Err(anyhow::Error::new(TokenRejected { label: result_label }));
+                return Err(anyhow::Error::new(TokenRejected {
+                    label: result_label,
+                }));
             } else {
                 tracing::info!(
                     result = result_label,
