@@ -9,7 +9,7 @@ use tonic::{Request, Response, Status};
 
 use crate::context::MessagingServiceContext;
 use crate::core;
-use crate::envelope::dispatch_sealed_sender;
+use crate::envelope::{TokenRejected, dispatch_sealed_sender};
 use crate::stream::{handle_stream_request, poll_messages, spawn_inbox_wakeup};
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, messaging_service_server::MessagingService,
@@ -18,6 +18,18 @@ use construct_server_shared::shared::proto::services::v1::{
 #[derive(Clone)]
 pub(crate) struct MessagingGrpcService {
     pub(crate) context: Arc<MessagingServiceContext>,
+}
+
+/// Map a `dispatch_sealed_sender` failure to a gRPC status. Privacy Pass rejection
+/// under enforce becomes FAILED_PRECONDITION "privacy_pass:{label}" (a stable,
+/// client-parseable contract — the client replenishes and retries sealed once);
+/// everything else stays a generic internal error.
+fn map_sealed_dispatch_error(e: anyhow::Error) -> Status {
+    if let Some(rejected) = e.downcast_ref::<TokenRejected>() {
+        Status::failed_precondition(rejected.to_string())
+    } else {
+        Status::internal(e.to_string())
+    }
 }
 
 fn heartbeat_ack_response() -> proto::MessageStreamResponse {
@@ -292,7 +304,7 @@ impl MessagingService for MessagingGrpcService {
             require_legacy_sealed_sender_auth(authed_user_id)?;
             let resp = dispatch_sealed_sender(&self.context, sealed)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(map_sealed_dispatch_error)?;
             return Ok(Response::new(resp));
         }
 
@@ -661,7 +673,7 @@ impl MessagingService for MessagingGrpcService {
 
         let mut resp = dispatch_sealed_sender(&self.context, &sealed)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_sealed_dispatch_error)?;
         resp.attempt_id = attempt_id;
         Ok(Response::new(resp))
     }
@@ -1023,5 +1035,33 @@ mod tests {
     fn test_legacy_sealed_sender_accepts_authenticated_user() {
         require_legacy_sealed_sender_auth(Some(uuid::Uuid::new_v4()))
             .expect("authenticated legacy sealed sender must be allowed");
+    }
+}
+
+#[cfg(test)]
+mod sealed_dispatch_error_tests {
+    use super::*;
+
+    #[test]
+    fn token_rejected_maps_to_failed_precondition_with_prefix() {
+        let err = anyhow::Error::new(TokenRejected { label: "missing_token" });
+        let status = map_sealed_dispatch_error(err);
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "privacy_pass:missing_token");
+    }
+
+    #[test]
+    fn other_errors_stay_internal() {
+        let status = map_sealed_dispatch_error(anyhow::anyhow!("redis down"));
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "redis down");
+    }
+
+    #[test]
+    fn token_rejected_display_prefix_survives_anyhow_to_string() {
+        // The stream path sends `e.to_string()` in MessageError.error_message —
+        // the client parses the "privacy_pass:" prefix there.
+        let err = anyhow::Error::new(TokenRejected { label: "double_spent" });
+        assert_eq!(err.to_string(), "privacy_pass:double_spent");
     }
 }

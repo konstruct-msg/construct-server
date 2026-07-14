@@ -38,6 +38,10 @@ pub(crate) async fn handle_stream_request(
                 let message_id = match dispatch_sealed_sender(context, sealed).await {
                     Ok(resp) => resp.message_id,
                     Err(e) => {
+                        // Privacy Pass rejection (enforce) surfaces here as
+                        // error_message "privacy_pass:{label}" via TokenRejected's
+                        // Display — the client parses that prefix on the stream path
+                        // the same way it parses FAILED_PRECONDITION on the unary path.
                         let error = proto::MessageError {
                             message_id: String::new(),
                             error_code: proto::ErrorCode::Internal.into(),
