@@ -135,7 +135,10 @@ fn load_relays() -> HashMap<String, RelayInfo> {
                         },
                     );
                 }
-                _ => tracing::warn!(record, "skipping malformed VEIL_RELAYS record (want address,scope,spki,sni)"),
+                _ => tracing::warn!(
+                    record,
+                    "skipping malformed VEIL_RELAYS record (want address,scope,spki,sni)"
+                ),
             }
         }
     }
