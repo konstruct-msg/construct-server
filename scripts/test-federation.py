@@ -9,11 +9,14 @@ Usage:
     ./scripts/test-federation.py \
         --server-a https://a.example.com \
         --server-b https://b.example.com \
-        [--signing-key <base64>]
+        --signing-key <base64 seed of server A's SERVER_SIGNING_KEY> \
+        [--origin a.example.com] [--dest b.example.com]
 
-The signing key is the Ed25519 seed for server A. If not provided,
-a new keypair is generated and the .well-known is fetched from server B
-for the verification step.
+The signing key MUST be server A's real SERVER_SIGNING_KEY seed, and --origin
+MUST match server A's INSTANCE_DOMAIN (the domain whose /.well-known/konstruct
+publishes the matching public key) — otherwise server B rejects the signature.
+Without --signing-key an ephemeral key is generated (a receiver-reachability
+probe only; B will reject the signature).
 
 Dependencies: pip install protobuf requests ed25519
 """
@@ -26,6 +29,7 @@ import os
 import sys
 import time
 import uuid
+from urllib.parse import urlparse
 
 try:
     import requests
@@ -65,10 +69,22 @@ def main():
     parser.add_argument("--server-a", required=True, help="URL of server A (origin)")
     parser.add_argument("--server-b", required=True, help="URL of server B (destination)")
     parser.add_argument("--signing-key", help="Base64 Ed25519 seed for server A")
+    parser.add_argument(
+        "--origin",
+        help="Origin domain of server A (must match its INSTANCE_DOMAIN and the key "
+        "at its /.well-known/konstruct). Default: hostname of --server-a.",
+    )
+    parser.add_argument(
+        "--dest",
+        help="Destination domain of server B (its INSTANCE_DOMAIN). "
+        "Default: hostname of --server-b.",
+    )
     args = parser.parse_args()
 
     server_a = args.server_a.rstrip("/")
     server_b = args.server_b.rstrip("/")
+    origin = args.origin or urlparse(server_a).hostname or "a.example"
+    dest = args.dest or urlparse(server_b).hostname or server_b.replace("https://", "")
 
     print(f"Testing federation: {server_a} → {server_b}")
     print()
@@ -134,7 +150,7 @@ def main():
         "recipient_user_id": recipient_user_id,
         "delivery_tag": delivery_tag.hex(),
         "sender_certificate": base64.b64encode(b"test-sender-cert").decode(),
-        "ciphertext": base64.b64encode(b"hello from alice — E2E encrypted").decode(),
+        "ciphertext": base64.b64encode(b"hello from alice - E2E encrypted").decode(),
     }
     # For test purposes, use JSON as opaque blob (in production this is protobuf)
     sealed_inner_json = json.dumps(sealed_inner).encode()
@@ -153,7 +169,9 @@ def main():
     print("\n5. Signing FederatedEnvelope with server A's key...")
 
     # Canonical: message_id:from:to:origin:dest:timestamp:payload_hash
-    canonical = f"{message_id}:::a.example:{server_b.replace('https://', '')}:{timestamp}:{payload_hash}"
+    # from/to are empty for sealed sender (sender-blind on the wire).
+    canonical = f"{message_id}:::{origin}:{dest}:{timestamp}:{payload_hash}"
+    print(f"  canonical origin={origin} dest={dest}")
     signature = sk.sign(canonical.encode())
     signature_b64 = base64.b64encode(signature).decode()
     ok(f"Signature: {signature_b64[:16]}...")
@@ -164,7 +182,7 @@ def main():
     request_body = {
         "messageId": message_id,
         "sealedInner": sealed_inner_b64,
-        "originServer": "a.example",
+        "originServer": origin,
         "timestamp": timestamp,
         "payloadHash": payload_hash,
         "serverSignature": signature_b64,
