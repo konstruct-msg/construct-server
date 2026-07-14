@@ -3,7 +3,7 @@ name = "group-service"
 version = "0.1.0"
 edition = "2021"
 description = "Group Service for Construct Messenger — MLS groups (RFC 9420) + Broadcast Channels"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -48,7 +48,7 @@ version = "0.16.10"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/konstruct-msg/construct-server"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 # Common dependencies for all services

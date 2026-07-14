@@ -3,7 +3,7 @@ name = "key-service"
 version = "0.1.0"
 edition = "2021"
 description = "E2EE Key Management Service for Construct Messenger"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [dependencies]
 # Core runtime

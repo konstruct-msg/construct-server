@@ -4,7 +4,7 @@ version = "0.6.0"
 edition = "2021"
 authors = ["Construct Server Team"]
 description = "Cryptographic primitives for Construct secure messaging server"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-only"
 
 [features]
 default = ["full"]

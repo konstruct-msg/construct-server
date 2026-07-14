@@ -1,5 +1,6 @@
 [package]
 name = "construct-utils"
+license = "AGPL-3.0-only"
 version.workspace = true
 edition.workspace = true
 

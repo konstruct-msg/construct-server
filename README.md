@@ -270,10 +270,16 @@ Contributions are welcome. Before contributing, read the threat model below.
 
 ## License
 
-See [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE). Network use = source-disclosure obligation (§13).
 
 ---
 
 <p align="center">
   <b>Privacy is a right. Not a feature. Not a setting. Not a subscription tier.</b>
 </p>
+
+## Trademark
+
+**Konstruct™** / **Конструкт™** and the logo are trademarks of Maxim Eliseyev. The open-source
+license on this code does **not** grant trademark rights — see [TRADEMARK.md](TRADEMARK.md).
+Forks that distribute a modified version must rebrand.
