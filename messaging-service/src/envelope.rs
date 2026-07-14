@@ -5,6 +5,28 @@ use crate::core;
 use crate::spent_tag::{DeliveryTagStatus, check_and_mark_delivery_tag};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
+/// Privacy Pass redemption rejected under `enforce` mode.
+///
+/// Carried as a typed error inside `anyhow::Error` so RPC handlers can downcast and
+/// map it to `FAILED_PRECONDITION` with the stable message `privacy_pass:{label}`
+/// instead of a blanket internal error. Clients key off that prefix to force a wallet
+/// replenish and retry the sealed send once — and must NEVER downgrade to an
+/// identified send (otherwise the server could deanonymize a sender on demand by
+/// rejecting its tokens). See construct-docs
+/// decisions/sealed-sender-anti-abuse-economics.md.
+#[derive(Debug)]
+pub(crate) struct TokenRejected {
+    pub(crate) label: &'static str,
+}
+
+impl std::fmt::Display for TokenRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "privacy_pass:{}", self.label)
+    }
+}
+
+impl std::error::Error for TokenRejected {}
+
 /// Convert MessageEnvelope to proto Envelope
 pub(crate) fn convert_envelope_to_proto(
     envelope: construct_server_shared::message::types::MessageEnvelope,
@@ -203,7 +225,7 @@ pub(crate) async fn dispatch_sealed_sender(
                     result = result_label,
                     "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
                 );
-                anyhow::bail!("privacy pass token redemption failed: {}", result_label);
+                return Err(anyhow::Error::new(TokenRejected { label: result_label }));
             } else {
                 tracing::info!(
                     result = result_label,
