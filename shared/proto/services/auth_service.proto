@@ -629,6 +629,15 @@ message GetSenderCertificateResponse {
   // Certificate expiry (Unix seconds, typically now + 24h)
   // Client should re-fetch before this time
   int64 expires_at = 2;
+
+  // Server's static X25519 token-encryption public key (32 raw bytes), the same
+  // key advertised as base64 `token_encryption_key` in /.well-known/construct-server.
+  // Delivered here over the authenticated gRPC channel so clients that cannot reach
+  // the HTTP well-known (self-signed native/VEIL listener, ATS, DPI) still obtain the
+  // key needed to seal Privacy Pass token_bytes — without it the client would send an
+  // unsealable token and every sealed send fails redemption (decrypt_failed) under
+  // enforce. Empty when the server has no token-encryption key configured.
+  bytes token_encryption_key = 3;
 }
 
 // ============================================================================
