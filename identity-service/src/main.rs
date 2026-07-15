@@ -56,6 +56,29 @@ use construct_server_shared::shared::proto::services::v1::{
 // gRPC service struct
 // ============================================================================
 
+/// Pick the hourly Privacy Pass issuance cap for an account by age.
+///
+/// `registered_at` = earliest device registration (account birth); `None` means the
+/// account has no device row (or the lookup failed upstream) — fail-safe to the young
+/// cap, never the full one. The young cap is clamped to the full cap so a
+/// misconfiguration (young > full) cannot *raise* the limit.
+fn effective_issuance_cap(
+    registered_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    maturity_hours: i64,
+    young_cap: u32,
+    full_cap: u32,
+) -> (u32, bool) {
+    let mature = registered_at
+        .map(|t| now - t >= chrono::Duration::hours(maturity_hours))
+        .unwrap_or(false);
+    if mature {
+        (full_cap, true)
+    } else {
+        (young_cap.min(full_cap), false)
+    }
+}
+
 #[derive(Clone)]
 struct IdentityGrpcService {
     context: Arc<IdentityServiceContext>,
@@ -68,6 +91,17 @@ struct IdentityGrpcService {
     /// the effective sealed-send rate limit — the anti-abuse backstop. Per-call batch
     /// size stays bounded (≤20 blinded points) as a request-size guard.
     token_issuance_max_per_hour: u32,
+    /// Reduced hourly cap for young accounts (`TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR`,
+    /// default 30): an account younger than `token_issuance_maturity_hours` gets this
+    /// cap instead of the full one. This — not registration PoW difficulty — is the
+    /// scalable anti-Sybil lever: a datacenter attacker can mint accounts faster than
+    /// any UX-acceptable PoW level can price out, but each fresh account's token
+    /// throughput (= sealed-send throughput under enforce) stays throttled for its
+    /// first day. See construct-docs decisions/sealed-sender-anti-abuse-economics.md.
+    token_issuance_young_max_per_hour: u32,
+    /// Account age (hours) after which the full cap applies
+    /// (`TOKEN_ISSUANCE_MATURITY_HOURS`, default 24).
+    token_issuance_maturity_hours: i64,
     /// Signs `SenderCertificate` (`BUNDLE_SIGNING_KEY`, same secret key-service
     /// signs prekey bundles / KT tree heads with). Clients verify certificates
     /// against `bundle_verification_key` from well-known, so certs must be
@@ -898,6 +932,31 @@ impl AuthService for IdentityGrpcService {
             ));
         }
 
+        // Age-tiered cap: young accounts (< maturity) get the reduced cap. Account age
+        // = earliest device registration. Lookup failure or no device row → young cap
+        // (fail-safe: degrade to the stricter tier, never fail issuance outright).
+        let registered_at: Option<chrono::DateTime<chrono::Utc>> =
+            match uuid::Uuid::parse_str(&user_id) {
+                Ok(uid) => sqlx::query_scalar(
+                    "SELECT MIN(registered_at) FROM devices WHERE user_id = $1",
+                )
+                .bind(uid)
+                .fetch_one(self.context.db_pool.as_ref())
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(user_id = %user_id, "issue_tokens: account-age lookup failed — applying young cap: {}", e);
+                    None
+                }),
+                Err(_) => None,
+            };
+        let (effective_cap, mature) = effective_issuance_cap(
+            registered_at,
+            chrono::Utc::now(),
+            self.token_issuance_maturity_hours,
+            self.token_issuance_young_max_per_hour,
+            self.token_issuance_max_per_hour,
+        );
+
         let count = self
             .context
             .queue
@@ -906,10 +965,17 @@ impl AuthService for IdentityGrpcService {
             .increment_token_issuance_count(&user_id, blinded_points.len() as u64)
             .await
             .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
-        if count > self.token_issuance_max_per_hour {
+        if count > effective_cap {
+            tracing::info!(
+                user_id = %user_id,
+                cap = effective_cap,
+                tier = if mature { "full" } else { "young" },
+                "issue_tokens: hourly cap reached"
+            );
             return Err(Status::resource_exhausted(format!(
-                "token issuance rate limit exceeded ({}/hr)",
-                self.token_issuance_max_per_hour
+                "token issuance rate limit exceeded ({}/hr{})",
+                effective_cap,
+                if mature { "" } else { ", new-account tier" }
             )));
         }
 
@@ -2713,9 +2779,21 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .filter(|&v| v > 0)
         .unwrap_or(120);
+    // Age-tiered issuance: young accounts (< maturity) get a reduced cap — the
+    // scalable anti-Sybil lever (see decisions/sealed-sender-anti-abuse-economics.md).
+    let token_issuance_young_max_per_hour: u32 = env::var("TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(30);
+    let token_issuance_maturity_hours: i64 = env::var("TOKEN_ISSUANCE_MATURITY_HOURS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(24);
     info!(
-        "Privacy Pass issuance cap: {}/hr per user",
-        token_issuance_max_per_hour
+        "Privacy Pass issuance cap: {}/hr per user ({}/hr for accounts younger than {}h)",
+        token_issuance_max_per_hour, token_issuance_young_max_per_hour, token_issuance_maturity_hours
     );
 
     // Sender-certificate signing key — same BUNDLE_SIGNING_KEY key-service signs
@@ -2802,6 +2880,8 @@ async fn main() -> Result<()> {
             veil_bridge_cert: grpc_veil,
             token_issuer_key,
             token_issuance_max_per_hour,
+            token_issuance_young_max_per_hour,
+            token_issuance_maturity_hours,
             cert_signing_key,
         };
         if let Err(e) =
@@ -2903,6 +2983,40 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issuance_cap_mature_account_gets_full_cap() {
+        let now = chrono::Utc::now();
+        let born = now - chrono::Duration::hours(25);
+        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (120, true));
+    }
+
+    #[test]
+    fn issuance_cap_young_account_gets_young_cap() {
+        let now = chrono::Utc::now();
+        let born = now - chrono::Duration::hours(1);
+        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (30, false));
+    }
+
+    #[test]
+    fn issuance_cap_unknown_age_fails_safe_to_young() {
+        let now = chrono::Utc::now();
+        assert_eq!(effective_issuance_cap(None, now, 24, 30, 120), (30, false));
+    }
+
+    #[test]
+    fn issuance_cap_young_clamped_to_full() {
+        // Misconfiguration (young > full) must not RAISE the limit.
+        let now = chrono::Utc::now();
+        assert_eq!(effective_issuance_cap(None, now, 24, 500, 120), (120, false));
+    }
+
+    #[test]
+    fn issuance_cap_exact_maturity_boundary_is_mature() {
+        let now = chrono::Utc::now();
+        let born = now - chrono::Duration::hours(24);
+        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (120, true));
+    }
 
     #[test]
     fn build_sender_cert_sign_payload_is_direct_concat_no_separators_be_times() {
