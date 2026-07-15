@@ -2793,7 +2793,9 @@ async fn main() -> Result<()> {
         .unwrap_or(24);
     info!(
         "Privacy Pass issuance cap: {}/hr per user ({}/hr for accounts younger than {}h)",
-        token_issuance_max_per_hour, token_issuance_young_max_per_hour, token_issuance_maturity_hours
+        token_issuance_max_per_hour,
+        token_issuance_young_max_per_hour,
+        token_issuance_maturity_hours
     );
 
     // Sender-certificate signing key — same BUNDLE_SIGNING_KEY key-service signs
@@ -2988,14 +2990,20 @@ mod tests {
     fn issuance_cap_mature_account_gets_full_cap() {
         let now = chrono::Utc::now();
         let born = now - chrono::Duration::hours(25);
-        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (120, true));
+        assert_eq!(
+            effective_issuance_cap(Some(born), now, 24, 30, 120),
+            (120, true)
+        );
     }
 
     #[test]
     fn issuance_cap_young_account_gets_young_cap() {
         let now = chrono::Utc::now();
         let born = now - chrono::Duration::hours(1);
-        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (30, false));
+        assert_eq!(
+            effective_issuance_cap(Some(born), now, 24, 30, 120),
+            (30, false)
+        );
     }
 
     #[test]
@@ -3008,14 +3016,20 @@ mod tests {
     fn issuance_cap_young_clamped_to_full() {
         // Misconfiguration (young > full) must not RAISE the limit.
         let now = chrono::Utc::now();
-        assert_eq!(effective_issuance_cap(None, now, 24, 500, 120), (120, false));
+        assert_eq!(
+            effective_issuance_cap(None, now, 24, 500, 120),
+            (120, false)
+        );
     }
 
     #[test]
     fn issuance_cap_exact_maturity_boundary_is_mature() {
         let now = chrono::Utc::now();
         let born = now - chrono::Duration::hours(24);
-        assert_eq!(effective_issuance_cap(Some(born), now, 24, 30, 120), (120, true));
+        assert_eq!(
+            effective_issuance_cap(Some(born), now, 24, 30, 120),
+            (120, true)
+        );
     }
 
     #[test]
