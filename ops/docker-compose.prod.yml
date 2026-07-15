@@ -263,8 +263,14 @@ services:
       SERVICE_NAME: media
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
+      # Explicit storage path on a named volume. Without this the service wrote to
+      # ./media_storage INSIDE the container — every image bump / force-recreate wiped
+      # all media well before the 7-day MEDIA_FILE_TTL_SECONDS retention (observed
+      # 2026-07-15: <7d-old object gone after the 07-14 redeploy).
+      MEDIA_STORAGE_DIR: /data/media
     volumes:
       - /opt/construct/secrets:/secrets:ro
+      - media-data:/data/media
     networks:
       - internal
 
@@ -376,6 +382,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  media-data:
   caddy-data:
   prometheus-data:
   grafana-data:
