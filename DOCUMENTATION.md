@@ -1,6 +1,6 @@
 # Konstruct Server: Developer Documentation
 
-**Last Updated:** 2026-07-02  
+**Last Updated:** 2026-07-17  
 **Status:** Living Document
 
 ---
@@ -189,16 +189,30 @@ Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY
         └─ original sender's stream picks it up → green checkmark
 ```
 
-### 7. Sealed Sender Dispatch
+### 7. Sealed Sender Dispatch (+ Privacy Pass)
 
 ```
 Client sends SealedSenderEnvelope
   └─► messaging-service/src/envelope.rs
       pub(crate) async fn dispatch_sealed_sender(...)
+        ├─ delivery_tag replay guard (spent_tag.rs — sealed:exact/sealed:seen Redis keys)
+        ├─ Privacy Pass token redemption (token_redeem.rs)
+        │    policy: MSG_STEALTH_TOKEN_POLICY = off | warn | enforce
+        │    - unseal (X25519 to server key) → verify VOPRF (TOKEN_ISSUER_KEY)
+        │    - double-spend: SET spent:{sha256(nonce)} NX EX 30d
+        │    - enforce rejection → FAILED_PRECONDITION "privacy_pass:{label}"
+        │      (labels: missing_token/invalid_token/double_spent/decrypt_failed/
+        │       redis_error/not_configured; client retries once, never de-anonymizes)
         ├─ [local recipient] → dispatch_envelope (same server)
         └─ [remote recipient] → crates/construct-federation
             forward sealed_inner opaquely to recipient's home server
 ```
+
+Token issuance lives in **identity-service** (`IssueTokens`, authed): hourly cap
+`TOKEN_ISSUANCE_MAX_PER_HOUR` (120), young accounts (< `TOKEN_ISSUANCE_MATURITY_HOURS`,
+24 h) get `TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR` (30). The token *encryption* key (X25519)
+is delivered in `GetSenderCertificateResponse.token_encryption_key`.
+Ops runbook: construct-docs `deployment/stealth-token-keys-runbook.md`.
 
 ---
 
@@ -294,11 +308,17 @@ DH4 = ECDH(EK_A_priv,  OPK_B_pub)  // if one-time prekey available
 SK = HKDF-SHA256(salt=0xFF×32, ikm=DH1||DH2||DH3||DH4, info="ConstructX3DH")
 ```
 
-### JWT / Auth
+### Auth Tokens (PASETO + legacy JWT)
 
-- Access tokens: RS256, TTL 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, reduced to limit token exposure window)
-- Refresh tokens: RS256, TTL 90 days
+- Format: **PASETO v4.public** (Ed25519) primary; legacy RS256 JWT still verified —
+  `construct-auth` dispatches by the `v4.public.` prefix.
+- PASETO payload framing is non-standard: `nonce(32) || message || sig(64)` even for the
+  signed purpose (documented; client-side slice offsets are intentional).
+- Access tokens: TTL 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, reduced to limit token exposure window)
+- Refresh tokens: TTL 90 days
 - Claims: `{ sub: user_id, device_id, iss: "construct-server" }`
+- Revocation blocklist: `invalidated_token:{jti}` in Redis (checked on verify and in
+  messaging's Bearer path, fail-closed)
 
 ### Sender Certificate (sealed sender)
 
@@ -528,10 +548,29 @@ docker logs construct-caddy --tail 50
 **Media:**
 - Upload/download via MediaService gRPC
 - Local file storage + CDN-ready design
+- Storage persists on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`) —
+  before 2026-07-16 it was ephemeral in-container and lost on redeploy
+- Retention: 7 days from upload (`MEDIA_FILE_TTL_SECONDS`; downloads do not extend)
+
+**Sealed sender anti-abuse (stealth):**
+- Per-message Privacy Pass tokens (VOPRF, ristretto255): issuance in identity-service
+  (hourly + age-tiered caps), redemption in messaging-service
+- `MSG_STEALTH_TOKEN_POLICY` off/warn/enforce; typed enforce rejection
+  `FAILED_PRECONDITION privacy_pass:{label}`
+- `delivery_tag` replay guard (Redis `sealed:exact`/`sealed:seen`)
+
+**Push:**
+- APNs prod + sandbox clients, routed per-token by `push_environment`
+- 403 = provider-auth error (never deletes device tokens); only
+  `BadDeviceToken`/`Unregistered` do
+- Device-token registration accepts ≤ 512 chars (FCM-ready); FCM send path not yet implemented
 
 **Federation:**
 - `.well-known/construct-server` + `jwks.json` server discovery
 - S2S sealed sender forwarding (`/federation/v1/sealed`, `/federation/v1/messages`)
+- Inbound S2S receiver (signature-verified) implemented — two-VPS end-to-end test pending
+  (construct-docs `decisions/decentralization-execution-plan.md`, Epic A)
+- `INSTANCE_DOMAIN` is required on all services (no default)
 
 **Cryptographic identity:**
 - `identity_public_key` + `identity_key_type` + `RouteId` (SHA-256(type ‖ key))
@@ -548,4 +587,4 @@ docker logs construct-caddy --tail 50
 ---
 
 **Maintainer:** Konstruct Team  
-**License:** MIT (see LICENSE)
+**License:** AGPL-3.0-only (see LICENSE)

@@ -25,7 +25,7 @@ Signal's Security  +  Email's Openness  +  Minimal Attack Surface
 
 **End-to-end encryption** — Messages are encrypted on the sender's device using the recipient's public key. The ciphertext is what travels over the network. The server stores nothing readable.
 
-**Sealed sender** — The server does not learn who sent you a message. The sender's identity is encrypted inside the message envelope. To the server it's an opaque blob destined for a device.
+**Sealed sender** — The server does not learn who sent you a message. The sender's identity is encrypted inside the message envelope. To the server it's an opaque blob destined for a device. Anti-spam without identity: each sealed message carries an anonymous Privacy Pass token (VOPRF), so the server can rate-limit abuse without ever learning who is sending.
 
 **No message persistence** — Messages are never written to a database. They travel: sender → messaging-service → Redis Stream → recipient. Once delivered they are gone from the server.
 
@@ -84,7 +84,8 @@ The server verifies all signatures on upload (RFC 8032 strict). A forged or tamp
 | Identity signatures | Ed25519 (RFC 8032) | Strict verification |
 | Message encryption | ChaCha20-Poly1305 | 256-bit AEAD |
 | Key derivation | HKDF-SHA256 | Per Signal spec |
-| Token signing | RS256 (JWT) | Short-lived access tokens |
+| Token signing | PASETO v4.public (Ed25519) | Short-lived access tokens; legacy RS256 JWT still verified |
+| Anonymous anti-spam | Privacy Pass (VOPRF, ristretto255) | Per-message tokens — rate-limits senders the server cannot identify |
 
 ---
 
@@ -163,9 +164,9 @@ construct-server/
 ├── veil-service/          # VEIL obfuscation ticket provisioning
 ├── shared/
 │   ├── proto/             # Protobuf definitions (source of truth)
-│   ├── migrations/        # PostgreSQL schema (65 migrations, 001–064)
+│   ├── migrations/        # PostgreSQL schema (64 migrations, 001–064)
 │   └── tests/             # Integration tests
-└── crates/                # Shared libraries (26 crates)
+└── crates/                # Shared libraries (25 crates)
     ├── construct-crypto/  # Crypto primitives
     ├── construct-auth/    # JWT, PoW
     ├── construct-db/      # Database ORM + queries
@@ -246,7 +247,7 @@ Contributions are welcome. Before contributing, read the threat model below.
 - ✅ Compromised server — server cannot decrypt messages
 - ✅ "Harvest now, decrypt later" quantum attacks — hybrid PQC active
 - ✅ MITM key substitution — prekey signatures verified client and server
-- ✅ Spam / bot registration — Proof-of-Work + invite-only
+- ✅ Spam / bot registration — Proof-of-Work + invite-only + per-message Privacy Pass tokens (age-tiered issuance caps)
 - ✅ Message replay — idempotency keys, per-message ratchet keys
 
 ### Not protected against
