@@ -211,9 +211,9 @@ async fn device_token_register_invalid_format_too_long() {
 
     let user_id = register_and_get_user_id(&client, &app.auth_url()).await;
 
-    // Device token > 128 chars
+    // Device token > 512 chars (cap allows FCM-length tokens; APNs is 64 hex)
     let request = json!({
-        "deviceToken": "a".repeat(200),
+        "deviceToken": "a".repeat(600),
         "notificationFilter": "silent"
     });
 
