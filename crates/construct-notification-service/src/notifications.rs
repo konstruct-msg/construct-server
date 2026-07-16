@@ -68,10 +68,12 @@ pub async fn register_device(
     let user_id_str = user_id.to_string();
     let user_id_hash = log_safe_id(&user_id_str, &app_context.config.logging.hash_salt);
 
-    // Validate device token format
-    if request.device_token.is_empty() || request.device_token.len() > 128 {
+    // Validate device token format.
+    // 512: APNs tokens are 64 hex chars, but FCM registration tokens routinely exceed 128.
+    if request.device_token.is_empty() || request.device_token.len() > 512 {
         tracing::warn!(
             user_hash = %user_id_hash,
+            token_len = request.device_token.len(),
             "Invalid device token format"
         );
         return Err(AppError::Validation(

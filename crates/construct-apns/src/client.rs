@@ -231,15 +231,24 @@ impl ApnsClient {
             }
             Err(e) => {
                 // Detect permanently-invalid tokens so callers can disable them in the DB.
-                // BadDeviceToken  → token format wrong or environment mismatch
-                // Unregistered    → app was uninstalled, token no longer exists
-                // code 403        → APNs Forbidden; usually environment mismatch (sandbox token
-                //                   sent to production endpoint or vice versa). The `error` field
-                //                   is often `None` in this case because APNs returns an empty
-                //                   body. Retrying will never succeed — treat as invalid token.
+                // Per Apple, only an explicit reason condemns the DEVICE token:
+                //   BadDeviceToken (400) → token malformed or wrong for this environment
+                //   Unregistered   (410) → app was uninstalled, token no longer exists
+                // 403 is a PROVIDER-auth verdict (Expired/Invalid/MissingProviderToken,
+                // Forbidden, BadCertificate*) — the device token is fine; deleting it here
+                // turns a server-side auth hiccup into silent push loss for every token
+                // touched during the outage. Environment mismatch is no longer a 403 source
+                // either: since 4e72ae7 sends are routed per-token to the matching endpoint.
                 let is_invalid_token = if let ApnsH2Error::ResponseError(ref resp) = e {
-                    let bad_reason = resp
-                        .error
+                    if resp.code == 403 {
+                        error!(
+                            "APNs 403 (provider auth) — check .p8 key/key_id/team_id and \
+                             server clock; reason: {:?} (empty body = APNs sent no reason). \
+                             Device token NOT deleted.",
+                            resp.error.as_ref().map(|body| &body.reason)
+                        );
+                    }
+                    resp.error
                         .as_ref()
                         .map(|body| {
                             matches!(
@@ -247,8 +256,7 @@ impl ApnsClient {
                                 ErrorReason::BadDeviceToken | ErrorReason::Unregistered
                             )
                         })
-                        .unwrap_or(false);
-                    bad_reason || resp.code == 403
+                        .unwrap_or(false)
                 } else {
                     false
                 };
