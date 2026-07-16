@@ -321,9 +321,12 @@ pub async fn register_device_token(
         &context.config.logging.hash_salt,
     );
 
-    if input.device_token.is_empty() || input.device_token.len() > 128 {
+    // 512: APNs tokens are 64 hex chars, but FCM registration tokens routinely exceed 128
+    // and Google documents no upper bound — a tight cap silently locks Android clients out.
+    if input.device_token.is_empty() || input.device_token.len() > 512 {
         tracing::warn!(
             user_hash = %user_id_hash,
+            token_len = input.device_token.len(),
             "Invalid device token format"
         );
         return Err(AppError::Validation("Device token format is invalid".to_string()).into());

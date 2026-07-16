@@ -53,7 +53,12 @@ pub async fn register_device(
         construct_server_shared::notification_service::notifications::RegisterDeviceRequest,
     >,
 ) -> Result<impl IntoResponse, AppError> {
-    if request.device_token.is_empty() || request.device_token.len() > 128 {
+    // 512: APNs tokens are 64 hex chars, but FCM registration tokens routinely exceed 128.
+    if request.device_token.is_empty() || request.device_token.len() > 512 {
+        tracing::warn!(
+            token_len = request.device_token.len(),
+            "Invalid device token format"
+        );
         return Err(AppError::Validation(
             "Device token format is invalid".to_string(),
         ));
