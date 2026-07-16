@@ -7,31 +7,34 @@
 
 ## Service Map
 
-| Service | Binary | gRPC Port | HTTP/REST Port | Role |
-|---|---|---|---|---|
-| `caddy` | external | 443 / 8080 | 80 | TLS (Let's Encrypt), JWT validation, gRPC routing |
-| `quic` | external | — | 443/UDP | SALAMANDER-obfuscated QUIC → caddy:8080 (construct-transport) |
-| `gateway` | `gateway` | — | 3000 / 9443 | veil/obfs4 obfuscation proxy → caddy:8080 |
-| `auth` | `auth-service` | 50051 | 8081 | JWT auth, device registration, PoW challenges |
-| `user` | `user-service` | 50052 | 8082 | User profiles, search, relationships, invite tokens |
-| `messaging` | `messaging-service` | 50053 | 8083 | gRPC MessageStream, send, Redis direct delivery, APNs push (prod + sandbox), Sentinel anti-spam (in-process) |
-| `media` | `media-service` | 50056 | 8086 | S3/local upload, presigned URLs |
-| `key` | `key-service` | 50057 | 8087 | X3DH pre-key management (E2EE) |
-| `signaling` | `signaling-service` | 50060 | 8091 | WebRTC SDP/ICE signaling |
-| `group` | `group-service` | 50058 | 8097 | MLS groups (RFC 9420) + Broadcast channels (PUBLIC/PRIVATE), Sender Key encryption |
+Deployable services (see `ops/docker-compose.prod.yml`):
+
+| Service | Binary | gRPC Port | Role |
+|---|---|---|---|
+| `caddy` | external | 443 / 8080 | Edge TLS (Let's Encrypt), gRPC routing by proto path prefix |
+| `quic` | external | 443/UDP | Plain QUIC → caddy:8080 (construct-transport; Salamander obfuscation is DEBUG-only since 2026-06) |
+| `gateway` | `gateway` | HTTP 3000 / 9443 | /health, /.well-known, /federation S2S; veil/obfs4 proxy → caddy:8080 |
+| `identity` | `identity-service` | 50051 | Merged Auth + Device + DeviceLink + User + Invite; PoW; Privacy Pass token issuance; sender certificates |
+| `messaging` | `messaging-service` | 50053 | MessageStream, send, sealed sender + Privacy Pass redemption, Redis direct delivery, APNs push (prod + sandbox), Sentinel anti-spam (in-process) |
+| `media` | `media-service` | 50056 | Encrypted upload/download; storage on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`), 7d retention (`MEDIA_FILE_TTL_SECONDS`) |
+| `veil` | `veil-service` | 50056 (separate deployment) | VEIL obfuscation ticket provisioning |
+| `key` | `key-service` | 50057 | X3DH pre-key management, ML-KEM prekeys |
+| `group` | `group-service` | 50058 | MLS groups (RFC 9420) + Broadcast channels, Sender Key encryption |
+| `signaling` | `signaling-service` | 50060 | WebRTC SDP/ICE signaling |
+| `masque` | `masque-service` | WS 9200 | MASQUE-lite QUIC datagram relay (not behind Caddy) |
+
+> `auth-service` / `user-service` as separate deployables are GONE — merged into
+> `identity-service`. Notification + Sentinel are merged into `messaging-service`.
 
 ---
 
 ## Code Structure
 
 ### Thin-wrapper pattern
-`auth-service`, `user-service` are thin HTTP/gRPC wrappers.
-(Notification logic now lives in `messaging-service`; invite logic in `user-service`.)
-Their `src/handlers.rs` literally does:
-```rust
-pub use construct_server_shared::auth_service::handlers::*;
-```
-All business logic lives in `shared/src/construct_server/<service>/`.
+`identity-service` is a wrapper over business-logic crates
+(`crates/construct-auth-service`, `crates/construct-user-service`); notification logic
+lives in `messaging-service` (`notification_core.rs`).
+Shared handler logic lives in `shared/src/construct_server/<service>/`.
 
 ### Shared crate
 `shared/` (`construct-server-shared`) contains:
@@ -39,22 +42,24 @@ All business logic lives in `shared/src/construct_server/<service>/`.
 - `src/construct_server/messaging_service/core.rs` — `dispatch_envelope` + `confirm_pending_message` used **only** by `shared/tests/test_utils.rs` integration tests. Mirrors `messaging-service/src/core.rs` — keep both in sync.
 - `src/clients/notification.rs` — `NotificationClient` wrapper (lazy gRPC connect)
 
-### Crates under `crates/`
+### Crates under `crates/` (25 total; key ones)
 | Crate | Purpose |
 |---|---|
-| `construct-config` | All config structs + env var parsing |
-| `construct-queue` | Redis stream read/write for messaging |
+| `construct-config` | All config structs + env var parsing + `secret_hygiene` (fail-fast boot check on malformed secrets; see also `scripts/preflight-secrets.sh`) |
+| `construct-queue` | Redis stream read/write for messaging + Privacy Pass issuance counter |
 | `construct-message` | Message envelope types (`MessageEnvelope` — no Kafka transport) |
-| `construct-auth` | JWT signing/verification |
+| `construct-auth` | Token signing/verification — PASETO v4.public (Ed25519) primary + legacy RS256 JWT (dispatch by `v4.public.` prefix) |
+| `construct-auth-service` / `construct-user-service` | Business logic wrapped by `identity-service` |
 | `construct-pow` | Proof-of-Work challenge/verify |
 | `construct-rate-limit` | Redis-backed sliding window rate limiter |
-| `construct-apns` | APNs HTTP/2 client |
+| `construct-apns` | APNs HTTP/2 client (`apns-h2`; JWT auto-renewed every 55 min) |
 | `construct-redis` | Redis connection pool + retry helpers |
 | `construct-context` | `AppContext` adapter (bridges old context to shared services) |
-| `construct-federation` | Server signing keys (Ed25519) |
+| `construct-federation` | Server signing keys (Ed25519), S2S forwarding |
 | `construct-metrics` | Prometheus metrics helpers |
 | `construct-db` | Postgres ORM: `User`, `BlockedUser`, `Device` etc + all CRUD queries |
 | `construct-types` | Domain types: `UserId`, `RouteId`, timestamp parsing, hex/UUID helpers |
+| `crypto-agility` | Crypto suite negotiation helpers |
 
 ---
 
@@ -94,7 +99,11 @@ Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written,
 | `user:{user_id}:server_instance_id` | String (SET) | messaging-service | Which server holds connection |
 | `delivery_queue:{server_instance_id}` | List/key (TTL) | messaging-service | Server heartbeat registry |
 | `rate_limit:{scope}:{id}` | String | construct-rate-limit | Sliding window counters |
-| `pow_challenge:{token}` | String (SETEX) | auth-service | PoW challenge storage |
+| `pow_challenge:{token}` | String (SETEX) | identity-service | PoW challenge storage |
+| `rate:pp_tokens:{user_id}:{hour}` | Counter (INCRBY+EXPIRE) | identity-service | Privacy Pass hourly issuance counter |
+| `spent:{sha256(nonce)}` | String (SET NX EX 30d) | messaging-service | Privacy Pass double-spend guard |
+| `sealed:exact:{sha256(tag)}` / `sealed:seen:{sha256(tag)}` | String (5 min / 24 h) | messaging-service | `SealedInner.delivery_tag` replay guard |
+| `invalidated_token:{jti}` | String (TTL) | identity/messaging | Revoked access-token blocklist |
 
 > Note: `KEYS delivery_queue:*` appears in old comments but is **not used** in runtime code.
 > Server discovery uses O(1) `GET user:{user_id}:server_instance_id`.
@@ -124,14 +133,58 @@ auth-service
 
 ---
 
+## Sealed Sender + Privacy Pass (stealth)
+
+Every sealed envelope carries a per-message Privacy Pass token (VOPRF, ristretto255) —
+the anti-abuse replacement for a sender identity the server no longer sees.
+Full context: construct-docs `decisions/sealed-sender-anti-abuse-economics.md` and
+`deployment/stealth-token-keys-runbook.md`.
+
+**Issuance** (identity-service, authed `IssueTokens`):
+- `TOKEN_ISSUER_KEY` — 32-byte hex VOPRF secret. Unset ⇒ issuance disabled (fail-quiet);
+  present-but-malformed ⇒ boot error (`secret_hygiene`). NOT the same key as
+  `SERVER_SIGNING_KEY` (different key, different encoding — see runbook §6).
+- Hourly caps: `TOKEN_ISSUANCE_MAX_PER_HOUR` (default 120); young accounts
+  (< `TOKEN_ISSUANCE_MATURITY_HOURS`, default 24 h, age = MIN(devices.registered_at))
+  get `TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR` (default 30). Age-lookup failure ⇒ young cap
+  (fail-safe). Cap hit ⇒ `RESOURCE_EXHAUSTED` (client backs off one hour).
+- Token **encryption** key (X25519 pub, seals the token to the server) is delivered in
+  `GetSenderCertificateResponse.token_encryption_key` — the HTTP well-known fetch was
+  unreliable on iOS (ATS vs self-signed cert) and is legacy.
+
+**Redemption** (messaging-service, `dispatch_sealed_sender` → `token_redeem.rs`):
+- `MSG_STEALTH_TOKEN_POLICY` = `off` | `warn` (log result, deliver anyway) | `enforce`.
+- Under `enforce`, rejection = typed `FAILED_PRECONDITION` with message
+  `privacy_pass:{label}`; labels from `TokenRedeemResult::as_label`:
+  `missing_token` / `invalid_token` / `double_spent` / `decrypt_failed` /
+  `redis_error` / `not_configured`. The iOS client does a one-shot
+  replenish-and-retry and NEVER downgrades to identified send (anonymity invariant).
+- Rollout state and warn-metric validation live in the runbook — check it before
+  flipping `enforce`.
+
+**Invariant**: an empty token wallet may degrade anti-abuse, never delivery or anonymity.
+Never add a server code path that reveals sender identity on token failure.
+
+---
+
 ## APNs Push Architecture
 
 **Notification-service merged into messaging-service:**
 - `messaging-service` calls APNs directly via `notification_core::send_blind_notification()`
-- APNs clients (prod + sandbox) are initialized in `messaging-service/main.rs`
+- APNs clients (prod + sandbox) are initialized in `messaging-service/main.rs`; sends are
+  routed per-token by `device_tokens.push_environment` (sandbox token → sandbox endpoint)
 - `NotificationServiceServer` runs on messaging's gRPC port (50053) for other services (key, signaling, mls, user)
 - Env var: `NOTIFICATION_SERVICE_URL` is no longer used by messaging-service; other services point to `messaging:50053`
 - Circuit-breaker `NotificationClient` removed — direct APNs call replaces gRPC round-trip
+
+**Error semantics (do not regress — see 938f395):**
+- Only explicit `BadDeviceToken` / `Unregistered` reasons condemn a device token
+  (→ delete from DB). **403 is a provider-auth verdict** (.p8 key / key_id / team_id /
+  clock) — never delete tokens on it; it logs a loud provider-auth error instead.
+- Device-token registration accepts up to 512 chars (APNs = 64 hex; FCM tokens routinely
+  exceed 128). Rejection logs `token_len`.
+- Silent pushes (`content-available`, low priority) are best-effort by design — Apple
+  throttles them per-device; do not treat sporadic non-delivery as a server bug.
 
 ---
 
@@ -213,6 +266,10 @@ Total: ~5-15 ms
 
 ### Token Lifecycle (access tokens)
 
+- **Format**: PASETO v4.public (Ed25519) primary; legacy RS256 JWT still verified
+  (dispatch by `v4.public.` prefix in `construct-auth`). Note the non-standard PASETO
+  payload framing `nonce(32) || message || sig(64)` — documented in construct-docs
+  (`reference: PASETO token framing`); the client slice offsets are NOT a bug.
 - **TTL**: 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, default 24). Was 168h — reduced to limit exposure window.
 - **Blocklist key**: `invalidated_token:{jti}` — Redis `SET` with TTL = remaining token lifetime. Written on explicit logout/revocation.
 - **Check on gRPC logout** (`AuthService.Logout`): server requires `access_token` in request body (`field 1`). Extracts JTI → adds to blocklist. Client **must populate** `request.accessToken` from Keychain; if empty, server returns `INVALID_ARGUMENT` (client should treat this as a non-fatal warning and continue session cleanup).
@@ -298,6 +355,22 @@ Server-visible fields (`Envelope.message_id`, `Envelope.timestamp`,
 `Envelope.conversation_id`, `Envelope.edits_message_id`) are transport-only and
 must not enter E2E semantics. Edits, replies, reactions, deletes, pins MUST use
 `MessageContent` / `SealedInner` fields.
+
+---
+
+## Config gotchas (learned the hard way)
+
+- **`INSTANCE_DOMAIN` is required** on every Rust service (no default since 2026-07-13;
+  removed the `eu.konstruct.cc` hardcode). Identity/messaging domain mismatch breaks
+  federation addressing.
+- **Never re-declare an `app.env` secret as a bare `${VAR}` under `environment:`** in
+  compose — an unset shell var silently blanks it (classic symptom:
+  "Seed must be 32 bytes, got 0"). Rotate secrets with `up -d --force-recreate`,
+  not `restart`.
+- `SERVER_SIGNING_KEY` is **base64**, `TOKEN_ISSUER_KEY` is **hex** — different keys,
+  different encodings, different rotation procedures (runbook §6).
+- Secret sanity: `construct-config::secret_hygiene` fails boot on present-but-malformed
+  secrets; run `scripts/preflight-secrets.sh` before deploys.
 
 ---
 
