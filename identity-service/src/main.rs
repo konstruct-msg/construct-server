@@ -2128,29 +2128,28 @@ impl UserService for IdentityGrpcService {
         // Wake recipient only for a freshly created request. Silent push —
         // clients that understand `contact_request_received` refresh the inbox;
         // older clients ignore the activity_type and fall through (harmless).
-        if is_new {
-            if let Some(notification_client) = &self.context.notification_client
-                && !notification_client.is_circuit_open()
-            {
-                let mut notif = notification_client.get();
-                let push_req = proto::SendBlindNotificationRequest {
-                    user_id: to_user_id.to_string(),
-                    badge_count: None,
-                    activity_type: Some("contact_request_received".to_string()),
-                    conversation_id: Some(request_id.to_string()),
-                };
-                match notif.send_blind_notification(push_req).await {
-                    Ok(_) => {
-                        notification_client.record_success();
-                    }
-                    Err(e) => {
-                        notification_client.record_failure();
-                        tracing::warn!(
-                            error = %e,
-                            to_user = %to_user_id,
-                            "Failed to send contact_request_received push"
-                        );
-                    }
+        if is_new
+            && let Some(notification_client) = &self.context.notification_client
+            && !notification_client.is_circuit_open()
+        {
+            let mut notif = notification_client.get();
+            let push_req = proto::SendBlindNotificationRequest {
+                user_id: to_user_id.to_string(),
+                badge_count: None,
+                activity_type: Some("contact_request_received".to_string()),
+                conversation_id: Some(request_id.to_string()),
+            };
+            match notif.send_blind_notification(push_req).await {
+                Ok(_) => {
+                    notification_client.record_success();
+                }
+                Err(e) => {
+                    notification_client.record_failure();
+                    tracing::warn!(
+                        error = %e,
+                        to_user = %to_user_id,
+                        "Failed to send contact_request_received push"
+                    );
                 }
             }
         }
