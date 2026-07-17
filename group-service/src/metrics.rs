@@ -2,7 +2,7 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram, register_int_counter, register_int_gauge, Histogram, IntCounter, IntGauge,
+    Histogram, IntCounter, IntGauge, register_histogram, register_int_counter, register_int_gauge,
 };
 
 lazy_static! {

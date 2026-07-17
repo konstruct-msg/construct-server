@@ -11,8 +11,9 @@ use crate::helpers::{
 use crate::service::GroupServiceImpl;
 
 fn generate_invite_token() -> String {
-    let mut rng = rand::thread_rng();
-    let bytes: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+    // `gen` is a reserved keyword in edition 2024; fill the buffer instead.
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill(bytes.as_mut_slice());
     hex::encode(bytes)
 }
 

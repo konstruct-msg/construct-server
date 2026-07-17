@@ -55,15 +55,15 @@ pub(crate) async fn subscribe_channel(
         if invite.revoked_at.is_some() {
             return Err(Status::permission_denied("Invite link has been revoked"));
         }
-        if let Some(expires_at) = invite.expires_at {
-            if expires_at < now {
-                return Err(Status::permission_denied("Invite link has expired"));
-            }
+        if let Some(expires_at) = invite.expires_at
+            && expires_at < now
+        {
+            return Err(Status::permission_denied("Invite link has expired"));
         }
-        if let Some(max_uses) = invite.max_uses {
-            if invite.use_count >= max_uses {
-                return Err(Status::resource_exhausted("Invite link fully used"));
-            }
+        if let Some(max_uses) = invite.max_uses
+            && invite.use_count >= max_uses
+        {
+            return Err(Status::resource_exhausted("Invite link fully used"));
         }
 
         db_channel::increment_channel_invite_link_usage(svc.db.as_ref(), &invite_token)
