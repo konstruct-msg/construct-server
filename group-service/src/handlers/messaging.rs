@@ -1,5 +1,5 @@
 use construct_db::mls::{
-    get_group_retention_days, insert_group_message, list_group_messages, NewGroupMessage,
+    NewGroupMessage, get_group_retention_days, insert_group_message, list_group_messages,
 };
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use futures_util::StreamExt;
