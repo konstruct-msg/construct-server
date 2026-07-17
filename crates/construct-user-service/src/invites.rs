@@ -10,7 +10,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use construct_context::AppContext;
-use construct_crypto::hmac_sha256;
 use construct_db::DbPool;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
@@ -405,8 +404,10 @@ pub async fn accept_invite(
             // Using a single invite acceptance as the "mutual consent" signal is correct
             // because the inviter generated the link with intent to connect.
             let secret = &app_context.config.security.contact_hmac_secret;
-            let accepter_hmac = hmac_sha256(secret, accepter_user_id.as_bytes());
-            let inviter_hmac = hmac_sha256(secret, invite.uuid.as_bytes());
+            // contact_link_hmac = HMAC over the canonical string form; hashing
+            // Uuid::as_bytes() here silently breaks the mutual-contacts call check.
+            let accepter_hmac = construct_db::contact_link_hmac(secret, &accepter_user_id);
+            let inviter_hmac = construct_db::contact_link_hmac(secret, &invite.uuid);
             // accepter → inviter
             construct_db::add_contact_link(&app_context.db_pool, &accepter_hmac, &inviter_hmac)
                 .await

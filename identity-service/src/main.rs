@@ -2266,12 +2266,15 @@ impl UserService for IdentityGrpcService {
         .await
         .map_err(|e| Status::not_found(e.to_string()))?;
 
-        use construct_crypto::hmac_sha256;
-
         if action == proto::ContactRequestAction::Accept {
             if let Some(sender_id) = from_user_id {
-                let caller_hmac = hmac_sha256(&sec.contact_hmac_secret, caller_id.as_bytes());
-                let sender_hmac = hmac_sha256(&sec.contact_hmac_secret, sender_id.as_bytes());
+                // Hashing Uuid::as_bytes() here (instead of the canonical string form)
+                // broke calls for request-flow contacts ("Calls allowed only for mutual
+                // contacts") — contact_link_hmac is the single source of the convention.
+                let caller_hmac =
+                    construct_db::contact_link_hmac(&sec.contact_hmac_secret, &caller_id);
+                let sender_hmac =
+                    construct_db::contact_link_hmac(&sec.contact_hmac_secret, &sender_id);
                 construct_server_shared::db::add_contact_link(
                     &self.context.db_pool,
                     &caller_hmac,

@@ -410,6 +410,17 @@ pub async fn is_blocked_by(pool: &DbPool, recipient_id: &Uuid, sender_id: &Uuid)
 // Privacy-preserving contact links
 // ============================================================================
 
+/// Canonical HMAC key for `contact_links` rows: HMAC over the **lowercase hyphenated
+/// string** form of the user id (matches what a `String` user id hashes to in
+/// signaling-service). Every writer AND reader of `contact_links` must derive keys
+/// through this helper — hashing `Uuid::as_bytes()` (raw 16 bytes) instead silently
+/// breaks the mutual-contacts check ("Calls allowed only for mutual contacts").
+/// Note: `contact_requests` rows intentionally use raw `Uuid::as_bytes()` — the two
+/// tables have different conventions.
+pub fn contact_link_hmac(secret: &[u8], user_id: &Uuid) -> [u8; 32] {
+    hmac_sha256(secret, user_id.to_string().as_bytes())
+}
+
 /// Insert directional contact link `user_hmac -> peer_hmac`.
 pub async fn add_contact_link(pool: &DbPool, user_hmac: &[u8], peer_hmac: &[u8]) -> Result<()> {
     sqlx::query(

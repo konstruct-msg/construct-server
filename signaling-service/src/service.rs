@@ -6,7 +6,6 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use construct_auth::AuthManager;
-use construct_crypto::hmac_sha256;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::services::v1 as services_proto;
@@ -362,8 +361,10 @@ impl SignalingService for SignalingServiceImpl {
                 return Err(Status::invalid_argument("Invalid user_id UUID"));
             };
 
-            let caller_hmac = hmac_sha256(&self.contact_hmac_secret, caller_id.as_bytes());
-            let callee_hmac = hmac_sha256(&self.contact_hmac_secret, callee_user_id.as_bytes());
+            let caller_hmac =
+                construct_db::contact_link_hmac(&self.contact_hmac_secret, &caller_uuid);
+            let callee_hmac =
+                construct_db::contact_link_hmac(&self.contact_hmac_secret, &callee_uuid);
             match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -572,17 +573,19 @@ async fn handle_outbound_signal(
             let callee_user_id = callee_user_id_from_route(route.as_ref())?;
 
             if let Some(pool) = db_pool {
-                // Validate UUIDs, but use the canonical string form for HMAC so the
-                // computed values match what invite-service stores (String::as_bytes()).
                 let (Ok(caller_uuid), Ok(callee_uuid)) =
                     (Uuid::parse_str(user_id), Uuid::parse_str(callee_user_id))
                 else {
                     return Err(Status::invalid_argument("Invalid user_id UUID"));
                 };
 
-                // Enforce strict mutual contacts for calls.
-                let caller_hmac = hmac_sha256(contact_hmac_secret, user_id.as_bytes());
-                let callee_hmac = hmac_sha256(contact_hmac_secret, callee_user_id.as_bytes());
+                // Enforce strict mutual contacts for calls. contact_link_hmac is the
+                // single source of the contact_links key convention (canonical string
+                // form, normalised through Uuid).
+                let caller_hmac =
+                    construct_db::contact_link_hmac(contact_hmac_secret, &caller_uuid);
+                let callee_hmac =
+                    construct_db::contact_link_hmac(contact_hmac_secret, &callee_uuid);
                 match construct_db::are_mutual_contacts(pool, &caller_hmac, &callee_hmac).await {
                     Ok(true) => {}
                     Ok(false) => {
