@@ -4,7 +4,6 @@ use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use uuid::Uuid;
 
-use construct_crypto::hmac_sha256;
 use construct_server_shared::{
     AppError,
     db::{self as construct_db, DbPool},
@@ -262,8 +261,8 @@ pub async fn accept_invite(
     );
 
     let secret = &context.config.security.contact_hmac_secret;
-    let accepter_hmac = hmac_sha256(secret, input.accepter_user_id.to_string().as_bytes());
-    let creator_hmac = hmac_sha256(secret, creator_user_id.to_string().as_bytes());
+    let accepter_hmac = construct_db::contact_link_hmac(secret, &input.accepter_user_id);
+    let creator_hmac = construct_db::contact_link_hmac(secret, &creator_user_id);
 
     construct_db::add_contact_link(&context.db_pool, &accepter_hmac, &creator_hmac)
         .await
