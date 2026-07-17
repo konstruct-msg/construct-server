@@ -1379,8 +1379,19 @@ struct SentRow {
 /// - `to_user_id` is **not stored** — caller must deliver the push notification before calling this.
 /// - `from_identity_enc` is an optional envelope-encrypted identity snapshot (username + display_name).
 ///
-/// Returns `Ok(request_id)` on success, or an error if a pending request already exists
-/// for this sender→recipient pair.
+/// Idempotent under concurrent sends: UNIQUE `(from_hmac, to_hmac)` races resolve to
+/// [`CreateContactRequestOutcome::AlreadyPending`] with the winning row's id instead of
+/// an internal error. Resolved (non-pending) pairs return an error — re-open is a
+/// separate product decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateContactRequestOutcome {
+    /// Fresh row inserted — caller should rate-limit-count and notify the recipient.
+    Created(Uuid),
+    /// Lost UNIQUE race (or concurrent dedup); pending row already exists.
+    /// Caller must NOT re-count rate limit or re-push.
+    AlreadyPending(Uuid),
+}
+
 pub async fn create_contact_request(
     pool: &DbPool,
     from_user_id: Uuid,
@@ -1388,13 +1399,13 @@ pub async fn create_contact_request(
     hmac_secret: &[u8],
     envelope_key: &[u8],
     from_identity_enc: Option<&[u8]>,
-) -> Result<Uuid> {
+) -> Result<CreateContactRequestOutcome> {
     let from_hmac = hmac_sha256(hmac_secret, from_user_id.as_bytes());
     let to_hmac = hmac_sha256(hmac_secret, to_user_id.as_bytes());
     let from_enc = envelope_encrypt(envelope_key, from_user_id.as_bytes())
         .map_err(|e| anyhow::anyhow!("envelope_encrypt failed: {}", e))?;
 
-    let id: Uuid = sqlx::query_scalar(
+    let inserted: Option<Uuid> = sqlx::query_scalar(
         r#"
         INSERT INTO contact_requests (from_hmac, to_hmac, from_enc, from_identity_enc)
         VALUES ($1, $2, $3, $4)
@@ -1408,10 +1419,38 @@ pub async fn create_contact_request(
     .bind(from_identity_enc)
     .fetch_optional(pool)
     .await
-    .context("Failed to insert contact request")?
-    .ok_or_else(|| anyhow::anyhow!("contact request already exists (duplicate)"))?;
+    .context("Failed to insert contact request")?;
 
-    Ok(id)
+    if let Some(id) = inserted {
+        return Ok(CreateContactRequestOutcome::Created(id));
+    }
+
+    // Conflict: another row owns this pair. Prefer pending (concurrent send race).
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT id, status FROM contact_requests
+        WHERE from_hmac = $1 AND to_hmac = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(&from_hmac[..])
+    .bind(&to_hmac[..])
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch contact request after insert conflict")?;
+
+    match existing {
+        Some((id, status)) if status == "pending" => {
+            Ok(CreateContactRequestOutcome::AlreadyPending(id))
+        }
+        Some((_, status)) => Err(anyhow::anyhow!(
+            "contact request already resolved (status={})",
+            status
+        )),
+        None => Err(anyhow::anyhow!(
+            "contact request insert conflicted but no row found"
+        )),
+    }
 }
 
 /// Fetch all pending incoming contact requests for `recipient_user_id`.
