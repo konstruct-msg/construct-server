@@ -1993,22 +1993,7 @@ impl UserService for IdentityGrpcService {
             return Err(Status::invalid_argument("Cannot send request to yourself"));
         }
 
-        const MAX_REQUESTS_PER_DAY: i64 = 5;
-        const WINDOW_SECONDS: i64 = 86400;
-        let rate_key = format!("rate:contact_request:{}:day", caller_id);
-        {
-            let mut queue = self.context.queue.lock().await;
-            let count = queue
-                .increment_rate_limit(&rate_key, WINDOW_SECONDS)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-            if count > MAX_REQUESTS_PER_DAY {
-                return Err(Status::resource_exhausted(
-                    "Contact request rate limit exceeded. Try again later.",
-                ));
-            }
-        }
-
+        // Cheap guards first — no rate-limit burn on blocked / non-searchable targets.
         let searchable = construct_db::is_user_searchable(&self.context.db_pool, &to_user_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -2029,6 +2014,8 @@ impl UserService for IdentityGrpcService {
 
         let sec = &self.context.config.security;
 
+        // Idempotent re-send: return existing pending id WITHOUT burning the daily quota
+        // and WITHOUT re-pushing the recipient (client transport retries land here).
         if let Some(existing_id) = construct_db::get_pending_contact_request_id(
             &self.context.db_pool,
             caller_id,
@@ -2042,6 +2029,24 @@ impl UserService for IdentityGrpcService {
                 request_id: existing_id.to_string(),
                 status: proto::ContactRequestStatus::Pending as i32,
             }));
+        }
+
+        // Rate limit only applies to *new* inserts. Place after dedup so flaky clients
+        // that retry SendContactRequest do not exhaust the 5/day budget on no-ops.
+        const MAX_REQUESTS_PER_DAY: i64 = 5;
+        const WINDOW_SECONDS: i64 = 86400;
+        let rate_key = format!("rate:contact_request:{}:day", caller_id);
+        {
+            let mut queue = self.context.queue.lock().await;
+            let count = queue
+                .increment_rate_limit(&rate_key, WINDOW_SECONDS)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if count > MAX_REQUESTS_PER_DAY {
+                return Err(Status::resource_exhausted(
+                    "Contact request rate limit exceeded. Try again later.",
+                ));
+            }
         }
 
         let from_identity_enc = match req.from_identity {
@@ -2095,7 +2100,7 @@ impl UserService for IdentityGrpcService {
             None => None,
         };
 
-        let request_id = construct_db::create_contact_request(
+        let outcome = construct_db::create_contact_request(
             &self.context.db_pool,
             caller_id,
             to_user_id,
@@ -2104,7 +2109,51 @@ impl UserService for IdentityGrpcService {
             from_identity_enc.as_deref(),
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("already resolved") {
+                // Prior accept/decline for this pair (UNIQUE holds forever). Do not leak
+                // recipient status beyond a generic already-exists.
+                Status::already_exists("contact request already exists for this user")
+            } else {
+                Status::internal(msg)
+            }
+        })?;
+
+        let (request_id, is_new) = match outcome {
+            construct_db::CreateContactRequestOutcome::Created(id) => (id, true),
+            construct_db::CreateContactRequestOutcome::AlreadyPending(id) => (id, false),
+        };
+
+        // Wake recipient only for a freshly created request. Silent push —
+        // clients that understand `contact_request_received` refresh the inbox;
+        // older clients ignore the activity_type and fall through (harmless).
+        if is_new {
+            if let Some(notification_client) = &self.context.notification_client
+                && !notification_client.is_circuit_open()
+            {
+                let mut notif = notification_client.get();
+                let push_req = proto::SendBlindNotificationRequest {
+                    user_id: to_user_id.to_string(),
+                    badge_count: None,
+                    activity_type: Some("contact_request_received".to_string()),
+                    conversation_id: Some(request_id.to_string()),
+                };
+                match notif.send_blind_notification(push_req).await {
+                    Ok(_) => {
+                        notification_client.record_success();
+                    }
+                    Err(e) => {
+                        notification_client.record_failure();
+                        tracing::warn!(
+                            error = %e,
+                            to_user = %to_user_id,
+                            "Failed to send contact_request_received push"
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(Response::new(proto::SendContactRequestResponse {
             request_id: request_id.to_string(),
