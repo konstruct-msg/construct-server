@@ -1,0 +1,34 @@
+[Unit]
+# EntryDirectory Source 3 — island mDNS advertiser for the local Construct relay.
+# Runs directly on the relay host (NOT in a bridge-networked container) so its
+# multicast advert reaches the LAN. Requires avahi-daemon to be running.
+Description=Construct VEIL island mDNS advertiser (EntryDirectory Source 3)
+Documentation=https://github.com/konstruct-msg/construct-docs decisions/entry-directory-source3-local-discovery.md
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+Requires=avahi-daemon.service
+
+[Service]
+Type=simple
+# The relay's cert SNI / INSTANCE_DOMAIN. REQUIRED — edit before enabling.
+Environment=VEIL_MDNS_SNI=relay.a.local
+# Where to read the live cert from (sidecar sits next to the relay).
+Environment=VEIL_MDNS_PROBE=127.0.0.1:443
+# Optional: WebTunnel path if this relay fronts one (omit for plain-TLS island relays).
+#Environment=VEIL_MDNS_WT=/api/stream
+# Re-probe the cert hourly so a rotation self-corrects.
+Environment=VEIL_MDNS_RECHECK_SECS=3600
+
+ExecStart=/opt/construct/ops/veil-mdns-sidecar/veil-mdns-advertise.sh
+Restart=always
+RestartSec=10
+
+# Hardening — the advertiser needs no privileges beyond outbound TLS + mDNS.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
