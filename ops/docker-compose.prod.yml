@@ -288,7 +288,12 @@ services:
       - path: /opt/construct/secrets/app.env
         required: true
     environment:
-      PORT: "8097"
+      # gRPC port MUST match the Caddyfile upstream `group:50058` (MlsService + ChannelService
+      # routes). This was wrongly set to 8097 (the metrics port), so the gRPC server bound 8097
+      # and Caddy's reverse_proxy to group:50058 got connection-refused → 502 Bad Gateway on all
+      # MLS/Channel RPCs (e.g. client key-package replenishment). METRICS_PORT keeps 8097.
+      PORT: "50058"
+      METRICS_PORT: "8097"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: group
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
