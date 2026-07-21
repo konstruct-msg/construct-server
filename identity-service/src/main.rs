@@ -1009,18 +1009,20 @@ impl AuthService for IdentityGrpcService {
         // Verifiable VOPRF (Phase C): commitment K = k·G + a batched DLEQ proof that every
         // evaluation used this same k. Clients pin K from well-known and reject any per-user key.
         let server_pubkey = construct_crypto::privacy_pass::issuer_public_key(&k_bytes).to_vec();
-        let dleq_proof =
-            match construct_crypto::privacy_pass::generate_dleq_proof(&k_bytes, &blinded32, &evaluated32)
-            {
-                Some(p) => p.to_vec(),
-                None => {
-                    // All points were already validated non-identity/on-curve above, so this is
-                    // unreachable in practice — but never fail issuance on a proof glitch (enforce
-                    // is off; an empty proof degrades to warn, delivery is unaffected).
-                    tracing::error!("issue_tokens: DLEQ proof generation returned None unexpectedly");
-                    Vec::new()
-                }
-            };
+        let dleq_proof = match construct_crypto::privacy_pass::generate_dleq_proof(
+            &k_bytes,
+            &blinded32,
+            &evaluated32,
+        ) {
+            Some(p) => p.to_vec(),
+            None => {
+                // All points were already validated non-identity/on-curve above, so this is
+                // unreachable in practice — but never fail issuance on a proof glitch (enforce
+                // is off; an empty proof degrades to warn, delivery is unaffected).
+                tracing::error!("issue_tokens: DLEQ proof generation returned None unexpectedly");
+                Vec::new()
+            }
+        };
 
         Ok(Response::new(proto::IssueTokensResponse {
             evaluated_points,
