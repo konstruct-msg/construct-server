@@ -756,6 +756,14 @@ message IssueTokensResponse {
   // Client unblinds: N = r_inv * Z = k * T, then derives token via HKDF.
   repeated bytes evaluated_points = 1;
   // 32-byte compressed Ristretto255 public key: K = k * G.
-  // Client uses this to verify the evaluation (DLEQ proof in future version).
+  // Clients pin this from well-known (token_issuer_public) and verify dleq_proof against it.
   bytes server_pubkey = 2;
+  // Batched Chaum-Pedersen DLEQ proof (Phase C verifiable VOPRF): 64 bytes,
+  // challenge(32) ‖ response(32). Proves every evaluated_point[i] = k * blinded_points[i]
+  // under the same committed k (K = k*G) — rejects a malicious per-user key_u. Empty only if
+  // the issuer key is unset. Transcript spec: construct-docs/cryptocore/privacy-pass-dleq-v1.md.
+  bytes dleq_proof = 3;
+  // Version of the committed issuer key (matches token_issuer_key_version in well-known), so key
+  // rotation is not a flag-day: the client pins K per version.
+  uint32 issuer_key_version = 4;
 }
