@@ -581,7 +581,8 @@ mod tests {
         let (blinded, evaluated) = make_batch(&k_u, 5); // evaluated under k_u
         let k_pub = issuer_public_key(&k.to_bytes()); // committed to k
 
-        let proof_under_k = generate_dleq_proof(&k.to_bytes(), &blinded, &evaluated).expect("proof");
+        let proof_under_k =
+            generate_dleq_proof(&k.to_bytes(), &blinded, &evaluated).expect("proof");
         assert!(
             !verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof_under_k),
             "k_u evaluation must fail against the committed K"
@@ -594,7 +595,12 @@ mod tests {
             "honest k_u proof must fail against the published K"
         );
         assert!(
-            verify_dleq_proof(&issuer_public_key(&k_u.to_bytes()), &blinded, &evaluated, &proof_under_ku),
+            verify_dleq_proof(
+                &issuer_public_key(&k_u.to_bytes()),
+                &blinded,
+                &evaluated,
+                &proof_under_ku
+            ),
             "k_u proof verifies only against K_u (sanity)"
         );
     }
@@ -635,7 +641,12 @@ mod tests {
         let (blinded, evaluated) = make_batch(&k, 2);
         let k_pub = issuer_public_key(&k.to_bytes());
         // All-0xFF is a non-canonical scalar encoding for both halves → reject, never panic.
-        assert!(!verify_dleq_proof(&k_pub, &blinded, &evaluated, &[0xffu8; 64]));
+        assert!(!verify_dleq_proof(
+            &k_pub,
+            &blinded,
+            &evaluated,
+            &[0xffu8; 64]
+        ));
         // Empty / mismatched batches → reject.
         assert!(generate_dleq_proof(&k.to_bytes(), &[], &[]).is_none());
         assert!(generate_dleq_proof(&k.to_bytes(), &blinded, &evaluated[..1]).is_none());
@@ -657,7 +668,10 @@ mod tests {
         let evaluated: Vec<[u8; 32]> = blinded
             .iter()
             .map(|b| {
-                let p = CompressedRistretto::from_slice(b).unwrap().decompress().unwrap();
+                let p = CompressedRistretto::from_slice(b)
+                    .unwrap()
+                    .decompress()
+                    .unwrap();
                 (k * p).compress().to_bytes()
             })
             .collect();
@@ -667,11 +681,20 @@ mod tests {
         let proof2 = generate_dleq_proof(&k_bytes, &blinded, &evaluated).unwrap();
         assert_eq!(proof, proof2, "deterministic nonce ⇒ stable proof");
         // Self-consistency.
-        assert!(verify_dleq_proof(&issuer_public_key(&k_bytes), &blinded, &evaluated, &proof));
+        assert!(verify_dleq_proof(
+            &issuer_public_key(&k_bytes),
+            &blinded,
+            &evaluated,
+            &proof
+        ));
 
         // Golden vector — the client-parity contract (privacy-pass-dleq-v1.md). A change here means
         // the DLEQ transcript changed and every client verifier must be updated in lockstep.
         const KAT_PROOF_HEX: &str = "a5fc43539f4acf319af0035bc73a19006588f75a5d425fc3039e906597c08d06bfa8b0cd50bb08d6d7bcb90dae2222fd2384e8404de57260fd412f729d29ab08";
-        assert_eq!(hex_encode(&proof), KAT_PROOF_HEX, "DLEQ transcript changed — wire break");
+        assert_eq!(
+            hex_encode(&proof),
+            KAT_PROOF_HEX,
+            "DLEQ transcript changed — wire break"
+        );
     }
 }
