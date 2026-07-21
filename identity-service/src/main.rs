@@ -980,6 +980,9 @@ impl AuthService for IdentityGrpcService {
         }
 
         let mut evaluated_points: Vec<Vec<u8>> = Vec::with_capacity(blinded_points.len());
+        // 32-byte arrays for the DLEQ proof (batched over the whole issuance).
+        let mut blinded32: Vec<[u8; 32]> = Vec::with_capacity(blinded_points.len());
+        let mut evaluated32: Vec<[u8; 32]> = Vec::with_capacity(blinded_points.len());
         for raw in blinded_points {
             if raw.len() != 32 {
                 return Err(Status::invalid_argument(
@@ -997,15 +1000,33 @@ impl AuthService for IdentityGrpcService {
                 ));
             }
             let z: RistrettoPoint = k * point;
-            evaluated_points.push(z.compress().to_bytes().to_vec());
+            let z_bytes = z.compress().to_bytes();
+            evaluated_points.push(z_bytes.to_vec());
+            blinded32.push(raw.as_slice().try_into().expect("len checked == 32"));
+            evaluated32.push(z_bytes);
         }
 
-        let pubkey_point = curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT * k;
-        let pubkey_bytes = pubkey_point.compress().to_bytes().to_vec();
+        // Verifiable VOPRF (Phase C): commitment K = k·G + a batched DLEQ proof that every
+        // evaluation used this same k. Clients pin K from well-known and reject any per-user key.
+        let server_pubkey = construct_crypto::privacy_pass::issuer_public_key(&k_bytes).to_vec();
+        let dleq_proof =
+            match construct_crypto::privacy_pass::generate_dleq_proof(&k_bytes, &blinded32, &evaluated32)
+            {
+                Some(p) => p.to_vec(),
+                None => {
+                    // All points were already validated non-identity/on-curve above, so this is
+                    // unreachable in practice — but never fail issuance on a proof glitch (enforce
+                    // is off; an empty proof degrades to warn, delivery is unaffected).
+                    tracing::error!("issue_tokens: DLEQ proof generation returned None unexpectedly");
+                    Vec::new()
+                }
+            };
 
         Ok(Response::new(proto::IssueTokensResponse {
             evaluated_points,
-            server_pubkey: pubkey_bytes,
+            server_pubkey,
+            dleq_proof,
+            issuer_key_version: self.context.token_issuer_key_version,
         }))
     }
 }
@@ -2592,6 +2613,13 @@ async fn well_known_construct_server(
         .as_ref()
         .map(|bytes| b64::STANDARD.encode(bytes));
 
+    // Privacy Pass issuer commitment K = k·G (Phase C) — clients pin this per version and verify the
+    // DLEQ proof returned by IssueTokens against it.
+    let token_issuer_public = context
+        .token_issuer_pub
+        .as_ref()
+        .map(|bytes| b64::STANDARD.encode(bytes));
+
     let paseto_public_key = app_context
         .config
         .paseto_public_key
@@ -2614,6 +2642,8 @@ async fn well_known_construct_server(
             "version": env!("CARGO_PKG_VERSION"),
             "public_key": public_key,
             "token_encryption_key": token_encryption_key,
+            "token_issuer_public": token_issuer_public,
+            "token_issuer_key_version": context.token_issuer_key_version,
             "paseto_public_key": paseto_public_key,
         },
         "grpc_endpoint": format!("{}:443", domain),
@@ -2753,51 +2783,9 @@ async fn main() -> Result<()> {
             *pub_key.as_bytes()
         });
 
-    let notification_url = env::var("NOTIFICATION_SERVICE_URL")
-        .unwrap_or_else(|_| "http://messaging:50053".to_string());
-    let notification_client =
-        match construct_server_shared::clients::notification::NotificationClient::new(
-            &notification_url,
-        ) {
-            Ok(client) => {
-                info!(url = %notification_url, "Notification gRPC client initialized");
-                Some(client)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to create notification gRPC client — contact-accepted push disabled");
-                None
-            }
-        };
-
-    let identity_ctx = Arc::new(IdentityServiceContext {
-        db_pool,
-        queue,
-        auth_manager,
-        config: config.clone(),
-        server_signer,
-        token_enc_pub,
-        notification_client,
-    });
-
-    // VEIL bridge cert
-    let veil_bridge_cert: Option<String> = if config.veil_enabled {
-        config.veil_server_key.as_ref().and_then(|key_b64| {
-            let bytes = b64::STANDARD
-                .decode(key_b64)
-                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: invalid base64"))
-                .ok()?;
-            let server_cfg = construct_veil::ServerConfig::from_bytes(&bytes)
-                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: failed to parse"))
-                .ok()?;
-            let cert = server_cfg.bridge_cert();
-            info!(cert = %cert, "VEIL bridge cert ready");
-            Some(cert)
-        })
-    } else {
-        None
-    };
-
-    // Privacy Pass token issuer key
+    // Privacy Pass token issuer key + its public commitment (Phase C verifiable VOPRF). Loaded
+    // before the context so the derived commitment K = k·G can be published in well-known and
+    // pinned by clients.
     let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
         Ok(hex_str) => {
             let bytes = (0..hex_str.len())
@@ -2822,6 +2810,68 @@ async fn main() -> Result<()> {
             None
         }
     };
+    let token_issuer_key_version: u32 = env::var("TOKEN_ISSUER_KEY_VERSION")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1);
+    let token_issuer_pub: Option<[u8; 32]> =
+        token_issuer_key.map(|k| construct_crypto::privacy_pass::issuer_public_key(&k));
+    if let Some(pub_bytes) = token_issuer_pub {
+        info!(
+            issuer_public = %b64::STANDARD.encode(pub_bytes),
+            version = token_issuer_key_version,
+            "Privacy Pass issuer commitment initialized (DLEQ verifiable)"
+        );
+    }
+
+    let notification_url = env::var("NOTIFICATION_SERVICE_URL")
+        .unwrap_or_else(|_| "http://messaging:50053".to_string());
+    let notification_client =
+        match construct_server_shared::clients::notification::NotificationClient::new(
+            &notification_url,
+        ) {
+            Ok(client) => {
+                info!(url = %notification_url, "Notification gRPC client initialized");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create notification gRPC client — contact-accepted push disabled");
+                None
+            }
+        };
+
+    let identity_ctx = Arc::new(IdentityServiceContext {
+        db_pool,
+        queue,
+        auth_manager,
+        config: config.clone(),
+        server_signer,
+        token_enc_pub,
+        token_issuer_pub,
+        token_issuer_key_version,
+        notification_client,
+    });
+
+    // VEIL bridge cert
+    let veil_bridge_cert: Option<String> = if config.veil_enabled {
+        config.veil_server_key.as_ref().and_then(|key_b64| {
+            let bytes = b64::STANDARD
+                .decode(key_b64)
+                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: invalid base64"))
+                .ok()?;
+            let server_cfg = construct_veil::ServerConfig::from_bytes(&bytes)
+                .map_err(|e| tracing::warn!(error = %e, "VEIL_SERVER_KEY: failed to parse"))
+                .ok()?;
+            let cert = server_cfg.bridge_cert();
+            info!(cert = %cert, "VEIL bridge cert ready");
+            Some(cert)
+        })
+    } else {
+        None
+    };
+
+    // (Privacy Pass token issuer key + commitment loaded earlier, before context construction.)
 
     // Hourly Privacy Pass issuance cap (default 120). Raised from 20 for per-message
     // sealed sending (Phase B) — this is the effective sealed-send rate limit.

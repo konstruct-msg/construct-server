@@ -19,6 +19,13 @@ pub struct IdentityServiceContext {
     pub config: Arc<Config>,
     pub server_signer: Option<Arc<ServerSigner>>,
     pub token_enc_pub: Option<[u8; 32]>,
+    /// Privacy Pass issuer commitment `K = k·G` (compressed Ristretto) — published in well-known as
+    /// `token_issuer_public` so clients can pin it and verify the DLEQ proof on each issuance
+    /// (Phase C verifiable VOPRF). `None` when `TOKEN_ISSUER_KEY` is unset.
+    pub token_issuer_pub: Option<[u8; 32]>,
+    /// Version of the committed issuer key, published as `token_issuer_key_version` and echoed in
+    /// `IssueTokensResponse.issuer_key_version` so key rotation is not a flag-day.
+    pub token_issuer_key_version: u32,
     pub notification_client: Option<NotificationClient>,
 }
 

@@ -19,7 +19,12 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
-use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_POINT,
+    ristretto::{CompressedRistretto, RistrettoPoint},
+    scalar::Scalar,
+    traits::{Identity, IsIdentity},
+};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -174,6 +179,181 @@ pub fn verify_token(token: &[u8; 32], nonce: &[u8; 32], k_scalar_bytes: &[u8; 32
     let expected = derive_token(&n.compress().to_bytes(), nonce);
 
     expected.ct_eq(token).into()
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Verifiable VOPRF — batched DLEQ (Phase C)
+//
+// Proves the issuer evaluated every blinded point with the SAME, publicly-committed scalar `k`
+// (`K = k·G`) — closing the malicious-issuer key-tagging channel (a per-user `k_u` de-anonymises a
+// sealed sender despite blinding). Non-interactive batched Chaum-Pedersen with a deterministic
+// (RFC-6979-style) nonce. The transcript below is a CLIENT-PARITY CONTRACT: iOS/Android reimplement
+// verification byte-for-byte, so any change here is a wire break — see
+// construct-docs/cryptocore/privacy-pass-dleq-v1.md.
+// ──────────────────────────────────────────────────────────────────────────
+
+const DLEQ_DOMAIN: &[u8] = b"ConstructPP-DLEQ-v1";
+
+/// SHA-512 wide-reduction of an ordered list of byte-slices to a Ristretto scalar (same
+/// `sha2_dalek_compat` path as `hash_to_ristretto`, so issuance and client verification reduce
+/// identically). Callers prepend `DLEQ_DOMAIN` + a 1-byte context tag.
+fn dleq_hash_to_scalar(parts: &[&[u8]]) -> Scalar {
+    use sha2_dalek_compat::{Digest, Sha512};
+    let mut h = Sha512::new();
+    for p in parts {
+        h.update(p);
+    }
+    Scalar::from_hash(h)
+}
+
+/// Decompress a 32-byte compressed Ristretto point, rejecting the identity.
+fn decompress_nonidentity(bytes: &[u8; 32]) -> Option<RistrettoPoint> {
+    let p = CompressedRistretto::from_slice(bytes).ok()?.decompress()?;
+    if p.is_identity() {
+        return None;
+    }
+    Some(p)
+}
+
+/// The issuer's public commitment `K = k·G` (compressed Ristretto, 32 bytes) — published in
+/// well-known as `token_issuer_public` and pinned by clients. `k` is `TOKEN_ISSUER_KEY`, reduced
+/// with `from_bytes_mod_order` to match issuance/redemption.
+pub fn issuer_public_key(k_scalar_bytes: &[u8; 32]) -> [u8; 32] {
+    let k = Scalar::from_bytes_mod_order(*k_scalar_bytes);
+    (RISTRETTO_BASEPOINT_POINT * k).compress().to_bytes()
+}
+
+/// Deterministic random-linear-combination of the `(B_i, Z_i)` batch — identical on prover and
+/// verifier. Returns `None` if empty, length-mismatched, or any point fails to decompress / is the
+/// identity. `k_pub` is the committed `K` (bound into the seed so a proof can't be replayed under a
+/// different commitment).
+fn compute_composites(
+    k_pub: &[u8; 32],
+    blinded: &[[u8; 32]],
+    evaluated: &[[u8; 32]],
+) -> Option<(RistrettoPoint, RistrettoPoint)> {
+    use sha2_dalek_compat::{Digest, Sha512};
+
+    if blinded.is_empty() || blinded.len() != evaluated.len() {
+        return None;
+    }
+
+    let mut b_pts = Vec::with_capacity(blinded.len());
+    let mut z_pts = Vec::with_capacity(evaluated.len());
+    for (b, z) in blinded.iter().zip(evaluated.iter()) {
+        b_pts.push(decompress_nonidentity(b)?);
+        z_pts.push(decompress_nonidentity(z)?);
+    }
+
+    // seed = SHA512(DOMAIN ‖ 0x00 ‖ K ‖ Σ_i (B_i ‖ Z_i))
+    let mut sh = Sha512::new();
+    sh.update(DLEQ_DOMAIN);
+    sh.update([0x00u8]);
+    sh.update(k_pub);
+    for (b, z) in blinded.iter().zip(evaluated.iter()) {
+        sh.update(b);
+        sh.update(z);
+    }
+    let seed = sh.finalize();
+
+    // M = Σ d_i·B_i, Zc = Σ d_i·Z_i, d_i = H(DOMAIN ‖ 0x01 ‖ seed ‖ u32_be(i) ‖ B_i ‖ Z_i)
+    let mut m = RistrettoPoint::identity();
+    let mut zc = RistrettoPoint::identity();
+    for (i, (b, z)) in blinded.iter().zip(evaluated.iter()).enumerate() {
+        let idx = (i as u32).to_be_bytes();
+        let d = dleq_hash_to_scalar(&[DLEQ_DOMAIN, &[0x01], &seed[..], &idx[..], &b[..], &z[..]]);
+        m += d * b_pts[i];
+        zc += d * z_pts[i];
+    }
+    Some((m, zc))
+}
+
+/// Generate a batched DLEQ proof that every `evaluated[i] == k·blinded[i]` under the same `k` whose
+/// public commitment is `K = k·G`. Returns a 64-byte proof `challenge(32) ‖ response(32)`, or
+/// `None` if the batch is empty/mismatched or any point is invalid.
+pub fn generate_dleq_proof(
+    k_scalar_bytes: &[u8; 32],
+    blinded: &[[u8; 32]],
+    evaluated: &[[u8; 32]],
+) -> Option<[u8; 64]> {
+    let k = Scalar::from_bytes_mod_order(*k_scalar_bytes);
+    let k_pub = issuer_public_key(k_scalar_bytes);
+
+    let (m, zc) = compute_composites(&k_pub, blinded, evaluated)?;
+    let m_c = m.compress().to_bytes();
+    let zc_c = zc.compress().to_bytes();
+
+    // Deterministic nonce t = H(DOMAIN ‖ 0x02 ‖ k ‖ M ‖ Zc) — binds the secret (unpredictable) and
+    // the statement (never repeats across distinct (M,Zc)); no RNG, so no reuse-leaks-k failure.
+    let k_canon = k.to_bytes();
+    let t = dleq_hash_to_scalar(&[DLEQ_DOMAIN, &[0x02], &k_canon[..], &m_c[..], &zc_c[..]]);
+
+    let a1 = RISTRETTO_BASEPOINT_POINT * t;
+    let a2 = m * t;
+    let c = dleq_hash_to_scalar(&[
+        DLEQ_DOMAIN,
+        &[0x03],
+        &k_pub[..],
+        &m_c[..],
+        &zc_c[..],
+        &a1.compress().to_bytes()[..],
+        &a2.compress().to_bytes()[..],
+    ]);
+    let s = t + c * k;
+
+    let mut proof = [0u8; 64];
+    proof[..32].copy_from_slice(&c.to_bytes());
+    proof[32..].copy_from_slice(&s.to_bytes());
+    Some(proof)
+}
+
+/// Verify a batched DLEQ proof against the pinned public commitment `issuer_public` (`K`). Accepts
+/// iff the same `k` links `K = k·G` and every `evaluated[i] = k·blinded[i]`. A per-user `k_u`
+/// (`K = k·G` but `Z = k_u·B`) is rejected — the exact key-tagging threat Phase C closes.
+pub fn verify_dleq_proof(
+    issuer_public: &[u8; 32],
+    blinded: &[[u8; 32]],
+    evaluated: &[[u8; 32]],
+    proof: &[u8; 64],
+) -> bool {
+    let c_bytes: [u8; 32] = proof[..32].try_into().expect("32-byte slice");
+    let s_bytes: [u8; 32] = proof[32..].try_into().expect("32-byte slice");
+    let c = Option::<Scalar>::from(Scalar::from_canonical_bytes(c_bytes));
+    let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes));
+    let (c, s) = match (c, s) {
+        (Some(c), Some(s)) => (c, s),
+        _ => return false, // non-canonical scalar encoding
+    };
+
+    let k_point = match CompressedRistretto::from_slice(issuer_public)
+        .ok()
+        .and_then(|cp| cp.decompress())
+    {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let (m, zc) = match compute_composites(issuer_public, blinded, evaluated) {
+        Some(v) => v,
+        None => return false,
+    };
+    let m_c = m.compress().to_bytes();
+    let zc_c = zc.compress().to_bytes();
+
+    // A1' = s·G − c·K, A2' = s·M − c·Zc; accept iff H(...A1'‖A2') == c.
+    let a1p = s * RISTRETTO_BASEPOINT_POINT - c * k_point;
+    let a2p = s * m - c * zc;
+    let c_prime = dleq_hash_to_scalar(&[
+        DLEQ_DOMAIN,
+        &[0x03],
+        &issuer_public[..],
+        &m_c[..],
+        &zc_c[..],
+        &a1p.compress().to_bytes()[..],
+        &a2p.compress().to_bytes()[..],
+    ]);
+
+    c_prime.ct_eq(&c).into()
 }
 
 #[cfg(test)]
@@ -352,5 +532,146 @@ mod tests {
             open_sealed_token_bytes(&sealed, &server_secret),
             Err(PrivacyPassError::DecryptFailed)
         ));
+    }
+
+    // ── Verifiable VOPRF / DLEQ (Phase C) ──────────────────────────────────
+
+    fn hex_encode(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// Build a `(blinded, evaluated)` batch honestly evaluated under `k`
+    /// (`B_i = r_i·H(nonce_i)`, `Z_i = k·B_i`).
+    fn make_batch(k: &Scalar, n: usize) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
+        let mut blinded = Vec::with_capacity(n);
+        let mut evaluated = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = hash_to_ristretto(&random_bytes32());
+            let r = Scalar::from_bytes_mod_order(random_bytes32());
+            let b = r * t;
+            let z = k * b;
+            blinded.push(b.compress().to_bytes());
+            evaluated.push(z.compress().to_bytes());
+        }
+        (blinded, evaluated)
+    }
+
+    #[test]
+    fn dleq_round_trip_single_and_batch() {
+        for n in [1usize, 20] {
+            let k = Scalar::from_bytes_mod_order(random_bytes32());
+            let k_bytes = k.to_bytes();
+            let (blinded, evaluated) = make_batch(&k, n);
+            let proof = generate_dleq_proof(&k_bytes, &blinded, &evaluated).expect("proof");
+            let k_pub = issuer_public_key(&k_bytes);
+            assert!(
+                verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof),
+                "honest batch of {n} must verify"
+            );
+        }
+    }
+
+    /// The exact threat Phase C closes: evaluating under a per-user `k_u` while publishing `K = k·G`
+    /// must NOT verify — neither with a proof forged under `k`, nor with an honest proof under `k_u`
+    /// checked against the published `K`.
+    #[test]
+    fn dleq_per_user_key_rejected() {
+        let k = Scalar::from_bytes_mod_order(random_bytes32());
+        let k_u = Scalar::from_bytes_mod_order(random_bytes32());
+        let (blinded, evaluated) = make_batch(&k_u, 5); // evaluated under k_u
+        let k_pub = issuer_public_key(&k.to_bytes()); // committed to k
+
+        let proof_under_k = generate_dleq_proof(&k.to_bytes(), &blinded, &evaluated).expect("proof");
+        assert!(
+            !verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof_under_k),
+            "k_u evaluation must fail against the committed K"
+        );
+
+        let proof_under_ku =
+            generate_dleq_proof(&k_u.to_bytes(), &blinded, &evaluated).expect("proof");
+        assert!(
+            !verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof_under_ku),
+            "honest k_u proof must fail against the published K"
+        );
+        assert!(
+            verify_dleq_proof(&issuer_public_key(&k_u.to_bytes()), &blinded, &evaluated, &proof_under_ku),
+            "k_u proof verifies only against K_u (sanity)"
+        );
+    }
+
+    #[test]
+    fn dleq_tampered_z_rejected() {
+        let k = Scalar::from_bytes_mod_order(random_bytes32());
+        let k_bytes = k.to_bytes();
+        let (blinded, mut evaluated) = make_batch(&k, 4);
+        let proof = generate_dleq_proof(&k_bytes, &blinded, &evaluated).unwrap();
+        let k_pub = issuer_public_key(&k_bytes);
+        assert!(verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof));
+
+        // Replace one evaluated point with a different valid point.
+        evaluated[2] = (k * hash_to_ristretto(&random_bytes32()))
+            .compress()
+            .to_bytes();
+        assert!(!verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof));
+    }
+
+    /// The proof binds the batch ORDER (seed + per-index `d_i`). A verifier that reorders the
+    /// (still-valid) pairs must reject — clients verify in the same order they exchanged.
+    #[test]
+    fn dleq_reordered_batch_rejected() {
+        let k = Scalar::from_bytes_mod_order(random_bytes32());
+        let k_bytes = k.to_bytes();
+        let (mut blinded, mut evaluated) = make_batch(&k, 3);
+        let proof = generate_dleq_proof(&k_bytes, &blinded, &evaluated).unwrap();
+        let k_pub = issuer_public_key(&k_bytes);
+        blinded.swap(0, 2);
+        evaluated.swap(0, 2);
+        assert!(!verify_dleq_proof(&k_pub, &blinded, &evaluated, &proof));
+    }
+
+    #[test]
+    fn dleq_malformed_proof_rejected() {
+        let k = Scalar::from_bytes_mod_order(random_bytes32());
+        let (blinded, evaluated) = make_batch(&k, 2);
+        let k_pub = issuer_public_key(&k.to_bytes());
+        // All-0xFF is a non-canonical scalar encoding for both halves → reject, never panic.
+        assert!(!verify_dleq_proof(&k_pub, &blinded, &evaluated, &[0xffu8; 64]));
+        // Empty / mismatched batches → reject.
+        assert!(generate_dleq_proof(&k.to_bytes(), &[], &[]).is_none());
+        assert!(generate_dleq_proof(&k.to_bytes(), &blinded, &evaluated[..1]).is_none());
+    }
+
+    /// Deterministic-nonce ⇒ the whole proof is a pure function of `(k, blinded, evaluated)`. Pins a
+    /// golden 64-byte proof over fixed inputs so an iOS/Android reimplementation can cross-check the
+    /// transcript byte-for-byte (client-parity contract). If this breaks, the wire format changed.
+    #[test]
+    fn dleq_kat_vector() {
+        let k_bytes = [7u8; 32];
+        let k = Scalar::from_bytes_mod_order(k_bytes);
+        let mk = |label: &[u8]| -> [u8; 32] {
+            let t = hash_to_ristretto(label);
+            let r = Scalar::from_bytes_mod_order([3u8; 32]);
+            (r * t).compress().to_bytes()
+        };
+        let blinded = vec![mk(b"kat-0"), mk(b"kat-1")];
+        let evaluated: Vec<[u8; 32]> = blinded
+            .iter()
+            .map(|b| {
+                let p = CompressedRistretto::from_slice(b).unwrap().decompress().unwrap();
+                (k * p).compress().to_bytes()
+            })
+            .collect();
+
+        let proof = generate_dleq_proof(&k_bytes, &blinded, &evaluated).unwrap();
+        // Determinism: regenerating yields identical bytes.
+        let proof2 = generate_dleq_proof(&k_bytes, &blinded, &evaluated).unwrap();
+        assert_eq!(proof, proof2, "deterministic nonce ⇒ stable proof");
+        // Self-consistency.
+        assert!(verify_dleq_proof(&issuer_public_key(&k_bytes), &blinded, &evaluated, &proof));
+
+        // Golden vector — the client-parity contract (privacy-pass-dleq-v1.md). A change here means
+        // the DLEQ transcript changed and every client verifier must be updated in lockstep.
+        const KAT_PROOF_HEX: &str = "a5fc43539f4acf319af0035bc73a19006588f75a5d425fc3039e906597c08d06bfa8b0cd50bb08d6d7bcb90dae2222fd2384e8404de57260fd412f729d29ab08";
+        assert_eq!(hex_encode(&proof), KAT_PROOF_HEX, "DLEQ transcript changed — wire break");
     }
 }
