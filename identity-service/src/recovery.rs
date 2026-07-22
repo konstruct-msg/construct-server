@@ -164,6 +164,8 @@ pub async fn verify_recovery_signature(
     hmac_secret: &[u8],
 ) -> Result<Uuid> {
     // 1. Find user by UUID or username_hash (privacy-first)
+    // Trim first so surrounding whitespace doesn't break either branch.
+    let identifier = identifier.trim();
     let row = if let Ok(user_uuid) = identifier.parse::<Uuid>() {
         // identifier is a UUID → direct lookup
         sqlx::query_as::<_, RecoveryKeyRow>(
@@ -177,8 +179,12 @@ pub async fn verify_recovery_signature(
         .fetch_optional(db)
         .await?
     } else {
-        // identifier is a username → hash and look up by hash
-        let hash = hash_username(hmac_secret, identifier);
+        // identifier is a username → normalize EXACTLY like registration
+        // (main.rs: `username.trim().to_lowercase()` before `hash_username`) and look up by
+        // hash. Without this, a user who registered "Alice" but types "alice"/"ALICE"/" alice "
+        // during recovery hashes to a different value → "Account not found" (NOT_FOUND).
+        let normalized = identifier.to_lowercase();
+        let hash = hash_username(hmac_secret, &normalized);
         sqlx::query_as::<_, RecoveryKeyRow>(
             r#"
             SELECT id, recovery_public_key, last_recovery_at
