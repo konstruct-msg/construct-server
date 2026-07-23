@@ -281,6 +281,12 @@ pub async fn get_prekey_bundle(
     user_id: &str,
     device_id: Option<&str>,
     bundle_signing_key: Option<&SigningKey>,
+    // When false, serve an SPK-only bundle without consuming a one-time pre-key. Used by the
+    // OTPK-drain guard: above the drain threshold we degrade to SPK-only (forward-secrecy
+    // reduced but session init still works) instead of rejecting — this preserves availability
+    // and removes the targeted-DoS amplification a hard reject would create. Mirrors the natural
+    // fallback when a device's OTPKs are genuinely exhausted.
+    consume_otpk: bool,
 ) -> Result<Option<PreKeyBundle>> {
     // First, get device info (including Kyber SPK columns added in migration 028)
     let device = if let Some(did) = device_id {
@@ -330,43 +336,52 @@ pub async fn get_prekey_bundle(
 
     // Try to consume a one-time pre-key (skip expired ones from a previous replace_existing).
     // FOR UPDATE SKIP LOCKED prevents two concurrent GetPreKeyBundle calls from burning the same key.
-    let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
-        r#"
-        DELETE FROM one_time_prekeys
-        WHERE (device_id, key_id) = (
-            SELECT device_id, key_id FROM one_time_prekeys
-            WHERE device_id = $1
-              AND is_expired = false
-            ORDER BY uploaded_at ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
+    // Skipped entirely when `consume_otpk` is false (drain guard → SPK-only bundle).
+    let otp = if consume_otpk {
+        sqlx::query_as::<_, OneTimePreKeyRow>(
+            r#"
+            DELETE FROM one_time_prekeys
+            WHERE (device_id, key_id) = (
+                SELECT device_id, key_id FROM one_time_prekeys
+                WHERE device_id = $1
+                  AND is_expired = false
+                ORDER BY uploaded_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_id, public_key
+            "#,
         )
-        RETURNING key_id, public_key
-        "#,
-    )
-    .bind(&device.device_id)
-    .fetch_optional(db)
-    .await?;
+        .bind(&device.device_id)
+        .fetch_optional(db)
+        .await?
+    } else {
+        None
+    };
 
     // Try to consume a Kyber one-time pre-key (soft-delete, same pattern as classic OTPK)
-    let kyber_otp = sqlx::query_as::<_, KyberOneTimePreKeyRow>(
-        r#"
-        UPDATE kyber_one_time_pre_keys
-        SET is_expired = true, expired_at = NOW()
-        WHERE (device_id, key_id) = (
-            SELECT device_id, key_id FROM kyber_one_time_pre_keys
-            WHERE device_id = $1
-              AND is_expired = false
-            ORDER BY uploaded_at ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
+    let kyber_otp = if consume_otpk {
+        sqlx::query_as::<_, KyberOneTimePreKeyRow>(
+            r#"
+            UPDATE kyber_one_time_pre_keys
+            SET is_expired = true, expired_at = NOW()
+            WHERE (device_id, key_id) = (
+                SELECT device_id, key_id FROM kyber_one_time_pre_keys
+                WHERE device_id = $1
+                  AND is_expired = false
+                ORDER BY uploaded_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING key_id, public_key, signature
+            "#,
         )
-        RETURNING key_id, public_key, signature
-        "#,
-    )
-    .bind(&device.device_id)
-    .fetch_optional(db)
-    .await?;
+        .bind(&device.device_id)
+        .fetch_optional(db)
+        .await?
+    } else {
+        None
+    };
 
     let mut bundle = PreKeyBundle {
         device_id: device.device_id,
@@ -434,6 +449,8 @@ pub async fn get_prekey_bundles(
     user_id: &str,
     device_ids: Option<&[String]>,
     bundle_signing_key: Option<&SigningKey>,
+    // See `get_prekey_bundle`: false ⇒ SPK-only bundles (drain guard), no OTPK consumed.
+    consume_otpk: bool,
 ) -> Result<(Vec<PreKeyBundle>, Vec<String>)> {
     let devices: Vec<DeviceRow> = if let Some(ids) = device_ids {
         sqlx::query_as(
@@ -478,43 +495,52 @@ pub async fn get_prekey_bundles(
     for device in devices {
         // Try to get one-time pre-key (skip expired ones from a previous replace_existing).
         // FOR UPDATE SKIP LOCKED prevents two concurrent requests from burning the same key.
-        let otp = sqlx::query_as::<_, OneTimePreKeyRow>(
-            r#"
-            DELETE FROM one_time_prekeys
-            WHERE (device_id, key_id) = (
-                SELECT device_id, key_id FROM one_time_prekeys
-                WHERE device_id = $1
-                  AND is_expired = false
-                ORDER BY uploaded_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
+        // Skipped when `consume_otpk` is false (drain guard → SPK-only bundle).
+        let otp = if consume_otpk {
+            sqlx::query_as::<_, OneTimePreKeyRow>(
+                r#"
+                DELETE FROM one_time_prekeys
+                WHERE (device_id, key_id) = (
+                    SELECT device_id, key_id FROM one_time_prekeys
+                    WHERE device_id = $1
+                      AND is_expired = false
+                    ORDER BY uploaded_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING key_id, public_key
+                "#,
             )
-            RETURNING key_id, public_key
-            "#,
-        )
-        .bind(&device.device_id)
-        .fetch_optional(db)
-        .await?;
+            .bind(&device.device_id)
+            .fetch_optional(db)
+            .await?
+        } else {
+            None
+        };
 
         // Try to consume a Kyber OTPK for this device
-        let kyber_otp = sqlx::query_as::<_, KyberOneTimePreKeyRow>(
-            r#"
-            UPDATE kyber_one_time_pre_keys
-            SET is_expired = true, expired_at = NOW()
-            WHERE (device_id, key_id) = (
-                SELECT device_id, key_id FROM kyber_one_time_pre_keys
-                WHERE device_id = $1
-                  AND is_expired = false
-                ORDER BY uploaded_at ASC
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
+        let kyber_otp = if consume_otpk {
+            sqlx::query_as::<_, KyberOneTimePreKeyRow>(
+                r#"
+                UPDATE kyber_one_time_pre_keys
+                SET is_expired = true, expired_at = NOW()
+                WHERE (device_id, key_id) = (
+                    SELECT device_id, key_id FROM kyber_one_time_pre_keys
+                    WHERE device_id = $1
+                      AND is_expired = false
+                    ORDER BY uploaded_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING key_id, public_key, signature
+                "#,
             )
-            RETURNING key_id, public_key, signature
-            "#,
-        )
-        .bind(&device.device_id)
-        .fetch_optional(db)
-        .await?;
+            .bind(&device.device_id)
+            .fetch_optional(db)
+            .await?
+        } else {
+            None
+        };
 
         let mut bundle = PreKeyBundle {
             device_id: device.device_id,
