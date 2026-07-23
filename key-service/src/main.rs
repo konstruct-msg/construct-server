@@ -190,10 +190,7 @@ fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
 /// Check whether a target user's OTPK consumption has exceeded the drain threshold
 /// in the current hour window. Returns `true` if under threshold (allow), `false`
 /// if drain exceeded (reject). Fail-open: Redis outage allows the request.
-async fn check_otpk_drain(
-    redis: &mut redis::aio::ConnectionManager,
-    user_id: &str,
-) -> bool {
+async fn check_otpk_drain(redis: &mut redis::aio::ConnectionManager, user_id: &str) -> bool {
     let key = format!("otpk_drain:{}", user_id);
     let count: Option<i64> = match redis::Cmd::get(&key).query_async(redis).await {
         Ok(c) => c,
@@ -216,10 +213,7 @@ async fn check_otpk_drain(
 
 /// Record OTPK consumption for a target user in the drain counter.
 /// Fail-open: Redis error silently drops the recording.
-async fn record_otpk_consumption(
-    redis: &mut redis::aio::ConnectionManager,
-    user_id: &str,
-) {
+async fn record_otpk_consumption(redis: &mut redis::aio::ConnectionManager, user_id: &str) {
     let key = format!("otpk_drain:{}", user_id);
     let result: Result<i64, _> = redis::Script::new(
         r#"
@@ -324,8 +318,8 @@ impl KeyService for KeyGrpcService {
         match bundle {
             Some(b) => {
                 // Capture for low-prekey check before b is moved into the response.
-                let otp_was_consumed = b.one_time_prekey_id.is_some()
-                    || b.kyber_one_time_pre_key_id.is_some();
+                let otp_was_consumed =
+                    b.one_time_prekey_id.is_some() || b.kyber_one_time_pre_key_id.is_some();
                 let notify_device_id = b.device_id.clone();
                 let notify_user_id = req.user_id.clone();
 
@@ -882,8 +876,8 @@ impl KeyService for KeyGrpcService {
             bundles
                 .iter()
                 .map(|b| {
-                    let otp_consumed = b.one_time_prekey_id.is_some()
-                        || b.kyber_one_time_pre_key_id.is_some();
+                    let otp_consumed =
+                        b.one_time_prekey_id.is_some() || b.kyber_one_time_pre_key_id.is_some();
                     any_otpk_consumed = any_otpk_consumed || otp_consumed;
                     DeviceChecks {
                         device_id: b.device_id.clone(),
