@@ -260,6 +260,7 @@ services:
         required: true
     environment:
       PORT: "8087"
+      MEDIA_BIND_ADDRESS: "0.0.0.0:8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: media
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
@@ -389,6 +390,26 @@ services:
       QUIC_KEY_PATH: /certs/server-key.der
     volumes:
       - /opt/construct/quic-certs:/certs
+
+  # ─── Monitoring ──────────────────────────────────────────────────────────
+  # Prometheus scrapes /metrics from every service on the internal network.
+  # Web UI accessible on host loopback only (ssh tunnel or localhost).
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: construct-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - internal
 
 volumes:
   postgres-data:
