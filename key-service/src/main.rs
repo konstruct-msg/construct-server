@@ -56,6 +56,14 @@ fn proto_crypto_suite(s: &str) -> i32 {
 /// - `otp_was_consumed = true`  means one key was just consumed; we check the remaining count.
 const LOW_PREKEY_THRESHOLD: u32 = 5;
 
+/// Max one-time pre-keys a single target user may have consumed per hour across all callers.
+/// Above this threshold, bundle fetches are temporarily rejected (RESOURCE_EXHAUSTED) until
+/// the window resets — prevents OTPK exhaustion attacks on the now-anonymous bundle path.
+const OTPK_DRAIN_THRESHOLD_PER_HOUR: u32 = 50;
+
+/// Max bundle fetch requests per (IP, target user) per minute.
+const BUNDLE_RATE_LIMIT_PER_MIN: i64 = 10;
+
 // ============================================================================
 // Service Context
 // ============================================================================
@@ -153,6 +161,94 @@ fn extract_device_id<T>(req: &Request<T>) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
+/// Caddy's `reverse_proxy`). Used for per-IP rate limiting on anonymous bundle fetches.
+///
+/// SECURITY: take the **rightmost** `X-Forwarded-For` entry, not the leftmost. Caddy
+/// (the edge `reverse_proxy`) *appends* the real connecting IP to any client-supplied
+/// `X-Forwarded-For`, so the leftmost value is attacker-controlled — a client can pre-set
+/// `X-Forwarded-For: <spoof>` and rotate it to dodge the rate limit. The last entry is the
+/// one Caddy itself appended (the immediate peer) and cannot be forged by the client. This
+/// assumes Caddy is the single trusted edge proxy for this service (it is:
+/// `reverse_proxy h2c://key:50057`); add another trusted hop here if that changes.
+fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
+    if let Some(forwarded) = metadata
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        let ip = forwarded.split(',').next_back().unwrap_or("").trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+    if let Some(real_ip) = metadata.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return real_ip.trim().to_string();
+    }
+    "unknown".to_string()
+}
+
+/// Check whether a target user's OTPK consumption has exceeded the drain threshold
+/// in the current hour window. Returns `true` if under threshold (allow), `false`
+/// if drain exceeded (reject). Fail-open: Redis outage allows the request.
+async fn check_otpk_drain(
+    redis: &mut redis::aio::ConnectionManager,
+    user_id: &str,
+) -> bool {
+    let key = format!("otpk_drain:{}", user_id);
+    let count: Option<i64> = match redis::Cmd::get(&key).query_async(redis).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, %user_id, "Redis unavailable for OTPK drain check — fail-open");
+            return true;
+        }
+    };
+    let exceeded = count.unwrap_or(0) >= OTPK_DRAIN_THRESHOLD_PER_HOUR as i64;
+    if exceeded {
+        tracing::warn!(
+            %user_id,
+            count = count.unwrap_or(0),
+            threshold = OTPK_DRAIN_THRESHOLD_PER_HOUR,
+            "OTPK drain threshold exceeded — rejecting bundle fetch"
+        );
+    }
+    !exceeded
+}
+
+/// Record OTPK consumption for a target user in the drain counter.
+/// Fail-open: Redis error silently drops the recording.
+async fn record_otpk_consumption(
+    redis: &mut redis::aio::ConnectionManager,
+    user_id: &str,
+) {
+    let key = format!("otpk_drain:{}", user_id);
+    let result: Result<i64, _> = redis::Script::new(
+        r#"
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+                redis.call('EXPIRE', KEYS[1], 3600)
+            end
+            return count
+        "#,
+    )
+    .key(&key)
+    .invoke_async(redis)
+    .await;
+    match result {
+        Ok(count) if count > OTPK_DRAIN_THRESHOLD_PER_HOUR as i64 => {
+            tracing::warn!(
+                %user_id,
+                count,
+                threshold = OTPK_DRAIN_THRESHOLD_PER_HOUR,
+                "OTPK drain threshold exceeded after consumption"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, %user_id, "Redis unavailable for OTPK drain record");
+        }
+    }
+}
+
 #[derive(Clone)]
 struct KeyGrpcService {
     context: Arc<KeyServiceContext>,
@@ -168,41 +264,51 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::GetPreKeyBundleRequest>,
     ) -> Result<Response<proto::GetPreKeyBundleResponse>, Status> {
-        // Rate limit: max 10 bundle requests per minute per (caller_device, target_user) pair.
-        // This prevents OTPK exhaustion attacks where an attacker drains all one-time pre-keys,
-        // degrading forward-secrecy for the target.
-        let caller_device = extract_device_id(&request).unwrap_or_else(|| "anonymous".to_string());
+        let client_ip = extract_client_ip(request.metadata());
         let req = request.into_inner();
 
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
         }
 
+        // Per-IP, per-target rate limit: max 10 bundle requests per minute per
+        // (client_ip, target_user) pair. Prevents OTPK exhaustion — the old scheme
+        // used caller_device (self-reported, unverifiable); IP is harder to spoof.
+        // Fails closed: Redis unavailable → deny (OTPK exhaustion safety).
         {
-            // Atomic INCR + EXPIRE via Lua — prevents the race condition where a crash
-            // between the two commands leaves the key without a TTL (permanent block).
-            // Fails closed: Redis unavailable → deny the request (OTPK exhaustion safety).
-            const RATE_LIMIT_LUA: &str = r#"
+            const LUA: &str = r#"
                 local count = redis.call('INCR', KEYS[1])
                 if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
                 return count
             "#;
             let mut redis = self.context.redis.clone();
-            let rate_key = format!("rate:bundle:{}:{}", caller_device, req.user_id);
-            let count: i64 = redis::Script::new(RATE_LIMIT_LUA)
+            let rate_key = format!("rate:bundle_ip:{}:{}", client_ip, req.user_id);
+            let count: i64 = redis::Script::new(LUA)
                 .key(&rate_key)
-                .arg(60i64) // 60-second window
+                .arg(60i64)
                 .invoke_async(&mut redis)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "Redis unavailable for bundle rate-limit — failing closed");
                     Status::unavailable("Service temporarily unavailable")
                 })?;
-            if count > 10 {
+            if count > BUNDLE_RATE_LIMIT_PER_MIN {
                 return Err(Status::resource_exhausted(
                     "Too many bundle requests — try again later",
                 ));
             }
+        }
+
+        // OTPK drain check: coarse throttle so callers cannot burn all OTPKs for a user
+        // within the hourly window. Above the threshold we DEGRADE to an SPK-only bundle
+        // (no OTPK consumed) rather than rejecting — a hard reject would let an attacker
+        // drain a victim to the threshold and then deny ALL new session inits to that victim
+        // for an hour (a targeted DoS), and would also false-positive on legitimately popular
+        // users. SPK-only keeps session init working (forward-secrecy reduced, same as natural
+        // OTPK exhaustion) while starving the drain of further one-time keys.
+        let consume_otpk = check_otpk_drain(&mut self.context.redis.clone(), &req.user_id).await;
+        if !consume_otpk {
+            tracing::warn!(user_id = %req.user_id, "OTPK drain threshold exceeded — serving SPK-only bundle");
         }
 
         let bundle = core::get_prekey_bundle(
@@ -210,6 +316,7 @@ impl KeyService for KeyGrpcService {
             &req.user_id,
             req.device_id.as_deref(),
             self.context.bundle_signing_key.as_ref(),
+            consume_otpk,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -217,9 +324,19 @@ impl KeyService for KeyGrpcService {
         match bundle {
             Some(b) => {
                 // Capture for low-prekey check before b is moved into the response.
-                let otp_was_consumed = b.one_time_prekey_id.is_some();
+                let otp_was_consumed = b.one_time_prekey_id.is_some()
+                    || b.kyber_one_time_pre_key_id.is_some();
                 let notify_device_id = b.device_id.clone();
                 let notify_user_id = req.user_id.clone();
+
+                // Record OTPK consumption for drain detection (fire-and-forget).
+                if otp_was_consumed {
+                    let mut redis = self.context.redis.clone();
+                    let drain_user_id = req.user_id.clone();
+                    tokio::spawn(async move {
+                        record_otpk_consumption(&mut redis, &drain_user_id).await;
+                    });
+                }
 
                 // Auto-heal detection: a device with a hybrid identity key but no SPK hybrid
                 // signature publishes a bundle every initiator hard-rejects ("SPK hybrid signature
@@ -699,10 +816,43 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::GetPreKeyBundlesRequest>,
     ) -> Result<Response<proto::GetPreKeyBundlesResponse>, Status> {
+        let client_ip = extract_client_ip(request.metadata());
         let req = request.into_inner();
 
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
+        }
+
+        // Per-IP, per-target rate limit (same as single-bundle path).
+        {
+            const LUA: &str = r#"
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+                return count
+            "#;
+            let mut redis = self.context.redis.clone();
+            let rate_key = format!("rate:bundle_ip:{}:{}", client_ip, req.user_id);
+            let count: i64 = redis::Script::new(LUA)
+                .key(&rate_key)
+                .arg(60i64)
+                .invoke_async(&mut redis)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "Redis unavailable for bundle rate-limit — failing closed");
+                    Status::unavailable("Service temporarily unavailable")
+                })?;
+            if count > BUNDLE_RATE_LIMIT_PER_MIN {
+                return Err(Status::resource_exhausted(
+                    "Too many bundle requests — try again later",
+                ));
+            }
+        }
+
+        // OTPK drain check (same as single-bundle path): degrade to SPK-only above the
+        // threshold instead of rejecting — see the single-bundle handler for the rationale.
+        let consume_otpk = check_otpk_drain(&mut self.context.redis.clone(), &req.user_id).await;
+        if !consume_otpk {
+            tracing::warn!(user_id = %req.user_id, "OTPK drain threshold exceeded — serving SPK-only bundles");
         }
 
         let device_ids = if req.device_ids.is_empty() {
@@ -716,11 +866,13 @@ impl KeyService for KeyGrpcService {
             &req.user_id,
             device_ids,
             self.context.bundle_signing_key.as_ref(),
+            consume_otpk,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Collect per-device info for low-prekey + wake checks before consuming the iterator.
+        // Collect per-device info for low-prekey + wake checks + drain before consuming.
+        let mut any_otpk_consumed = false;
         struct DeviceChecks {
             device_id: String,
             otp_was_consumed: bool,
@@ -729,15 +881,34 @@ impl KeyService for KeyGrpcService {
         let notify_items: Vec<DeviceChecks> = if self.context.notification_client.is_some() {
             bundles
                 .iter()
-                .map(|b| DeviceChecks {
-                    device_id: b.device_id.clone(),
-                    otp_was_consumed: b.one_time_prekey_id.is_some(),
-                    spk_is_stale: core::spk_is_stale_enough_for_wake(b),
+                .map(|b| {
+                    let otp_consumed = b.one_time_prekey_id.is_some()
+                        || b.kyber_one_time_pre_key_id.is_some();
+                    any_otpk_consumed = any_otpk_consumed || otp_consumed;
+                    DeviceChecks {
+                        device_id: b.device_id.clone(),
+                        otp_was_consumed: otp_consumed,
+                        spk_is_stale: core::spk_is_stale_enough_for_wake(b),
+                    }
                 })
                 .collect()
         } else {
+            bundles.iter().for_each(|b| {
+                if b.one_time_prekey_id.is_some() || b.kyber_one_time_pre_key_id.is_some() {
+                    any_otpk_consumed = true;
+                }
+            });
             vec![]
         };
+
+        // Record OTPK consumption for drain detection (fire-and-forget).
+        if any_otpk_consumed {
+            let mut redis = self.context.redis.clone();
+            let drain_user_id = req.user_id.clone();
+            tokio::spawn(async move {
+                record_otpk_consumption(&mut redis, &drain_user_id).await;
+            });
+        }
 
         let proto_bundles = bundles
             .into_iter()
