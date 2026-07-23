@@ -1,0 +1,43 @@
+# =============================================================================
+# Construct Server — Prometheus Scrape Configuration
+# =============================================================================
+# All services expose /metrics on their HTTP port (or METRICS_PORT where set).
+# Targets use Docker internal DNS hostnames (same network as Prometheus).
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: identity
+    static_configs:
+      - targets: ['identity:8081']
+
+  - job_name: messaging
+    static_configs:
+      - targets: ['messaging:8083']
+
+  - job_name: key
+    static_configs:
+      - targets: ['key:8057']
+
+  - job_name: group
+    static_configs:
+      - targets: ['group:8097']
+
+  - job_name: signaling
+    static_configs:
+      - targets: ['signaling:8091']
+
+  - job_name: media
+    static_configs:
+      - targets: ['media:8087']
+
+  - job_name: veil
+    static_configs:
+      - targets: ['veil:8080']
+
+  - job_name: gateway
+    static_configs:
+      - targets: ['gateway:3000']
