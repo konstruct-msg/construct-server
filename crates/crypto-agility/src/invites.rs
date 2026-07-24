@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Invite token object for one-time contact sharing (v1/v2/v3)
+/// Invite token object for one-time contact sharing (v1–v4)
 ///
 /// This structure is cryptographically signed by the user's Identity Key
 /// and can be encoded into QR codes or deep links for secure contact exchange.
@@ -12,6 +12,7 @@ use uuid::Uuid;
 /// - v1: userId only (backwards compatible)
 /// - v2: userId + deviceId (for device-based key fetching)
 /// - v3: userId + deviceId + username (for display name sharing)
+/// - v4: userId + deviceId + username, **no ephKey** (dead crypto removed; pure signed capability)
 ///
 /// Security properties:
 /// - One-time use only (jti tracking prevents replay)
@@ -21,7 +22,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InviteToken {
-    /// Protocol version: 1, 2, or 3
+    /// Protocol version: 1, 2, 3, or 4
     pub v: u32,
 
     /// Unique invite ID (JWT jti) - prevents replay attacks
@@ -30,7 +31,7 @@ pub struct InviteToken {
     /// User UUID who created this invite
     pub uuid: Uuid,
 
-    /// Device ID (v2/v3 only) - 32-char lowercase hex string
+    /// Device ID (v2+) - 32-char lowercase hex string
     /// None for v1 invites (backwards compat)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
@@ -38,8 +39,9 @@ pub struct InviteToken {
     /// Server FQDN (e.g., "konstruct.cc") for federation
     pub server: String,
 
-    /// Ephemeral X25519 public key (Base64 encoded)
-    /// Generated fresh for each invite, never reused
+    /// Ephemeral X25519 public key (Base64 encoded) — **v1–v3 only**.
+    /// Empty string on v4+ (field dropped from canonical string).
+    #[serde(default)]
     pub eph_key: String,
 
     /// Unix timestamp when this invite was created
@@ -49,10 +51,11 @@ pub struct InviteToken {
     /// v1: (v, jti, uuid, server, ephKey, ts)
     /// v2: (v, jti, uuid, deviceId, server, ephKey, ts)
     /// v3: (v, jti, uuid, deviceId, server, ephKey, ts, username)
+    /// v4: (v, jti, uuid, deviceId, server, ts, username)
     /// Signed with user's long-term Identity Key
     pub sig: String,
 
-    /// Username of the sender (v3 only) - for display purposes
+    /// Username of the sender (v3+) - for display purposes
     /// Empty string if not set. Signed as part of canonical string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
@@ -102,6 +105,7 @@ impl InviteToken {
     /// - v1: `v|jti|uuid|server|ephKey|ts`
     /// - v2: `v|jti|uuid|deviceId|server|ephKey|ts`
     /// - v3: `v|jti|uuid|deviceId|server|ephKey|ts|username`
+    /// - v4: `v|jti|uuid|deviceId|server|ts|username` (no ephKey)
     ///
     /// This ensures consistent signing/verification across implementations
     pub fn canonical_string(&self) -> String {
@@ -143,6 +147,18 @@ impl InviteToken {
                     username
                 )
             }
+            4 => {
+                // v4: no dead ephKey — pure signed capability
+                let device_id = self
+                    .device_id
+                    .as_ref()
+                    .expect("deviceId required for v4 invites");
+                let username = self.username.as_deref().unwrap_or("");
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    self.v, self.jti, self.uuid, device_id, self.server, self.ts, username
+                )
+            }
             _ => panic!("Unsupported invite version: {}", self.v),
         }
     }
@@ -172,12 +188,12 @@ impl InviteToken {
     /// - Ephemeral key is valid Base64 (32 bytes)
     /// - Signature is valid Base64 (64 bytes)
     pub fn validate(&self) -> Result<(), InviteValidationError> {
-        // Version check
-        if self.v != 1 && self.v != 2 && self.v != 3 {
+        // Version check (v4 drops unused ephKey)
+        if self.v != 1 && self.v != 2 && self.v != 3 && self.v != 4 {
             return Err(InviteValidationError::UnsupportedVersion(self.v));
         }
 
-        // Device ID validation (required for v2/v3)
+        // Device ID validation (required for v2+)
         if self.v >= 2 {
             match &self.device_id {
                 None => return Err(InviteValidationError::MissingDeviceID),
@@ -201,11 +217,16 @@ impl InviteToken {
             return Err(InviteValidationError::InvalidServer);
         }
 
-        // Ephemeral key (Base64, should decode to 32 bytes)
         use base64::{engine::general_purpose::STANDARD, Engine as _};
-        match STANDARD.decode(&self.eph_key) {
-            Ok(bytes) if bytes.len() == 32 => {}
-            _ => return Err(InviteValidationError::InvalidEphemeralKey),
+
+        // Ephemeral key: required (32B) for v1–v3; must be empty for v4+
+        if self.v <= 3 {
+            match STANDARD.decode(&self.eph_key) {
+                Ok(bytes) if bytes.len() == 32 => {}
+                _ => return Err(InviteValidationError::InvalidEphemeralKey),
+            }
+        } else if !self.eph_key.is_empty() {
+            return Err(InviteValidationError::InvalidEphemeralKey);
         }
 
         // Timestamp checks
@@ -277,6 +298,28 @@ mod tests {
             canonical,
             "1|25a5e378-c873-4e4b-a16a-a8d299386d3d|af70cf9a-b176-4df3-b6bf-00196a6f173e|konstruct.cc|test_key_base64|1675209600"
         );
+    }
+
+    #[test]
+    fn test_canonical_string_v4_no_eph() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let invite = InviteToken {
+            v: 4,
+            jti: Uuid::nil(),
+            uuid: Uuid::nil(),
+            device_id: Some("4e1f9dbe209c1bedb33ee32dda5a28f0".to_string()),
+            server: "konstruct.cc".to_string(),
+            eph_key: String::new(),
+            ts: 1_738_156_800,
+            sig: STANDARD.encode([0u8; 64]),
+            username: Some("alice".to_string()),
+        };
+        let canonical = invite.canonical_string();
+        assert_eq!(
+            canonical,
+            "4|00000000-0000-0000-0000-000000000000|00000000-0000-0000-0000-000000000000|4e1f9dbe209c1bedb33ee32dda5a28f0|konstruct.cc|1738156800|alice"
+        );
+        assert!(invite.validate().is_ok());
     }
 
     #[test]
