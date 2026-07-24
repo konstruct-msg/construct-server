@@ -2454,6 +2454,8 @@ impl InviteService for IdentityGrpcService {
             username: invite_token.un,
         };
 
+        let creator_user_id = invite.uuid;
+
         let output = invite_core::accept_invite(
             &self.context,
             invite_core::AcceptInviteInput {
@@ -2466,6 +2468,40 @@ impl InviteService for IdentityGrpcService {
             tracing::error!(error = %e, "Failed to accept invite");
             Status::invalid_argument(format!("Failed to accept invite: {}", e))
         })?;
+
+        // Wake the inviter so their client creates a local contact (isContact)
+        // for call mutuality under sealed sender. conversation_id carries the
+        // accepter's ServerUserId (transitional metadata; same class of leak as
+        // AcceptInvite learning the edge). activity_type = invite_accepted.
+        if let Some(notification_client) = &self.context.notification_client
+            && !notification_client.is_circuit_open()
+        {
+            let mut notif = notification_client.get();
+            let push_req = proto::SendBlindNotificationRequest {
+                user_id: creator_user_id.to_string(),
+                badge_count: None,
+                activity_type: Some("invite_accepted".to_string()),
+                conversation_id: Some(accepter_user_id.to_string()),
+            };
+            match notif.send_blind_notification(push_req).await {
+                Ok(_) => {
+                    notification_client.record_success();
+                    tracing::info!(
+                        creator = %creator_user_id,
+                        accepter = %accepter_user_id,
+                        "Sent invite_accepted push to inviter"
+                    );
+                }
+                Err(e) => {
+                    notification_client.record_failure();
+                    tracing::warn!(
+                        error = %e,
+                        to_user = %creator_user_id,
+                        "Failed to send invite_accepted push"
+                    );
+                }
+            }
+        }
 
         Ok(Response::new(proto::AcceptInviteResponse {
             user_id: output.user_id,
