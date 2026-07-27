@@ -144,7 +144,7 @@ pub struct Config {
 
     // ── construct-veil (VEIL transport obfuscation) ────────────────────────────
     /// Enable VEIL (obfs4) listener in addition to the plain listener.
-    /// Set ICE_ENABLED=true to activate.
+    /// Set VEIL_ENABLED=true to activate.
     pub veil_enabled: bool,
 
     /// Port for the VEIL (obfs4) listener (default 9443).

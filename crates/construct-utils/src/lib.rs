@@ -78,6 +78,29 @@ pub fn log_safe_id(id: &str, salt: &str) -> String {
         .collect::<String>()
 }
 
+/// Derives a stable, salted tag from a client IP so the **raw address is never
+/// stored** — in anti-abuse rate-limit keys, logs, or audit records. Uses the same
+/// secret salt as [`log_safe_id`] (`LOG_HASH_SALT`); reversing it requires that salt
+/// *and* a brute force over the address space, and the raw value never appears at
+/// rest. Anti-abuse semantics are unchanged: the same IP maps to the same tag, so
+/// per-IP rate limits still apply.
+///
+/// The `"unknown"` sentinel (returned by `extract_client_ip` when no address is
+/// present) passes through unchanged, so callers' `!= "unknown"` guards keep working.
+/// Output is 8 bytes (64-bit) of hex — long enough to keep rate-limit buckets
+/// collision-free, short enough for logs.
+pub fn hash_client_ip(ip: &str, salt: &str) -> String {
+    if ip == "unknown" {
+        return "unknown".to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"client-ip:"); // domain separation from user_id / username hashing
+    hasher.update(salt.as_bytes());
+    hasher.update(ip.as_bytes());
+    let hash = hasher.finalize();
+    hash[..8].iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Validates username format and length requirements.
 ///
 /// # Username Requirements
@@ -358,6 +381,22 @@ mod tests {
     #[test]
     fn test_password_too_short() {
         assert!(validate_password_strength("Short1").is_err());
+    }
+
+    #[test]
+    fn test_hash_client_ip_stable_and_opaque() {
+        let salt = "test-salt";
+        let a = hash_client_ip("1.2.3.4", salt);
+        // Stable: same IP + salt → same tag (rate-limit keying relies on this).
+        assert_eq!(a, hash_client_ip("1.2.3.4", salt));
+        // Opaque: the raw address does not appear in the tag.
+        assert!(!a.contains("1.2.3.4"));
+        assert_eq!(a.len(), 16); // 8 bytes hex
+        // Different IPs and different salts diverge.
+        assert_ne!(a, hash_client_ip("1.2.3.5", salt));
+        assert_ne!(a, hash_client_ip("1.2.3.4", "other-salt"));
+        // Sentinel passes through so `!= "unknown"` guards keep working.
+        assert_eq!(hash_client_ip("unknown", salt), "unknown");
     }
 
     #[test]

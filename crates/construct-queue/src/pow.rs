@@ -136,6 +136,11 @@ impl MessageQueue {
     }
 
     /// Count PoW challenges requested by an IP within the last `minutes`.
+    ///
+    /// IP-MINIMISATION CONTRACT (2026-07-27): `ip` here (and in `create_pow_challenge`'s
+    /// `requester_ip` and `count_pow_registrations_by_ip`) is the salted tag from
+    /// `construct_utils::hash_client_ip`, not a raw address — it becomes a Redis key and
+    /// is stored in the challenge record. Callers (auth-service) hash before calling.
     pub async fn count_pow_challenges_by_ip(&mut self, ip: &str, minutes: i64) -> Result<i64> {
         self.count_pow_window(&format!("{IPCH_PREFIX}{ip}"), minutes)
             .await

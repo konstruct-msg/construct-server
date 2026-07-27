@@ -22,6 +22,7 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use construct_utils::hash_client_ip;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -284,12 +285,19 @@ pub async fn register_device_core(
     identity_public_key: Option<Vec<u8>>,
     identity_key_type: Option<u32>,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
-    let client_ip = extract_client_ip(&headers);
+    // Salted hash of the client IP (hash_client_ip) — used only for anti-abuse keying
+    // and logging. The raw address is never stored: the PoW challenge record's
+    // requester_ip, the per-IP zset keys, and all logs carry this opaque tag. Same IP →
+    // same tag, so adaptive per-IP PoW is unchanged; "unknown" passes through.
+    let client_ip = hash_client_ip(
+        &extract_client_ip(&headers),
+        &app_context.config.logging.hash_salt,
+    );
 
     tracing::info!(
         device_id = %device_id,
         username = ?username,
-        client_ip = %client_ip,
+        ip_hash = %client_ip,
         "Device registration attempt (username will be normalized to lowercase)"
     );
 
@@ -320,7 +328,7 @@ pub async fn register_device_core(
             tracing::warn!(
                 target: "audit",
                 event_type = "REGISTRATION_RATE_LIMIT",
-                client_ip = %client_ip,
+                ip_hash = %client_ip,
                 count = count,
                 retry_after_secs = params.retry_after_secs,
                 "Registration rate limit exceeded"
@@ -874,7 +882,14 @@ pub async fn get_pow_challenge(
     State(app_context): State<Arc<AppContext>>,
     headers: HeaderMap,
 ) -> Result<(axum::http::HeaderMap, Json<ChallengeResponse>), AppError> {
-    let client_ip = extract_client_ip(&headers);
+    // Salted hash of the client IP (hash_client_ip) — used only for anti-abuse keying
+    // and logging. The raw address is never stored: the PoW challenge record's
+    // requester_ip, the per-IP zset keys, and all logs carry this opaque tag. Same IP →
+    // same tag, so adaptive per-IP PoW is unchanged; "unknown" passes through.
+    let client_ip = hash_client_ip(
+        &extract_client_ip(&headers),
+        &app_context.config.logging.hash_salt,
+    );
 
     // 1. Count how many challenges this IP has requested in the last hour
     // Skip rate-limit check when IP is unknown (no proxy headers) to avoid inet cast errors
@@ -895,7 +910,7 @@ pub async fn get_pow_challenge(
         tracing::warn!(
             target: "audit",
             event_type = "POW_CHALLENGE_RATE_LIMIT",
-            client_ip = %client_ip,
+            ip_hash = %client_ip,
             count = count,
             "PoW challenge rate limit exceeded"
         );
@@ -937,7 +952,7 @@ pub async fn get_pow_challenge(
         tracing::info!(
             target: "audit",
             event_type = "POW_REG_ESCALATION",
-            client_ip = %client_ip,
+            ip_hash = %client_ip,
             reg_count = reg_count,
             difficulty = params.difficulty,
             retry_after_secs = params.retry_after_secs,
@@ -971,7 +986,7 @@ pub async fn get_pow_challenge(
         challenge = %challenge,
         difficulty = %params.difficulty,
         retry_after_secs = %params.retry_after_secs,
-        client_ip = %client_ip,
+        ip_hash = %client_ip,
         "PoW challenge generated (adaptive)"
     );
 

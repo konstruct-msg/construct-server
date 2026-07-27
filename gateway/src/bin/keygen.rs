@@ -21,8 +21,8 @@ fn main() {
     println!();
     println!("Add both values to docker-compose.yml for gateway AND auth-service:");
     println!();
-    println!("  ICE_ENABLED=true");
-    println!("  ICE_SERVER_KEY={key_b64}");
+    println!("  VEIL_ENABLED=true");
+    println!("  VEIL_SERVER_KEY={key_b64}");
     println!();
     println!("Bridge cert (for client SDK / QR codes):");
     println!("  {cert}");
@@ -30,7 +30,7 @@ fn main() {
     println!("Example bridge line (replace <YOUR_IP> and <PORT>):");
     println!("  Bridge obfs4 <YOUR_IP>:9443 cert={cert} iat-mode=1");
     println!();
-    println!("⚠  Keep ICE_SERVER_KEY secret. Regenerating it invalidates all");
+    println!("⚠  Keep VEIL_SERVER_KEY secret. Regenerating it invalidates all");
     println!("   existing client bridge certs.");
     println!();
 }
