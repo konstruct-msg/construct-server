@@ -99,15 +99,12 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ### P0-C — Device revoke discards session revocation
 
-`identity-service/src/main.rs` (~1138):
+**Status:** FIXED (2026-07-28)
 
-```rust
-let _ = queue.revoke_all_sessions(&req.device_id).await;
-```
-
-Device deactivated in DB; Redis sessions may remain → tokens still valid until expiry if blocklist not written elsewhere.
-
-**Fix:** Propagate error or retry; fail the RPC if revoke fails (or mark device revoked + async hard retry with metric).
+- `mark_device_revoked:{device_id}` Redis marker (TTL = access-token lifetime); messaging auth rejects tokens for revoked devices
+- Device revoke blocklists caller access JTI when same device; fail-closed on Redis errors
+- Logout fail-closed on blocklist / revoke-all / secondary-device cleanup failures
+- Fixed wrong key: sessions index is `user_sessions:{user_id}`, not device_id
 
 ---
 

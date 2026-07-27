@@ -937,32 +937,40 @@ async fn extract_authed_user_id(
             .ok()?;
     let user_id = uuid::Uuid::parse_str(&claims.sub).ok()?;
 
-    // Fail-closed: reject the request if Redis is unavailable or the token
-    // has been explicitly revoked (e.g. via logout or device removal).
-    let mut redis = match context.redis_conn().await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "Redis unavailable for blocklist check — rejecting JWT");
-            return None;
-        }
-    };
+    // Fail-closed: reject if Redis is unavailable, JTI is blocklisted, or the
+    // device was revoked (covers all outstanding tokens for that device_id).
+    let mut queue = context.queue.lock().await;
 
-    let key = format!("invalidated_token:{}", claims.jti);
-    match redis::cmd("EXISTS")
-        .arg(&key)
-        .query_async::<bool>(&mut redis)
-        .await
-    {
-        Ok(false) => Some(user_id),
+    match queue.is_token_invalidated(&claims.jti).await {
         Ok(true) => {
             tracing::warn!(jti = %claims.jti, "Rejected revoked access token in gRPC auth");
-            None
+            return None;
         }
+        Ok(false) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "Blocklist EXISTS check failed — rejecting JWT");
-            None
+            tracing::warn!(error = %e, "Blocklist check failed — rejecting JWT");
+            return None;
         }
     }
+
+    if let Some(device_id) = claims.device_id.as_deref() {
+        match queue.is_device_revoked(device_id).await {
+            Ok(true) => {
+                tracing::warn!(
+                    device_id = %device_id,
+                    "Rejected access token for revoked device"
+                );
+                return None;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Device-revoked check failed — rejecting JWT");
+                return None;
+            }
+        }
+    }
+
+    Some(user_id)
 }
 
 // ============================================================================
