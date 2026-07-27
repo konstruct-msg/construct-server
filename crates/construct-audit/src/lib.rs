@@ -63,7 +63,15 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username_hash: Option<String>,
 
-    /// Client IP address
+    /// Client IP address.
+    ///
+    /// NOTE (2026-07-27, IP-minimisation): this module currently has NO callers.
+    /// Before wiring it up, pass a **salted hash** here, not a raw address — use
+    /// `construct_utils::hash_client_ip(&ip, &config.logging.hash_salt)` and change
+    /// this field to `client_ip_hash: Option<String>`, consistent with the
+    /// `user_id_hash` / `username_hash` fields and this module's "hashed identifiers"
+    /// contract. The live anti-abuse paths (auth/user services) already store only the
+    /// hashed tag; raw IPs must never reach audit records either.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ip: Option<IpAddr>,
 

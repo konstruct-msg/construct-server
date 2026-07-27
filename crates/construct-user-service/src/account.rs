@@ -17,7 +17,7 @@ use construct_context::AppContext;
 use construct_db as db;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
-use construct_utils::{extract_client_ip, log_safe_id};
+use construct_utils::{extract_client_ip, hash_client_ip, log_safe_id};
 
 /// Account information response
 #[derive(Debug, Serialize)]
@@ -134,7 +134,13 @@ pub async fn check_username_availability(
     headers: HeaderMap,
     Query(query): Query<UsernameAvailabilityQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let client_ip = extract_client_ip(&headers, None);
+    // Salted hash of the client IP — used only for anti-abuse rate-limit keying and
+    // logging. The raw address is never stored (rate-limit key, Redis, logs all see
+    // this opaque tag). Same IP → same tag, so per-IP limits are unchanged.
+    let client_ip = hash_client_ip(
+        &extract_client_ip(&headers, None),
+        &app_context.config.logging.hash_salt,
+    );
     let device_id = headers
         .get("X-Device-Id")
         .or_else(|| headers.get("X-Client-Id"))
@@ -150,7 +156,7 @@ pub async fn check_username_availability(
                 if count > 10 {
                     drop(queue);
                     tracing::warn!(
-                        ip = %client_ip,
+                        ip_hash = %client_ip,
                         count = count,
                         "Username availability rate limit exceeded (IP)"
                     );
@@ -247,7 +253,7 @@ pub async fn check_username_availability(
 
     // 6. Log mass check attempts (for audit)
     tracing::debug!(
-        ip = %client_ip,
+        ip_hash = %client_ip,
         device_id = %device_id,
         username_hash = %log_safe_id(&normalized, &app_context.config.logging.hash_salt),
         available = available,

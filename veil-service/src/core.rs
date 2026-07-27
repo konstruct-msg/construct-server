@@ -1,6 +1,6 @@
 //! VeilService business logic — issue (sign) veil-front capabilities.
 //!
-//! ⚠️ Wire-format coupling: the signing message and the capability blob layout MUST
+//! Wire-format coupling: the signing message and the capability blob layout MUST
 //! match `construct-veil-protocol::capability` exactly (the relay verifies offline
 //! against these bytes). They are replicated here because construct-server and
 //! construct-veil are separate repos. Keep the two in sync:

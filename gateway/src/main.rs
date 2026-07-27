@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
         } else {
             if config.veil_cover_upstream.is_some() {
                 tracing::warn!(
-                    "ICE_COVER_UPSTREAM is set but VEIL-over-TLS is also active — \
+                    "VEIL_COVER_UPSTREAM is set but VEIL-over-TLS is also active — \
                         cover proxy disabled (peek happens before gateway TLS, not after)"
                 );
             }
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
             }
         });
     } else {
-        info!("VEIL transport disabled (set ICE_ENABLED=true to activate)");
+        info!("VEIL transport disabled (set VEIL_ENABLED=true to activate)");
     }
 
     axum::serve(listener, app)
@@ -339,7 +339,7 @@ fn veil_load_or_generate(
             .decode(key_b64)
             .context("VEIL_SERVER_KEY: invalid base64")?;
         let cfg = construct_veil::ServerConfig::from_bytes(&bytes)
-            .map_err(|e| anyhow::anyhow!("ICE_SERVER_KEY: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("VEIL_SERVER_KEY: {}", e))?;
         let iat = construct_veil::IatMode::from_u8(config.veil_iat_mode).unwrap_or_default();
         cfg.with_iat(iat)
     } else {
@@ -347,8 +347,8 @@ fn veil_load_or_generate(
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(cfg.to_bytes());
         tracing::warn!(
             key = %key_b64,
-            "ICE_SERVER_KEY not set — using ephemeral key. \
-             Set ICE_SERVER_KEY={} to persist across restarts.",
+            "VEIL_SERVER_KEY not set — using ephemeral key. \
+             Set VEIL_SERVER_KEY={} to persist across restarts.",
             key_b64
         );
         let iat = construct_veil::IatMode::from_u8(config.veil_iat_mode).unwrap_or_default();

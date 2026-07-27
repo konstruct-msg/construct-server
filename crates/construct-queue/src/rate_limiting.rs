@@ -47,6 +47,11 @@ impl<'a> RateLimiter<'a> {
     /// Increments message count per IP address for rate limiting
     /// Returns the total count of messages from this IP in the last hour
     /// This provides protection against distributed attacks (multiple users from same IP)
+    ///
+    /// IP-MINIMISATION CONTRACT (2026-07-27): `ip` MUST already be the salted tag from
+    /// `construct_utils::hash_client_ip`, never a raw address — the tag becomes a Redis
+    /// key here. (Currently dormant: no service caller. The live paths — username check,
+    /// PoW registration/challenge — already pass the hashed tag.)
     pub(crate) async fn increment_ip_message_count(&mut self, ip: &str) -> Result<u32> {
         // Normalize IP (handle IPv6 brackets if present)
         let normalized_ip = ip.trim_start_matches('[').trim_end_matches(']');

@@ -21,8 +21,8 @@ mod core;
 mod kt;
 
 use anyhow::{Context, Result};
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Json, Router};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{SigningKey, VerifyingKey as Ed25519VerifyingKey};
 use redis::aio::ConnectionManager as RedisConnectionManager;
 use serde_json::json;
@@ -37,9 +37,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::core::v1::CryptoSuite;
 use construct_server_shared::shared::proto::services::v1::{
-    self as proto,
+    self as proto, SendBlindNotificationRequest, SendKeyRotationWakeRequest,
     key_service_server::{KeyService, KeyServiceServer},
-    SendBlindNotificationRequest, SendKeyRotationWakeRequest,
 };
 
 /// Map a DB crypto_suite string to the proto CryptoSuite enum value.
