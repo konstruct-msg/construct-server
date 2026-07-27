@@ -188,6 +188,30 @@ impl<'a> TokenManager<'a> {
         Ok(exists)
     }
 
+    /// Mark a device as revoked so any access token carrying that `device_id`
+    /// claim is rejected until TTL expires (should match max access-token lifetime).
+    ///
+    /// Complements JTI blocklist: we do not have a per-device access-token index,
+    /// so a single Redis key covers all outstanding tokens for the device.
+    pub(crate) async fn mark_device_revoked(
+        &mut self,
+        device_id: &str,
+        ttl_seconds: i64,
+    ) -> Result<()> {
+        let key = format!("revoked_device:{}", device_id);
+        let ttl = ttl_seconds.max(1) as u64;
+        let _: () = self.client.set_ex(&key, "1", ttl).await?;
+        tracing::info!(device_id = %device_id, ttl_seconds = ttl, "Marked device revoked");
+        Ok(())
+    }
+
+    /// Returns true if the device was revoked via [`mark_device_revoked`].
+    pub(crate) async fn is_device_revoked(&mut self, device_id: &str) -> Result<bool> {
+        let key = format!("revoked_device:{}", device_id);
+        let exists: bool = self.client.exists(&key).await?;
+        Ok(exists)
+    }
+
     // =========================================================================
     // Device Link Tokens (for multi-device QR linking)
     // =========================================================================

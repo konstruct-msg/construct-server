@@ -364,6 +364,18 @@ impl MessageQueue {
             .await
     }
 
+    pub async fn mark_device_revoked(&mut self, device_id: &str, ttl_seconds: i64) -> Result<()> {
+        tokens::TokenManager::new(&mut self.client)
+            .mark_device_revoked(device_id, ttl_seconds)
+            .await
+    }
+
+    pub async fn is_device_revoked(&mut self, device_id: &str) -> Result<bool> {
+        tokens::TokenManager::new(&mut self.client)
+            .is_device_revoked(device_id)
+            .await
+    }
+
     // =========================================================================
     // Device Link Tokens
     // =========================================================================

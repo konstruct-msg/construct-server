@@ -1135,7 +1135,41 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
 
         if deactivated {
             let mut queue = self.context.queue.lock().await;
-            let _ = queue.revoke_all_sessions(&req.device_id).await;
+            // Access-token TTL window: any outstanding token for this device must
+            // be rejected until it would have expired naturally.
+            let access_ttl_secs = (self.context.config.access_token_ttl_hours
+                * construct_config::SECONDS_PER_HOUR)
+                .max(1);
+
+            // Mark device revoked (covers all access tokens with this device_id claim).
+            queue
+                .mark_device_revoked(&req.device_id, access_ttl_secs)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, device_id = %req.device_id, "Failed to mark device revoked");
+                    Status::internal("Failed to revoke device sessions")
+                })?;
+
+            // Also blocklist the caller's access token when it is for this device.
+            if claims.device_id.as_deref() == Some(req.device_id.as_str()) {
+                let remaining = (claims.exp - chrono::Utc::now().timestamp()).max(0);
+                if remaining > 0 {
+                    queue
+                        .invalidate_access_token(&claims.jti, remaining)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(error = %e, "Failed to blocklist access token after device revoke");
+                            Status::internal("Failed to revoke device sessions")
+                        })?;
+                }
+            }
+
+            // Legacy session set is keyed by user_id (not device_id). Still best-effort
+            // for any residual session keys; fail closed if Redis errors.
+            if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
+                tracing::error!(error = %e, "Failed to revoke user sessions after device deactivate");
+                return Err(Status::internal("Failed to revoke device sessions"));
+            }
         }
 
         tracing::info!(

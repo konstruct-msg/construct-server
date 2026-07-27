@@ -238,23 +238,28 @@ pub async fn logout_user(
 ) -> Result<(), AppError> {
     // Invalidate the current access token so it cannot be reused after logout.
     // TTL is set to the token's remaining lifetime so the entry self-expires.
+    // Fail closed: if we cannot write the blocklist, the access token remains
+    // valid — returning success would lie to the client about session end.
     if let (Some(jti), Some(exp)) = (access_jti, access_exp) {
         let remaining = (exp - Utc::now().timestamp()).max(0);
         if remaining > 0 {
             let mut queue = app_context.queue.lock().await;
-            if let Err(e) = queue.invalidate_access_token(jti, remaining).await {
-                tracing::error!(error = %e, "Failed to add access token to blocklist");
-                // Continue logout — best-effort blocklist, short TTL limits exposure
-            }
+            queue.invalidate_access_token(jti, remaining).await.map_err(|e| {
+                tracing::error!(error = %e, "Failed to add access token to blocklist — fail closed");
+                AppError::internal("Cannot complete logout (token blocklist unavailable)")
+            })?;
         }
     }
 
     if all_devices {
         let mut queue = app_context.queue.lock().await;
-        if let Err(e) = queue.revoke_all_user_tokens(&user_id.to_string()).await {
-            tracing::error!(error = %e, "Failed to revoke all user tokens");
-            // Continue anyway
-        }
+        queue
+            .revoke_all_user_tokens(&user_id.to_string())
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to revoke all user tokens — fail closed");
+                AppError::internal("Cannot complete logout (refresh token revoke failed)")
+            })?;
         drop(queue);
 
         tracing::info!(
@@ -267,8 +272,9 @@ pub async fn logout_user(
         // can no longer authenticate — the fix for "logout leaves a ghost".
         // The user's *primary* device is never deactivated here: it owns the
         // account (passwordless identity), so deactivating it would look like
-        // account loss. Best-effort — never fail the logout on cleanup errors.
-        deactivate_secondary_device_on_logout(&app_context, &user_id, device_id).await;
+        // account loss.
+        // Session revoke for secondary devices is fail-closed (see helper).
+        deactivate_secondary_device_on_logout(&app_context, &user_id, device_id).await?;
 
         tracing::info!(
             user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
@@ -280,23 +286,23 @@ pub async fn logout_user(
 }
 
 /// Deactivate the requesting device on single-device logout, unless it is the
-/// user's primary device. Best-effort: logs and returns on any error.
+/// user's primary device. Redis revocation failures fail closed.
 async fn deactivate_secondary_device_on_logout(
     app_context: &Arc<AppContext>,
     user_id: &Uuid,
     device_id: Option<&str>,
-) {
+) -> Result<(), AppError> {
     let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
         // No device_id in the token (older clients) — nothing to unregister.
-        return;
+        return Ok(());
     };
 
     let user = match construct_db::get_user_by_id(&app_context.db_pool, user_id).await {
         Ok(Some(u)) => u,
-        Ok(None) => return,
+        Ok(None) => return Ok(()),
         Err(e) => {
             tracing::error!(error = %e, "logout: failed to load user for device cleanup");
-            return;
+            return Err(AppError::internal("Cannot complete logout (user lookup failed)"));
         }
     };
 
@@ -306,25 +312,44 @@ async fn deactivate_secondary_device_on_logout(
             user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
             "logout: primary device — keeping registration (token revoked only)"
         );
-        return;
+        return Ok(());
     }
 
     match construct_db::deactivate_device(&app_context.db_pool, device_id).await {
         Ok(true) => {
             let mut queue = app_context.queue.lock().await;
-            if let Err(e) = queue.revoke_all_sessions(device_id).await {
-                tracing::error!(error = %e, "logout: failed to revoke device sessions");
+            let access_ttl_secs = (app_context.config.access_token_ttl_hours
+                * construct_config::SECONDS_PER_HOUR)
+                .max(1);
+            queue
+                .mark_device_revoked(device_id, access_ttl_secs)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "logout: failed to mark device revoked");
+                    AppError::internal("Cannot complete logout (device revoke marker failed)")
+                })?;
+            // Session set is user-scoped; still clear residual keys for this user.
+            if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
+                tracing::error!(error = %e, "logout: failed to revoke user sessions");
+                return Err(AppError::internal(
+                    "Cannot complete logout (session revoke failed)",
+                ));
             }
             tracing::info!(
                 device_id = %device_id,
                 "logout: secondary device unregistered"
             );
+            Ok(())
         }
         Ok(false) => {
             // Already inactive or unknown — nothing to do.
+            Ok(())
         }
         Err(e) => {
             tracing::error!(error = %e, "logout: failed to deactivate secondary device");
+            Err(AppError::internal(
+                "Cannot complete logout (device deactivation failed)",
+            ))
         }
     }
 }
