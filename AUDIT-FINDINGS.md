@@ -84,17 +84,16 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ### P0-B — Insecure secret defaults boot successfully
 
-| ID | Secret | Default | File |
-|----|--------|---------|------|
-| P0-B1 | `USERNAME_HMAC_SECRET` | `construct-insecure-username-hmac` | `construct-config/src/security.rs` |
-| P0-B2 | `CONTACT_HMAC_SECRET` | `construct-insecure-contact-hmac` | same + signaling `main.rs` |
-| P0-B3 | `REQUEST_ENVELOPE_KEY` | `construct-insecure-envelope-key!!` | `security.rs` |
-| P0-B4 | `TURN_SECRET` | `"changeme"` | `signaling-service/src/main.rs:44` |
-| P0-B5 | `MASQUE_AUTH_TOKEN` | empty → open relay | `masque-service/src/main.rs` |
+| ID | Secret | Default | File | Status |
+|----|--------|---------|------|--------|
+| P0-B1 | `USERNAME_HMAC_SECRET` | insecure constant | `security.rs` | **FIXED** — prod fail-boot |
+| P0-B2 | `CONTACT_HMAC_SECRET` | insecure constant | security + signaling | **FIXED** |
+| P0-B3 | `REQUEST_ENVELOPE_KEY` | insecure constant | `security.rs` | **FIXED** |
+| P0-B4 | `TURN_SECRET` | `"changeme"` | signaling | **FIXED** |
+| P0-B5 | `MASQUE_AUTH_TOKEN` | empty → open relay | masque | **FIXED** |
 
-**Preflight:** `scripts/preflight-secrets.sh` only **warns** on missing HMAC secrets; does not fail on `changeme` / insecure constants; does not check MASQUE.
-
-**Fix:** Fail boot when `ENVIRONMENT=production` (or always outside tests) if missing/malformed/known-bad; harden preflight to hard-error.
+**Escape hatch (dev only):** `ALLOW_INSECURE_SECRETS=true`.  
+**Preflight:** hard-errors missing HMAC/envelope + `TURN_SECRET=changeme`.
 
 ---
 

@@ -24,6 +24,77 @@ use crate::rate_limiter::{RateLimitConfig, RateLimiter};
 use crate::registry::CallRegistry;
 use crate::service::{make_default_peer_salt, make_instance_id, SignalingServiceImpl};
 
+fn load_turn_secret() -> anyhow::Result<String> {
+    use construct_config::{allow_insecure_secrets, is_production_environment, INSECURE_TURN_SECRET};
+    match env::var("TURN_SECRET") {
+        Ok(s) if !s.is_empty() && s != INSECURE_TURN_SECRET => Ok(s),
+        Ok(s) => {
+            if is_production_environment() && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "TURN_SECRET must not be empty or '{INSECURE_TURN_SECRET}' in production. \
+                     Generate with: openssl rand -hex 32"
+                );
+            }
+            tracing::warn!(
+                "TURN_SECRET is empty or '{INSECURE_TURN_SECRET}' — insecure (dev only)"
+            );
+            Ok(if s.is_empty() {
+                INSECURE_TURN_SECRET.to_string()
+            } else {
+                s
+            })
+        }
+        Err(_) => {
+            if is_production_environment() && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "TURN_SECRET is REQUIRED in production. Generate with: openssl rand -hex 32"
+                );
+            }
+            tracing::warn!(
+                "TURN_SECRET not set — using insecure default '{INSECURE_TURN_SECRET}' (dev only)"
+            );
+            Ok(INSECURE_TURN_SECRET.to_string())
+        }
+    }
+}
+
+fn load_contact_hmac_secret() -> anyhow::Result<Vec<u8>> {
+    use construct_config::{
+        allow_insecure_secrets, is_production_environment, INSECURE_CONTACT_HMAC,
+    };
+    match env::var("CONTACT_HMAC_SECRET") {
+        Ok(hex) if !hex.trim().is_empty() => {
+            let bytes = hex::decode(hex.trim()).map_err(|e| {
+                anyhow::anyhow!("CONTACT_HMAC_SECRET is not valid hex: {e}")
+            })?;
+            if bytes.len() != 32 {
+                anyhow::bail!(
+                    "CONTACT_HMAC_SECRET must be exactly 32 bytes (got {})",
+                    bytes.len()
+                );
+            }
+            if bytes.as_slice() == INSECURE_CONTACT_HMAC && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "CONTACT_HMAC_SECRET must not use the known insecure default material"
+                );
+            }
+            Ok(bytes)
+        }
+        _ => {
+            if is_production_environment() && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "CONTACT_HMAC_SECRET is REQUIRED in production. \
+                     Generate with: openssl rand -hex 32"
+                );
+            }
+            tracing::warn!(
+                "CONTACT_HMAC_SECRET not set — using insecure default (dev only)"
+            );
+            Ok(INSECURE_CONTACT_HMAC.to_vec())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -41,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let grpc_bind_addr = format!("0.0.0.0:{}", port);
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_addr).await?;
 
-    let turn_secret = env::var("TURN_SECRET").unwrap_or_else(|_| "changeme".into());
+    let turn_secret = load_turn_secret()?;
     let turn_ttl: u64 = env::var("TURN_CREDENTIALS_TTL_SECONDS")
         .unwrap_or_else(|_| "86400".into())
         .parse()?;
@@ -79,48 +150,39 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let contact_hmac_secret = match env::var("CONTACT_HMAC_SECRET") {
-        Ok(hex) => match hex::decode(&hex) {
-            Ok(bytes) if !bytes.is_empty() => bytes,
-            _ => {
-                tracing::warn!(
-                    "CONTACT_HMAC_SECRET is not valid hex — using insecure default (dev only)"
-                );
-                b"construct-insecure-contact-hmac".to_vec()
-            }
-        },
-        Err(_) => {
-            tracing::warn!(
-                "CONTACT_HMAC_SECRET not set — using insecure default (dev only). \
-                 Set it in production: openssl rand -hex 32"
-            );
-            b"construct-insecure-contact-hmac".to_vec()
-        }
-    };
+    let contact_hmac_secret = load_contact_hmac_secret()?;
 
     info!("SignalingService listening on {}", grpc_bind_addr);
 
-    // Load JWT auth manager for device_id cross-verification (S-C1).
-    // If JWT_PUBLIC_KEY is not set, start in degraded mode: trust gateway-injected
-    // x-device-id headers directly (same as pre-S-C1 behavior).
+    // Load JWT auth manager for device_id cross-verification.
+    // Auth is required for user/device identity (Bearer); Config keys must be present
+    // in production. Degraded None only when Config fails in non-prod.
     let auth: Option<Arc<AuthManager>> = match Config::from_env() {
         Ok(config) => match AuthManager::new(&config) {
             Ok(manager) => {
-                info!("JWT device_id verification enabled");
+                info!("JWT/PASETO device verification enabled");
                 Some(Arc::new(manager))
             }
             Err(e) => {
+                if construct_config::is_production_environment() {
+                    return Err(e.context(
+                        "AuthManager init failed in production (set PASETO/JWT public keys)",
+                    ));
+                }
                 tracing::warn!(
                     error = %e,
-                    "AuthManager init failed — device_id JWT verification disabled (set JWT_PUBLIC_KEY)"
+                    "AuthManager init failed — auth disabled (dev only; set PASETO/JWT keys)"
                 );
                 None
             }
         },
         Err(e) => {
+            if construct_config::is_production_environment() {
+                return Err(e.context("Config load failed in production"));
+            }
             tracing::warn!(
                 error = %e,
-                "Config load failed — device_id JWT verification disabled"
+                "Config load failed — auth disabled (dev only)"
             );
             None
         }
