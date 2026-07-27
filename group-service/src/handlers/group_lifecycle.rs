@@ -15,8 +15,8 @@ pub(crate) async fn create_group(
     svc: &GroupServiceImpl,
     request: Request<proto::CreateGroupRequest>,
 ) -> Result<Response<proto::CreateGroupResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let rl_key = format!("rl:group_create:{}", user_id);
@@ -111,7 +111,7 @@ pub(crate) async fn get_group_state(
     svc: &GroupServiceImpl,
     request: Request<proto::GetGroupStateRequest>,
 ) -> Result<Response<proto::GetGroupStateResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id = Uuid::parse_str(&req.group_id)
@@ -219,7 +219,7 @@ pub(crate) async fn dissolve_group(
     svc: &GroupServiceImpl,
     request: Request<proto::DissolveGroupRequest>,
 ) -> Result<Response<proto::DissolveGroupResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id = Uuid::parse_str(&req.group_id)

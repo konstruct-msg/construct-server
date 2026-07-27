@@ -11,7 +11,7 @@ pub(crate) async fn publish_key_package(
     svc: &GroupServiceImpl,
     request: Request<proto::PublishKeyPackageRequest>,
 ) -> Result<Response<proto::PublishKeyPackageResponse>, Status> {
-    let user_id = extract_user_id(request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let device_id = req.device_id;

@@ -10,8 +10,14 @@ pub(crate) async fn get_comment_group(
     svc: &GroupServiceImpl,
     request: Request<proto::GetCommentGroupRequest>,
 ) -> Result<Response<proto::GetCommentGroupResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
+    // Preserve caller auth for the in-process CreateGroup call (Bearer required).
+    let auth_header = request
+        .metadata()
+        .get("authorization")
+        .cloned()
+        .or_else(|| request.metadata().get("Authorization").cloned());
     let req = request.into_inner();
 
     let post_id =
@@ -59,6 +65,9 @@ pub(crate) async fn get_comment_group(
     };
 
     let mut grpc_request = Request::new(create_req);
+    if let Some(auth) = auth_header {
+        grpc_request.metadata_mut().insert("authorization", auth);
+    }
     grpc_request
         .metadata_mut()
         .insert("x-user-id", user_id.to_string().parse().unwrap());

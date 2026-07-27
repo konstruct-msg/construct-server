@@ -2,11 +2,14 @@
 // TrustedUser Extractor - Gateway Auth Pattern
 // ============================================================================
 //
-// Extracts user identity from X-User-Id header set by Gateway.
+// LEGACY REST helper: extracts user identity from X-User-Id header.
 //
-// SECURITY: This extractor trusts the X-User-Id header unconditionally.
-// It MUST only be used for services behind the API Gateway.
-// Direct internet access to services would bypass authentication!
+// SECURITY (2026-07 audit): Production gRPC edge is vanilla Caddy without JWT
+// injection. Do NOT use this extractor for new gRPC auth — use
+// `construct_server_shared::auth_utils` (Bearer token required, header must
+// match claims if present). This extractor remains for legacy Axum REST paths
+// that still sit behind an edge which injects the header after JWT verify.
+// Treating client-supplied X-User-Id as identity on a public path is an auth bypass.
 //
 // Usage:
 // ```rust

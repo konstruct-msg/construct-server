@@ -15,6 +15,7 @@ async fn test_add_and_list_admins() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -85,6 +86,7 @@ async fn test_remove_admin() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -153,6 +155,7 @@ async fn test_add_admin_not_owner() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

@@ -17,8 +17,8 @@ pub(crate) async fn create_topic(
     request: Request<proto::CreateTopicRequest>,
 ) -> Result<Response<proto::CreateTopicResponse>, Status> {
     let meta = request.metadata();
-    let user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req
@@ -95,8 +95,8 @@ pub(crate) async fn list_topics(
     request: Request<proto::ListTopicsRequest>,
 ) -> Result<Response<proto::ListTopicsResponse>, Status> {
     let meta = request.metadata();
-    let _user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let _user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req
@@ -133,8 +133,8 @@ pub(crate) async fn archive_topic(
     request: Request<proto::ArchiveTopicRequest>,
 ) -> Result<Response<proto::ArchiveTopicResponse>, Status> {
     let meta = request.metadata();
-    let _user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let _user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req
@@ -188,8 +188,8 @@ pub(crate) async fn create_invite_link(
     request: Request<proto::CreateInviteLinkRequest>,
 ) -> Result<Response<proto::CreateInviteLinkResponse>, Status> {
     let meta = request.metadata();
-    let _user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let _user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req
@@ -257,8 +257,8 @@ pub(crate) async fn revoke_invite_link(
     request: Request<proto::RevokeInviteLinkRequest>,
 ) -> Result<Response<proto::RevokeInviteLinkResponse>, Status> {
     let meta = request.metadata();
-    let _user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let _user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req

@@ -15,6 +15,7 @@ async fn test_publish_post_by_owner() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -67,6 +68,7 @@ async fn test_publish_post_by_non_admin() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -124,6 +126,7 @@ async fn test_list_posts() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -189,6 +192,7 @@ async fn test_get_post() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -260,6 +264,7 @@ async fn test_delete_post() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

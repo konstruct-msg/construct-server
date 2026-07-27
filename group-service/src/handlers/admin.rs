@@ -14,7 +14,7 @@ pub(crate) async fn delegate_admin(
     svc: &GroupServiceImpl,
     request: Request<proto::DelegateAdminRequest>,
 ) -> Result<Response<proto::DelegateAdminResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =
@@ -105,7 +105,7 @@ pub(crate) async fn transfer_ownership(
     svc: &GroupServiceImpl,
     request: Request<proto::TransferOwnershipRequest>,
 ) -> Result<Response<proto::TransferOwnershipResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =

@@ -15,6 +15,7 @@ async fn test_subscribe_public_channel() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -62,6 +63,7 @@ async fn test_subscribe_private_no_token() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -106,6 +108,7 @@ async fn test_unsubscribe_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -164,6 +167,7 @@ async fn test_owner_cannot_unsubscribe() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -207,6 +211,7 @@ async fn test_list_subscriptions() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -248,6 +253,7 @@ async fn test_get_subscriber_count() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

@@ -1,14 +1,14 @@
 use anyhow::{Context, Result, anyhow};
 use axum::{Json, Router, routing::get};
+use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 use std::collections::HashMap;
 use std::{env, sync::Arc};
-use tonic::{Request, Response, Status, metadata::MetadataMap};
+use tonic::{Request, Response, Status};
 use tracing::info;
-use uuid::Uuid;
 
 use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::veil_service_server::{VeilService, VeilServiceServer};
@@ -16,19 +16,10 @@ use proto::veil_service_server::{VeilService, VeilServiceServer};
 mod core;
 use core::{RelayInfo, VeilServiceContext};
 
-/// Extract user_id from gRPC metadata (set by the gateway/envoy after JWT validation).
-fn extract_user_id(metadata: &MetadataMap) -> Result<Uuid, Status> {
-    let s = metadata
-        .get("x-user-id")
-        .ok_or_else(|| Status::unauthenticated("Missing x-user-id metadata"))?
-        .to_str()
-        .map_err(|_| Status::unauthenticated("Invalid x-user-id format"))?;
-    Uuid::parse_str(s).map_err(|_| Status::unauthenticated("Invalid x-user-id UUID"))
-}
-
 #[derive(Clone)]
 struct VeilGrpcService {
     context: Arc<VeilServiceContext>,
+    auth: Arc<AuthManager>,
 }
 
 #[tonic::async_trait]
@@ -37,7 +28,8 @@ impl VeilService for VeilGrpcService {
         &self,
         request: Request<proto::IssueVeilCapabilityRequest>,
     ) -> Result<Response<proto::IssueVeilCapabilityResponse>, Status> {
-        let user_id = extract_user_id(request.metadata())?;
+        let user_id =
+            construct_server_shared::auth_utils::extract_user_id(&self.auth, request.metadata())?;
         let req = request.into_inner();
 
         let map_issue_err = |e: core::IssueError| match e {
@@ -210,8 +202,15 @@ async fn main() -> Result<()> {
         ticket_ttl_secs: core::DEFAULT_TICKET_TTL_SECS,
     });
 
+    let auth = Arc::new(
+        AuthManager::new(&config)
+            .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+    );
+    info!("JWT/PASETO verification enabled for veil-service");
+
     // gRPC server.
     let grpc_context = context.clone();
+    let grpc_auth = auth.clone();
     let grpc_bind = env::var("VEIL_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50056".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind).await?;
     let ka = config.grpc_keepalive_interval_secs;
@@ -219,6 +218,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let service = VeilGrpcService {
             context: grpc_context,
+            auth: grpc_auth,
         };
         if let Err(e) = construct_server_shared::grpc_server(ka, ka_to)
             .add_service(VeilServiceServer::new(service))

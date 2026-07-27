@@ -11,8 +11,8 @@ pub(crate) async fn create_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::CreateChannelRequest>,
 ) -> Result<Response<proto::CreateChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     crate::helpers::check_warmup_rate_limit(
@@ -91,7 +91,7 @@ pub(crate) async fn get_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::GetChannelRequest>,
 ) -> Result<Response<proto::GetChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())
+    let device_id = extract_device_id(svc, request.metadata())
         .ok()
         .unwrap_or_default();
     let req = request.into_inner();
@@ -141,8 +141,8 @@ pub(crate) async fn update_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::UpdateChannelRequest>,
 ) -> Result<Response<proto::UpdateChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -171,8 +171,8 @@ pub(crate) async fn set_channel_visibility(
     svc: &GroupServiceImpl,
     request: Request<proto::SetChannelVisibilityRequest>,
 ) -> Result<Response<proto::SetChannelVisibilityResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -197,8 +197,8 @@ pub(crate) async fn delete_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::DeleteChannelRequest>,
 ) -> Result<Response<proto::DeleteChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)

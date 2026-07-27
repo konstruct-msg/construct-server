@@ -11,8 +11,8 @@ pub(crate) async fn subscribe_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::SubscribeChannelRequest>,
 ) -> Result<Response<proto::SubscribeChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -104,8 +104,8 @@ pub(crate) async fn unsubscribe_channel(
     svc: &GroupServiceImpl,
     request: Request<proto::UnsubscribeChannelRequest>,
 ) -> Result<Response<proto::UnsubscribeChannelResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -148,8 +148,8 @@ pub(crate) async fn list_subscriptions(
     svc: &GroupServiceImpl,
     request: Request<proto::ListSubscriptionsRequest>,
 ) -> Result<Response<proto::ListSubscriptionsResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let cursor = if req.cursor.is_empty() {

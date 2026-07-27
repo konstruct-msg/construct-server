@@ -25,12 +25,21 @@ pub(crate) async fn handle_stream_request(
         Some(StreamReq::Send(envelope)) => {
             let attempt_id = req.attempt_id.clone();
 
-            // Extract user_id from envelope if not set yet (regular messages only)
-            if user_id.is_none()
-                && envelope.sealed_sender.is_none()
-                && let Some(sender) = &envelope.sender
+            // Stream identity is bound only from verified auth metadata at open
+            // (or re-checked on unary RPCs). Never trust envelope.sender.user_id
+            // for inbox subscription — that was an unauthenticated spoof path.
+            if user_id.is_none() && envelope.sealed_sender.is_none() {
+                return Err(anyhow::anyhow!(
+                    "unauthenticated: MessageStream requires Authorization Bearer token"
+                ));
+            }
+            if let (Some(uid), Some(sender)) = (*user_id, envelope.sender.as_ref())
+                && let Ok(claimed) = uuid::Uuid::parse_str(&sender.user_id)
+                && claimed != uid
             {
-                *user_id = Some(uuid::Uuid::parse_str(&sender.user_id)?);
+                return Err(anyhow::anyhow!(
+                    "sender.user_id does not match authenticated user"
+                ));
             }
 
             // ── Sealed Sender path ──────────────────────────────────────────

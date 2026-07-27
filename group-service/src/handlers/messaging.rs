@@ -19,8 +19,8 @@ pub(crate) async fn send_group_message(
     request: Request<proto::SendGroupMessageRequest>,
 ) -> Result<Response<proto::SendGroupMessageResponse>, Status> {
     let meta = request.metadata();
-    let user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let rl_key = format!("rl:group_msg:{}", user_id);
@@ -137,8 +137,8 @@ pub(crate) async fn fetch_group_messages(
     request: Request<proto::FetchGroupMessagesRequest>,
 ) -> Result<Response<FetchGroupMessagesStream>, Status> {
     let meta = request.metadata();
-    let _user_id = extract_user_id(meta)?;
-    let device_id = extract_device_id(meta)?;
+    let _user_id = extract_user_id(svc, meta)?;
+    let device_id = extract_device_id(svc, meta)?;
     let req = request.into_inner();
 
     let group_id = req
@@ -180,8 +180,8 @@ pub(crate) async fn message_stream(
     request: Request<tonic::Streaming<proto::GroupStreamRequest>>,
 ) -> Result<Response<MessageStreamStream>, Status> {
     let meta = request.metadata().clone();
-    let _user_id = extract_user_id(&meta)?;
-    let device_id = extract_device_id(&meta)?;
+    let _user_id = extract_user_id(svc, &meta)?;
+    let device_id = extract_device_id(svc, &meta)?;
 
     let db = svc.db.clone();
     let hub = svc.hub.clone();

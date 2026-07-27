@@ -11,8 +11,8 @@ pub(crate) async fn publish_post(
     svc: &GroupServiceImpl,
     request: Request<proto::PublishPostRequest>,
 ) -> Result<Response<proto::PublishPostResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -94,8 +94,8 @@ pub(crate) async fn list_posts(
     svc: &GroupServiceImpl,
     request: Request<proto::ListPostsRequest>,
 ) -> Result<Response<proto::ListPostsResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -171,8 +171,8 @@ pub(crate) async fn get_post(
     svc: &GroupServiceImpl,
     request: Request<proto::GetPostRequest>,
 ) -> Result<Response<proto::GetPostResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let post_id =
@@ -203,8 +203,8 @@ pub(crate) async fn delete_post(
     svc: &GroupServiceImpl,
     request: Request<proto::DeletePostRequest>,
 ) -> Result<Response<proto::DeletePostResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let _user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let _user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let post_id =
