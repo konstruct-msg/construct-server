@@ -30,8 +30,29 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_token = env::var("MASQUE_AUTH_TOKEN").unwrap_or_default();
     if auth_token.is_empty() {
+        let allow = env::var("ALLOW_INSECURE_SECRETS")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+        let is_prod = env::var("PRODUCTION")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false)
+            || env::var("ENVIRONMENT")
+                .map(|v| {
+                    let e = v.to_lowercase();
+                    !matches!(e.as_str(), "development" | "dev" | "local" | "test" | "")
+                })
+                .unwrap_or(false)
+            || env::var("FLY_APP_NAME").is_ok()
+            || env::var("FLY_REGION").is_ok();
+        if is_prod && !allow {
+            anyhow::bail!(
+                "MASQUE_AUTH_TOKEN is REQUIRED in production (empty = open relay). \
+                 Generate with: openssl rand -hex 32. \
+                 For local dev only: ALLOW_INSECURE_SECRETS=true"
+            );
+        }
         tracing::warn!(
-            "MASQUE_AUTH_TOKEN not set — relay open to any client. \
+            "MASQUE_AUTH_TOKEN not set — relay open to any client (dev only). \
              Set in production: MASQUE_AUTH_TOKEN=$(openssl rand -hex 32)"
         );
     }

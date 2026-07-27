@@ -94,14 +94,31 @@ check_base64_len BUNDLE_SIGNING_PUBLIC_KEY 32
 check_hex_len    TOKEN_ISSUER_KEY 32
 check_hex_len    APNS_DEVICE_TOKEN_ENCRYPTION_KEY 32
 
-# --- 3. presence advisories (soft — a service may legitimately not need one) -
-echo "[3/3] presence advisories"
+# --- 3. presence + known-bad values -----------------------------------------
+echo "[3/3] presence + known-insecure checks"
 present SERVER_SIGNING_KEY || warn "SERVER_SIGNING_KEY absent — federation + token-encryption (sealed sender) disabled."
 present TOKEN_ISSUER_KEY   || warn "TOKEN_ISSUER_KEY absent — Privacy Pass issuance + redemption disabled."
 present BUNDLE_SIGNING_KEY || warn "BUNDLE_SIGNING_KEY absent — sender certs fall back to the federation signer."
-for k in USERNAME_HMAC_SECRET CONTACT_HMAC_SECRET; do
-  present "$k" || warn "$k absent — service falls back to an INSECURE default HMAC (privacy weakened)."
+
+# Privacy HMAC/envelope secrets: required for production boots (runtime fails without
+# ALLOW_INSECURE_SECRETS). Preflight hard-errors on missing or known insecure values.
+for k in USERNAME_HMAC_SECRET CONTACT_HMAC_SECRET REQUEST_ENVELOPE_KEY; do
+  if ! present "$k"; then
+    err "$k absent — required in production (openssl rand -hex 32). Runtime will fail-boot unless ALLOW_INSECURE_SECRETS=true."
+  else
+    check_hex_len "$k" 32
+  fi
 done
+
+turn="$(raw_value TURN_SECRET)"
+if [[ -z "$turn" || "$turn" == "changeme" ]]; then
+  err "TURN_SECRET absent or set to 'changeme' — required for signaling (openssl rand -hex 32)."
+fi
+
+masque="$(raw_value MASQUE_AUTH_TOKEN)"
+if [[ -z "$masque" ]]; then
+  warn "MASQUE_AUTH_TOKEN absent — masque-service will fail-boot in production (open relay)."
+fi
 
 # --- consistency reminders (cannot verify across hosts from one file) --------
 echo

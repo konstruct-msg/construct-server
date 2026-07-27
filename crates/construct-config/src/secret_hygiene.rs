@@ -42,11 +42,79 @@ const QUOTE_SENSITIVE: &[&str] = &[
     "DELIVERY_SECRET_KEY",
     "LOG_HASH_SALT",
     "TURN_SECRET",
+    "REQUEST_ENVELOPE_KEY",
+    "MASQUE_AUTH_TOKEN",
 ];
+
+/// Known insecure default material that must never ship in production.
+pub const INSECURE_USERNAME_HMAC: &[u8] = b"construct-insecure-username-hmac";
+pub const INSECURE_CONTACT_HMAC: &[u8] = b"construct-insecure-contact-hmac";
+pub const INSECURE_ENVELOPE_KEY: &[u8] = b"construct-insecure-envelope-key!!";
+pub const INSECURE_TURN_SECRET: &str = "changeme";
+
+/// True when the process is running in a production-like environment.
+///
+/// Indicators (any one is enough):
+/// - `PRODUCTION=true`
+/// - `ENVIRONMENT` set and not development/dev/local/test
+/// - Fly.io (`FLY_APP_NAME` / `FLY_REGION`)
+/// - Railway non-development
+pub fn is_production_environment() -> bool {
+    if std::env::var("PRODUCTION")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Ok(v) = std::env::var("ENVIRONMENT") {
+        let env_lower = v.to_lowercase();
+        if !matches!(
+            env_lower.as_str(),
+            "development" | "dev" | "local" | "test" | ""
+        ) {
+            return true;
+        }
+    }
+    if std::env::var("FLY_APP_NAME").is_ok() || std::env::var("FLY_REGION").is_ok() {
+        return true;
+    }
+    if let Ok(v) = std::env::var("RAILWAY_ENVIRONMENT") {
+        return !v.eq_ignore_ascii_case("development");
+    }
+    false
+}
+
+/// Explicit opt-in for local/dev/test when real secrets are not configured.
+/// Set `ALLOW_INSECURE_SECRETS=true` (or `1`) to permit known insecure defaults.
+pub fn allow_insecure_secrets() -> bool {
+    std::env::var("ALLOW_INSECURE_SECRETS")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
 
 /// Read an env var, returning `None` for absent OR empty (both = "not configured").
 fn present(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Reject known-bad plaintext secrets that must never be used outside explicit opt-in.
+fn reject_known_insecure_string(name: &str, value: &str) -> Result<()> {
+    let t = value.trim();
+    let bad = matches!(
+        (name, t),
+        ("TURN_SECRET", INSECURE_TURN_SECRET)
+            | ("TURN_SECRET", "")
+            | ("MASQUE_AUTH_TOKEN", "")
+    ) || t == "construct-insecure-username-hmac"
+        || t == "construct-insecure-contact-hmac"
+        || t == "construct-insecure-envelope-key!!";
+    if bad && !allow_insecure_secrets() {
+        bail!(
+            "{name} is set to a known insecure/default value. Generate a real secret \
+             (`openssl rand -hex 32`) or set ALLOW_INSECURE_SECRETS=true for local dev only."
+        );
+    }
+    Ok(())
 }
 
 /// Fail if a present value is wrapped in literal quotes — the classic env_file mistake.
@@ -91,15 +159,18 @@ fn require_hex_len(name: &str, value: &str, bytes: usize) -> Result<()> {
     Ok(())
 }
 
-/// Boot-time fail-fast on malformed secrets. Called from `Config::from_env()`.
+/// Boot-time fail-fast on malformed / insecure secrets. Called from `Config::from_env()`.
 ///
-/// Errors only on PRESENT-but-malformed values; absent/empty is left to per-service
-/// "feature disabled" handling. A healthy production configuration always passes.
+/// - PRESENT-but-malformed values always error (wrong length/encoding/quotes).
+/// - Known insecure constants error unless `ALLOW_INSECURE_SECRETS=true`.
+/// - In production, required HMAC/envelope secrets must be present (handled in
+///   `SecurityConfig::from_env`); this function still rejects `changeme`/empty TURN.
 pub fn validate() -> Result<()> {
     // 1. No secret may carry literal surrounding quotes.
     for name in QUOTE_SENSITIVE {
         if let Some(v) = present(name) {
             reject_quotes(name, &v)?;
+            reject_known_insecure_string(name, &v)?;
         }
     }
 
@@ -120,6 +191,31 @@ pub fn validate() -> Result<()> {
     }
     if let Some(v) = present("APNS_DEVICE_TOKEN_ENCRYPTION_KEY") {
         require_hex_len("APNS_DEVICE_TOKEN_ENCRYPTION_KEY", &v, 32)?;
+    }
+    if let Some(v) = present("USERNAME_HMAC_SECRET") {
+        require_hex_len("USERNAME_HMAC_SECRET", &v, 32)?;
+    }
+    if let Some(v) = present("CONTACT_HMAC_SECRET") {
+        require_hex_len("CONTACT_HMAC_SECRET", &v, 32)?;
+    }
+    if let Some(v) = present("REQUEST_ENVELOPE_KEY") {
+        require_hex_len("REQUEST_ENVELOPE_KEY", &v, 32)?;
+    }
+
+    // 3. Production: required privacy secrets must not be absent.
+    if is_production_environment() && !allow_insecure_secrets() {
+        for name in [
+            "USERNAME_HMAC_SECRET",
+            "CONTACT_HMAC_SECRET",
+            "REQUEST_ENVELOPE_KEY",
+        ] {
+            if present(name).is_none() {
+                bail!(
+                    "{name} is REQUIRED in production. Generate with: openssl rand -hex 32. \
+                     For local-only insecure defaults set ALLOW_INSECURE_SECRETS=true."
+                );
+            }
+        }
     }
 
     Ok(())
@@ -153,5 +249,17 @@ mod tests {
         assert!(reject_quotes("K", "\"abc\"").is_err());
         assert!(reject_quotes("K", "'abc'").is_err());
         assert!(reject_quotes("K", "abc").is_ok());
+    }
+
+    #[test]
+    fn rejects_known_insecure_turn_secret() {
+        // Ensure opt-in is off for this test process slice.
+        // SAFETY: single-threaded unit test; we restore nothing because other tests
+        // do not depend on ALLOW_INSECURE_SECRETS being set.
+        unsafe {
+            std::env::remove_var("ALLOW_INSECURE_SECRETS");
+        }
+        assert!(reject_known_insecure_string("TURN_SECRET", "changeme").is_err());
+        assert!(reject_known_insecure_string("TURN_SECRET", "real-random-secret").is_ok());
     }
 }

@@ -32,6 +32,10 @@ pub use media::MediaConfig;
 pub use messaging::{MessagingConfig, StealthTokenPolicy};
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
+pub use secret_hygiene::{
+    allow_insecure_secrets, is_production_environment, INSECURE_CONTACT_HMAC,
+    INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
+};
 pub use security::{CsrfConfig, SecurityConfig};
 
 use anyhow::Result;
@@ -211,7 +215,7 @@ impl Config {
 
         // Load sub-configurations
         let logging = LoggingConfig::from_env()?;
-        let security = SecurityConfig::from_env();
+        let security = SecurityConfig::from_env()?;
         let apns = ApnsConfig::from_env()?;
         let federation = FederationConfig::from_env()?;
         let db = DbConfig::from_env();

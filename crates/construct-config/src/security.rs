@@ -82,8 +82,8 @@ pub struct SecurityConfig {
 }
 
 impl SecurityConfig {
-    pub(crate) fn from_env() -> Self {
-        Self {
+    pub(crate) fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
             prekey_ttl_days: std::env::var("PREKEY_TTL_DAYS")
                 .ok()
                 .and_then(|d| d.parse().ok())
@@ -192,62 +192,71 @@ impl SecurityConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8), // 8 leading zeros by default (3-5 seconds to solve)
-            username_hmac_secret: {
-                match std::env::var("USERNAME_HMAC_SECRET") {
-                    Ok(hex) => hex::decode(&hex).unwrap_or_else(|_| {
-                        tracing::warn!("USERNAME_HMAC_SECRET is not valid hex — falling back to insecure default");
-                        b"construct-insecure-username-hmac".to_vec()
-                    }),
-                    Err(_) => {
-                        tracing::warn!(
-                            "USERNAME_HMAC_SECRET not set — using insecure default. \
-                            Set it in production: openssl rand -hex 32"
-                        );
-                        b"construct-insecure-username-hmac".to_vec()
-                    }
-                }
-            },
-            contact_hmac_secret: {
-                match std::env::var("CONTACT_HMAC_SECRET") {
-                    Ok(hex) => hex::decode(&hex).unwrap_or_else(|_| {
-                        tracing::warn!("CONTACT_HMAC_SECRET is not valid hex — falling back to insecure default");
-                        b"construct-insecure-contact-hmac".to_vec()
-                    }),
-                    Err(_) => {
-                        tracing::warn!(
-                            "CONTACT_HMAC_SECRET not set — using insecure default. \
-                            Set it in production: openssl rand -hex 32"
-                        );
-                        b"construct-insecure-contact-hmac".to_vec()
-                    }
-                }
-            },
-            request_envelope_key: {
-                match std::env::var("REQUEST_ENVELOPE_KEY") {
-                    Ok(hex) => {
-                        let bytes = hex::decode(&hex).unwrap_or_else(|_| {
-                            tracing::warn!("REQUEST_ENVELOPE_KEY is not valid hex — falling back to insecure default");
-                            b"construct-insecure-envelope-key!!".to_vec()
-                        });
-                        if bytes.len() != 32 {
-                            tracing::warn!(
-                                "REQUEST_ENVELOPE_KEY must be exactly 32 bytes (got {}) — falling back to insecure default",
-                                bytes.len()
-                            );
-                            b"construct-insecure-envelope-key!!".to_vec()
-                        } else {
-                            bytes
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "REQUEST_ENVELOPE_KEY not set — using insecure default. \
-                            Set it in production: openssl rand -hex 32"
-                        );
-                        b"construct-insecure-envelope-key!!".to_vec()
-                    }
-                }
-            },
+            username_hmac_secret: load_required_hex_secret(
+                "USERNAME_HMAC_SECRET",
+                crate::secret_hygiene::INSECURE_USERNAME_HMAC,
+                32,
+            )?,
+            contact_hmac_secret: load_required_hex_secret(
+                "CONTACT_HMAC_SECRET",
+                crate::secret_hygiene::INSECURE_CONTACT_HMAC,
+                32,
+            )?,
+            request_envelope_key: load_required_hex_secret(
+                "REQUEST_ENVELOPE_KEY",
+                crate::secret_hygiene::INSECURE_ENVELOPE_KEY,
+                32,
+            )?,
+        })
+    }
+}
+
+/// Load a hex-encoded secret of exact byte length.
+///
+/// - Present + valid → used
+/// - Present + malformed → hard error (never silently fall back)
+/// - Absent → insecure default only when not production OR `ALLOW_INSECURE_SECRETS`
+fn load_required_hex_secret(
+    name: &str,
+    insecure_default: &[u8],
+    expected_len: usize,
+) -> anyhow::Result<Vec<u8>> {
+    use crate::secret_hygiene::{allow_insecure_secrets, is_production_environment};
+
+    match std::env::var(name) {
+        Ok(hex) if !hex.trim().is_empty() => {
+            let bytes = hex::decode(hex.trim()).map_err(|e| {
+                anyhow::anyhow!(
+                    "{name} is not valid hex: {e}. Generate with: openssl rand -hex {expected_len}"
+                )
+            })?;
+            if bytes.len() != expected_len {
+                anyhow::bail!(
+                    "{name} must be exactly {expected_len} bytes (got {}). \
+                     Generate with: openssl rand -hex {expected_len}",
+                    bytes.len()
+                );
+            }
+            if bytes.as_slice() == insecure_default && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "{name} must not use the known insecure default material. \
+                     Generate with: openssl rand -hex {expected_len}"
+                );
+            }
+            Ok(bytes)
+        }
+        _ => {
+            if is_production_environment() && !allow_insecure_secrets() {
+                anyhow::bail!(
+                    "{name} is REQUIRED in production. Generate with: openssl rand -hex {expected_len}. \
+                     For local dev only: ALLOW_INSECURE_SECRETS=true"
+                );
+            }
+            tracing::warn!(
+                "{name} not set — using insecure default (dev/test only). \
+                 Set it for real deployments: openssl rand -hex {expected_len}"
+            );
+            Ok(insecure_default.to_vec())
         }
     }
 }
@@ -273,35 +282,7 @@ pub struct CsrfConfig {
 
 impl CsrfConfig {
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        // Check if we're in production
-        // Production indicators (any of these means production):
-        // 1. ENVIRONMENT is set and not "development"/"dev"/"local"
-        // 2. FLY_APP_NAME is set (Fly.io always sets this)
-        // 3. FLY_REGION is set (Fly.io always sets this)
-        // 4. RAILWAY_ENVIRONMENT is set and not "development"
-        // 5. Explicit PRODUCTION=true
-        let is_production = std::env::var("PRODUCTION")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or_else(|_| {
-                // Check various production indicators
-                std::env::var("ENVIRONMENT")
-                    .map(|v| {
-                        let env_lower = v.to_lowercase();
-                        env_lower != "development" && env_lower != "dev" && env_lower != "local"
-                    })
-                    .or_else(|_| {
-                        // Fly.io always sets FLY_APP_NAME and FLY_REGION
-                        if std::env::var("FLY_APP_NAME").is_ok()
-                            || std::env::var("FLY_REGION").is_ok()
-                        {
-                            Ok(true)
-                        } else {
-                            std::env::var("RAILWAY_ENVIRONMENT")
-                                .map(|v| v.to_lowercase() != "development")
-                        }
-                    })
-                    .unwrap_or(false)
-            });
+        let is_production = crate::secret_hygiene::is_production_environment();
 
         let enabled = std::env::var("CSRF_ENABLED")
             .map(|v| v.to_lowercase() == "true")
