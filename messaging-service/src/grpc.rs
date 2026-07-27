@@ -920,34 +920,21 @@ fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Resu
 
 /// Extract the authenticated user UUID from gRPC request metadata.
 ///
-/// Resolution order:
-/// 1. `x-user-id` header — injected by the gateway after it has already
-///    validated the JWT. Trusted; no further checks needed.
-/// 2. `Authorization: Bearer <jwt>` — used for direct (non-gateway) gRPC
-///    connections. Requires both cryptographic verification **and** a Redis
-///    blocklist check (fail-closed: rejects on Redis error).
+/// Requires a cryptographically verified Bearer access token (PASETO/JWT).
+/// Optional `x-user-id` must match `claims.sub` when present (spoof guard).
+/// Always checks the Redis revocation blocklist (fail-closed on Redis error).
 ///
-/// Returns `None` when no auth header is present or when the JWT is
-/// invalid / revoked.
+/// Returns `None` when auth is missing, invalid, revoked, or Redis is down.
+///
+/// **Not trusted:** client-supplied `x-user-id` alone (Caddy does not inject
+/// or strip this header — treating it as identity was an auth bypass).
 async fn extract_authed_user_id(
     metadata: &tonic::metadata::MetadataMap,
     context: &MessagingServiceContext,
 ) -> Option<uuid::Uuid> {
-    if let Some(uid) = metadata
-        .get("x-user-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
-    {
-        return Some(uid);
-    }
-
-    let token = metadata
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_owned())?;
-
-    let claims = context.auth_manager.verify_token(&token).ok()?;
+    let claims =
+        construct_server_shared::auth_utils::verify_access_token(&context.auth_manager, metadata)
+            .ok()?;
     let user_id = uuid::Uuid::parse_str(&claims.sub).ok()?;
 
     // Fail-closed: reject the request if Redis is unavailable or the token

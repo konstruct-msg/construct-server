@@ -13,6 +13,8 @@ use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use construct_auth::AuthManager;
+use construct_config::Config;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::services::v1::channel_service_server::ChannelServiceServer;
 use construct_server_shared::shared::proto::services::v1::mls_service_server::MlsServiceServer;
@@ -95,11 +97,18 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
+    let config = Config::from_env()?;
+    let auth = Arc::new(AuthManager::new(&config).map_err(|e| {
+        anyhow::anyhow!("Failed to initialize AuthManager (set PASETO/JWT public keys): {e}")
+    })?);
+    info!("JWT/PASETO verification enabled for group-service");
+
     let svc = GroupServiceImpl {
         db,
         hub: service::GroupHub::new(),
         notification_client,
         redis,
+        auth,
     };
 
     Server::builder()

@@ -46,6 +46,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Shared dependencies
 construct-server-shared = { path = "../shared" }
 construct-config = { path = "../crates/construct-config" }
+construct-auth = { path = "../crates/construct-auth" }
 construct-crypto = { path = "../crates/construct-crypto", features = ["pqc"] }
 
 [[bin]]

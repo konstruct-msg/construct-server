@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use construct_auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::shared::proto::services::v1 as proto;
 use tokio::sync::broadcast;
@@ -43,4 +44,6 @@ pub(crate) struct GroupServiceImpl {
     pub(crate) hub: Arc<GroupHub>,
     pub(crate) notification_client: Option<NotificationClient>,
     pub(crate) redis: redis::aio::ConnectionManager,
+    /// Verifies Bearer access tokens; never trusts client x-user-id alone.
+    pub(crate) auth: Arc<AuthManager>,
 }

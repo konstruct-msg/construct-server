@@ -77,6 +77,8 @@ struct KeyServiceContext {
     /// Base64-encoded verifying key for `/.well-known/construct-server`.
     /// `None` when bundle signing is disabled.
     bundle_verifying_key_b64: Option<String>,
+    /// Verifies Bearer access tokens for upload/mutation RPCs.
+    auth: Arc<construct_auth::AuthManager>,
 }
 
 impl KeyServiceContext {
@@ -136,6 +138,14 @@ impl KeyServiceContext {
             }
         };
 
+        let config = construct_config::Config::from_env()
+            .context("Failed to load config for AuthManager")?;
+        let auth = Arc::new(
+            construct_auth::AuthManager::new(&config)
+                .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+        );
+        info!("JWT/PASETO verification enabled for key-service upload paths");
+
         Ok(Self {
             db,
             notification_client,
@@ -144,6 +154,7 @@ impl KeyServiceContext {
                 .as_ref()
                 .map(|sk| BASE64.encode(Ed25519VerifyingKey::from(sk).to_bytes())),
             bundle_signing_key,
+            auth,
         })
     }
 }
@@ -152,12 +163,12 @@ impl KeyServiceContext {
 // gRPC Service Implementation
 // ============================================================================
 
-/// Extract the caller's device_id from gRPC metadata (set by Envoy/gateway).
-fn extract_device_id<T>(req: &Request<T>) -> Option<String> {
-    req.metadata()
-        .get("x-device-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+/// Authenticated device_id from Bearer token (optional x-device-id must match claims).
+fn extract_authed_device_id<T>(
+    req: &Request<T>,
+    auth: &construct_auth::AuthManager,
+) -> Result<String, Status> {
+    construct_server_shared::auth_utils::extract_device_id(auth, req.metadata())
 }
 
 /// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
@@ -437,11 +448,8 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::UploadPreKeysRequest>,
     ) -> Result<Response<proto::UploadPreKeysResponse>, Status> {
-        // Validate that the device_id in the request body matches the authenticated device.
-        // x-device-id is injected by the gateway after JWT verification — trust it as the
-        // source of truth and reject any request claiming a different device identity.
-        let authed_device_id = extract_device_id(&request)
-            .ok_or_else(|| Status::unauthenticated("x-device-id header missing"))?;
+        // Authenticate via Bearer token; body device_id must match verified claims.
+        let authed_device_id = extract_authed_device_id(&request, &self.context.auth)?;
 
         let req = request.into_inner();
 
@@ -599,8 +607,7 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::RotateSignedPreKeyRequest>,
     ) -> Result<Response<proto::RotateSignedPreKeyResponse>, Status> {
-        let authed_device_id = extract_device_id(&request)
-            .ok_or_else(|| Status::unauthenticated("x-device-id header missing"))?;
+        let authed_device_id = extract_authed_device_id(&request, &self.context.auth)?;
 
         let req = request.into_inner();
 

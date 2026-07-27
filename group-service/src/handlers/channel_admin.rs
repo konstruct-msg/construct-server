@@ -10,7 +10,7 @@ pub(crate) async fn add_admin(
     svc: &GroupServiceImpl,
     request: Request<proto::AddAdminRequest>,
 ) -> Result<Response<proto::AddAdminResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -36,7 +36,7 @@ pub(crate) async fn remove_admin(
     svc: &GroupServiceImpl,
     request: Request<proto::RemoveAdminRequest>,
 ) -> Result<Response<proto::RemoveAdminResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)

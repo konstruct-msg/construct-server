@@ -15,8 +15,8 @@ pub(crate) async fn invite_to_group(
     svc: &GroupServiceImpl,
     request: Request<proto::InviteToGroupRequest>,
 ) -> Result<Response<proto::InviteToGroupResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let inviter_user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let inviter_user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id = Uuid::parse_str(&req.group_id)
@@ -174,8 +174,8 @@ pub(crate) async fn accept_group_invite(
     svc: &GroupServiceImpl,
     request: Request<proto::AcceptGroupInviteRequest>,
 ) -> Result<Response<proto::AcceptGroupInviteResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =
@@ -342,7 +342,7 @@ pub(crate) async fn decline_group_invite(
     svc: &GroupServiceImpl,
     request: Request<proto::DeclineGroupInviteRequest>,
 ) -> Result<Response<proto::DeclineGroupInviteResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =
@@ -385,8 +385,8 @@ pub(crate) async fn get_pending_invites(
     svc: &GroupServiceImpl,
     request: Request<proto::GetPendingInvitesRequest>,
 ) -> Result<Response<proto::GetPendingInvitesResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let target_device_id = if req.device_id.is_empty() {
@@ -449,7 +449,7 @@ pub(crate) async fn leave_group(
     svc: &GroupServiceImpl,
     request: Request<proto::LeaveGroupRequest>,
 ) -> Result<Response<proto::LeaveGroupResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =
@@ -509,7 +509,7 @@ pub(crate) async fn remove_member(
     svc: &GroupServiceImpl,
     request: Request<proto::RemoveMemberRequest>,
 ) -> Result<Response<proto::RemoveMemberResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =

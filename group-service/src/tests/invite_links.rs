@@ -15,6 +15,7 @@ async fn test_create_invite_link() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -64,6 +65,7 @@ async fn test_resolve_invite_link() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -123,6 +125,7 @@ async fn test_revoke_invite_link() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);
@@ -187,6 +190,7 @@ async fn test_subscribe_private_with_invite_link() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&owner_id, &owner_device);

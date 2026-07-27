@@ -19,6 +19,7 @@ async fn test_publish_key_package_success() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -53,6 +54,7 @@ async fn test_publish_key_package_empty_list_rejected() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -82,6 +84,7 @@ async fn test_publish_key_package_wrong_device_rejected() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);
 
@@ -138,6 +141,7 @@ async fn test_consume_key_package_success() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -170,6 +174,7 @@ async fn test_consume_key_package_not_found() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&admin_user_id, &admin_device_id);
 
@@ -198,6 +203,7 @@ async fn test_get_key_package_count_zero() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -231,6 +237,7 @@ async fn test_get_key_package_count_after_publish() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&user_id, &device_id);
 
@@ -297,6 +304,7 @@ async fn test_get_pending_invites_cross_device_rejected() {
         hub: GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&attacker_user_id, &attacker_device_id);
 

@@ -42,6 +42,9 @@ construct-auth = { path = "../crates/construct-auth" }
 construct-rate-limit = { path = "../crates/construct-rate-limit" }
 construct-metrics = { path = "../crates/construct-metrics" }
 
+# Test-only crypto helpers (TEST_AUTH keygen in tests/test_helpers.rs)
+ed25519-compact = { version = "2.0", features = ["pem", "random"] }
+
 [[bin]]
 name = "group-service"
 path = "src/main.rs"

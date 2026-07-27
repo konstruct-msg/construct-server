@@ -21,8 +21,8 @@ pub(crate) async fn create_invite_link(
     svc: &GroupServiceImpl,
     request: Request<proto::ChannelServiceCreateInviteLinkRequest>,
 ) -> Result<Response<proto::ChannelServiceCreateInviteLinkResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
-    let user_id = extract_user_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
+    let user_id = extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)
@@ -80,7 +80,7 @@ pub(crate) async fn revoke_invite_link(
     svc: &GroupServiceImpl,
     request: Request<proto::ChannelServiceRevokeInviteLinkRequest>,
 ) -> Result<Response<proto::ChannelServiceRevokeInviteLinkResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let channel_id = Uuid::parse_str(&req.channel_id)

@@ -14,7 +14,7 @@ pub(crate) async fn submit_commit(
     svc: &GroupServiceImpl,
     request: Request<proto::SubmitCommitRequest>,
 ) -> Result<Response<proto::SubmitCommitResponse>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =
@@ -125,7 +125,7 @@ pub(crate) async fn fetch_commits(
     svc: &GroupServiceImpl,
     request: Request<proto::FetchCommitsRequest>,
 ) -> Result<Response<FetchCommitsStream>, Status> {
-    let device_id = extract_device_id(request.metadata())?;
+    let device_id = extract_device_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let group_id =

@@ -21,6 +21,7 @@ async fn test_create_topic_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();
@@ -68,6 +69,7 @@ async fn test_create_topic_non_admin() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();
@@ -104,6 +106,7 @@ async fn test_create_topic_empty_name() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();
@@ -139,6 +142,7 @@ async fn test_create_topic_invalid_sort_order() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();
@@ -174,6 +178,7 @@ async fn test_create_topic_max_limit() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     for i in 0..50 {
@@ -228,6 +233,7 @@ async fn test_list_topics_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     for i in 0..3 {
@@ -275,6 +281,7 @@ async fn test_list_topics_non_member() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let (_, other_device_id, _) = create_test_device(&db).await;
@@ -306,6 +313,7 @@ async fn test_archive_topic_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();
@@ -362,6 +370,7 @@ async fn test_archive_topic_non_admin() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let timestamp = Utc::now().timestamp();

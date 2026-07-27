@@ -69,50 +69,29 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) auth: Option<Arc<AuthManager>>,
 }
 
-fn caller_user_id<T>(req: &Request<T>) -> Result<String, Status> {
-    req.metadata()
-        .get("x-user-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| Status::unauthenticated("Missing x-user-id header"))
+/// Authenticated user_id from Bearer token (optional x-user-id must match).
+/// When `auth` is `None` (misconfigured keys), refuse rather than trust headers.
+fn caller_user_id<T>(req: &Request<T>, auth: Option<&AuthManager>) -> Result<String, Status> {
+    let auth = auth.ok_or_else(|| {
+        Status::failed_precondition(
+            "AuthManager not configured — set PASETO/JWT public keys on signaling-service",
+        )
+    })?;
+    let caller = construct_server_shared::auth_utils::extract_authed_caller(auth, req.metadata())?;
+    Ok(caller.user_id.to_string())
 }
 
-fn caller_device_id<T>(req: &Request<T>) -> Result<String, Status> {
-    req.metadata()
-        .get("x-device-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))
-}
-
-/// Extract and verify device_id from both x-device-id header and JWT token.
-/// This prevents header forgery attacks where an attacker spoofs x-device-id.
-/// When `auth` is `None` (JWT_PUBLIC_KEY not configured), falls back to
-/// trusting the gateway-injected x-device-id header directly.
+/// Authenticated device_id from Bearer token (+ optional x-device-id consistency).
 fn verified_caller_device_id<T>(
     req: &Request<T>,
     auth: Option<&AuthManager>,
 ) -> Result<String, Status> {
-    let header_device_id = caller_device_id(req)?;
-
-    let Some(auth) = auth else {
-        return Ok(header_device_id);
-    };
-
-    let token = req
-        .metadata()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
-        .ok_or_else(|| Status::unauthenticated("Missing Authorization header"))?;
-
-    let claims = auth
-        .verify_token(&token)
-        .map_err(|e| Status::unauthenticated(format!("Invalid token: {}", e)))?;
-
-    auth.verify_device_id(&header_device_id, &claims)
-        .map_err(|e| Status::permission_denied(format!("Device ID mismatch: {}", e)))
+    let auth = auth.ok_or_else(|| {
+        Status::failed_precondition(
+            "AuthManager not configured — set PASETO/JWT public keys on signaling-service",
+        )
+    })?;
+    construct_server_shared::auth_utils::extract_device_id(auth, req.metadata())
 }
 
 #[tonic::async_trait]
@@ -124,7 +103,7 @@ impl SignalingService for SignalingServiceImpl {
         &self,
         request: Request<Streaming<SignalRequest>>,
     ) -> Result<Response<Self::SignalStream>, Status> {
-        let user_id = caller_user_id(&request)?;
+        let user_id = caller_user_id(&request, self.auth.as_deref())?;
         let device_id = verified_caller_device_id(&request, self.auth.as_deref())?;
         let mut inbound = request.into_inner();
         let registry = Arc::clone(&self.registry);
@@ -310,7 +289,7 @@ impl SignalingService for SignalingServiceImpl {
         &self,
         request: Request<GetTurnCredentialsRequest>,
     ) -> Result<Response<GetTurnCredentialsResponse>, Status> {
-        let user_id = caller_user_id(&request)?;
+        let user_id = caller_user_id(&request, self.auth.as_deref())?;
         if !self
             .rate_limiter
             .check_turn_rate(&user_id)
@@ -332,7 +311,7 @@ impl SignalingService for SignalingServiceImpl {
         request: Request<InitiateCallRequest>,
     ) -> Result<Response<InitiateCallResponse>, Status> {
         tracing::info!("InitiateCall received");
-        let caller_id = caller_user_id(&request)?;
+        let caller_id = caller_user_id(&request, self.auth.as_deref())?;
         let caller_device_id_str = verified_caller_device_id(&request, self.auth.as_deref())?;
         let req = request.into_inner();
 

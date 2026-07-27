@@ -20,6 +20,7 @@ async fn test_submit_commit_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -78,6 +79,7 @@ async fn test_submit_commit_epoch_mismatch() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -111,6 +113,7 @@ async fn test_submit_commit_non_member() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 
@@ -163,6 +166,7 @@ async fn test_fetch_commits_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&_admin_user_id, &admin_device_id);
 
@@ -199,6 +203,7 @@ async fn test_fetch_commits_non_member() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
     let meta = create_metadata(&non_member_user_id, &non_member_device_id);
 

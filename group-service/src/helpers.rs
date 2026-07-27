@@ -7,24 +7,26 @@ use tonic::Status;
 use tracing::warn;
 use uuid::Uuid;
 
-fn get_metadata_str<'a>(meta: &'a tonic::metadata::MetadataMap, key: &str) -> Option<&'a str> {
-    meta.get(key).and_then(|v| v.to_str().ok())
-}
+use crate::service::GroupServiceImpl;
 
 fn map_db_error(error: impl std::fmt::Display) -> Status {
     Status::internal(format!("DB error: {}", error))
 }
 
-pub(crate) fn extract_user_id(meta: &tonic::metadata::MetadataMap) -> Result<Uuid, Status> {
-    get_metadata_str(meta, "x-user-id")
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| Status::unauthenticated("Missing or invalid x-user-id"))
+/// Authenticated user_id from Bearer token (optional x-user-id must match claims).
+pub(crate) fn extract_user_id(
+    svc: &GroupServiceImpl,
+    meta: &tonic::metadata::MetadataMap,
+) -> Result<Uuid, Status> {
+    construct_server_shared::auth_utils::extract_user_id(&svc.auth, meta)
 }
 
-pub(crate) fn extract_device_id(meta: &tonic::metadata::MetadataMap) -> Result<String, Status> {
-    get_metadata_str(meta, "x-device-id")
-        .map(|s| s.to_string())
-        .ok_or_else(|| Status::unauthenticated("Missing x-device-id"))
+/// Authenticated device_id from Bearer token (+ optional x-device-id consistency).
+pub(crate) fn extract_device_id(
+    svc: &GroupServiceImpl,
+    meta: &tonic::metadata::MetadataMap,
+) -> Result<String, Status> {
+    construct_server_shared::auth_utils::extract_device_id(svc.auth.as_ref(), meta)
 }
 
 pub(crate) async fn verify_admin_proof(

@@ -21,6 +21,7 @@ async fn test_create_group_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let group_id = Uuid::new_v4();
@@ -51,6 +52,76 @@ async fn test_create_group_success() {
 }
 
 #[tokio::test]
+async fn test_create_group_rejects_header_only_auth() {
+    let db = get_test_db().await;
+    let (user_id, device_id, _) = create_test_device(&db).await;
+    let service = GroupServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+        notification_client: None,
+        redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
+    };
+
+    let meta = super::test_helpers::create_metadata_header_only(&user_id, &device_id);
+    let request = Request::from_parts(
+        meta,
+        tonic::Extensions::default(),
+        proto::CreateGroupRequest {
+            group_id: Uuid::new_v4().to_string(),
+            initial_ratchet_tree: vec![1, 2, 3],
+            encrypted_group_context: vec![4, 5, 6],
+            max_members: 100,
+            message_retention_days: 90,
+            threads_enabled: false,
+        },
+    );
+
+    let err = service
+        .create_group(request)
+        .await
+        .expect_err("header-only auth must be rejected");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn test_create_group_rejects_spoofed_x_user_id() {
+    let db = get_test_db().await;
+    let (user_id, device_id, _) = create_test_device(&db).await;
+    let spoof = Uuid::new_v4();
+    let service = GroupServiceImpl {
+        db: db.clone(),
+        hub: crate::service::GroupHub::new(),
+        notification_client: None,
+        redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
+    };
+
+    let mut meta = create_metadata(&user_id, &device_id);
+    // Overwrite with a different user id (spoof attempt)
+    meta.insert("x-user-id", spoof.to_string().parse().unwrap());
+
+    let request = Request::from_parts(
+        meta,
+        tonic::Extensions::default(),
+        proto::CreateGroupRequest {
+            group_id: Uuid::new_v4().to_string(),
+            initial_ratchet_tree: vec![1, 2, 3],
+            encrypted_group_context: vec![4, 5, 6],
+            max_members: 100,
+            message_retention_days: 90,
+            threads_enabled: false,
+        },
+    );
+
+    let err = service
+        .create_group(request)
+        .await
+        .expect_err("spoofed x-user-id must be rejected");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+#[tokio::test]
 async fn test_create_group_invalid_group_id() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -59,6 +130,7 @@ async fn test_create_group_invalid_group_id() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -90,6 +162,7 @@ async fn test_create_group_empty_ratchet_tree() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -121,6 +194,7 @@ async fn test_create_group_max_members_exceeded() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -152,6 +226,7 @@ async fn test_create_group_missing_user_id() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let mut meta = tonic::metadata::MetadataMap::new();
@@ -185,6 +260,7 @@ async fn test_get_group_state_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -220,6 +296,7 @@ async fn test_get_group_state_non_member() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -248,6 +325,7 @@ async fn test_dissolve_group_success() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -296,6 +374,7 @@ async fn test_dissolve_group_invalid_signature() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -330,6 +409,7 @@ async fn test_dissolve_group_expired_timestamp() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
@@ -376,6 +456,7 @@ async fn test_dissolve_group_non_admin() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id2);
@@ -416,6 +497,7 @@ async fn test_dissolve_group_already_dissolved() {
         hub: crate::service::GroupHub::new(),
         notification_client: None,
         redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
     let meta = create_metadata(&user_id, &device_id);
