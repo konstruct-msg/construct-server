@@ -1288,8 +1288,9 @@ pub async fn rotate_signed_prekey(
 
     // Archive old key with its real key_id
     if let Some(old) = current
-        && let Some(sig) = old.signed_prekey_signature {
-            sqlx::query(
+        && let Some(sig) = old.signed_prekey_signature
+    {
+        sqlx::query(
                 r#"
                 INSERT INTO signed_prekey_archive (device_id, key_id, public_key, signature, rotation_reason)
                 VALUES ($1, $2, $3, $4, $5)
@@ -1305,7 +1306,7 @@ pub async fn rotate_signed_prekey(
             .bind(reason)
             .execute(db)
             .await?;
-        }
+    }
 
     // Update device with new signed prekey, upload timestamp, and incremented epoch
     let new_epoch: i32 = sqlx::query_scalar(
