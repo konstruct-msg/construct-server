@@ -155,6 +155,7 @@ pub(crate) async fn handle_stream_request(
                                 error = %e,
                                 "SentinelCore::check_send_permission failed — failing open"
                             );
+                            construct_metrics::record_abuse_fail_open("sentinel");
                             (true, String::new(), 0)
                         }
                     };
