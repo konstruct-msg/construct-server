@@ -102,9 +102,7 @@ fn reject_known_insecure_string(name: &str, value: &str) -> Result<()> {
     let t = value.trim();
     let bad = matches!(
         (name, t),
-        ("TURN_SECRET", INSECURE_TURN_SECRET)
-            | ("TURN_SECRET", "")
-            | ("MASQUE_AUTH_TOKEN", "")
+        ("TURN_SECRET", INSECURE_TURN_SECRET) | ("TURN_SECRET", "") | ("MASQUE_AUTH_TOKEN", "")
     ) || t == "construct-insecure-username-hmac"
         || t == "construct-insecure-contact-hmac"
         || t == "construct-insecure-envelope-key!!";

@@ -25,7 +25,9 @@ use crate::registry::CallRegistry;
 use crate::service::{make_default_peer_salt, make_instance_id, SignalingServiceImpl};
 
 fn load_turn_secret() -> anyhow::Result<String> {
-    use construct_config::{allow_insecure_secrets, is_production_environment, INSECURE_TURN_SECRET};
+    use construct_config::{
+        allow_insecure_secrets, is_production_environment, INSECURE_TURN_SECRET,
+    };
     match env::var("TURN_SECRET") {
         Ok(s) if !s.is_empty() && s != INSECURE_TURN_SECRET => Ok(s),
         Ok(s) => {
@@ -64,9 +66,8 @@ fn load_contact_hmac_secret() -> anyhow::Result<Vec<u8>> {
     };
     match env::var("CONTACT_HMAC_SECRET") {
         Ok(hex) if !hex.trim().is_empty() => {
-            let bytes = hex::decode(hex.trim()).map_err(|e| {
-                anyhow::anyhow!("CONTACT_HMAC_SECRET is not valid hex: {e}")
-            })?;
+            let bytes = hex::decode(hex.trim())
+                .map_err(|e| anyhow::anyhow!("CONTACT_HMAC_SECRET is not valid hex: {e}"))?;
             if bytes.len() != 32 {
                 anyhow::bail!(
                     "CONTACT_HMAC_SECRET must be exactly 32 bytes (got {})",
@@ -87,9 +88,7 @@ fn load_contact_hmac_secret() -> anyhow::Result<Vec<u8>> {
                      Generate with: openssl rand -hex 32"
                 );
             }
-            tracing::warn!(
-                "CONTACT_HMAC_SECRET not set — using insecure default (dev only)"
-            );
+            tracing::warn!("CONTACT_HMAC_SECRET not set — using insecure default (dev only)");
             Ok(INSECURE_CONTACT_HMAC.to_vec())
         }
     }

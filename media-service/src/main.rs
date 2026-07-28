@@ -556,8 +556,8 @@ mod tests {
     use super::*;
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
-        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia, MicroservicesConfig,
-        MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
+        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia,
+        MicroservicesConfig, MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
     };
 
     fn make_auth() -> AuthManager {
@@ -749,10 +749,7 @@ mod tests {
         let uid = Uuid::new_v4();
         let (token, _, _) = auth.create_token_for_device(&uid, Some("device")).unwrap();
         let mut meta = tonic::metadata::MetadataMap::new();
-        meta.insert(
-            "authorization",
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        meta.insert("authorization", format!("Bearer {token}").parse().unwrap());
         let got = require_authed_user(&auth, &meta).expect("valid token");
         assert_eq!(got, uid);
     }
@@ -762,7 +759,10 @@ mod tests {
         // Capability path after mint remains HMAC-only (no Bearer on UploadMedia).
         let secret = "test-media-hmac-secret";
         let token = core::generate_upload_token(secret).unwrap();
-        let wire = format!("{}|{}|{}", token.media_id, token.expires_at, token.signature);
+        let wire = format!(
+            "{}|{}|{}",
+            token.media_id, token.expires_at, token.signature
+        );
         let (mid, _) = core::validate_upload_token(&wire, secret).unwrap();
         assert_eq!(mid, token.media_id);
     }

@@ -103,9 +103,9 @@ pub async fn verify_invite_signature(
     })?;
 
     let signature = Signature::from_bytes(&sig_array);
-    let canonical = invite.canonical_string().map_err(|e| {
-        InviteSignatureError::InvalidSignature(format!("canonical string: {e}"))
-    })?;
+    let canonical = invite
+        .canonical_string()
+        .map_err(|e| InviteSignatureError::InvalidSignature(format!("canonical string: {e}")))?;
 
     tracing::debug!(
         canonical_string = %canonical,
