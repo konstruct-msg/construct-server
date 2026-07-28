@@ -50,27 +50,27 @@ impl InviteObject {
     /// Format depends on protocol version:
     /// - v1: `v|jti|uuid|server|ephKey|ts`
     /// - v2: `v|jti|uuid|deviceId|server|ephKey|ts`
-    pub fn canonical_string(&self) -> String {
+    pub fn canonical_string(&self) -> Result<String, InviteValidationError> {
         match self.v {
             1 => {
                 // v1: Without deviceId
-                format!(
+                Ok(format!(
                     "{}|{}|{}|{}|{}|{}",
                     self.v, self.jti, self.uuid, self.server, self.eph_key, self.ts
-                )
+                ))
             }
             2 => {
                 // v2: With deviceId
                 let device_id = self
                     .device_id
                     .as_ref()
-                    .expect("deviceId required for v2 invites");
-                format!(
+                    .ok_or(InviteValidationError::MissingDeviceID)?;
+                Ok(format!(
                     "{}|{}|{}|{}|{}|{}|{}",
                     self.v, self.jti, self.uuid, device_id, self.server, self.eph_key, self.ts
-                )
+                ))
             }
-            _ => panic!("Unsupported invite version: {}", self.v),
+            other => Err(InviteValidationError::UnsupportedVersion(other)),
         }
     }
 
@@ -185,7 +185,7 @@ mod tests {
             sig: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
         };
 
-        let canonical = invite.canonical_string();
+        let canonical = invite.canonical_string().unwrap();
         assert_eq!(
             canonical,
             "1|550e8400-e29b-41d4-a716-446655440000|650e8400-e29b-41d4-a716-446655440001|konstruct.cc|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=|1738776000"
@@ -205,7 +205,7 @@ mod tests {
             sig: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
         };
 
-        let canonical = invite.canonical_string();
+        let canonical = invite.canonical_string().unwrap();
         assert_eq!(
             canonical,
             "2|550e8400-e29b-41d4-a716-446655440000|650e8400-e29b-41d4-a716-446655440001|4e1f9dbe209c1bedb33ee32dda5a28f0|konstruct.cc|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=|1738776000"

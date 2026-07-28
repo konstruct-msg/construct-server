@@ -127,7 +127,9 @@ pub async fn verify_invite_signature(
     let signature = Signature::from_bytes(&sig_array);
 
     // 4. Build canonical string and verify
-    let canonical = invite.canonical_string();
+    let canonical = invite.canonical_string().map_err(|e| {
+        InviteSignatureError::InvalidSignature(format!("canonical string: {e}"))
+    })?;
 
     // DEBUG: Log what we're verifying
     tracing::info!(
@@ -360,7 +362,7 @@ pub async fn accept_invite(
         device_id = ?invite.device_id,
         server = %invite.server,
         ts = invite.ts,
-        canonical = %invite.canonical_string(),
+        canonical = ?invite.canonical_string().ok(),
         "DEBUG: Invite canonical string for verification"
     );
 

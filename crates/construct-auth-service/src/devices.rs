@@ -401,7 +401,11 @@ pub async fn register_device_core(
         let vk = VerifyingKey::from_bytes(&vk_bytes).map_err(|_| {
             AppError::Validation("verifying_key is not a valid Ed25519 key".to_string())
         })?;
-        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().unwrap();
+        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().map_err(|_| {
+            AppError::Validation(
+                "signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)".to_string(),
+            )
+        })?;
         let sig = Ed25519Signature::from_bytes(&sig_bytes);
         let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
         msg.extend_from_slice(b"KonstruktX3DH-v1");
