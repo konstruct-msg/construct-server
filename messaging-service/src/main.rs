@@ -64,6 +64,24 @@ async fn main() -> Result<()> {
 
     info!("=== Messaging Service Starting ===");
     info!("Port: {}", config.port);
+    let stealth_policy = match config.messaging.stealth_token_policy {
+        construct_config::StealthTokenPolicy::Off => "off",
+        construct_config::StealthTokenPolicy::Warn => "warn",
+        construct_config::StealthTokenPolicy::Enforce => "enforce",
+    };
+    info!(
+        MSG_STEALTH_TOKEN_POLICY = stealth_policy,
+        "Sealed-sender Privacy Pass policy (launch default: warn; enforce only after metrics OK)"
+    );
+    if matches!(
+        config.messaging.stealth_token_policy,
+        construct_config::StealthTokenPolicy::Off
+    ) {
+        tracing::warn!(
+            "MSG_STEALTH_TOKEN_POLICY=off — Privacy Pass checks disabled. \
+             Do not use in production (set warn or enforce)."
+        );
+    }
 
     // Initialize database
     info!("Connecting to database...");

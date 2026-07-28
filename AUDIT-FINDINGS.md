@@ -135,15 +135,13 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 | sealed_ip | proceed | SendSealedMessage | `sealed_ip` |
 | delivery_tag | deliver | `envelope` | `delivery_tag` |
 | federation_origin | proceed | federation RL | `federation_origin` |
-| OTPK drain | allow | key-service | *(not yet metered)* |
+| OTPK drain | allow | key-service | `otpk_drain_check` / `otpk_drain_record` |
 
 Fail-closed (unchanged): JWT blocklist, device revoked, PP `enforce`, refresh rotate, signaling mutual contacts.
 
 Metric: `construct_msg_abuse_fail_open_total{control=...}`  
 Doc module: `messaging-service/src/fail_open.rs`  
 Alert: sustained non-zero `rate(construct_msg_abuse_fail_open_total[5m])`.
-
-**Launch default:** `MSG_STEALTH_TOKEN_POLICY` = `warn` in compose (log, still deliver).
 
 ### P1-2 Logout / blocklist best-effort
 
@@ -176,9 +174,25 @@ callers map to signature/validation errors (no panic on wire data).
 
 **Status:** FIXED via P0-D (`5839407`).
 
-### P1-9 key-service auth is header-only for uploads
+### P1-9 Stealth / Privacy Pass launch policy
 
-Upload paths require `x-device-id` metadata and body match — spoofable if client sets both to same value without JWT binding. GetPreKeyBundle is intentionally public-ish with IP rate limit.
+**Status:** LOCKED for launch = **`warn`**
+
+| value | Behavior | Use |
+|-------|----------|-----|
+| `off` | no redeem | emergency/dev only — loud warn at messaging boot |
+| **`warn`** | redeem + metrics, always deliver | **default code + prod compose** |
+| `enforce` | reject on any redeem failure | after `construct_stealth_token_*` metrics healthy |
+
+Code: `StealthTokenPolicy` default `Warn`; invalid env → `Warn` (not `Off`).  
+Compose: `MSG_STEALTH_TOKEN_POLICY=${MSG_STEALTH_TOKEN_POLICY:-warn}`.  
+Boot log: messaging prints active policy.  
+Path to enforce: runbook + client replenish-and-retry already in place.
+
+### P1-10 key-service upload auth (header-only historically)
+
+**Status:** FIXED via auth PR (`24ba385`) — Bearer + device_id claim match on upload paths.
+GetPreKeyBundle remains public-ish with IP rate limit + OTPK drain (metered fail-open).
 
 ---
 
@@ -239,22 +253,21 @@ Upload paths require `x-device-id` metadata and body match — spoofable if clie
 
 ---
 
-## Decisions needed from product/security
+## Decisions (resolved in audit)
 
-1. **Auth model for public gRPC via Caddy:** JWT-only at every service, or reintroduce edge auth that strips/injects headers?
-2. **`MSG_STEALTH_TOKEN_POLICY` at launch:** keep `warn` or move to `enforce`?
-3. **Redis outage abuse policy:** accept fail-open with metrics, or fail-closed for rate/sentinel after N errors?
-4. **Is masque in scope for this publish?** If no, document “not shipped”; if yes, require auth token at boot.
+1. **Auth:** Bearer required at services (no trust of client `x-user-id`).
+2. **`MSG_STEALTH_TOKEN_POLICY`:** **`warn` at launch**; `enforce` later via metrics.
+3. **Redis outage abuse:** fail-open + `construct_msg_abuse_fail_open_total` metrics.
+4. **Masque:** require `MASQUE_AUTH_TOKEN` in production (fail-boot).
 
 ---
 
-## Next actions (execution)
+## Next actions
 
-- [ ] Implement PR-1 (auth spoofing) — highest ROI  
-- [ ] Implement PR-2 (secrets)  
-- [ ] Implement PR-3 (revoke)  
-- [ ] Re-grep after fixes; update this file status columns  
-- [ ] Phase 7 verification gate  
+- [x] P0 auth / secrets / revoke / media  
+- [x] P1 small + fail-open metrics + stealth policy + OTPK meter  
+- [ ] Phase 7 verification / smoke after deploy of this batch  
+- [ ] Optional: Grafana panel for `construct_msg_abuse_fail_open_total`  
 
 ---
 

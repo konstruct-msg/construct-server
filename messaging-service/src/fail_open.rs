@@ -22,6 +22,19 @@
 //! | `sealed_ip`          | `grpc` SendSealedMessage      | skip per-IP sealed limit     |
 //! | `delivery_tag`       | `envelope` sealed replay      | deliver without tag check    |
 //! | `federation_origin`  | `federation` origin RL        | skip per-origin limit        |
+//! | `otpk_drain_check`   | key-service drain GET         | allow bundle (no drain gate) |
+//! | `otpk_drain_record`  | key-service drain INCR        | skip recording consumption   |
+//!
+//! # Privacy Pass (`MSG_STEALTH_TOKEN_POLICY`) — P1-9
+//!
+//! | value | Behavior | Launch |
+//! |-------|----------|--------|
+//! | `off` | no redeem | **not** for production |
+//! | `warn` | redeem + metrics, deliver always | **default / prod compose** |
+//! | `enforce` | reject on any redeem failure | after present/check metrics healthy |
+//!
+//! Related metrics (already exist): `construct_stealth_token_present_total`,
+//! `construct_stealth_token_check_total{mode,result}`.
 //!
 //! # Alerts
 //!
@@ -32,5 +45,6 @@
 //!
 //! Tightening any row to fail-closed is a deliberate policy change (spam vs
 //! outage). Do not flip without runbook + client backoff review.
+//! Flipping PP to `enforce` is a separate rollout (client replenish-and-retry).
 
 // Module is documentation-only; metric helper lives in construct-metrics.

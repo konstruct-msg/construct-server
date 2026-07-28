@@ -48,6 +48,7 @@ construct-server-shared = { path = "../shared" }
 construct-config = { path = "../crates/construct-config" }
 construct-auth = { path = "../crates/construct-auth" }
 construct-crypto = { path = "../crates/construct-crypto", features = ["pqc"] }
+construct-metrics = { path = "../crates/construct-metrics" }
 
 [[bin]]
 name = "key-service"

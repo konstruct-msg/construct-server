@@ -206,6 +206,7 @@ async fn check_otpk_drain(redis: &mut redis::aio::ConnectionManager, user_id: &s
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, %user_id, "Redis unavailable for OTPK drain check — fail-open");
+            construct_metrics::record_abuse_fail_open("otpk_drain_check");
             return true;
         }
     };
@@ -249,6 +250,7 @@ async fn record_otpk_consumption(redis: &mut redis::aio::ConnectionManager, user
         Ok(_) => {}
         Err(e) => {
             tracing::error!(error = %e, %user_id, "Redis unavailable for OTPK drain record");
+            construct_metrics::record_abuse_fail_open("otpk_drain_record");
         }
     }
 }

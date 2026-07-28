@@ -153,7 +153,7 @@ Full context: construct-docs `decisions/sealed-sender-anti-abuse-economics.md` a
   unreliable on iOS (ATS vs self-signed cert) and is legacy.
 
 **Redemption** (messaging-service, `dispatch_sealed_sender` → `token_redeem.rs`):
-- `MSG_STEALTH_TOKEN_POLICY` = `off` | `warn` (log result, deliver anyway) | `enforce`.
+- `MSG_STEALTH_TOKEN_POLICY` = `off` | `warn` (default/launch: log + metrics, deliver anyway) | `enforce`.
 - Under `enforce`, rejection = typed `FAILED_PRECONDITION` with message
   `privacy_pass:{label}`; labels from `TokenRedeemResult::as_label`:
   `missing_token` / `invalid_token` / `double_spent` / `decrypt_failed` /
