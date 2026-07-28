@@ -12,12 +12,17 @@
 /// Enforcement mode for Privacy Pass token redemption on sealed-sender messages
 /// (stealth-sealed-sender-v2 Phase 1). See
 /// `construct-docs/decisions/stealth-sealed-sender-v2-always-on.md`.
+///
+/// **Launch policy (P1-9):** default / prod compose = `warn` — redeem + metrics,
+/// never block delivery. Move to `enforce` only after metrics show healthy
+/// token present/check rates (see runbook). Never set `off` in production.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum StealthTokenPolicy {
-    /// Skip token redemption entirely (current behavior).
-    #[default]
+    /// Skip token redemption entirely (dev/emergency only — not for production).
     Off,
     /// Attempt redemption, log + record metrics on failure, never reject the send.
+    /// **Default for launch and prod compose.**
+    #[default]
     Warn,
     /// Attempt redemption, reject the send on any failure (including Redis errors).
     Enforce,
@@ -216,10 +221,12 @@ impl MessagingConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50),
 
+            // Default `warn` (see StealthTokenPolicy docs / P1-9). Invalid values
+            // fall back to warn so a typo does not silently disable checks (`off`).
             stealth_token_policy: std::env::var("MSG_STEALTH_TOKEN_POLICY")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
+                .unwrap_or(StealthTokenPolicy::Warn),
 
             sealed_ip_rate_limit_per_min: std::env::var("MSG_SEALED_IP_RATE_LIMIT_PER_MIN")
                 .ok()

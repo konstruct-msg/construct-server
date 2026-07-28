@@ -412,6 +412,8 @@ pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 //   sealed_ip           — per-IP sealed-sender rate limit
 //   delivery_tag        — sealed delivery_tag replay cache
 //   federation_origin   — federation per-origin rate limit
+//   otpk_drain_check    — key-service OTPK drain threshold (Redis GET)
+//   otpk_drain_record   — key-service OTPK drain counter (Redis INCR)
 //
 // Policy (launch): fail-open remains intentional. Alert when rate of any label
 // is non-zero for sustained periods (Redis outage or misconfig).
