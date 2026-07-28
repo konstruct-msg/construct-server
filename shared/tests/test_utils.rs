@@ -1258,8 +1258,10 @@ async fn confirm_pending_message_for_test(
 
 fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
+    // Keep in sync with messaging-service `core::receipt_routing_hash`: never
+    // substitute a fixed "fallback" HMAC key.
     let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
-        .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+        .expect("HMAC-SHA256 accepts arbitrary-length keys");
     mac.update(message_id.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
