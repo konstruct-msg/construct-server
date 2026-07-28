@@ -409,8 +409,8 @@ impl KeyService for KeyGrpcService {
                 }
 
                 // Auto-heal nudge for a broken (unsigned-SPK) hybrid bundle — throttled, silent.
-                if hybrid_bundle_broken {
-                    if let Some(notif_client) = self.context.notification_client.clone() {
+                if hybrid_bundle_broken
+                    && let Some(notif_client) = self.context.notification_client.clone() {
                         let mut redis = self.context.redis.clone();
                         tokio::spawn(async move {
                             maybe_nudge_hybrid_republish(
@@ -422,17 +422,15 @@ impl KeyService for KeyGrpcService {
                             .await;
                         });
                     }
-                }
 
                 // Fire-and-forget SPK rotation wake if the bundle is stale enough.
-                if spk_is_stale {
-                    if let Some(notif_client) = self.context.notification_client.clone() {
+                if spk_is_stale
+                    && let Some(notif_client) = self.context.notification_client.clone() {
                         let mut redis = self.context.redis.clone();
                         tokio::spawn(async move {
                             maybe_wake_key_rotation(&mut redis, &notif_client, &wake_user_id).await;
                         });
                     }
-                }
 
                 Ok(response)
             }
