@@ -124,28 +124,30 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ### P1-1 Fail-open matrix (messaging + key)
 
-| Control | On Redis error | Location |
-|---------|----------------|----------|
-| Send idempotency/dedup | proceed | `grpc.rs` ~374 |
-| Sentinel `check_send_permission` outer Err | **allow** | `grpc.rs` ~431–445, `stream.rs` |
-| Trust/hourly rate | skip; trust=Trusted | `grpc.rs` ~497–498 |
-| Sealed IP rate limit | proceed | `grpc.rs` ~662 |
-| Delivery-tag replay | deliver | `envelope.rs`, `spent_tag.rs` |
-| Federation origin RL | proceed | `federation.rs` ~79 |
-| Dedup mark write | ignore | `core.rs` ~78 |
-| OTPK drain | allow | `key-service` |
-| JWT blocklist (Bearer only) | **reject** | `grpc.rs` ~953 |
-| Privacy Pass `enforce` | reject incl. RedisError | `token_redeem` + envelope |
-| Refresh token rotate | fail closed | `construct-auth-service` |
-| Signaling mutual contacts | fail closed | signaling |
+**Status:** DOCUMENTED + METERED (launch policy = keep fail-open; alert on metrics)
 
-**Launch default:** `MSG_STEALTH_TOKEN_POLICY` = `warn` in `docker-compose.prod.yml` (log, still deliver).
+| control | On Redis/err | Location | Metric label |
+|---------|--------------|----------|--------------|
+| send_dedup | proceed | `grpc` SendMessage | `send_dedup` |
+| dispatch_dedup | proceed | `core` dispatch | `dispatch_dedup` |
+| sentinel | **allow** | `grpc` + `stream` | `sentinel` |
+| rate_trust | Trusted, skip caps | `grpc` | `rate_trust` |
+| sealed_ip | proceed | SendSealedMessage | `sealed_ip` |
+| delivery_tag | deliver | `envelope` | `delivery_tag` |
+| federation_origin | proceed | federation RL | `federation_origin` |
+| OTPK drain | allow | key-service | *(not yet metered)* |
 
-**Actions:** Document product acceptance; add metrics counters on every fail-open branch; consider fail-closed for Sentinel outer Err and sealed IP limits under prolonged outage.
+Fail-closed (unchanged): JWT blocklist, device revoked, PP `enforce`, refresh rotate, signaling mutual contacts.
+
+Metric: `construct_msg_abuse_fail_open_total{control=...}`  
+Doc module: `messaging-service/src/fail_open.rs`  
+Alert: sustained non-zero `rate(construct_msg_abuse_fail_open_total[5m])`.
+
+**Launch default:** `MSG_STEALTH_TOKEN_POLICY` = `warn` in compose (log, still deliver).
 
 ### P1-2 Logout / blocklist best-effort
 
-`construct-auth-service` `logout_user`: blocklist / revoke-all errors logged, logout still succeeds.
+**Status:** FIXED earlier (`c68b1cf`) — logout fail-closed on blocklist/revoke.
 
 ### P1-3 Failed-login temporary block discarded
 

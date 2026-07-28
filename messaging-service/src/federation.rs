@@ -78,6 +78,7 @@ async fn check_origin_rate_limit(
         Err(e) => {
             // Fail-open on Redis error — don't block messages due to rate limiter outage
             tracing::warn!(origin = %origin_server, error = %e, "Rate limit check failed (fail-open)");
+            construct_metrics::record_abuse_fail_open("federation_origin");
             Ok(())
         }
     }

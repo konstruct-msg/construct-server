@@ -12,7 +12,7 @@ use construct_context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
 use construct_message::MessageEnvelope;
-use construct_metrics::{MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL};
+use construct_metrics::{MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, record_abuse_fail_open};
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_types::message::{ChatMessage, EndSessionData};
 use construct_utils::{extract_client_ip, log_safe_id};
@@ -79,6 +79,7 @@ pub async fn dispatch_envelope(
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
+                record_abuse_fail_open("dispatch_dedup");
             }
         }
 

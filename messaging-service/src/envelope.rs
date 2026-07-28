@@ -282,6 +282,7 @@ pub(crate) async fn dispatch_sealed_sender(
                     error = %e,
                     "delivery_tag cache unavailable — delivering without replay check"
                 );
+                construct_metrics::record_abuse_fail_open("delivery_tag");
             }
         }
     }

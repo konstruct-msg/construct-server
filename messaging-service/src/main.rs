@@ -1,6 +1,7 @@
 mod context;
 mod core;
 mod envelope;
+mod fail_open;
 mod federation;
 mod grpc;
 mod handlers;

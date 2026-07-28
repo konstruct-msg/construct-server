@@ -371,7 +371,10 @@ impl MessagingService for MessagingGrpcService {
                     }));
                 }
                 Ok(false) => {} // first time — proceed to rate check
-                Err(_) => {}    // fail-open: Redis unavailable, proceed normally
+                Err(_) => {
+                    // Fail-open: Redis unavailable — proceed (may double-count rate).
+                    construct_metrics::record_abuse_fail_open("send_dedup");
+                }
             }
         }
 
@@ -441,6 +444,7 @@ impl MessagingService for MessagingGrpcService {
                         error = %e,
                         "SentinelCore::check_send_permission failed — failing open"
                     );
+                    construct_metrics::record_abuse_fail_open("sentinel");
                     (true, String::new(), 0)
                 }
             };
@@ -592,6 +596,10 @@ impl MessagingService for MessagingGrpcService {
                     }));
                 }
             }
+        } else {
+            // Redis connect failed — trust defaults to Trusted, limits skipped.
+            construct_metrics::record_abuse_fail_open("rate_trust");
+            tracing::warn!("Redis unavailable for trust/rate checks — failing open (Trusted)");
         }
 
         let t_dispatch = std::time::Instant::now();
@@ -662,6 +670,7 @@ impl MessagingService for MessagingGrpcService {
                 // Fail-open: Redis unavailable shouldn't block delivery — consistent
                 // with this service's other Redis fail-open paths (delivery-tag cache).
                 tracing::error!(error = %e, "sealed_ip rate limit check unavailable — proceeding");
+                construct_metrics::record_abuse_fail_open("sealed_ip");
             }
         }
 

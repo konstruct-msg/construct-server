@@ -397,6 +397,46 @@ pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 // ============================================================================
+// Abuse-control fail-open (messaging availability bias)
+// ============================================================================
+//
+// Messaging prefers delivery over hard-blocking when Redis (or related) is
+// unavailable. Each intentional fail-open branch increments this counter so
+// operators can alert when abuse controls are degraded.
+//
+// Label `control` (stable names — do not rename without dashboard updates):
+//   send_dedup          — SendMessage idempotency / duplicate check
+//   dispatch_dedup      — dispatch_envelope dedup mark/check
+//   sentinel            — SentinelCore::check_send_permission outer Err
+//   rate_trust          — TrustLevel + hourly/fanout limits skipped (Redis down)
+//   sealed_ip           — per-IP sealed-sender rate limit
+//   delivery_tag        — sealed delivery_tag replay cache
+//   federation_origin   — federation per-origin rate limit
+//
+// Policy (launch): fail-open remains intentional. Alert when rate of any label
+// is non-zero for sustained periods (Redis outage or misconfig).
+
+/// Abuse / anti-spam controls skipped due to infrastructure error (fail-open).
+pub static MSG_ABUSE_FAIL_OPEN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_abuse_fail_open_total",
+            "Messaging abuse controls skipped (fail-open) by control name"
+        ),
+        &["control"]
+    )
+    .expect("Failed to register MSG_ABUSE_FAIL_OPEN_TOTAL metric")
+});
+
+/// Record that an abuse control was skipped (fail-open). Prefer stable `control` labels.
+#[inline]
+pub fn record_abuse_fail_open(control: &'static str) {
+    MSG_ABUSE_FAIL_OPEN_TOTAL
+        .with_label_values(&[control])
+        .inc();
+}
+
+// ============================================================================
 // Metrics Collection
 // ============================================================================
 
@@ -424,5 +464,14 @@ mod tests {
 
         let metrics_text = result.unwrap();
         assert!(metrics_text.contains("construct_messages_sent_total"));
+    }
+
+    #[test]
+    fn test_abuse_fail_open_metric() {
+        record_abuse_fail_open("sentinel");
+        record_abuse_fail_open("sealed_ip");
+        let text = gather_metrics().unwrap();
+        assert!(text.contains("construct_msg_abuse_fail_open_total"));
+        assert!(text.contains("control=\"sentinel\"") || text.contains("sentinel"));
     }
 }
