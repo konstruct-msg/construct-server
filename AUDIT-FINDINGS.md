@@ -172,7 +172,7 @@ callers map to signature/validation errors (no panic on wire data).
 
 ### P1-8 Media GenerateUploadToken unauthenticated
 
-See P0-D; storage DoS vector.
+**Status:** FIXED via P0-D (`5839407`).
 
 ### P1-9 key-service auth is header-only for uploads
 
