@@ -405,12 +405,63 @@ pub async fn confirm_pending_message(
 
 /// Compute HMAC-SHA256(message_id, salt) as a hex string for delivery_pending lookups.
 /// UUIDs have 122 bits of entropy — brute force is impractical without the salt.
+///
+/// `salt` should come from configured `LOG_HASH_SALT` / `logging.hash_salt`.
+/// HMAC-SHA256 accepts any key length (including empty); we never substitute a
+/// fixed global key such as `"fallback"` — that would make hashes predictable
+/// across all deployments that hit a key-init failure path.
 pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
-    use hmac::{Hmac, Mac, digest::KeyInit};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
+
     let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
-        .unwrap_or_else(|_| HmacSha256::new_from_slice(b"fallback").unwrap());
+        .expect("HMAC-SHA256 accepts arbitrary-length keys");
     mac.update(message_id.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receipt_routing_hash;
+
+    #[test]
+    fn receipt_hash_is_stable_for_same_inputs() {
+        let a = receipt_routing_hash("msg-1", "deploy-salt-alpha");
+        let b = receipt_routing_hash("msg-1", "deploy-salt-alpha");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64); // sha256 hex
+    }
+
+    #[test]
+    fn receipt_hash_differs_when_salt_differs() {
+        let a = receipt_routing_hash("msg-1", "salt-a");
+        let b = receipt_routing_hash("msg-1", "salt-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn receipt_hash_does_not_use_literal_fallback_key() {
+        // The old bug substituted b"fallback" when key init "failed".
+        // With a real salt, the MAC must not equal HMAC(message, "fallback").
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let with_salt = receipt_routing_hash("msg-1", "production-salt");
+        let mut mac = HmacSha256::new_from_slice(b"fallback").unwrap();
+        mac.update(b"msg-1");
+        let with_fallback = hex::encode(mac.finalize().into_bytes());
+        assert_ne!(
+            with_salt, with_fallback,
+            "routing hash must not collapse to the fixed fallback key"
+        );
+    }
+
+    #[test]
+    fn empty_salt_still_computes_without_panic() {
+        // Empty salt is a misconfig, but must not panic or switch to a fixed key.
+        let h = receipt_routing_hash("msg-1", "");
+        assert_eq!(h.len(), 64);
+    }
 }

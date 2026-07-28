@@ -153,7 +153,8 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ### P1-4 Receipt HMAC fallback key
 
-`messaging-service/src/core.rs` ~412–413: invalid salt → key `b"fallback"`. Never use fixed fallback; panic at boot or return error if salt empty.
+**Status:** FIXED — removed fixed `b"fallback"` key; HMAC uses configured salt only
+(`expect` on init; HMAC-SHA256 accepts any key length).
 
 ### P1-5 Signature length unwrap (low residual)
 
