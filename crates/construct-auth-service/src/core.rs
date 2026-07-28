@@ -302,7 +302,9 @@ async fn deactivate_secondary_device_on_logout(
         Ok(None) => return Ok(()),
         Err(e) => {
             tracing::error!(error = %e, "logout: failed to load user for device cleanup");
-            return Err(AppError::internal("Cannot complete logout (user lookup failed)"));
+            return Err(AppError::internal(
+                "Cannot complete logout (user lookup failed)",
+            ));
         }
     };
 
