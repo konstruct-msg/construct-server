@@ -846,6 +846,29 @@ pub async fn upload_prekeys_hybrid(
 }
 
 /// Get count of remaining one-time pre-keys
+/// Whether `device_id` is an active device of `user_id`.
+///
+/// Used to detect a self bundle fetch, which must never burn one of the caller's own
+/// one-time pre-keys (`resolve_otpk_consumption`). Returns `false` for an unknown or
+/// deactivated device, and for a device whose `user_id` is still NULL (pre-migration
+/// registration) — both are "not provably self", which is the safe answer here.
+pub async fn device_belongs_to_user(db: &PgPool, device_id: &str, user_id: &str) -> Result<bool> {
+    let Ok(uid) = uuid::Uuid::parse_str(user_id) else {
+        return Ok(false);
+    };
+    let owns: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM devices
+             WHERE device_id = $1 AND user_id = $2 AND is_active = true
+         )",
+    )
+    .bind(device_id)
+    .bind(uid)
+    .fetch_one(db)
+    .await?;
+    Ok(owns)
+}
+
 pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, DateTime<Utc>)> {
     let row = sqlx::query_as::<_, PreKeyCountRow>(
         r#"
@@ -1852,6 +1875,85 @@ mod tests {
         .await
         .expect("Failed to insert test device");
         device_id
+    }
+
+    /// Like `insert_test_device` but also returns the owning user_id, for tests that
+    /// need to reason about device↔user ownership.
+    async fn insert_test_device_with_user(db: &PgPool) -> (String, uuid::Uuid) {
+        let device_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (user_id, username, created_at) VALUES ($1, $2, NOW())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(format!("testuser-{}", &device_id[..8]))
+        .execute(db)
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO devices (device_id, user_id, is_active, created_at)
+             VALUES ($1::uuid, $2, true, NOW())",
+        )
+        .bind(&device_id)
+        .bind(user_id)
+        .execute(db)
+        .await
+        .expect("Failed to insert test device");
+        (device_id, user_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_device_belongs_to_user_gates_self_fetch() {
+        // Guards the rule that a bundle fetch of your OWN account must not burn one of
+        // your own one-time pre-keys (see `resolve_otpk_consumption` in main.rs). A wrong
+        // answer here either re-opens the self-drain or hands a stranger a free bundle.
+        let db = get_test_db().await;
+        let (device_a, user_a) = insert_test_device_with_user(&db).await;
+        let (device_b, user_b) = insert_test_device_with_user(&db).await;
+
+        assert!(
+            device_belongs_to_user(&db, &device_a, &user_a.to_string())
+                .await
+                .unwrap(),
+            "own device must be recognised as self"
+        );
+        assert!(
+            !device_belongs_to_user(&db, &device_a, &user_b.to_string())
+                .await
+                .unwrap(),
+            "another user's device must NOT count as self"
+        );
+        assert!(
+            !device_belongs_to_user(&db, "not-a-device", &user_a.to_string())
+                .await
+                .unwrap(),
+            "unknown device must not count as self"
+        );
+        assert!(
+            !device_belongs_to_user(&db, &device_a, "not-a-uuid")
+                .await
+                .unwrap(),
+            "malformed user_id must be rejected, not error out"
+        );
+
+        // A deactivated device must lose self status (revoked device shouldn't get the
+        // non-consuming path either).
+        sqlx::query("UPDATE devices SET is_active = false WHERE device_id = $1::uuid")
+            .bind(&device_a)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(
+            !device_belongs_to_user(&db, &device_a, &user_a.to_string())
+                .await
+                .unwrap(),
+            "deactivated device must not count as self"
+        );
+
+        cleanup_device(&db, &device_a).await;
+        cleanup_device(&db, &device_b).await;
     }
 
     async fn cleanup_device(db: &PgPool, device_id: &str) {

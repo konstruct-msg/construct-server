@@ -95,8 +95,26 @@ message GetPreKeyBundleRequest {
   // Preferred crypto suite (optional)
   optional shared.proto.core.v1.CryptoSuite preferred_suite = 3;
 
+  // Whether this fetch should consume (burn) one of the target's one-time
+  // pre-keys. Fetching a bundle is DESTRUCTIVE by default: the server deletes an
+  // OTPK and hands it out, because that is what an X3DH session init needs.
+  //
+  // Callers that only need the long-lived material (identity key, verifying key,
+  // signed pre-key) — profile display, invite verification, key-consistency
+  // checks, call setup — MUST set this to false. Otherwise every such fetch
+  // drains the target's OTPK pool, and once it hits zero every new inbound
+  // session is established WITHOUT a one-time pre-key, weakening X3DH forward
+  // secrecy. A misbehaving or merely chatty peer could drain a pool just by
+  // reopening a conversation.
+  //
+  // Absent (proto3 default false) is treated as TRUE by the server for wire
+  // compatibility with clients built before this field existed; new clients must
+  // set it explicitly. Fetching your own device's bundle never consumes,
+  // regardless of this field.
+  optional bool consume_one_time_prekey = 4;
+
   // Reserved for future options
-  reserved 4 to 10;
+  reserved 5 to 10;
 }
 
 message GetPreKeyBundleResponse {
@@ -267,6 +285,11 @@ message GetPreKeyBundlesRequest {
 
   // Preferred crypto suite
   optional shared.proto.core.v1.CryptoSuite preferred_suite = 3;
+
+  // Whether this fetch should consume one-time pre-keys — see the field of the
+  // same name on GetPreKeyBundleRequest. Absent is treated as TRUE for wire
+  // compatibility; fetching your own account's bundles never consumes.
+  optional bool consume_one_time_prekey = 4;
 }
 
 message GetPreKeyBundlesResponse {
