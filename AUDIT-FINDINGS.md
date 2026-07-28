@@ -158,15 +158,17 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ### P1-5 Signature length unwrap (low residual)
 
-`devices.rs` ~404: `.unwrap()` after earlier length check (~390). Prefer `try_into` + Validation for consistency (panic if check drifts).
+**Status:** FIXED — `try_into` → `AppError::Validation` (no request-path panic).
 
 ### P1-6 Invite unsupported version panic
 
-`crypto-agility` / shared invite model: `panic!("Unsupported invite version")` — convert to error.
+**Status:** FIXED — `canonical_string()` returns `Result` (`UnsupportedVersion` / missing device);
+callers map to signature/validation errors (no panic on wire data).
 
 ### P1-7 Recovery backup dropped
 
-`identity-service/src/recovery.rs`: `let _ = backup; // placeholder` — client may believe backup stored.
+**Status:** FIXED — migration `065_recovery_encrypted_backup.sql`; store opaque blob
+(max 256 KiB); `has_backup` reflects column.
 
 ### P1-8 Media GenerateUploadToken unauthenticated
 

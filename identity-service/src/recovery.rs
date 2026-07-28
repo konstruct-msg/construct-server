@@ -23,6 +23,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Max encrypted recovery backup size accepted from clients (256 KiB).
+/// Prevents unbounded storage abuse via SetRecoveryKey.
+pub const MAX_RECOVERY_BACKUP_BYTES: usize = 256 * 1024;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -99,19 +103,32 @@ pub async fn set_recovery_key(
         anyhow::bail!("Recovery key already set and cannot be changed");
     }
 
-    // 6. Store recovery key (DB trigger enforces immutability)
-    sqlx::query("UPDATE users SET recovery_public_key = $1 WHERE id = $2")
+    // 6. Validate optional encrypted backup size before write
+    if let Some(backup) = encrypted_backup
+        && backup.len() > MAX_RECOVERY_BACKUP_BYTES
+    {
+        anyhow::bail!(
+            "encrypted_backup too large (max {} bytes)",
+            MAX_RECOVERY_BACKUP_BYTES
+        );
+    }
+
+    // 7. Store recovery key (DB trigger enforces immutability) and optional backup
+    if let Some(backup) = encrypted_backup {
+        sqlx::query(
+            "UPDATE users SET recovery_public_key = $1, recovery_encrypted_backup = $2 WHERE id = $3",
+        )
         .bind(recovery_public_key)
+        .bind(backup)
         .bind(user_id)
         .execute(db)
         .await?;
-
-    // 7. Store encrypted backup if provided
-    if let Some(backup) = encrypted_backup {
-        // Store in a separate column or table
-        // For now: store in recovery_backup column if exists
-        // TODO: add recovery_backup column in migration if needed
-        let _ = backup; // placeholder
+    } else {
+        sqlx::query("UPDATE users SET recovery_public_key = $1 WHERE id = $2")
+            .bind(recovery_public_key)
+            .bind(user_id)
+            .execute(db)
+            .await?;
     }
 
     // 8. Return fingerprint
@@ -127,7 +144,8 @@ pub async fn set_recovery_key(
 pub async fn get_recovery_status(db: &PgPool, user_id: Uuid) -> Result<RecoveryStatus> {
     let row = sqlx::query_as::<_, RecoveryStatusRow>(
         r#"
-        SELECT recovery_public_key, recovery_setup_at, last_recovery_at
+        SELECT recovery_public_key, recovery_setup_at, last_recovery_at,
+               (recovery_encrypted_backup IS NOT NULL) AS has_backup
         FROM users
         WHERE id = $1
         "#,
@@ -144,7 +162,7 @@ pub async fn get_recovery_status(db: &PgPool, user_id: Uuid) -> Result<RecoveryS
                 fingerprint,
                 setup_at: r.recovery_setup_at,
                 last_used_at: r.last_recovery_at,
-                has_backup: false, // TODO: check backup column
+                has_backup: r.has_backup,
             })
         }
         None => anyhow::bail!("User not found"),
@@ -285,6 +303,7 @@ struct RecoveryStatusRow {
     recovery_public_key: Option<Vec<u8>>,
     recovery_setup_at: Option<DateTime<Utc>>,
     last_recovery_at: Option<DateTime<Utc>>,
+    has_backup: bool,
 }
 
 #[derive(sqlx::FromRow)]

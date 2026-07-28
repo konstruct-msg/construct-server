@@ -103,7 +103,9 @@ pub async fn verify_invite_signature(
     })?;
 
     let signature = Signature::from_bytes(&sig_array);
-    let canonical = invite.canonical_string();
+    let canonical = invite.canonical_string().map_err(|e| {
+        InviteSignatureError::InvalidSignature(format!("canonical string: {e}"))
+    })?;
 
     tracing::debug!(
         canonical_string = %canonical,
@@ -215,7 +217,7 @@ pub async fn accept_invite(
         jti = %invite.jti,
         version = invite.v,
         device_id = ?invite.device_id,
-        canonical = %invite.canonical_string(),
+        canonical = ?invite.canonical_string().ok(),
         "Processing invite"
     );
 
