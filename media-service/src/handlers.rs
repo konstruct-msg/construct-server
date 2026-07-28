@@ -146,16 +146,33 @@ pub async fn download_media(
     Ok(response)
 }
 
-/// Delete media endpoint (admin only)
+/// Delete media endpoint (admin only).
+///
+/// Not mounted by the production gRPC binary (`main.rs` only exposes /health
+/// and /metrics over HTTP). Kept for lib/tests — requires
+/// `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` matching the env secret.
 pub async fn delete_media(
     State(state): State<AppState>,
     Path(media_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
+    let expected = std::env::var("MEDIA_ADMIN_TOKEN").unwrap_or_default();
+    if expected.is_empty() {
+        tracing::error!("MEDIA_ADMIN_TOKEN not configured — rejecting delete");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        warn!("media delete rejected: invalid or missing admin token");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let config = &state.config;
     let file_path = config.storage_dir.join(&media_id);
-
-    // Check admin token (simplified - in production use proper auth)
-    // TODO: Add proper admin authentication
 
     match fs::remove_file(&file_path).await {
         Ok(_) => {
@@ -164,4 +181,12 @@ pub async fn delete_media(
         }
         Err(_) => Err(StatusCode::NOT_FOUND),
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
 }

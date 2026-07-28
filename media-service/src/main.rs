@@ -9,9 +9,10 @@
 // Multi-instance (load balancer) is only needed at ~10k+ concurrent uploads;
 // until then a single dedicated instance with SQLite is sufficient.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use chrono::{DateTime, Utc};
+use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use serde_json::json;
@@ -19,6 +20,7 @@ use std::{env, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::media_service_server::{MediaService, MediaServiceServer};
@@ -33,11 +35,23 @@ pub struct MediaServiceContext {
     pub db_pool: Arc<DbPool>,
     pub media_config: Arc<MediaConfig>,
     pub public_host: String,
+    /// Verifies Bearer access tokens for authenticated RPCs (token mint / delete).
+    pub auth: Arc<AuthManager>,
 }
 
 #[derive(Clone)]
 struct MediaGrpcService {
     context: Arc<MediaServiceContext>,
+}
+
+/// Require a cryptographically verified access token. Used for GenerateUploadToken
+/// (and any future user-scoped media RPCs). Download remains capability-style
+/// (media_id) by design — blobs are E2E ciphertext.
+fn require_authed_user(
+    auth: &AuthManager,
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<Uuid, Status> {
+    construct_server_shared::auth_utils::extract_authed_caller(auth, metadata).map(|c| c.user_id)
 }
 
 // Constants for chunk sizes
@@ -52,6 +66,9 @@ impl MediaService for MediaGrpcService {
         &self,
         request: Request<proto::GenerateUploadTokenRequest>,
     ) -> Result<Response<proto::GenerateUploadTokenResponse>, Status> {
+        // Auth required: unauthenticated mint was an open storage-abuse vector.
+        // UploadMedia still accepts only the short-lived HMAC upload_token capability.
+        let user_id = require_authed_user(self.context.auth.as_ref(), request.metadata())?;
         let req = request.into_inner();
 
         // Validate expected size if provided
@@ -81,6 +98,12 @@ impl MediaService for MediaGrpcService {
         let expires_at = DateTime::from_timestamp(token.expires_at, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
+
+        info!(
+            user_id = %user_id,
+            media_id = %token.media_id,
+            "Issued media upload token"
+        );
 
         Ok(Response::new(proto::GenerateUploadTokenResponse {
             upload_token,
@@ -326,9 +349,12 @@ impl MediaService for MediaGrpcService {
         &self,
         request: Request<proto::DeleteMediaRequest>,
     ) -> Result<Response<proto::DeleteMediaResponse>, Status> {
+        // Require authenticated caller in addition to admin_token HMAC capability.
+        // Prevents unauthenticated probing of the delete surface via Caddy.
+        let _caller = require_authed_user(self.context.auth.as_ref(), request.metadata())?;
         let req = request.into_inner();
 
-        // Validate admin token (simple HMAC check)
+        // Validate admin token (HMAC capability bound to media_id + short TTL)
         // Admin token format: {media_id}|{timestamp}|{signature}
         if req.admin_token.is_empty() {
             return Err(Status::permission_denied("Admin token required"));
@@ -465,10 +491,17 @@ async fn main() -> Result<()> {
     let public_host =
         env::var("MEDIA_PUBLIC_HOST").unwrap_or_else(|_| "localhost:50056".to_string());
 
+    let auth = Arc::new(
+        AuthManager::new(&main_config)
+            .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+    );
+    info!("JWT/PASETO verification enabled for media-service");
+
     let context = Arc::new(MediaServiceContext {
         db_pool,
         media_config: media_config.clone(),
         public_host,
+        auth,
     });
 
     let grpc_context = context.clone();
@@ -512,4 +545,225 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(construct_server_shared::shutdown_signal())
         .await?;
     Ok(())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use construct_config::{
+        ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
+        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia, MicroservicesConfig,
+        MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
+    };
+
+    fn make_auth() -> AuthManager {
+        let kp = ed25519_compact::KeyPair::generate();
+        let priv_pem = String::from_utf8(kp.sk.to_pem().as_bytes().to_vec()).unwrap();
+        let pub_pem = String::from_utf8(kp.pk.to_pem().as_bytes().to_vec()).unwrap();
+        let config = Config {
+            database_url: String::new(),
+            redis_url: String::new(),
+            jwt_secret: "unused".into(),
+            jwt_private_key: None,
+            jwt_public_key: None,
+            paseto_private_key: Some(priv_pem),
+            paseto_public_key: Some(pub_pem),
+            paseto_public_key_previous: vec![],
+            token_issue_format: "paseto".into(),
+            port: 0,
+            bind_address: "127.0.0.1".into(),
+            health_port: 0,
+            heartbeat_interval_secs: 60,
+            server_registry_ttl_secs: 120,
+            message_ttl_days: 7,
+            dedup_safety_margin_hours: 2,
+            access_token_ttl_hours: 24,
+            session_ttl_days: 30,
+            refresh_token_ttl_days: 7,
+            jwt_issuer: "construct-test".into(),
+            online_channel: "online".into(),
+            offline_queue_prefix: "queue:".into(),
+            delivery_queue_prefix: "delivery:".into(),
+            delivery_poll_interval_ms: 100,
+            grpc_keepalive_interval_secs: 45,
+            grpc_keepalive_timeout_secs: 5,
+            rust_log: "error".into(),
+            logging: LoggingConfig {
+                enable_message_metadata: false,
+                enable_user_identifiers: false,
+                hash_salt: "test".into(),
+            },
+            security: SecurityConfig {
+                prekey_ttl_days: 30,
+                prekey_min_ttl_days: 7,
+                prekey_max_ttl_days: 90,
+                max_messages_per_hour: 1000,
+                max_messages_per_ip_per_hour: 5000,
+                max_key_rotations_per_day: 10,
+                max_password_changes_per_day: 5,
+                max_failed_login_attempts: 5,
+                max_connections_per_user: 5,
+                key_bundle_cache_hours: 1,
+                rate_limit_block_duration_seconds: 3600,
+                ip_rate_limiting_enabled: false,
+                max_requests_per_ip_per_hour: 1000,
+                combined_rate_limiting_enabled: false,
+                max_requests_per_user_ip_per_hour: 500,
+                max_long_poll_requests_per_window: 100,
+                long_poll_rate_limit_window_secs: 60,
+                request_signing_required: false,
+                metrics_auth_enabled: false,
+                metrics_ip_whitelist: vec![],
+                metrics_bearer_token: None,
+                max_pow_challenges_per_hour: 5,
+                max_registrations_per_hour: 3,
+                pow_difficulty: 1,
+                username_hmac_secret: vec![0u8; 32],
+                contact_hmac_secret: vec![0u8; 32],
+                request_envelope_key: vec![0u8; 32],
+            },
+            apns: ApnsConfig {
+                enabled: false,
+                environment: ApnsEnvironment::Development,
+                key_path: String::new(),
+                key_id: String::new(),
+                team_id: String::new(),
+                bundle_id: String::new(),
+                topic: String::new(),
+                voip_topic: None,
+                device_token_encryption_key: "0".repeat(64),
+            },
+            federation: FederationConfig {
+                enabled: false,
+                instance_domain: "test.local".into(),
+                base_domain: "test.local".into(),
+                signing_key_seed: None,
+                max_requests_per_origin_per_hour: 1000,
+                mtls: MtlsConfig {
+                    required: false,
+                    client_cert_path: None,
+                    client_key_path: None,
+                    verify_server_cert: false,
+                    pinned_certs: Default::default(),
+                },
+            },
+            db: DbConfig {
+                max_connections: 1,
+                min_connections: 0,
+                acquire_timeout_secs: 5,
+                idle_timeout_secs: 60,
+            },
+            deeplinks: DeepLinksConfig {
+                apple_team_id: String::new(),
+                android_package_name: String::new(),
+                android_cert_fingerprint: String::new(),
+            },
+            redis_key_prefixes: RedisKeyPrefixes {
+                processed_msg: "processed_msg:".into(),
+                user: "user:".into(),
+                session: "session:".into(),
+                user_sessions: "user_sessions:".into(),
+                msg_hash: "msg_hash:".into(),
+                rate: "rate:".into(),
+                blocked: "blocked:".into(),
+                key_bundle: "key_bundle:".into(),
+                connections: "connections:".into(),
+            },
+            redis_channels: RedisChannels {
+                dead_letter_queue: "dlq".into(),
+                delivery_message: "delivery_message:{}".into(),
+                delivery_notification: "delivery_notification:{}".into(),
+            },
+            media: CfgMedia {
+                enabled: false,
+                base_url: String::new(),
+                upload_token_secret: String::new(),
+                max_file_size: 10 * 1024 * 1024,
+                rate_limit_per_hour: 100,
+            },
+            csrf: CsrfConfig {
+                enabled: false,
+                secret: "test-csrf-secret-at-least-32-chars!!".into(),
+                token_ttl_secs: 3600,
+                allowed_origins: vec![],
+                cookie_name: "csrf_token".into(),
+                header_name: "X-CSRF-Token".into(),
+            },
+            messaging: Default::default(),
+            microservices: MicroservicesConfig {
+                enabled: false,
+                auth_service_url: "http://localhost:8001".into(),
+                messaging_service_url: "http://localhost:8002".into(),
+                user_service_url: "http://localhost:8003".into(),
+                notification_service_url: "http://localhost:8004".into(),
+                discovery_mode: "static".into(),
+                service_timeout_secs: 30,
+                circuit_breaker: CircuitBreakerConfig {
+                    failure_threshold: 5,
+                    success_threshold: 2,
+                    timeout_secs: 60,
+                },
+            },
+            instance_domain: "test.local".into(),
+            federation_base_domain: "test.local".into(),
+            federation_enabled: false,
+            deep_link_base_url: String::new(),
+            veil_enabled: false,
+            veil_port: 9443,
+            veil_server_key: None,
+            veil_iat_mode: 0,
+            veil_upstream: "envoy:8080".into(),
+            veil_tls_cert_path: None,
+            veil_tls_key_path: None,
+            veil_cover_upstream: None,
+            veil_relay_addresses: vec![],
+        };
+        AuthManager::new(&config).expect("test auth")
+    }
+
+    #[test]
+    fn require_authed_user_rejects_missing_bearer() {
+        let auth = make_auth();
+        let meta = tonic::metadata::MetadataMap::new();
+        let err = require_authed_user(&auth, &meta).expect_err("must reject");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn require_authed_user_rejects_header_only_spoof() {
+        let auth = make_auth();
+        let uid = Uuid::new_v4();
+        let mut meta = tonic::metadata::MetadataMap::new();
+        meta.insert("x-user-id", uid.to_string().parse().unwrap());
+        let err = require_authed_user(&auth, &meta).expect_err("header-only must fail");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn require_authed_user_accepts_valid_bearer() {
+        let auth = make_auth();
+        let uid = Uuid::new_v4();
+        let (token, _, _) = auth.create_token_for_device(&uid, Some("device")).unwrap();
+        let mut meta = tonic::metadata::MetadataMap::new();
+        meta.insert(
+            "authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let got = require_authed_user(&auth, &meta).expect("valid token");
+        assert_eq!(got, uid);
+    }
+
+    #[test]
+    fn upload_token_roundtrip_still_works() {
+        // Capability path after mint remains HMAC-only (no Bearer on UploadMedia).
+        let secret = "test-media-hmac-secret";
+        let token = core::generate_upload_token(secret).unwrap();
+        let wire = format!("{}|{}|{}", token.media_id, token.expires_at, token.signature);
+        let (mid, _) = core::validate_upload_token(&wire, secret).unwrap();
+        assert_eq!(mid, token.media_id);
+    }
 }

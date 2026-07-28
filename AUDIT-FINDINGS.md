@@ -108,12 +108,15 @@ Third class: intentional **Redis fail-open** on abuse controls (availability ove
 
 ---
 
-### P0-D — Media admin delete has no auth (REST)
+### P0-D — Media admin delete / upload mint unauthenticated
 
-`media-service/src/handlers.rs` `delete_media`: TODO admin auth; deletes by path.  
-**Mitigation today:** REST handlers may not be mounted on the gRPC primary binary path — verify which binary is deployed. gRPC MediaService is exposed via Caddy; REST admin risk depends on whether REST router is live.
+**Status:** FIXED (2026-07-28)
 
-**Also:** `GenerateUploadToken` gRPC has **no caller authentication** in `media-service/src/main.rs` — anyone can mint upload tokens (storage abuse / DoS).
+- gRPC `GenerateUploadToken` requires Bearer (PASETO/JWT)
+- gRPC `DeleteMedia` requires Bearer **and** existing admin_token HMAC
+- REST `handlers::delete_media` (not mounted in prod binary) requires `MEDIA_ADMIN_TOKEN` Bearer
+- `UploadMedia` still capability-only via short-lived HMAC upload_token (after authed mint)
+- `DownloadMedia` / metadata remain public by media_id (E2E ciphertext capability URL)
 
 ---
 
