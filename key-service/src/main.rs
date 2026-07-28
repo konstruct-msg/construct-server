@@ -222,6 +222,60 @@ async fn check_otpk_drain(redis: &mut redis::aio::ConnectionManager, user_id: &s
     !exceeded
 }
 
+/// Decide whether a bundle fetch may burn one of the target's one-time pre-keys.
+///
+/// Fetching a bundle is destructive by default — the server DELETEs an OTPK and hands
+/// it out — because that is what an X3DH session init needs. Most callers do not need
+/// one: profile display, invite verification, key-consistency checks and call setup only
+/// want the long-lived identity / verifying / signed pre-key material. Letting those burn
+/// keys drains the target's pool to zero, after which every new inbound session is
+/// established WITHOUT a one-time pre-key (reduced X3DH forward secrecy), and the target
+/// re-uploads endlessly to refill it.
+///
+/// Three independent reasons to withhold the OTPK, cheapest first:
+/// 1. The caller said so (`consume_one_time_prekey = false`). Absent means `true` so
+///    clients built before the field exists keep working.
+/// 2. The caller is fetching **its own account's** bundle (key-consistency check, own
+///    multi-device enumeration). Nobody should burn their own one-time keys just to read
+///    their own public material, and this holds even for old clients that cannot set (1).
+/// 3. The hourly drain threshold for this target is exceeded (pre-existing behaviour).
+///
+/// Only reason (3) is a throttle; (1) and (2) are correctness.
+async fn resolve_otpk_consumption<T>(
+    request: &Request<T>,
+    ctx: &KeyServiceContext,
+    target_user_id: &str,
+    requested_consume: Option<bool>,
+) -> bool {
+    // (1) Explicit caller opt-out. `None` = legacy client → treat as "yes, consume".
+    if requested_consume == Some(false) {
+        return false;
+    }
+
+    // (2) Self-fetch. Unauthenticated (sealed-sender) callers have no device to match,
+    // so this simply does not apply to them — they fall through to the drain check.
+    if let Ok(authed_device_id) = extract_authed_device_id(request, &ctx.auth) {
+        match core::device_belongs_to_user(&ctx.db, &authed_device_id, target_user_id).await {
+            Ok(true) => {
+                tracing::debug!(
+                    device_id = %authed_device_id,
+                    user_id = %target_user_id,
+                    "Self bundle fetch — not consuming an OTPK"
+                );
+                return false;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Never fail the fetch over this; worst case we consume as before.
+                tracing::warn!(error = %e, "Self-fetch check failed — falling back to drain check");
+            }
+        }
+    }
+
+    // (3) Coarse hourly drain throttle.
+    check_otpk_drain(&mut ctx.redis.clone(), target_user_id).await
+}
+
 /// Record OTPK consumption for a target user in the drain counter.
 /// Fail-open: Redis error silently drops the recording.
 async fn record_otpk_consumption(redis: &mut redis::aio::ConnectionManager, user_id: &str) {
@@ -271,6 +325,15 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundleRequest>,
     ) -> Result<Response<proto::GetPreKeyBundleResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
+        // Resolve OTPK consumption BEFORE consuming the request: the self-fetch rule needs
+        // the auth metadata, which `into_inner()` discards.
+        let consume_otpk = resolve_otpk_consumption(
+            &request,
+            &self.context,
+            &request.get_ref().user_id,
+            request.get_ref().consume_one_time_prekey,
+        )
+        .await;
         let req = request.into_inner();
 
         if req.user_id.is_empty() {
@@ -305,16 +368,15 @@ impl KeyService for KeyGrpcService {
             }
         }
 
-        // OTPK drain check: coarse throttle so callers cannot burn all OTPKs for a user
-        // within the hourly window. Above the threshold we DEGRADE to an SPK-only bundle
-        // (no OTPK consumed) rather than rejecting — a hard reject would let an attacker
+        // `consume_otpk` was resolved above (caller opt-out / self-fetch / hourly drain
+        // throttle — see `resolve_otpk_consumption`). Above the drain threshold we DEGRADE
+        // to an SPK-only bundle rather than rejecting: a hard reject would let an attacker
         // drain a victim to the threshold and then deny ALL new session inits to that victim
         // for an hour (a targeted DoS), and would also false-positive on legitimately popular
         // users. SPK-only keeps session init working (forward-secrecy reduced, same as natural
         // OTPK exhaustion) while starving the drain of further one-time keys.
-        let consume_otpk = check_otpk_drain(&mut self.context.redis.clone(), &req.user_id).await;
         if !consume_otpk {
-            tracing::warn!(user_id = %req.user_id, "OTPK drain threshold exceeded — serving SPK-only bundle");
+            tracing::debug!(user_id = %req.user_id, "Serving SPK-only bundle (no OTPK consumed)");
         }
 
         let bundle = core::get_prekey_bundle(
@@ -818,6 +880,14 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundlesRequest>,
     ) -> Result<Response<proto::GetPreKeyBundlesResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
+        // Resolved before `into_inner()` — the self-fetch rule needs the auth metadata.
+        let consume_otpk = resolve_otpk_consumption(
+            &request,
+            &self.context,
+            &request.get_ref().user_id,
+            request.get_ref().consume_one_time_prekey,
+        )
+        .await;
         let req = request.into_inner();
 
         if req.user_id.is_empty() {
@@ -849,11 +919,11 @@ impl KeyService for KeyGrpcService {
             }
         }
 
-        // OTPK drain check (same as single-bundle path): degrade to SPK-only above the
-        // threshold instead of rejecting — see the single-bundle handler for the rationale.
-        let consume_otpk = check_otpk_drain(&mut self.context.redis.clone(), &req.user_id).await;
+        // `consume_otpk` was resolved above (same rules as the single-bundle path); above
+        // the drain threshold we degrade to SPK-only instead of rejecting — see there for
+        // the rationale. Notably this makes own-device enumeration non-destructive.
         if !consume_otpk {
-            tracing::warn!(user_id = %req.user_id, "OTPK drain threshold exceeded — serving SPK-only bundles");
+            tracing::debug!(user_id = %req.user_id, "Serving SPK-only bundles (no OTPK consumed)");
         }
 
         let device_ids = if req.device_ids.is_empty() {
