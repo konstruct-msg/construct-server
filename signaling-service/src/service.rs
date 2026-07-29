@@ -589,7 +589,7 @@ async fn handle_outbound_signal(
                             )])
                             .inc();
                         send_out(
-                            &out_tx,
+                            out_tx,
                             SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
@@ -611,7 +611,7 @@ async fn handle_outbound_signal(
                             )])
                             .inc();
                         send_out(
-                            &out_tx,
+                            out_tx,
                             SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
@@ -632,7 +632,7 @@ async fn handle_outbound_signal(
                             )])
                             .inc();
                         send_out(
-                            &out_tx,
+                            out_tx,
                             SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
@@ -654,7 +654,7 @@ async fn handle_outbound_signal(
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::Unauthorized)])
                     .inc();
                 send_out(
-                    &out_tx,
+                    out_tx,
                     SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::Unauthorized as i32,
@@ -675,7 +675,7 @@ async fn handle_outbound_signal(
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
                 send_out(
-                    &out_tx,
+                    out_tx,
                     SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
@@ -695,7 +695,7 @@ async fn handle_outbound_signal(
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
                 send_out(
-                    &out_tx,
+                    out_tx,
                     SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
@@ -715,7 +715,7 @@ async fn handle_outbound_signal(
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
                 send_out(
-                    &out_tx,
+                    out_tx,
                     SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
@@ -732,7 +732,7 @@ async fn handle_outbound_signal(
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::CalleeBusy)])
                     .inc();
                 send_out(
-                    &out_tx,
+                    out_tx,
                     SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::CalleeBusy as i32,
