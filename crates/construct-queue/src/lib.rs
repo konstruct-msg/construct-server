@@ -399,14 +399,14 @@ impl MessageQueue {
     pub async fn store_join_request(
         &mut self,
         pending_device_id: &str,
-        json_payload: &str,
+        payload: &[u8],
     ) -> Result<()> {
         tokens::TokenManager::new(&mut self.client)
-            .store_join_request(pending_device_id, json_payload)
+            .store_join_request(pending_device_id, payload)
             .await
     }
 
-    pub async fn get_join_request(&mut self, pending_device_id: &str) -> Result<Option<String>> {
+    pub async fn get_join_request(&mut self, pending_device_id: &str) -> Result<Option<Vec<u8>>> {
         tokens::TokenManager::new(&mut self.client)
             .get_join_request(pending_device_id)
             .await
@@ -415,7 +415,7 @@ impl MessageQueue {
     pub async fn consume_join_request(
         &mut self,
         pending_device_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Vec<u8>>> {
         tokens::TokenManager::new(&mut self.client)
             .consume_join_request(pending_device_id)
             .await
