@@ -38,7 +38,10 @@ COPY masque-service ./masque-service
 
 # Build release bins for the multi-service image. Exclude masque (separate
 # deploy surface; still present as a workspace member for local/dev builds).
-RUN cargo build --release --bins --exclude masque-service
+# `--workspace` is required: cargo rejects `--exclude` without it. The root is a
+# virtual manifest with no `default-members`, so `--workspace` selects the same
+# set the bare `--bins` did — this only drops masque, nothing else changes.
+RUN cargo build --release --workspace --bins --exclude masque-service
 
 # Runtime stage
 FROM debian:bookworm-slim
