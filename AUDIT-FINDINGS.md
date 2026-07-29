@@ -207,7 +207,7 @@ GetPreKeyBundle remains public-ish with IP rate limit + OTPK drain (metered fail
 | P2-2 | APNs token DELETE/UPDATE errors discarded | **FIXED** — `if let Err` + error logs |
 | P2-3 | Context adapter panic if APNs/token-enc missing | **FIXED** — optional fields, no panic |
 | P2-4 | Zero signature placeholders in DB key bundles | **FIXED** (SPK sig from DB); outer bundle envelope sig remains zeros (unused by clients) |
-| P2-5 | masque not in workspace / Dockerfile | **FIXED** — in workspace; still **not** in main Dockerfile (separate deploy) |
+| P2-5 | masque not in workspace / Dockerfile | **FIXED** — in workspace; Dockerfile COPYs sources for resolve, `--exclude masque-service` from multi-service image |
 | P2-6 | VoIP rate-limit TODO | **FIXED** — recipient + peer Redis limits; fail-open + `voip_push` metric |
 | P2-7 | Docs claim gateway injects user id | **FIXED** — AGENTS + TrustedUser docs |
 
