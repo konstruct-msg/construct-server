@@ -23,6 +23,16 @@ use crate::routing::callee_user_id_from_route;
 use crate::time::unix_millis;
 use crate::turn::generate_turn_credentials;
 
+/// Send a signal response on the gRPC stream; log if the client already hung up.
+async fn send_out(
+    out_tx: &tokio::sync::mpsc::Sender<Result<SignalResponse, Status>>,
+    response: SignalResponse,
+) {
+    if out_tx.send(Ok(response)).await.is_err() {
+        tracing::debug!("signal stream closed; dropped outbound response");
+    }
+}
+
 /// Simple per-stream token bucket rate limiter (no external crates).
 /// Refills at `rate_per_sec` tokens per second. Each `check()` consumes 1 token.
 struct TokenBucket {
@@ -140,8 +150,7 @@ impl SignalingService for SignalingServiceImpl {
                                 Some(signal_request::Request::RoutedSignal(routed)) => {
                                     // Enforce per-stream signal rate limit before forwarding.
                                     if !signal_limiter.check() {
-                                        let _ = out_tx
-                                            .send(Ok(SignalResponse {
+                                        send_out(&out_tx, SignalResponse {
                                                 response: Some(
                                                     signal_response::Response::Error(SignalError {
                                                         code: SignalErrorCode::RateLimited as i32,
@@ -150,8 +159,7 @@ impl SignalingService for SignalingServiceImpl {
                                                                 .into(),
                                                     }),
                                                 ),
-                                            }))
-                                            .await;
+                                            }).await;
                                         continue;
                                     }
 
@@ -180,16 +188,18 @@ impl SignalingService for SignalingServiceImpl {
                                         .touch_online(&user_id, &device_id_for_inbound)
                                         .await;
                                     registry.note_keepalive(&user_id).await;
-                                    let _ = out_tx
-                                        .send(Ok(SignalResponse {
+                                    send_out(
+                                        &out_tx,
+                                        SignalResponse {
                                             response: Some(signal_response::Response::Pong(
                                                 SignalPong {
                                                     timestamp: ping.timestamp,
                                                     server_timestamp: unix_millis(),
                                                 },
                                             )),
-                                        }))
-                                        .await;
+                                        },
+                                    )
+                                    .await;
                                 }
                                 None => {}
                             },
@@ -578,14 +588,16 @@ async fn handle_outbound_signal(
                                 SignalErrorCode::Unauthorized,
                             )])
                             .inc();
-                        let _ = out_tx
-                            .send(Ok(SignalResponse {
+                        send_out(
+                            &out_tx,
+                            SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
                                     message: "Calls allowed only for mutual contacts".into(),
                                 })),
-                            }))
-                            .await;
+                            },
+                        )
+                        .await;
                         return Ok(());
                     }
                     Err(e) => {
@@ -598,14 +610,16 @@ async fn handle_outbound_signal(
                                 SignalErrorCode::Unauthorized,
                             )])
                             .inc();
-                        let _ = out_tx
-                            .send(Ok(SignalResponse {
+                        send_out(
+                            &out_tx,
+                            SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
                                     message: "Calls not allowed".into(),
                                 })),
-                            }))
-                            .await;
+                            },
+                        )
+                        .await;
                         return Ok(());
                     }
                 }
@@ -617,14 +631,16 @@ async fn handle_outbound_signal(
                                 SignalErrorCode::Unauthorized,
                             )])
                             .inc();
-                        let _ = out_tx
-                            .send(Ok(SignalResponse {
+                        send_out(
+                            &out_tx,
+                            SignalResponse {
                                 response: Some(signal_response::Response::Error(SignalError {
                                     code: SignalErrorCode::Unauthorized as i32,
                                     message: "Call not allowed".into(),
                                 })),
-                            }))
-                            .await;
+                            },
+                        )
+                        .await;
                         return Ok(());
                     }
                     Ok(false) => {}
@@ -637,14 +653,16 @@ async fn handle_outbound_signal(
                 metrics::SIGNALING_ERRORS_TOTAL
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::Unauthorized)])
                     .inc();
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
+                send_out(
+                    &out_tx,
+                    SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::Unauthorized as i32,
                             message: "Calls allowed only for mutual contacts".into(),
                         })),
-                    }))
-                    .await;
+                    },
+                )
+                .await;
                 return Ok(());
             }
 
@@ -656,14 +674,16 @@ async fn handle_outbound_signal(
                 metrics::SIGNALING_ERRORS_TOTAL
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
+                send_out(
+                    &out_tx,
+                    SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
                             message: "Call rate limit exceeded".into(),
                         })),
-                    }))
-                    .await;
+                    },
+                )
+                .await;
                 return Ok(());
             }
             if !rate_limiter
@@ -674,14 +694,16 @@ async fn handle_outbound_signal(
                 metrics::SIGNALING_ERRORS_TOTAL
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
+                send_out(
+                    &out_tx,
+                    SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
                             message: "Too many calls to this peer".into(),
                         })),
-                    }))
-                    .await;
+                    },
+                )
+                .await;
                 return Ok(());
             }
             if !rate_limiter
@@ -692,14 +714,16 @@ async fn handle_outbound_signal(
                 metrics::SIGNALING_ERRORS_TOTAL
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::RateLimited)])
                     .inc();
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
+                send_out(
+                    &out_tx,
+                    SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::RateLimited as i32,
                             message: "Callee declined recently (cooldown)".into(),
                         })),
-                    }))
-                    .await;
+                    },
+                )
+                .await;
                 return Ok(());
             }
 
@@ -707,14 +731,16 @@ async fn handle_outbound_signal(
                 metrics::SIGNALING_ERRORS_TOTAL
                     .with_label_values(&[signal_error_code_to_str(SignalErrorCode::CalleeBusy)])
                     .inc();
-                let _ = out_tx
-                    .send(Ok(SignalResponse {
+                send_out(
+                    &out_tx,
+                    SignalResponse {
                         response: Some(signal_response::Response::Error(SignalError {
                             code: SignalErrorCode::CalleeBusy as i32,
                             message: "Callee is busy".into(),
                         })),
-                    }))
-                    .await;
+                    },
+                )
+                .await;
                 return Ok(());
             }
 

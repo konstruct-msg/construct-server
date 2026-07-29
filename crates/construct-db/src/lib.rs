@@ -508,6 +508,7 @@ async fn get_key_bundle_from_device(
             d.verifying_key,
             d.identity_public,
             d.signed_prekey_public,
+            d.signed_prekey_signature,
             d.crypto_suites
         FROM devices d
         JOIN users u ON d.user_id = u.id
@@ -540,13 +541,35 @@ async fn get_key_bundle_from_device(
         1 // CLASSIC_X25519
     };
 
+    // Prefer stored signed_prekey_signature (migration 016+). Missing → empty
+    // placeholder + warn (client should re-upload keys); never invent a fake sig
+    // without logging.
+    let signed_prekey_sig = match &d.signed_prekey_signature {
+        Some(sig) if sig.len() == 64 => BASE64.encode(sig),
+        Some(sig) => {
+            tracing::warn!(
+                user_id = %user_id,
+                sig_len = sig.len(),
+                "signed_prekey_signature has unexpected length"
+            );
+            BASE64.encode(vec![0u8; 64])
+        }
+        None => {
+            tracing::warn!(
+                user_id = %user_id,
+                "Device missing signed_prekey_signature in get_key_bundle_from_device"
+            );
+            BASE64.encode(vec![0u8; 64])
+        }
+    };
+
     // Construct SuiteKeyMaterial from device keys
     let suite_key = SuiteKeyMaterial {
         suite_id: crypto_suite_id,
         identity_key: BASE64.encode(&d.identity_public),
         signed_prekey: BASE64.encode(&d.signed_prekey_public),
-        signed_prekey_signature: BASE64.encode(vec![0u8; 64]), // Placeholder - device doesn't store this separately
-        one_time_prekeys: vec![],                              // Not used for initial key exchange
+        signed_prekey_signature: signed_prekey_sig,
+        one_time_prekeys: vec![], // Not used for initial key exchange
     };
 
     // Construct BundleData
@@ -560,13 +583,13 @@ async fn get_key_bundle_from_device(
     let bundle_data_bytes =
         serde_json::to_vec(&bundle_data).context("Failed to serialize bundle_data")?;
 
-    // For device-based auth, we use verifying_key as master_identity_key
-    // TODO: Store real bundle signature from client when system stabilizes
-    // For now: placeholder, client doesn't verify
+    // Outer `UploadableKeyBundle.signature` is a legacy envelope field; clients
+    // verify `signed_prekey_signature` (and invite signatures), not this bytes
+    // field. Kept as zeros until a stored bundle signature is protocolized.
     let bundle = UploadableKeyBundle {
         master_identity_key: BASE64.encode(&d.verifying_key),
         bundle_data: BASE64.encode(&bundle_data_bytes),
-        signature: BASE64.encode(vec![0u8; 64]), // TODO: store real signature from client
+        signature: BASE64.encode(vec![0u8; 64]),
         nonce: None,
         timestamp: None,
     };
@@ -662,18 +685,13 @@ pub async fn get_extended_key_bundle(
     let verifying_key = BASE64.encode(&d.verifying_key);
     let identity_key = BASE64.encode(&d.identity_public);
 
-    // Bundle signature is for the entire bundleData JSON
-    // This is separate from signedPrekeySignature
-    //
-    // TODO: When system stabilizes, implement full bundle signature verification:
-    //   1. Client generates bundleSignature on key upload
-    //   2. Server stores bundleSignature in devices table
-    //   3. Client verifies on GET /public-key
-    // For now: placeholder, client doesn't verify
+    // Outer bundle envelope signature is unused by current clients (they verify
+    // signed_prekey_signature / invite sigs). Zeros are intentional until protocol
+    // stores a real bundle signature — do not treat as X3DH material.
     let bundle = UploadableKeyBundle {
         master_identity_key: identity_key.clone(), // X25519 for sessions
         bundle_data: BASE64.encode(&bundle_data_bytes),
-        signature: BASE64.encode(vec![0u8; 64]), // TODO: store real signature from client
+        signature: BASE64.encode(vec![0u8; 64]),
         nonce: None,
         timestamp: None,
     };

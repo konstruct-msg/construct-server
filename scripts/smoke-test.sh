@@ -166,6 +166,41 @@ _timed_err "GetPendingMessages (fake JWT → rejected fast)" grpcurl \
   "$MSG_HOST" \
   shared.proto.services.v1.MessagingService/GetPendingMessages
 
+# P0-A regression: client-supplied x-user-id alone must NOT authenticate.
+# Caddy does not inject identity headers — services require Bearer.
+_timed_err "GetPendingMessages (x-user-id spoof only → rejected)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/messaging_service.proto \
+  -H "x-user-id: 00000000-0000-0000-0000-000000000001" \
+  -d '{}' \
+  "$MSG_HOST" \
+  shared.proto.services.v1.MessagingService/GetPendingMessages
+
+# Spoof guard: Bearer present but x-user-id mismatches claims → reject.
+_timed_err "GetPendingMessages (fake JWT + mismatched x-user-id → rejected)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/messaging_service.proto \
+  -H "Authorization: Bearer $FAKE_JWT" \
+  -H "x-user-id: 00000000-0000-0000-0000-000000000001" \
+  -d '{}' \
+  "$MSG_HOST" \
+  shared.proto.services.v1.MessagingService/GetPendingMessages
+
+# ── 3b. Auth logout / revocation ──────────────────────────────────────────────
+echo ""
+echo "--- Auth Logout ---"
+
+# Logout requires access_token in request body; empty → INVALID_ARGUMENT (not hang).
+_timed_err "Logout (empty access_token → rejected fast)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/auth_service.proto \
+  -d '{"access_token": ""}' \
+  "$AUTH_HOST" \
+  shared.proto.services.v1.AuthService/Logout
+
 # ── 4. Key service ────────────────────────────────────────────────────────────
 echo ""
 echo "--- Key Service ---"
@@ -207,7 +242,7 @@ _timed_err_unauthenticated "InitiateCall (no auth → UNAUTHENTICATED, not UNIMP
   "$SIG_HOST" \
   shared.proto.signaling.v1.SignalingService/InitiateCall
 
-# GetTurnCredentials without x-user-id → must also reject quickly (liveness).
+# GetTurnCredentials without auth → must also reject quickly (liveness).
 _timed_err "GetTurnCredentials (no auth → rejected fast)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
@@ -216,10 +251,40 @@ _timed_err "GetTurnCredentials (no auth → rejected fast)" grpcurl \
   "$SIG_HOST" \
   shared.proto.signaling.v1.SignalingService/GetTurnCredentials
 
+# P0-A: x-user-id alone must not authorize calls.
+_timed_err "InitiateCall (x-user-id spoof only → rejected)" grpcurl \
+  -plaintext \
+  -import-path "$PROTO_DIR" \
+  -proto services/signaling_service.proto \
+  -H "x-user-id: 00000000-0000-0000-0000-000000000001" \
+  -d '{"call_id":"smoke-spoof","callee_user_id":"00000000-0000-0000-0000-000000000002","has_video":false}' \
+  "$SIG_HOST" \
+  shared.proto.signaling.v1.SignalingService/InitiateCall
+
+
+# ── 6. Identity metrics surface (optional; warn-only if unreachable) ──────────
+echo ""
+echo "--- Metrics (identity HTTP) ---"
+IDENTITY_HTTP="${IDENTITY_HTTP:-localhost:8081}"
+if curl -sf --max-time "$TIMEOUT_S" "http://$IDENTITY_HTTP/metrics" > /tmp/construct-smoke-metrics.txt 2>/dev/null; then
+  _ok "GET identity /metrics"
+  # Counters may be zero until first fail-open; presence of HELP/TYPE is enough.
+  if grep -q "construct_auth_security_fail_open_total\|construct_messages_sent_total\|construct_" /tmp/construct-smoke-metrics.txt; then
+    _ok "metrics text exposes construct_* series"
+  else
+    _warn "metrics reachable but no construct_* series found yet"
+  fi
+else
+  _warn "identity /metrics not reachable at $IDENTITY_HTTP (skip — not all stacks expose it)"
+fi
+
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $WARN warnings ==="
+echo ""
+echo "Phase 7 audit checks covered: Bearer-required auth, x-user-id spoof rejection,"
+echo "  logout empty-token reject, signaling auth, optional metrics scrape."
 echo ""
 
 if [ "$FAIL" -gt 0 ]; then

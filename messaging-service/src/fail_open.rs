@@ -24,6 +24,7 @@
 //! | `federation_origin`  | `federation` origin RL        | skip per-origin limit        |
 //! | `otpk_drain_check`   | key-service drain GET         | allow bundle (no drain gate) |
 //! | `otpk_drain_record`  | key-service drain INCR        | skip recording consumption   |
+//! | `voip_push`          | notification_core VoIP RL     | skip recipient/peer VoIP caps|
 //!
 //! # Privacy Pass (`MSG_STEALTH_TOKEN_POLICY`) — P1-9
 //!

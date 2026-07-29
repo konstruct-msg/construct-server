@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use construct_error::AppError;
 use construct_server_shared::auth_utils;
 use construct_server_shared::shared::proto::services::v1 as proto;
 use construct_server_shared::shared::proto::signaling::v1::CallType as SignalingCallType;
@@ -229,7 +230,15 @@ impl NotificationService for NotificationGrpcService {
         let ctx = self.notif_ctx()?;
         let output = notification_core::send_voip_incoming_call(ctx, input)
             .await
-            .map_err(|e| Status::internal(format!("Failed to send VoIP incoming call: {}", e)))?;
+            .map_err(|e| {
+                if let Some(AppError::TooManyRequests(msg)) = e.downcast_ref::<AppError>() {
+                    Status::resource_exhausted(msg.clone())
+                } else if let Some(AppError::Validation(msg)) = e.downcast_ref::<AppError>() {
+                    Status::invalid_argument(msg.clone())
+                } else {
+                    Status::internal(format!("Failed to send VoIP incoming call: {}", e))
+                }
+            })?;
 
         Ok(Response::new(proto::SendVoipIncomingCallResponse {
             success: output.success,

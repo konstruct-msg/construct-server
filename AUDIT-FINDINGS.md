@@ -201,15 +201,15 @@ GetPreKeyBundle remains public-ish with IP rate limit + OTPK drain (metered fail
 
 ## P2 — stability / hygiene
 
-| ID | Issue | Where |
-|----|-------|-------|
-| P2-1 | Many `let _ = out_tx.send` | signaling (call UX) |
-| P2-2 | APNs token DELETE/UPDATE errors discarded | notification_core |
-| P2-3 | Context adapter panic if APNs/token-enc missing | identity/auth/user contexts |
-| P2-4 | Zero signature placeholders in DB key bundles | construct-db TODOs |
-| P2-5 | masque not in workspace / Dockerfile | root Cargo / ops |
-| P2-6 | VoIP rate-limit TODO | notification_core |
-| P2-7 | Docs claim gateway injects user id | AGENTS, extractors, auth_utils |
+| ID | Issue | Status |
+|----|-------|--------|
+| P2-1 | Signaling `let _ = out_tx.send` | **FIXED** — `send_out()` logs on closed stream |
+| P2-2 | APNs token DELETE/UPDATE errors discarded | **FIXED** — `if let Err` + error logs |
+| P2-3 | Context adapter panic if APNs/token-enc missing | **FIXED** — optional fields, no panic |
+| P2-4 | Zero signature placeholders in DB key bundles | **FIXED** (SPK sig from DB); outer bundle envelope sig remains zeros (unused by clients) |
+| P2-5 | masque not in workspace / Dockerfile | **FIXED** — in workspace; still **not** in main Dockerfile (separate deploy) |
+| P2-6 | VoIP rate-limit TODO | **FIXED** — recipient + peer Redis limits; fail-open + `voip_push` metric |
+| P2-7 | Docs claim gateway injects user id | **FIXED** — AGENTS + TrustedUser docs |
 
 ---
 
@@ -270,8 +270,22 @@ GetPreKeyBundle remains public-ish with IP rate limit + OTPK drain (metered fail
 - [x] P0 auth / secrets / revoke / media  
 - [x] P1 small + fail-open metrics + stealth policy + OTPK meter  
 - [x] P1-3 failed-login lockout (await + metrics)  
-- [ ] Phase 7 verification / smoke after deploy of this batch  
-- [ ] Optional: Grafana panel for `construct_msg_abuse_fail_open_total` + `construct_auth_security_fail_open_total`  
+- [x] Phase 7 smoke script extended (spoof headers, logout, signaling, metrics scrape)  
+- [x] Grafana: fail-open panels in `ops/grafana/dashboards/construct-overview.json`  
+- [x] P2 hygiene sweep (P2-1…P2-7)  
+- [ ] Deploy batch + run `./scripts/smoke-test.sh` against live smoke/prod stack  
+- [ ] Confirm Grafana provision picks up dashboard (reload / re-import)  
+
+### Phase 7 smoke (local / CI)
+
+```bash
+# Against docker-compose.smoke.yml (default ports):
+./scripts/smoke-test.sh
+# Optional: IDENTITY_HTTP=localhost:8081 ./scripts/smoke-test.sh
+```
+
+Audit-specific cases added: `x-user-id` spoof without Bearer, Bearer+mismatched header,
+Logout empty token, InitiateCall spoof, optional identity `/metrics` scrape.
 
 ---
 
