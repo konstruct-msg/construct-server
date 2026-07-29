@@ -149,7 +149,10 @@ Alert: sustained non-zero `rate(construct_msg_abuse_fail_open_total[5m])`.
 
 ### P1-3 Failed-login temporary block discarded
 
-`devices.rs` ~724: `let _ = q.block_user_temporarily(...).await` inside spawn — lockout can silently fail.
+**Status:** FIXED — lockout runs **awaited on request path** (no fire-and-forget
+`tokio::spawn`); Redis errors log + `construct_auth_security_fail_open_total`
+(`login_block_check` / `login_fail_count` / `login_block_apply` / `login_fail_reset`).
+Policy: fail-open on Redis for login availability (same bias as messaging abuse).
 
 ### P1-4 Receipt HMAC fallback key
 
@@ -266,8 +269,9 @@ GetPreKeyBundle remains public-ish with IP rate limit + OTPK drain (metered fail
 
 - [x] P0 auth / secrets / revoke / media  
 - [x] P1 small + fail-open metrics + stealth policy + OTPK meter  
+- [x] P1-3 failed-login lockout (await + metrics)  
 - [ ] Phase 7 verification / smoke after deploy of this batch  
-- [ ] Optional: Grafana panel for `construct_msg_abuse_fail_open_total`  
+- [ ] Optional: Grafana panel for `construct_msg_abuse_fail_open_total` + `construct_auth_security_fail_open_total`  
 
 ---
 
