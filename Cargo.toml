@@ -11,6 +11,9 @@ members = [
     "group-service",
     "signaling-service",
     "veil-service",
+    # Optional edge binary (WS/UDP relay). Built with workspace; not copied into
+    # the main multi-service Dockerfile (separate deploy surface — see P2-5).
+    "masque-service",
 
     # modular crates
     "crates/construct-types",

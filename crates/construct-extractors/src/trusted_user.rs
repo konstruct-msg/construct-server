@@ -41,16 +41,14 @@ use serde_json::json;
 use std::convert::Infallible;
 use uuid::Uuid;
 
-/// User identity propagated from Gateway via trusted X-User-Id header.
+/// User identity from `X-User-Id` — **legacy REST / internal-mesh only**.
 ///
-/// This extractor is used in the Trust Boundary pattern where:
-/// - Gateway is the ONLY entry point from the internet
-/// - Gateway verifies JWT and sets X-User-Id header
-/// - Services trust this header (they are not directly accessible)
+/// Production public path is Caddy → h2c with **no** JWT plugin and **no**
+/// header injection. Do **not** treat client-supplied `X-User-Id` as auth on any
+/// internet-facing surface. Prefer Bearer verification via `auth_utils`.
 ///
-/// SECURITY WARNING:
-/// Services using this extractor MUST NOT be accessible from the internet.
-/// They should only be accessible via internal network (e.g., Fly.io private networking).
+/// Safe only when: (1) the service is not reachable from the public edge, and
+/// (2) a trusted hop sets the header after cryptographic verify.
 #[derive(Debug, Clone)]
 pub struct TrustedUser(pub Uuid);
 
@@ -64,19 +62,15 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Extract X-User-Id header set by Gateway
         let user_id = parts
             .headers
             .get(USER_ID_HEADER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| {
-                // This should never happen if Gateway is working correctly
-                // and if the service is not directly accessible from internet
                 tracing::error!(
-                    "Missing or invalid X-User-Id header. \
-                     Is this request coming through Gateway? \
-                     Is this service directly accessible from internet (security issue)?"
+                    "Missing or invalid X-User-Id header on TrustedUser extractor. \
+                     This path must not be public; use Bearer auth for edge RPCs."
                 );
 
                 let body = json!({

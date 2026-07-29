@@ -274,8 +274,8 @@ Total: ~5-15 ms
 - **Blocklist key**: `invalidated_token:{jti}` — Redis `SET` with TTL = remaining token lifetime. Written on explicit logout/revocation.
 - **Check on gRPC logout** (`AuthService.Logout`): server requires `access_token` in request body (`field 1`). Extracts JTI → adds to blocklist. Client **must populate** `request.accessToken` from Keychain; if empty, server returns `INVALID_ARGUMENT` (client should treat this as a non-fatal warning and continue session cleanup).
 - **Check on token verify** (`AuthService.VerifyToken`): crypto verify + `EXISTS invalidated_token:{jti}`.
-- **Check in messaging-service gRPC**: `extract_authed_user_id()` in `grpc.rs` — checks blocklist for Bearer JWT auth path (fail-closed on Redis error). `x-user-id` header path (gateway-injected) is trusted without extra check.
-- **NOT checked in**: user-service (and other gateway-only services) local JWT verify — these only receive `x-user-id`, no Bearer fallback, so a revoked token cannot reach them directly.
+- **Check in messaging-service gRPC**: `extract_authed_user_id()` in `grpc.rs` — **Bearer required**; crypto verify + blocklist (fail-closed on Redis error). Optional client `x-user-id` / `x-device-id` must match claims (spoof guard); headers alone are never trusted.
+- **Edge path**: vanilla Caddy → h2c services — **does not** inject `x-user-id`. Gateway (`:9443`) is veil/obfs4 proxy only, not JWT auth.
 
 ### Refresh Token Reverse Index
 
@@ -376,7 +376,7 @@ must not enter E2E semantics. Edits, replies, reactions, deletes, pins MUST use
 
 ## Known Issues / Tech Debt
 
-1. **`to_app_context()` adapter** — `AppContext::apns_client` is non-optional, so APNs clients are initialized in `messaging-service/main.rs` even though `to_app_context()` doesn't use them. Full fix: make `apns_client` `Option<ApnsClient>` in `construct-context`.
+1. **`to_app_context()` adapter** — `AppContext::apns_client` / `token_encryption` are `Option`; auth/identity adapters leave them `None` when unused. Messaging builds a separate `NotificationServiceContext` for push.
 
 2. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
 

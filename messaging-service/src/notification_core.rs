@@ -282,16 +282,18 @@ pub async fn send_blind_notification(
                 push_provider = %token_row.push_provider,
                 "APNs: token invalid/rejected — deleting from DB"
             );
-            let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                .bind(&token_row.device_token_encrypted)
-                .execute(&*context.db_pool)
-                .await
-                .map_err(|db_err| {
-                    tracing::error!(
-                        error = %db_err,
-                        "Failed to delete invalid device token from DB"
-                    );
-                });
+            if let Err(db_err) =
+                sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                    .bind(&token_row.device_token_encrypted)
+                    .execute(&*context.db_pool)
+                    .await
+            {
+                tracing::error!(
+                    error = %db_err,
+                    user_hash = %user_id_hash,
+                    "Failed to delete invalid device token from DB"
+                );
+            }
             continue;
         }
         if !succeeded {
@@ -735,10 +737,18 @@ pub async fn send_key_rotation_wake(
             }
             Err(ApnsSendError::InvalidToken) => {
                 tracing::warn!(user_hash = %user_id_hash, push_environment = %token_row.push_environment, "APNs token invalid — deleting");
-                let _ = sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                    .bind(&token_row.device_token_encrypted)
-                    .execute(&*context.db_pool)
-                    .await;
+                if let Err(db_err) =
+                    sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                        .bind(&token_row.device_token_encrypted)
+                        .execute(&*context.db_pool)
+                        .await
+                {
+                    tracing::error!(
+                        error = %db_err,
+                        user_hash = %user_id_hash,
+                        "Failed to delete invalid device token after key-rotation wake"
+                    );
+                }
             }
             Err(ApnsSendError::Other(e)) => {
                 tracing::warn!(error = %e, user_hash = %user_id_hash, "APNs send failed (best-effort)");
@@ -750,14 +760,21 @@ pub async fn send_key_rotation_wake(
     Ok(SendKeyRotationWakeOutput { success: sent_any })
 }
 
+/// Per-recipient VoIP push budget (defense in depth; signaling also rate-limits calls).
+const VOIP_PUSH_MAX_PER_WINDOW: i64 = 10;
+const VOIP_PUSH_WINDOW_SECS: i64 = 60;
+/// Per (caller → recipient) pair budget within the same window.
+const VOIP_PUSH_PEER_MAX_PER_WINDOW: i64 = 3;
+
 /// Send a VoIP push notification for an incoming call.
 ///
 /// SECURITY: the push payload is server-constructed and visible to Apple/APNs.
 /// It only wakes the device / CallKit. The actual call authorization (caller
 /// identity, DTLS fingerprint, etc.) happens inside the E2EE signaling path.
 ///
-/// TODO: add per-caller/per-recipient rate limiting here to reduce the impact
-/// of a compromised server account trying to spam call invites.
+/// Rate limits (Redis): recipient total + caller→recipient pair, aligned with
+/// signaling call limits. Redis errors fail-open + metric so push availability
+/// is not lost during an outage.
 pub async fn send_voip_incoming_call(
     context: &NotificationServiceContext,
     input: SendVoipIncomingCallInput,
@@ -778,6 +795,65 @@ pub async fn send_voip_incoming_call(
     }
     if input.call_type.is_empty() || input.call_type.len() > 16 {
         return Err(AppError::Validation("call_type format is invalid".to_string()).into());
+    }
+
+    // VoIP push rate limits (recipient + peer pair).
+    {
+        let mut queue = context.queue.lock().await;
+        let recip_key = format!("rate:voip:{}", input.user_id);
+        match queue
+            .increment_rate_limit(&recip_key, VOIP_PUSH_WINDOW_SECS)
+            .await
+        {
+            Ok(count) if count > VOIP_PUSH_MAX_PER_WINDOW => {
+                tracing::warn!(
+                    user_hash = %user_id_hash,
+                    count,
+                    limit = VOIP_PUSH_MAX_PER_WINDOW,
+                    "VoIP push rate limit exceeded (recipient)"
+                );
+                return Err(
+                    AppError::TooManyRequests("VoIP push rate limit exceeded".to_string()).into(),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_hash = %user_id_hash,
+                    "VoIP recipient rate limit Redis error; failing open"
+                );
+                construct_metrics::record_abuse_fail_open("voip_push");
+            }
+        }
+
+        let peer_key = format!("rate:voip:{}:{}", input.caller_id, input.user_id);
+        match queue
+            .increment_rate_limit(&peer_key, VOIP_PUSH_WINDOW_SECS)
+            .await
+        {
+            Ok(count) if count > VOIP_PUSH_PEER_MAX_PER_WINDOW => {
+                tracing::warn!(
+                    user_hash = %user_id_hash,
+                    count,
+                    limit = VOIP_PUSH_PEER_MAX_PER_WINDOW,
+                    "VoIP push peer rate limit exceeded"
+                );
+                return Err(AppError::TooManyRequests(
+                    "VoIP push peer rate limit exceeded".to_string(),
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_hash = %user_id_hash,
+                    "VoIP peer rate limit Redis error; failing open"
+                );
+                construct_metrics::record_abuse_fail_open("voip_push");
+            }
+        }
     }
 
     let rows = sqlx::query(
@@ -819,10 +895,18 @@ pub async fn send_voip_incoming_call(
                     user_hash = %user_id_hash,
                     "Failed to decrypt VoIP token - disabling"
                 );
-                let _ = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
-                    .bind(token_id)
-                    .execute(&*context.db_pool)
-                    .await;
+                if let Err(db_err) =
+                    sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                        .bind(token_id)
+                        .execute(&*context.db_pool)
+                        .await
+                {
+                    tracing::error!(
+                        error = %db_err,
+                        user_hash = %user_id_hash,
+                        "Failed to disable VoIP token after decrypt failure"
+                    );
+                }
                 continue;
             }
         };
@@ -852,10 +936,18 @@ pub async fn send_voip_incoming_call(
                     push_environment = %push_environment,
                     "VoIP token rejected by APNs - disabling"
                 );
-                let _ = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
-                    .bind(token_id)
-                    .execute(&*context.db_pool)
-                    .await;
+                if let Err(db_err) =
+                    sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                        .bind(token_id)
+                        .execute(&*context.db_pool)
+                        .await
+                {
+                    tracing::error!(
+                        error = %db_err,
+                        user_hash = %user_id_hash,
+                        "Failed to disable VoIP token after APNs InvalidToken"
+                    );
+                }
             }
             Err(ApnsSendError::Other(e)) => {
                 tracing::warn!(
