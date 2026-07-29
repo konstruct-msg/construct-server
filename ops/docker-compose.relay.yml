@@ -141,7 +141,8 @@ services:
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
+      # APNS_KEY_PATH + APNS_KEY_ID come from env_file — do NOT re-list here. A hardcoded
+      # `:-` default overrides env_file and survives key rotation (revoked .p8, push dead).
       CONTACT_HMAC_SECRET: ${CONTACT_HMAC_SECRET}
     volumes:
       - /opt/construct/secrets:/secrets:ro

@@ -161,6 +161,33 @@ impl ApnsConfig {
             device_token_encryption_key: key,
         })
     }
+
+    /// This config re-pointed at the APNs sandbox endpoint (api.sandbox.push.apple.com).
+    ///
+    /// Apple lets an APNs auth key be restricted to a single environment. A
+    /// Production-only key is accepted on api.push.apple.com and rejected on the
+    /// sandbox endpoint with `BadEnvironmentKeyInToken` (403) — which is exactly how
+    /// every push to a development build died while production users saw nothing wrong.
+    ///
+    /// Preferred fix is one key configured for "Sandbox & Production", in which case
+    /// nothing here needs setting. `APNS_SANDBOX_KEY_PATH` / `APNS_SANDBOX_KEY_ID` are
+    /// the escape hatch for teams that would rather keep the production key untouched
+    /// and issue a separate sandbox-scoped key; both default to the production key.
+    pub fn sandbox_variant(&self) -> Self {
+        let non_empty = |var: &str| {
+            std::env::var(var)
+                .ok()
+                .map(|v| v.trim_matches('"').trim_matches('\'').to_string())
+                .filter(|v| !v.is_empty())
+        };
+
+        Self {
+            environment: ApnsEnvironment::Development,
+            key_path: non_empty("APNS_SANDBOX_KEY_PATH").unwrap_or_else(|| self.key_path.clone()),
+            key_id: non_empty("APNS_SANDBOX_KEY_ID").unwrap_or_else(|| self.key_id.clone()),
+            ..self.clone()
+        }
+    }
 }
 
 /// Federation configuration

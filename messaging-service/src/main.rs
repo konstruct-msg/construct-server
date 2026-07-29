@@ -23,7 +23,7 @@ use axum::{
     routing::{get, post, put},
 };
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
-use construct_config::{ApnsEnvironment, Config};
+use construct_config::Config;
 use construct_server_shared::auth::AuthManager;
 use construct_server_shared::db::DbPool;
 use construct_server_shared::notification_service::NotificationServiceContext;
@@ -136,8 +136,13 @@ async fn main() -> Result<()> {
 
     // Initialize APNs sandbox client (api.sandbox.push.apple.com) — for debug/TestFlight builds.
     info!("Initializing APNs sandbox client...");
-    let mut sandbox_config = config.apns.clone();
-    sandbox_config.environment = ApnsEnvironment::Development;
+    let sandbox_config = config.apns.sandbox_variant();
+    if sandbox_config.key_id != config.apns.key_id {
+        info!(
+            "APNs sandbox uses a separate auth key (key_id: {})",
+            sandbox_config.key_id
+        );
+    }
     let apns_sandbox_client = Arc::new(
         ApnsClient::new(sandbox_config).context("Failed to initialize APNs sandbox client")?,
     );
