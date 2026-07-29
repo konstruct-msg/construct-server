@@ -681,23 +681,30 @@ message JoinRequestPayload {
   // New device identifier (derived from identity key)
   string pending_device_id = 1;
 
-  // X25519 identity key (base64)
-  string identity_public_b64 = 2;
-
-  // Ed25519 verifying key (base64)
-  string verifying_key_b64 = 3;
-
-  // Signed prekey public (base64)
-  string signed_prekey_public_b64 = 4;
-
-  // Ed25519 signature of (prologue || spk_pub), 64 bytes (base64)
-  string signed_prekey_signature_b64 = 5;
+  // DEPRECATED (fields 2-5): base64-in-string carriage of binary key material.
+  // Kept for clients built before the bytes fields below existed; the server
+  // prefers the bytes fields and falls back to these. Remove once no released
+  // client populates them, then mark the numbers `reserved`.
+  string identity_public_b64 = 2 [deprecated = true];
+  string verifying_key_b64 = 3 [deprecated = true];
+  string signed_prekey_public_b64 = 4 [deprecated = true];
+  string signed_prekey_signature_b64 = 5 [deprecated = true];
 
   // Human-readable device name (e.g., "MacBook Pro")
   string device_name = 6;
 
   // Platform identifier (e.g., "macos", "linux", "windows")
   string platform = 7;
+
+  // Binary key material. Preferred over the deprecated base64 strings above.
+  // X25519 identity key, 32 bytes
+  bytes identity_public = 8;
+  // Ed25519 verifying key, 32 bytes
+  bytes verifying_key = 9;
+  // Signed prekey public, 32 bytes
+  bytes signed_prekey_public = 10;
+  // Ed25519 signature of (prologue || spk_pub), 64 bytes
+  bytes signed_prekey_signature = 11;
 }
 
 // JoinRequestAck - Server acknowledges the join request was stored

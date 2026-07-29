@@ -247,14 +247,17 @@ impl<'a> TokenManager<'a> {
     // Join Request Tokens (Flow B: TUI → Phone linking)
     // =========================================================================
 
-    /// Store a join request payload (JSON) with 10-minute TTL.
+    /// Store a join request payload with 10-minute TTL.
+    ///
+    /// The payload is opaque bytes: it carries X25519/Ed25519 key material, so the
+    /// caller serializes it in a binary format rather than base64-in-JSON.
     pub(crate) async fn store_join_request(
         &mut self,
         pending_device_id: &str,
-        json_payload: &str,
+        payload: &[u8],
     ) -> Result<()> {
         let key = format!("join_req:{}", pending_device_id);
-        let _: () = self.client.set_ex(&key, json_payload, 10 * 60).await?;
+        let _: () = self.client.set_ex(&key, payload, 10 * 60).await?;
         Ok(())
     }
 
@@ -262,20 +265,20 @@ impl<'a> TokenManager<'a> {
     pub(crate) async fn get_join_request(
         &mut self,
         pending_device_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Vec<u8>>> {
         let key = format!("join_req:{}", pending_device_id);
-        let payload: Option<String> = self.client.get(&key).await?;
+        let payload: Option<Vec<u8>> = self.client.get(&key).await?;
         Ok(payload)
     }
 
     /// Atomically consume a join request (GET + DEL).
-    /// Returns the JSON payload if it existed.
+    /// Returns the payload if it existed.
     pub(crate) async fn consume_join_request(
         &mut self,
         pending_device_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Vec<u8>>> {
         let key = format!("join_req:{}", pending_device_id);
-        let payload: Option<String> = self.client.get(&key).await?;
+        let payload: Option<Vec<u8>> = self.client.get(&key).await?;
         if payload.is_some() {
             let _: i64 = self.client.del(&key).await?;
         }

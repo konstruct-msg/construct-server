@@ -111,8 +111,29 @@ struct IdentityGrpcService {
     cert_signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
+/// Pending device-link join request, held in Redis between `SubmitJoinRequest`
+/// (joining device) and `ApproveJoinRequest` (approving phone).
+///
+/// Key material is `Vec<u8>` end-to-end: the wire carries proto `bytes`, so
+/// re-encoding it as base64 just to sit in Redis would reintroduce the encoding
+/// this migration removes. Serialized with MessagePack rather than JSON — JSON
+/// has no binary type, so serde would base64 these fields right back.
 #[derive(Debug, Serialize, Deserialize)]
 struct JoinRequestData {
+    pending_device_id: String,
+    identity_public: Vec<u8>,
+    verifying_key: Vec<u8>,
+    signed_prekey_public: Vec<u8>,
+    signed_prekey_signature: Vec<u8>,
+    device_name: String,
+    platform: String,
+}
+
+/// Pre-migration Redis shape: JSON with the key material base64'd into strings.
+/// Only used to read entries written by the previous build — a join request has a
+/// 10-minute TTL, so this can be deleted one release after the rollout.
+#[derive(Debug, Deserialize)]
+struct LegacyJoinRequestData {
     pending_device_id: String,
     identity_public_b64: String,
     verifying_key_b64: String,
@@ -120,6 +141,42 @@ struct JoinRequestData {
     signed_prekey_signature_b64: String,
     device_name: String,
     platform: String,
+}
+
+impl JoinRequestData {
+    /// Decodes a stored join request, accepting both the current MessagePack shape
+    /// and the legacy base64-in-JSON one so a rolling deploy does not strand the
+    /// requests already sitting in Redis.
+    fn decode_stored(payload: &[u8]) -> Result<Self, String> {
+        if let Ok(data) = rmp_serde::from_slice::<Self>(payload) {
+            return Ok(data);
+        }
+
+        let legacy: LegacyJoinRequestData = serde_json::from_slice(payload)
+            .map_err(|e| format!("neither msgpack nor legacy json: {e}"))?;
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let decode = |s: &str, field: &str| {
+            b64.decode(s)
+                .map_err(|_| format!("invalid base64 in legacy {field}"))
+        };
+
+        Ok(Self {
+            pending_device_id: legacy.pending_device_id,
+            identity_public: decode(&legacy.identity_public_b64, "identity_public_b64")?,
+            verifying_key: decode(&legacy.verifying_key_b64, "verifying_key_b64")?,
+            signed_prekey_public: decode(
+                &legacy.signed_prekey_public_b64,
+                "signed_prekey_public_b64",
+            )?,
+            signed_prekey_signature: decode(
+                &legacy.signed_prekey_signature_b64,
+                "signed_prekey_signature_b64",
+            )?,
+            device_name: legacy.device_name,
+            platform: legacy.platform,
+        })
+    }
 }
 
 fn app_error_to_status(e: construct_error::AppError) -> Status {
@@ -781,7 +838,7 @@ impl AuthService for IdentityGrpcService {
         let user_id = uuid::Uuid::parse_str(&claims.sub)
             .map_err(|_| Status::internal("invalid user id in token"))?;
 
-        let json_payload = {
+        let stored_payload = {
             let mut queue = self.context.queue.lock().await;
             queue
                 .consume_join_request(&req.pending_device_id)
@@ -790,7 +847,7 @@ impl AuthService for IdentityGrpcService {
         }
         .ok_or_else(|| Status::not_found("join request not found or expired"))?;
 
-        let join_data: JoinRequestData = serde_json::from_str(&json_payload)
+        let join_data = JoinRequestData::decode_stored(&stored_payload)
             .map_err(|e| Status::internal(format!("invalid join request data: {e}")))?;
 
         if construct_db::device_exists(self.context.db_pool.as_ref(), &req.pending_device_id)
@@ -800,23 +857,10 @@ impl AuthService for IdentityGrpcService {
             return Err(Status::already_exists("device_id already registered"));
         }
 
-        let b64_dec = base64::engine::general_purpose::STANDARD;
-        let decode = |s: &str, field: &str| {
-            b64_dec
-                .decode(s)
-                .map_err(|_| Status::invalid_argument(format!("invalid base64 in {field}")))
-        };
-
-        let verifying_key = decode(&join_data.verifying_key_b64, "verifying_key_b64")?;
-        let identity_public = decode(&join_data.identity_public_b64, "identity_public_b64")?;
-        let signed_prekey_public = decode(
-            &join_data.signed_prekey_public_b64,
-            "signed_prekey_public_b64",
-        )?;
-        let signed_prekey_signature = decode(
-            &join_data.signed_prekey_signature_b64,
-            "signed_prekey_signature_b64",
-        )?;
+        let verifying_key = join_data.verifying_key;
+        let identity_public = join_data.identity_public;
+        let signed_prekey_public = join_data.signed_prekey_public;
+        let signed_prekey_signature = join_data.signed_prekey_signature;
 
         let hostname = self.context.config.instance_domain.clone();
         let crypto_suite = if req.crypto_suite.is_empty() {
@@ -1444,6 +1488,9 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         }))
     }
 
+    // Reads the deprecated `*_b64` fields on purpose: they are the compatibility
+    // path for clients built before the binary fields existed.
+    #[allow(deprecated)]
     async fn submit_join_request(
         &self,
         request: Request<proto::JoinRequestPayload>,
@@ -1453,22 +1500,39 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         if req.pending_device_id.is_empty() {
             return Err(Status::invalid_argument("pending_device_id is required"));
         }
-        if req.identity_public_b64.is_empty() {
-            return Err(Status::invalid_argument("identity_public_b64 is required"));
-        }
-        if req.verifying_key_b64.is_empty() {
-            return Err(Status::invalid_argument("verifying_key_b64 is required"));
-        }
-        if req.signed_prekey_public_b64.is_empty() {
-            return Err(Status::invalid_argument(
-                "signed_prekey_public_b64 is required",
-            ));
-        }
-        if req.signed_prekey_signature_b64.is_empty() {
-            return Err(Status::invalid_argument(
-                "signed_prekey_signature_b64 is required",
-            ));
-        }
+
+        // Prefer the binary fields; fall back to the deprecated base64 strings for
+        // clients built before they existed. Once no released client populates the
+        // `*_b64` fields, drop this fallback and mark those numbers reserved.
+        let b64_dec = base64::engine::general_purpose::STANDARD;
+        let take_key = |bin: Vec<u8>, b64: &str, field: &str| -> Result<Vec<u8>, Status> {
+            if !bin.is_empty() {
+                return Ok(bin);
+            }
+            if b64.is_empty() {
+                return Err(Status::invalid_argument(format!("{field} is required")));
+            }
+            b64_dec
+                .decode(b64)
+                .map_err(|_| Status::invalid_argument(format!("invalid base64 in {field}_b64")))
+        };
+
+        let identity_public = take_key(
+            req.identity_public,
+            &req.identity_public_b64,
+            "identity_public",
+        )?;
+        let verifying_key = take_key(req.verifying_key, &req.verifying_key_b64, "verifying_key")?;
+        let signed_prekey_public = take_key(
+            req.signed_prekey_public,
+            &req.signed_prekey_public_b64,
+            "signed_prekey_public",
+        )?;
+        let signed_prekey_signature = take_key(
+            req.signed_prekey_signature,
+            &req.signed_prekey_signature_b64,
+            "signed_prekey_signature",
+        )?;
 
         if construct_db::device_exists(self.context.db_pool.as_ref(), &req.pending_device_id)
             .await
@@ -1480,21 +1544,21 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         let pending_device_id = req.pending_device_id.clone();
         let data = JoinRequestData {
             pending_device_id: req.pending_device_id,
-            identity_public_b64: req.identity_public_b64,
-            verifying_key_b64: req.verifying_key_b64,
-            signed_prekey_public_b64: req.signed_prekey_public_b64,
-            signed_prekey_signature_b64: req.signed_prekey_signature_b64,
+            identity_public,
+            verifying_key,
+            signed_prekey_public,
+            signed_prekey_signature,
             device_name: req.device_name,
             platform: req.platform,
         };
 
-        let json_payload = serde_json::to_string(&data)
+        let payload = rmp_serde::to_vec_named(&data)
             .map_err(|e| Status::internal(format!("serialize: {e}")))?;
 
         {
             let mut queue = self.context.queue.lock().await;
             queue
-                .store_join_request(&pending_device_id, &json_payload)
+                .store_join_request(&pending_device_id, &payload)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to store join request: {e}")))?;
         }
@@ -3158,6 +3222,67 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_join_request() -> JoinRequestData {
+        JoinRequestData {
+            pending_device_id: "4e1f9dbe209c1bedb33ee32dda5a28f0".to_string(),
+            identity_public: vec![0x11; 32],
+            verifying_key: vec![0x22; 32],
+            signed_prekey_public: vec![0x33; 32],
+            signed_prekey_signature: vec![0x44; 64],
+            device_name: "MacBook Pro".to_string(),
+            platform: "macos".to_string(),
+        }
+    }
+
+    #[test]
+    fn join_request_round_trips_through_msgpack() {
+        let original = sample_join_request();
+        let encoded = rmp_serde::to_vec_named(&original).expect("encode");
+        let decoded = JoinRequestData::decode_stored(&encoded).expect("decode");
+
+        assert_eq!(decoded.identity_public, original.identity_public);
+        assert_eq!(decoded.verifying_key, original.verifying_key);
+        assert_eq!(decoded.signed_prekey_public, original.signed_prekey_public);
+        assert_eq!(
+            decoded.signed_prekey_signature,
+            original.signed_prekey_signature
+        );
+        assert_eq!(decoded.pending_device_id, original.pending_device_id);
+        assert_eq!(decoded.platform, original.platform);
+    }
+
+    /// A rolling deploy leaves entries written by the previous build in Redis for up
+    /// to the 10-minute TTL; they must still approve rather than 500.
+    #[test]
+    fn join_request_decodes_legacy_base64_json() {
+        let original = sample_join_request();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let legacy = serde_json::json!({
+            "pending_device_id": original.pending_device_id,
+            "identity_public_b64": b64.encode(&original.identity_public),
+            "verifying_key_b64": b64.encode(&original.verifying_key),
+            "signed_prekey_public_b64": b64.encode(&original.signed_prekey_public),
+            "signed_prekey_signature_b64": b64.encode(&original.signed_prekey_signature),
+            "device_name": original.device_name,
+            "platform": original.platform,
+        })
+        .to_string();
+
+        let decoded = JoinRequestData::decode_stored(legacy.as_bytes()).expect("decode legacy");
+        assert_eq!(decoded.identity_public, original.identity_public);
+        assert_eq!(
+            decoded.signed_prekey_signature,
+            original.signed_prekey_signature
+        );
+        assert_eq!(decoded.device_name, original.device_name);
+    }
+
+    #[test]
+    fn join_request_rejects_garbage() {
+        assert!(JoinRequestData::decode_stored(b"not a payload").is_err());
+        assert!(JoinRequestData::decode_stored(&[]).is_err());
+    }
 
     #[test]
     fn issuance_cap_mature_account_gets_full_cap() {

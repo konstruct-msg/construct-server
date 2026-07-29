@@ -47,7 +47,7 @@ members = [
 
 # One version for all packages
 [workspace.package]
-version = "0.16.28"
+version = "0.16.29"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/konstruct-msg/construct-server"
@@ -59,6 +59,7 @@ tokio = { version = "1.40", features = ["full"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rmp-serde = "1.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
