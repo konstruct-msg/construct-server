@@ -148,7 +148,11 @@ services:
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
+      # APNS_KEY_PATH + APNS_KEY_ID come from env_file (app.env) — do NOT re-list here.
+      # This line used to pin a hardcoded `:-/secrets/AuthKey_<old>.p8` default, which
+      # OVERRODE app.env: rotating the key by editing app.env alone left the service
+      # pointing at the revoked .p8 (init fails → push silently disabled), and only
+      # APNS_KEY_ID actually changed. The two must always name the same key.
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
       DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
@@ -191,7 +195,9 @@ services:
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
-      APNS_KEY_PATH: ${APNS_KEY_PATH:-/secrets/AuthKey_TKYQ5KVW7P.p8}
+      # APNS_KEY_PATH + APNS_KEY_ID come from env_file (app.env) — do NOT re-list here.
+      # See the identity service above: a hardcoded `:-` default here overrode app.env and
+      # survived a key rotation, leaving the sender pointed at a revoked .p8.
       # CONTACT_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
       MSG_STEALTH_TOKEN_POLICY: ${MSG_STEALTH_TOKEN_POLICY:-warn}
       # SERVER_SIGNING_KEY + TOKEN_ISSUER_KEY come from env_file (app.env). Do NOT list
