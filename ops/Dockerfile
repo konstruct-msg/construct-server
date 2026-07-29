@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.90-slim-bookworm as builder
+FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -31,9 +31,14 @@ COPY key-service ./key-service
 COPY group-service ./group-service
 COPY signaling-service ./signaling-service
 COPY veil-service ./veil-service
+# Required because Cargo.toml lists masque-service as a workspace member
+# (cargo fails to load the workspace if the path is missing). Not installed
+# into the runtime image — deploy masque separately if needed.
+COPY masque-service ./masque-service
 
-# Build all binaries in release mode
-RUN cargo build --release --bins
+# Build release bins for the multi-service image. Exclude masque (separate
+# deploy surface; still present as a workspace member for local/dev builds).
+RUN cargo build --release --bins --exclude masque-service
 
 # Runtime stage
 FROM debian:bookworm-slim
