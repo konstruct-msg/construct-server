@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::context::MessagingServiceContext;
 use crate::core as messaging_core;
 use crate::notification_core;
+use construct_config::ApnsEnvironments;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_extractors::TrustedUser;
@@ -95,7 +96,18 @@ pub async fn register_device(
         },
         device_id: None,
         push_provider: "apns".to_string(),
-        push_environment: "production".to_string(),
+        // Was hardcoded to "production", which is a guess this endpoint has no basis for:
+        // the request carried no environment at all. A sandbox token filed as production
+        // is rejected with BadDeviceToken, indistinguishable from a dead token, and the
+        // sender then deletes it — so the guess cost users their push silently. Now the
+        // client may declare one environment or several, and an absent/garbled value
+        // records both candidates for the sender to probe.
+        push_environment: request
+            .environment
+            .as_deref()
+            .map(ApnsEnvironments::parse_or_both)
+            .unwrap_or_else(ApnsEnvironments::both)
+            .to_string(),
     };
 
     let output = notification_core::register_device_token(&notif_ctx, input)

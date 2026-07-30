@@ -1,3 +1,4 @@
+use construct_config::{ApnsEnvironment, ApnsEnvironments};
 use std::sync::Arc;
 
 use construct_error::AppError;
@@ -80,9 +81,15 @@ impl NotificationService for NotificationGrpcService {
                 2 => "fcm".to_string(),
                 _ => "apns".to_string(),
             },
+            // PushEnvironment: 1 = SANDBOX, 2 = PRODUCTION, 0 = UNSPECIFIED.
+            // UNSPECIFIED used to fall through to "sandbox" — a guess, and the expensive
+            // kind: a production token filed as sandbox is rejected with BadDeviceToken,
+            // which the sender cannot tell from a dead token, so it deletes it. Record
+            // both candidates instead and let the sender probe.
             push_environment: match req.environment {
-                2 => "production".to_string(),
-                _ => "sandbox".to_string(),
+                1 => ApnsEnvironments::single(ApnsEnvironment::Development).to_string(),
+                2 => ApnsEnvironments::single(ApnsEnvironment::Production).to_string(),
+                _ => ApnsEnvironments::both().to_string(),
             },
         };
 
@@ -160,9 +167,15 @@ impl NotificationService for NotificationGrpcService {
             voip_token: req.voip_token,
             device_id: req.device_id,
             platform: req.platform,
+            // PushEnvironment: 1 = SANDBOX, 2 = PRODUCTION, 0 = UNSPECIFIED.
+            // UNSPECIFIED used to fall through to "sandbox" — a guess, and the expensive
+            // kind: a production token filed as sandbox is rejected with BadDeviceToken,
+            // which the sender cannot tell from a dead token, so it deletes it. Record
+            // both candidates instead and let the sender probe.
             push_environment: match req.environment {
-                2 => "production".to_string(),
-                _ => "sandbox".to_string(),
+                1 => ApnsEnvironments::single(ApnsEnvironment::Development).to_string(),
+                2 => ApnsEnvironments::single(ApnsEnvironment::Production).to_string(),
+                _ => ApnsEnvironments::both().to_string(),
             },
         };
 
