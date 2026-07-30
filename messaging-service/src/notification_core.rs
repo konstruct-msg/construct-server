@@ -425,6 +425,50 @@ pub async fn register_device_token(
     };
 
     if let Some(ref device_id) = input.device_id {
+        // The table carries TWO uniqueness rules — `UNIQUE(user_id, device_token_hash)`
+        // from migration 006 and the partial `(user_id, device_id)` index from 025 — but
+        // `ON CONFLICT` can name only one target. So a row holding this token under a
+        // NULL (or different) device_id is not merely a stale duplicate: the upsert below
+        // targets `(user_id, device_id)`, finds nothing to update, attempts an INSERT, and
+        // that INSERT violates the token-hash constraint. The whole registration then
+        // errors — permanently, on every retry, for that device/token pair.
+        //
+        // Such rows exist because a client that could not read its device id used to
+        // register with an empty one (fixed client-side in messenger 480f7364). Claim the
+        // token for this device before upserting; APNs tokens are unique per app install,
+        // so any other row holding it is by definition stale.
+        // One transaction: a DELETE that commits without its INSERT would leave the user
+        // with no token at all — strictly worse than the duplicate we are removing.
+        let mut tx = context
+            .db_pool
+            .begin()
+            .await
+            .context("Failed to open device token registration transaction")?;
+
+        let orphaned = sqlx::query(
+            r#"
+            DELETE FROM device_tokens
+            WHERE user_id = $1
+              AND device_token_hash = $2
+              AND device_id IS DISTINCT FROM $3
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(&token_hash)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear stale rows holding this device token")?
+        .rows_affected();
+
+        if orphaned > 0 {
+            tracing::info!(
+                user_hash = %user_id_hash,
+                rows = orphaned,
+                "Claimed device token from stale row(s) not bound to this device"
+            );
+        }
+
         sqlx::query(
             r#"
             INSERT INTO device_tokens
@@ -450,10 +494,29 @@ pub async fn register_device_token(
         .bind(device_id)
         .bind(&input.push_provider)
         .bind(&input.push_environment)
-        .execute(&*context.db_pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to insert/update device token")?;
+
+        tx.commit()
+            .await
+            .context("Failed to commit device token registration")?;
     } else {
+        // A registration with no device id cannot be addressed per-device: the row it
+        // creates is keyed only by the token, and until some later registration supplies a
+        // device id (which now claims it, above) nothing can update it in place. Tolerated
+        // so an unknown client is not locked out, but it should not happen from our own
+        // clients — iOS defers instead (messenger 480f7364). Logged at warn so a client
+        // regressing to this is visible rather than merely odd.
+        tracing::warn!(
+            user_hash = %user_id_hash,
+            push_provider = %input.push_provider,
+            "Device token registered WITHOUT a device id — row is token-keyed and cannot be \
+             addressed per device; the client should defer until its device id exists"
+        );
+
+        // Note the DO UPDATE list deliberately omits device_id: if a row for this token
+        // already exists under a real device, this must not orphan it.
         sqlx::query(
             r#"
             INSERT INTO device_tokens
