@@ -26,9 +26,7 @@ pub use constants::{
 };
 pub use database::DbConfig;
 pub use deeplinks::DeepLinksConfig;
-pub use federation::{
-    ApnsConfig, ApnsEnvironment, ApnsEnvironments, FederationConfig, MtlsConfig,
-};
+pub use federation::{ApnsConfig, ApnsEnvironment, ApnsEnvironments, FederationConfig, MtlsConfig};
 pub use logging::LoggingConfig;
 pub use media::MediaConfig;
 pub use messaging::{MessagingConfig, StealthTokenPolicy};

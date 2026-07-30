@@ -1036,22 +1036,20 @@ pub async fn send_voip_incoming_call(
                     "Failed to disable VoIP token after APNs InvalidToken"
                 );
             }
-        } else if let Some(environment) = delivered_on {
-            if environments.len() > 1 {
-                if let Err(db_err) =
-                    sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
-                        .bind(environment.as_str())
-                        .bind(token_id)
-                        .execute(&*context.db_pool)
-                        .await
-                {
-                    tracing::warn!(
-                        error = %db_err,
-                        user_hash = %user_id_hash,
-                        "Failed to pin resolved APNs environment for VoIP token"
-                    );
-                }
-            }
+        } else if let Some(environment) = delivered_on
+            && environments.len() > 1
+            && let Err(db_err) =
+                sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
+                    .bind(environment.as_str())
+                    .bind(token_id)
+                    .execute(&*context.db_pool)
+                    .await
+        {
+            tracing::warn!(
+                error = %db_err,
+                user_hash = %user_id_hash,
+                "Failed to pin resolved APNs environment for VoIP token"
+            );
         }
     }
 
