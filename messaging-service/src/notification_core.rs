@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use construct_config::{ApnsEnvironment, ApnsEnvironments};
 use construct_server_shared::{
     AppError,
     apns::{ApnsSendError, DeviceTokenEncryption},
@@ -205,19 +206,15 @@ pub async fn send_blind_notification(
             continue;
         }
 
-        let apns_client = if token_row.push_provider == "apns" {
-            match token_row.push_environment.as_str() {
-                "sandbox" => &context.apns_sandbox_client,
-                _ => &context.apns_client,
-            }
-        } else {
+        if token_row.push_provider != "apns" {
             tracing::debug!(
                 user_hash = %user_id_hash,
                 push_provider = %token_row.push_provider,
                 "Skipping non-APNS token (FCM not yet implemented)"
             );
             continue;
-        };
+        }
+        let environments = ApnsEnvironments::parse_or_both(&token_row.push_environment);
 
         use construct_server_shared::apns::types::{
             ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
@@ -240,47 +237,68 @@ pub async fn send_blind_notification(
         let priority = NotificationPriority::Low;
 
         const MAX_ATTEMPTS: u32 = 3;
-        let mut succeeded = false;
-        let mut invalid_token = false;
-        for attempt in 1..=MAX_ATTEMPTS {
-            match apns_client
-                .send_notification(&device_token, payload.clone(), push_type, priority)
-                .await
-            {
-                Ok(()) => {
-                    succeeded = true;
-                    break;
-                }
-                Err(ApnsSendError::InvalidToken) => {
-                    invalid_token = true;
-                    break;
-                }
-                Err(ref e) if attempt < MAX_ATTEMPTS => {
-                    let delay = Duration::from_millis(100 * 3_u64.pow(attempt - 1));
-                    tracing::warn!(
-                        error = %e,
-                        user_hash = %user_id_hash,
-                        attempt = attempt,
-                        retry_ms = delay.as_millis(),
-                        "APNs send failed — retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        user_hash = %user_id_hash,
-                        "APNs send failed after all retries — giving up on this token"
-                    );
+        let mut succeeded_on: Option<ApnsEnvironment> = None;
+        // Only condemn the token once EVERY declared environment has rejected it. A row
+        // that says "sandbox,production" is telling us the environment is unknown, so a
+        // rejection from one endpoint proves nothing about the token itself.
+        let mut rejected_by_all = true;
+        'env: for environment in environments.iter() {
+            let apns_client = match environment {
+                ApnsEnvironment::Development => &context.apns_sandbox_client,
+                ApnsEnvironment::Production => &context.apns_client,
+            };
+            for attempt in 1..=MAX_ATTEMPTS {
+                match apns_client
+                    .send_notification(&device_token, payload.clone(), push_type, priority)
+                    .await
+                {
+                    Ok(()) => {
+                        succeeded_on = Some(environment);
+                        rejected_by_all = false;
+                        break 'env;
+                    }
+                    Err(ApnsSendError::InvalidToken) => {
+                        tracing::debug!(
+                            user_hash = %user_id_hash,
+                            environment = %environment.as_str(),
+                            remaining = environments.len() - 1,
+                            "APNs rejected the token on this endpoint"
+                        );
+                        continue 'env;
+                    }
+                    Err(ref e) if attempt < MAX_ATTEMPTS => {
+                        let delay = Duration::from_millis(100 * 3_u64.pow(attempt - 1));
+                        tracing::warn!(
+                            error = %e,
+                            user_hash = %user_id_hash,
+                            environment = %environment.as_str(),
+                            attempt = attempt,
+                            retry_ms = delay.as_millis(),
+                            "APNs send failed — retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(e) => {
+                        // A transport/auth failure is NOT a verdict on the token — do not
+                        // let it count towards deletion.
+                        tracing::error!(
+                            error = %e,
+                            user_hash = %user_id_hash,
+                            environment = %environment.as_str(),
+                            "APNs send failed after all retries — giving up on this endpoint"
+                        );
+                        rejected_by_all = false;
+                        continue 'env;
+                    }
                 }
             }
         }
-        if invalid_token {
+        if rejected_by_all {
             tracing::warn!(
                 user_hash = %user_id_hash,
                 push_environment = %token_row.push_environment,
                 push_provider = %token_row.push_provider,
-                "APNs: token invalid/rejected — deleting from DB"
+                "APNs: token rejected by every declared environment — deleting from DB"
             );
             if let Err(db_err) =
                 sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
@@ -296,8 +314,35 @@ pub async fn send_blind_notification(
             }
             continue;
         }
-        if !succeeded {
+        let Some(environment) = succeeded_on else {
             continue;
+        };
+
+        // Narrow an unknown-environment row to the endpoint that actually worked, so the
+        // probe is paid once per token rather than once per push.
+        if environments.len() > 1 {
+            let resolved = environment.as_str();
+            if let Err(db_err) = sqlx::query(
+                "UPDATE device_tokens SET push_environment = $1 WHERE device_token_encrypted = $2",
+            )
+            .bind(resolved)
+            .bind(&token_row.device_token_encrypted)
+            .execute(&*context.db_pool)
+            .await
+            {
+                // Non-fatal: the push was delivered, we just probe again next time.
+                tracing::warn!(
+                    error = %db_err,
+                    user_hash = %user_id_hash,
+                    "Failed to pin resolved APNs environment"
+                );
+            } else {
+                tracing::info!(
+                    user_hash = %user_id_hash,
+                    environment = %resolved,
+                    "Resolved APNs environment for token"
+                );
+            }
         }
 
         sent_count += 1;
@@ -714,44 +759,60 @@ pub async fn send_key_rotation_wake(
             }
         };
 
-        let apns_client = if token_row.push_provider == "apns" {
-            match token_row.push_environment.as_str() {
-                "sandbox" => &context.apns_sandbox_client,
-                _ => &context.apns_client,
-            }
-        } else {
+        if token_row.push_provider != "apns" {
             continue;
-        };
+        }
+        let environments = ApnsEnvironments::parse_or_both(&token_row.push_environment);
 
-        match apns_client
-            .send_notification(
-                &device_token,
-                payload.clone(),
-                PushType::Silent,
-                NotificationPriority::Low,
-            )
-            .await
-        {
-            Ok(()) => {
-                sent_any = true;
-            }
-            Err(ApnsSendError::InvalidToken) => {
-                tracing::warn!(user_hash = %user_id_hash, push_environment = %token_row.push_environment, "APNs token invalid — deleting");
-                if let Err(db_err) =
-                    sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                        .bind(&token_row.device_token_encrypted)
-                        .execute(&*context.db_pool)
-                        .await
-                {
-                    tracing::error!(
-                        error = %db_err,
+        let mut rejected_by_all = true;
+        for environment in environments.iter() {
+            let apns_client = match environment {
+                ApnsEnvironment::Development => &context.apns_sandbox_client,
+                ApnsEnvironment::Production => &context.apns_client,
+            };
+
+            match apns_client
+                .send_notification(
+                    &device_token,
+                    payload.clone(),
+                    PushType::Silent,
+                    NotificationPriority::Low,
+                )
+                .await
+            {
+                Ok(()) => {
+                    sent_any = true;
+                    rejected_by_all = false;
+                    break;
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    tracing::debug!(
                         user_hash = %user_id_hash,
-                        "Failed to delete invalid device token after key-rotation wake"
+                        environment = %environment.as_str(),
+                        "APNs rejected the token on this endpoint (key-rotation wake)"
                     );
                 }
+                Err(ApnsSendError::Other(e)) => {
+                    // Not a verdict on the token — never let it lead to deletion.
+                    tracing::warn!(error = %e, user_hash = %user_id_hash, environment = %environment.as_str(), "APNs send failed (best-effort)");
+                    rejected_by_all = false;
+                }
             }
-            Err(ApnsSendError::Other(e)) => {
-                tracing::warn!(error = %e, user_hash = %user_id_hash, "APNs send failed (best-effort)");
+        }
+
+        if rejected_by_all {
+            tracing::warn!(user_hash = %user_id_hash, push_environment = %token_row.push_environment, "APNs token rejected by every declared environment — deleting");
+            if let Err(db_err) =
+                sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                    .bind(&token_row.device_token_encrypted)
+                    .execute(&*context.db_pool)
+                    .await
+            {
+                tracing::error!(
+                    error = %db_err,
+                    user_hash = %user_id_hash,
+                    "Failed to delete invalid device token after key-rotation wake"
+                );
             }
         }
     }
@@ -911,51 +972,85 @@ pub async fn send_voip_incoming_call(
             }
         };
 
-        let apns_client = match push_environment.as_str() {
-            "sandbox" => &context.apns_sandbox_client,
-            _ => &context.apns_client,
-        };
+        let environments = ApnsEnvironments::parse_or_both(&push_environment);
 
-        match apns_client
-            .send_voip_incoming_call_push(
-                &token,
-                input.call_id.clone(),
-                input.caller_id.clone(),
-                input.caller_name.clone(),
-                input.call_type.clone(),
-                input.offered_at,
-            )
-            .await
-        {
-            Ok(()) => {
-                sent_count += 1;
+        let mut delivered_on: Option<ApnsEnvironment> = None;
+        let mut rejected_by_all = true;
+        for environment in environments.iter() {
+            let apns_client = match environment {
+                ApnsEnvironment::Development => &context.apns_sandbox_client,
+                ApnsEnvironment::Production => &context.apns_client,
+            };
+
+            match apns_client
+                .send_voip_incoming_call_push(
+                    &token,
+                    input.call_id.clone(),
+                    input.caller_id.clone(),
+                    input.caller_name.clone(),
+                    input.call_type.clone(),
+                    input.offered_at,
+                )
+                .await
+            {
+                Ok(()) => {
+                    sent_count += 1;
+                    delivered_on = Some(environment);
+                    rejected_by_all = false;
+                    break;
+                }
+                Err(ApnsSendError::InvalidToken) => {
+                    tracing::debug!(
+                        user_hash = %user_id_hash,
+                        environment = %environment.as_str(),
+                        "VoIP token rejected on this endpoint"
+                    );
+                }
+                Err(ApnsSendError::Other(e)) => {
+                    // Transport/auth failure — says nothing about the token.
+                    tracing::warn!(
+                        error = %e,
+                        user_hash = %user_id_hash,
+                        environment = %environment.as_str(),
+                        "Failed to send VoIP push (best-effort)"
+                    );
+                    rejected_by_all = false;
+                }
             }
-            Err(ApnsSendError::InvalidToken) => {
-                tracing::info!(
+        }
+
+        if rejected_by_all {
+            tracing::info!(
+                user_hash = %user_id_hash,
+                push_environment = %push_environment,
+                "VoIP token rejected by every declared environment - disabling"
+            );
+            if let Err(db_err) = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                .bind(token_id)
+                .execute(&*context.db_pool)
+                .await
+            {
+                tracing::error!(
+                    error = %db_err,
                     user_hash = %user_id_hash,
-                    push_environment = %push_environment,
-                    "VoIP token rejected by APNs - disabling"
+                    "Failed to disable VoIP token after APNs InvalidToken"
                 );
+            }
+        } else if let Some(environment) = delivered_on {
+            if environments.len() > 1 {
                 if let Err(db_err) =
-                    sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                    sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
+                        .bind(environment.as_str())
                         .bind(token_id)
                         .execute(&*context.db_pool)
                         .await
                 {
-                    tracing::error!(
+                    tracing::warn!(
                         error = %db_err,
                         user_hash = %user_id_hash,
-                        "Failed to disable VoIP token after APNs InvalidToken"
+                        "Failed to pin resolved APNs environment for VoIP token"
                     );
                 }
-            }
-            Err(ApnsSendError::Other(e)) => {
-                tracing::warn!(
-                    error = %e,
-                    user_hash = %user_id_hash,
-                    push_environment = %push_environment,
-                    "Failed to send VoIP push (best-effort)"
-                );
             }
         }
     }

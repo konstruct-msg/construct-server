@@ -32,6 +32,15 @@ pub struct RegisterDeviceRequest {
     /// Notification filter preference
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_filter: Option<String>,
+    /// APNs environment(s) the token may belong to: "sandbox", "production", or a
+    /// comma-separated list such as "sandbox,production".
+    ///
+    /// Omit it if the caller genuinely does not know — the server then records both
+    /// candidates and probes. Do NOT send a guess: APNs answers BadDeviceToken both for a
+    /// dead token and for a live token sent to the wrong endpoint, so a wrong assertion
+    /// gets a working token deleted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// Request body for device token unregistration

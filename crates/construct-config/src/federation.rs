@@ -36,7 +36,7 @@ impl Default for MtlsConfig {
 }
 
 /// APNs environment
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApnsEnvironment {
     Production,
     Development,
@@ -48,12 +48,109 @@ impl std::str::FromStr for ApnsEnvironment {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "production" | "prod" => Ok(Self::Production),
-            "development" | "dev" => Ok(Self::Development),
+            "development" | "dev" | "sandbox" => Ok(Self::Development),
             _ => anyhow::bail!(
-                "Invalid APNs environment: {}. Must be 'production' or 'development'",
+                "Invalid APNs environment: {}. Must be 'production' or 'development'/'sandbox'",
                 s
             ),
         }
+    }
+}
+
+impl ApnsEnvironment {
+    /// Canonical name used in the `push_environment` DB columns and on the wire.
+    ///
+    /// Note the spelling difference from the config/entitlement vocabulary: Apple calls
+    /// the build setting "development" but the endpoint "sandbox". Both parse; this is
+    /// what we store.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Development => "sandbox",
+        }
+    }
+}
+
+/// One or more APNs environments, in probe order.
+///
+/// Parses a single value (`"production"`) **or** a comma-separated list
+/// (`"sandbox,production"`). Accepts either spelling of the sandbox endpoint —
+/// `sandbox` / `development` / `dev` — and `prod` for production.
+///
+/// A single value asserts which endpoint a token belongs to; the pair admits that it is
+/// unknown and both must be tried. That distinction matters because APNs answers
+/// `BadDeviceToken` both for a genuinely dead token and for a live token sent to the
+/// wrong endpoint — so a caller that guesses wrong cannot tell the two apart, and will
+/// happily delete a working token. Anything that cannot know the environment should
+/// record [`ApnsEnvironments::both`] rather than guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApnsEnvironments(Vec<ApnsEnvironment>);
+
+impl ApnsEnvironments {
+    /// Both endpoints, sandbox first. The correct value whenever the environment is unknown.
+    pub fn both() -> Self {
+        Self(vec![
+            ApnsEnvironment::Development,
+            ApnsEnvironment::Production,
+        ])
+    }
+
+    pub fn single(env: ApnsEnvironment) -> Self {
+        Self(vec![env])
+    }
+
+    /// Parse, falling back to [`Self::both`] on anything unrecognised or empty.
+    ///
+    /// Use this for values read back from storage, where rejecting the row would mean
+    /// dropping a push; use `FromStr` for operator-supplied config, where a typo should
+    /// be loud.
+    pub fn parse_or_both(raw: &str) -> Self {
+        raw.parse().unwrap_or_else(|_| Self::both())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ApnsEnvironment> + '_ {
+        self.0.iter().cloned()
+    }
+
+    pub fn contains(&self, env: &ApnsEnvironment) -> bool {
+        self.0.contains(env)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::str::FromStr for ApnsEnvironments {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let mut out: Vec<ApnsEnvironment> = Vec::with_capacity(2);
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let env: ApnsEnvironment = part.parse()?;
+            if !out.contains(&env) {
+                out.push(env);
+            }
+        }
+        if out.is_empty() {
+            anyhow::bail!("Empty APNs environment list: {:?}", s);
+        }
+        Ok(Self(out))
+    }
+}
+
+impl std::fmt::Display for ApnsEnvironments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let joined: Vec<&str> = self.0.iter().map(ApnsEnvironment::as_str).collect();
+        f.write_str(&joined.join(","))
     }
 }
 
@@ -316,5 +413,88 @@ impl FederationConfig {
             },
             max_requests_per_origin_per_hour,
         })
+    }
+}
+
+#[cfg(test)]
+mod apns_environment_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parses_single_value_and_both_sandbox_spellings() {
+        assert_eq!(
+            ApnsEnvironments::from_str("production").unwrap(),
+            ApnsEnvironments::single(ApnsEnvironment::Production)
+        );
+        for spelling in ["sandbox", "development", "dev", "SANDBOX", " Sandbox "] {
+            assert_eq!(
+                ApnsEnvironments::from_str(spelling).unwrap(),
+                ApnsEnvironments::single(ApnsEnvironment::Development),
+                "failed for {spelling:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_a_list_and_preserves_declared_probe_order() {
+        assert_eq!(
+            ApnsEnvironments::from_str("sandbox,production").unwrap(),
+            ApnsEnvironments::both()
+        );
+        // The caller's order is the probe order — the likelier endpoint goes first.
+        assert_eq!(
+            ApnsEnvironments::from_str("production, sandbox")
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![ApnsEnvironment::Production, ApnsEnvironment::Development]
+        );
+    }
+
+    #[test]
+    fn deduplicates_and_tolerates_untidy_input() {
+        let parsed = ApnsEnvironments::from_str(" production , prod,, production ").unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.to_string(), "production");
+    }
+
+    #[test]
+    fn rejects_garbage_but_parse_or_both_never_guesses_one() {
+        assert!(ApnsEnvironments::from_str("staging").is_err());
+        assert!(ApnsEnvironments::from_str("").is_err());
+        assert!(ApnsEnvironments::from_str(" , ").is_err());
+
+        // Storage values must not blow up a send, and must never collapse to a single
+        // guess — the wrong guess is what gets a live token deleted.
+        for garbage in ["", "staging", "???", " , "] {
+            assert_eq!(
+                ApnsEnvironments::parse_or_both(garbage),
+                ApnsEnvironments::both(),
+                "failed for {garbage:?}"
+            );
+        }
+        // A valid value still survives the lenient path.
+        assert_eq!(
+            ApnsEnvironments::parse_or_both("production"),
+            ApnsEnvironments::single(ApnsEnvironment::Production)
+        );
+    }
+
+    #[test]
+    fn display_round_trips_through_the_db_spelling() {
+        // Config says "development", the column and the endpoint say "sandbox".
+        assert_eq!(ApnsEnvironment::Development.as_str(), "sandbox");
+        for raw in ["production", "sandbox", "sandbox,production"] {
+            let parsed = ApnsEnvironments::from_str(raw).unwrap();
+            assert_eq!(
+                ApnsEnvironments::from_str(&parsed.to_string()).unwrap(),
+                parsed
+            );
+        }
+        assert_eq!(
+            ApnsEnvironments::from_str("dev,prod").unwrap().to_string(),
+            "sandbox,production"
+        );
     }
 }
