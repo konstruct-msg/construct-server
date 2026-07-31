@@ -9,6 +9,11 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# No Alertmanager is deployed yet, so these fire into Prometheus' own /alerts page
+# and are readable by Grafana. Routing to a human still needs Alertmanager.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: identity
     static_configs:
@@ -41,3 +46,9 @@ scrape_configs:
   - job_name: gateway
     static_configs:
       - targets: ['gateway:3000']
+
+  # Redis holds the offline delivery queues, so its memory headroom is a
+  # data-durability signal, not just a capacity one. See ops/alerts.yml.
+  - job_name: redis
+    static_configs:
+      - targets: ['redis-exporter:9121']
