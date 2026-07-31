@@ -14,5 +14,7 @@
 // ============================================================================
 
 pub mod core;
+pub mod degraded;
 
-pub use core::{ProtectionStats, SendPermission, SentinelCore, TrustLevel};
+pub use core::{ProtectionStats, QuotaOutcome, SendPermission, SentinelCore, TrustLevel};
+pub use degraded::{BreakerState, DegradedLimiter};
