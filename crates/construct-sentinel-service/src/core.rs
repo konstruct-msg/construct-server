@@ -35,6 +35,24 @@ const BAN_FLAG_TTL: u64 = 7 * 24 * 3600; // 7 days fallback
 const BLOCKS_CACHE_TTL: i64 = 300; // 5 minutes
 const REPORT_RATE_LIMIT: i64 = 10; // max reports per reporter per day
 const REPORTS_WINDOW_TTL: u64 = 24 * 3600; // 24 hours
+const MSG_WINDOW_TTL: i64 = 3600; // hourly message window
+
+fn msg_key(device_id: &str) -> String {
+    format!("sentinel:rate:msg:{}", device_id)
+}
+
+/// Decide a window's verdict from the post-increment total.
+///
+/// `used` counts the event being authorised, so the `limit`-th one is the last that may
+/// pass. The old caller compared `limit - used` against zero and denied on 0, which
+/// rejected that last event and made the effective ceiling `limit - 1`.
+fn quota_outcome(used: i64, limit: i32) -> QuotaOutcome {
+    QuotaOutcome {
+        allowed: limit > 0 && used <= limit as i64,
+        remaining: (limit as i64 - used).max(0) as i32,
+        limit,
+    }
+}
 
 /// Thresholds for automatic escalation.
 const AUTO_FLAG_REPORTS: i64 = 3;
@@ -94,6 +112,15 @@ pub struct SentinelCore {
 }
 
 // ─── Return types ────────────────────────────────────────────────────────────
+
+/// Result of charging one event to a rate-limit window.
+pub struct QuotaOutcome {
+    /// False once the window's ceiling has been passed.
+    pub allowed: bool,
+    /// Sends still permitted in this window after the one just counted.
+    pub remaining: i32,
+    pub limit: i32,
+}
 
 pub struct SendPermission {
     pub allowed: bool,
@@ -217,60 +244,107 @@ impl SentinelCore {
 
     // ── Rate limits ───────────────────────────────────────────────────────────
 
-    pub async fn msg_quota(&self, device_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
-        let limit = trust.msg_limit_hour();
-        if limit <= 0 {
-            return Ok((0, limit));
-        }
-
+    /// Read a rate-limit counter without consuming quota.
+    ///
+    /// An absent key is **not** an error — it means the window has not started yet, so
+    /// nothing has been used. Reading straight into `i32` used to turn Redis' nil into
+    /// `Incompatible type - "Response type not convertible to numeric."`, which the send
+    /// path logged as "Redis unavailable" and failed closed on. Since the counter only
+    /// exists once something has been counted in the current window, that error was the
+    /// normal state, not an outage: an idle device could not send at all.
+    ///
+    /// Genuine connection/protocol failures still propagate.
+    async fn window_used(&self, key: &str) -> Result<i32> {
         let mut conn = self.redis().await?;
-        let key = format!("sentinel:rate:msg:{}", device_id);
-        // Propagate Redis error rather than failing open (unwrap_or(0) would grant full quota).
-        let used: i32 = conn.get(&key).await?;
-
-        Ok(((limit - used).max(0), limit))
+        let used: Option<i32> = conn.get(key).await?;
+        Ok(used.unwrap_or(0))
     }
 
-    pub async fn recipient_quota(&self, device_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
-        let limit = trust.recipient_limit_day();
-        if limit <= 0 {
-            return Ok((0, limit));
-        }
-
-        let mut conn = self.redis().await?;
-        let key = format!("sentinel:rate:rcpt:{}", device_id);
-        // Propagate Redis error rather than failing open.
-        let used: i32 = conn.get(&key).await?;
-
-        Ok(((limit - used).max(0), limit))
-    }
-
-    /// User-level aggregate message quota: same hourly ceiling as per-device, but shared
-    /// across all devices of the user. Prevents N-device bypass.
-    /// Key: `sentinel:rate:msg:user:{user_id}`
-    pub async fn user_msg_quota(&self, user_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
-        let limit = trust.msg_limit_hour();
-        if limit <= 0 {
-            return Ok((0, limit));
-        }
-
-        // Atomic INCR + EXPIRE via Lua prevents the race where a crash between the two
-        // commands leaves the key without a TTL, making the counter permanent.
+    /// Count one event against a fixed window and return the new total.
+    ///
+    /// Atomic INCR + first-write EXPIRE via Lua prevents the race where a crash between
+    /// the two commands leaves the key without a TTL, making the counter permanent.
+    async fn incr_window(&self, key: &str, ttl_secs: i64) -> Result<i64> {
         const LUA: &str = r#"
             local n = redis.call('INCR', KEYS[1])
             if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
             return n
         "#;
-        let key = format!("sentinel:rate:msg:user:{}", user_id);
         let mut conn = self.redis().await?;
         let used: i64 = redis::Script::new(LUA)
-            .key(&key)
-            .arg(3600i64)
+            .key(key)
+            .arg(ttl_secs)
             .invoke_async(&mut conn)
-            .await
-            .unwrap_or(1);
+            .await?;
+        Ok(used)
+    }
 
-        Ok(((limit as i64 - used).max(0) as i32, limit))
+    /// Read-only view of the device's hourly message quota. Used by `GetTrustStatus`,
+    /// which reports remaining quota and must not spend it.
+    pub async fn msg_quota(&self, device_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
+        let limit = trust.msg_limit_hour();
+        if limit <= 0 {
+            return Ok((0, limit));
+        }
+        let used = self.window_used(&msg_key(device_id)).await?;
+        Ok(((limit - used).max(0), limit))
+    }
+
+    /// Read-only view of the device's daily new-recipient quota.
+    ///
+    /// NOTE: `sentinel:rate:rcpt:{device_id}` is currently never written by anything, so
+    /// this always reports the full allowance. Enforcing it needs the send path to record
+    /// *distinct* recipients per day (a SET, not a counter) — tracked separately; do not
+    /// "fix" it by incrementing per message, which would limit messages, not recipients.
+    pub async fn recipient_quota(&self, device_id: &str, trust: TrustLevel) -> Result<(i32, i32)> {
+        let limit = trust.recipient_limit_day();
+        if limit <= 0 {
+            return Ok((0, limit));
+        }
+        let used = self
+            .window_used(&format!("sentinel:rate:rcpt:{}", device_id))
+            .await?;
+        Ok(((limit - used).max(0), limit))
+    }
+
+    /// Charge this send to the device's hourly window.
+    ///
+    /// The counter this reads was never incremented by anything before, so the per-device
+    /// hourly limit had never actually limited anything — only the user-level ceiling did.
+    pub async fn consume_msg_quota(
+        &self,
+        device_id: &str,
+        trust: TrustLevel,
+    ) -> Result<QuotaOutcome> {
+        self.consume(&msg_key(device_id), trust.msg_limit_hour(), MSG_WINDOW_TTL)
+            .await
+    }
+
+    /// User-level aggregate message quota: same hourly ceiling as per-device, but shared
+    /// across all devices of the user. Prevents N-device bypass.
+    /// Key: `sentinel:rate:msg:user:{user_id}`
+    pub async fn consume_user_msg_quota(
+        &self,
+        user_id: &str,
+        trust: TrustLevel,
+    ) -> Result<QuotaOutcome> {
+        // Previously `.unwrap_or(1)`, which swallowed every Redis failure and allowed the
+        // send — fail-open, while the device-level check one line above failed closed on
+        // the same outage. The caller already has an error branch; let it reach it.
+        self.consume(
+            &format!("sentinel:rate:msg:user:{}", user_id),
+            trust.msg_limit_hour(),
+            MSG_WINDOW_TTL,
+        )
+        .await
+    }
+
+    async fn consume(&self, key: &str, limit: i32, ttl_secs: i64) -> Result<QuotaOutcome> {
+        if limit <= 0 {
+            return Ok(quota_outcome(0, limit));
+        }
+        let used = self.incr_window(key, ttl_secs).await?;
+        Ok(quota_outcome(used, limit))
     }
 
     /// Increment rate-limit violation counter for stats.
@@ -316,7 +390,7 @@ impl SentinelCore {
         // Check device-level hourly message rate.
         // Fail-closed: if Redis is unavailable, deny the send rather than allowing
         // unlimited traffic. The client should retry after the backoff.
-        let (remaining, _) = match self.msg_quota(caller_device_id, trust).await {
+        let device_quota = match self.consume_msg_quota(caller_device_id, trust).await {
             Ok(q) => q,
             Err(e) => {
                 tracing::error!(error = %e, device_id = %caller_device_id, "Redis unavailable in msg_quota — failing closed");
@@ -327,7 +401,7 @@ impl SentinelCore {
                 });
             }
         };
-        if remaining == 0 {
+        if !device_quota.allowed {
             self.record_violation().await;
             return Ok(SendPermission {
                 allowed: false,
@@ -341,7 +415,7 @@ impl SentinelCore {
         if let Some(user_id) = caller_user_id
             && !user_id.is_empty()
         {
-            let (user_remaining, _) = match self.user_msg_quota(user_id, trust).await {
+            let user_quota = match self.consume_user_msg_quota(user_id, trust).await {
                 Ok(q) => q,
                 Err(e) => {
                     tracing::error!(error = %e, user_id = %user_id, "Redis unavailable in user_msg_quota — failing closed");
@@ -352,7 +426,7 @@ impl SentinelCore {
                     });
                 }
             };
-            if user_remaining == 0 {
+            if !user_quota.allowed {
                 self.record_violation().await;
                 return Ok(SendPermission {
                     allowed: false,
@@ -682,6 +756,51 @@ mod tests {
         assert_eq!(TrustLevel::Banned.msg_limit_hour(), 0);
         assert_eq!(TrustLevel::Banned.recipient_limit_day(), 0);
         assert_eq!(TrustLevel::Banned.group_msg_limit_day(), 0);
+    }
+
+    /// The outage: `GET` on a key that does not exist yet returns nil, and the quota read
+    /// deserialised it straight into `i32`. That is not a type the nil converts to, so the
+    /// send path logged "Redis unavailable in msg_quota" and failed closed — for a device
+    /// whose hourly window simply had not started.
+    ///
+    /// This pins the *conversion*, which is where the misclassification lived and which
+    /// needs no server. The call-site guarantee is the explicit `Option<i32>` in
+    /// `window_used`; only a live-Redis test could enforce that end to end.
+    #[test]
+    fn nil_is_a_missing_counter_not_a_redis_failure() {
+        use redis::{FromRedisValue, Value};
+
+        assert!(
+            i32::from_redis_value(Value::Nil).is_err(),
+            "if this ever starts succeeding the guard below is no longer load-bearing"
+        );
+        assert_eq!(Option::<i32>::from_redis_value(Value::Nil).unwrap(), None);
+        assert_eq!(
+            Option::<i32>::from_redis_value(Value::Int(7)).unwrap(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn quota_allows_exactly_the_limit() {
+        // 10th send of a limit-10 window is the last one allowed, not the first refused.
+        assert!(quota_outcome(1, 10).allowed);
+        assert!(quota_outcome(10, 10).allowed);
+        assert!(!quota_outcome(11, 10).allowed);
+    }
+
+    #[test]
+    fn quota_remaining_counts_down_and_never_goes_negative() {
+        assert_eq!(quota_outcome(1, 10).remaining, 9);
+        assert_eq!(quota_outcome(10, 10).remaining, 0);
+        assert_eq!(quota_outcome(50, 10).remaining, 0);
+    }
+
+    #[test]
+    fn banned_device_is_refused_before_touching_redis() {
+        let limit = TrustLevel::Banned.msg_limit_hour();
+        assert_eq!(limit, 0);
+        assert!(!quota_outcome(0, limit).allowed);
     }
 
     #[test]

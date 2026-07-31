@@ -431,9 +431,12 @@ impl MessagingService for MessagingGrpcService {
                 sender_device_id
             };
             // In-process call to SentinelCore — no gRPC hop.
-            // Fail-open semantics: on Redis/internal error we allow the send
-            // through (mirrors the previous gRPC-client fail-open behaviour
-            // when sentinel-service was unreachable).
+            //
+            // This fail-open branch is narrower than it looks: SentinelCore turns a Redis
+            // failure in the quota path into `Ok(allowed: false)` on purpose, so it never
+            // surfaces here as `Err`. Only errors before that point (trust lookup, block
+            // lookup) reach this arm. Rate limiting itself is fail-CLOSED — a Redis outage
+            // denies every send with retry_after=30.
             let (allowed, reason, retry_after) = match sentinel
                 .check_send_permission(sender_device_id, target, Some(&sender_id.to_string()))
                 .await
