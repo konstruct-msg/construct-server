@@ -23,9 +23,11 @@
 //   sentinel:violations:24h               → counter (TTL = 86400s)
 // ============================================================================
 
+use crate::degraded::{BreakerState, DegradedLimiter};
 use anyhow::Result;
 use redis::AsyncCommands;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -49,9 +51,18 @@ fn msg_key(device_id: &str) -> String {
 fn quota_outcome(used: i64, limit: i32) -> QuotaOutcome {
     QuotaOutcome {
         allowed: limit > 0 && used <= limit as i64,
-        remaining: (limit as i64 - used).max(0) as i32,
+        remaining: Some((limit as i64 - used).max(0) as i32),
         limit,
+        degraded: false,
     }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 /// Thresholds for automatic escalation.
@@ -109,6 +120,9 @@ impl TrustLevel {
 pub struct SentinelCore {
     pub db: PgPool,
     pub redis: redis::aio::ConnectionManager,
+    /// Breaker + in-process fallback counters, used only while Redis is unreachable.
+    /// See `degraded` for what degraded mode does and does not guarantee.
+    limiter: Arc<DegradedLimiter>,
 }
 
 // ─── Return types ────────────────────────────────────────────────────────────
@@ -117,9 +131,13 @@ pub struct SentinelCore {
 pub struct QuotaOutcome {
     /// False once the window's ceiling has been passed.
     pub allowed: bool,
-    /// Sends still permitted in this window after the one just counted.
-    pub remaining: i32,
+    /// Sends still permitted in this window after the one just counted, or `None` when
+    /// the count came from the degraded per-instance fallback and is not a figure any
+    /// caller should report to a client as authoritative.
+    pub remaining: Option<i32>,
     pub limit: i32,
+    /// True when Redis was unreachable and this verdict came from the local fallback.
+    pub degraded: bool,
 }
 
 pub struct SendPermission {
@@ -145,7 +163,16 @@ impl SentinelCore {
     /// that already owns a `PgPool` and Redis `ConnectionManager`. Sharing the
     /// pools avoids a second TCP/HTTP2 fan-out to the same backends.
     pub fn new(db: PgPool, redis: redis::aio::ConnectionManager) -> Self {
-        Self { db, redis }
+        Self {
+            db,
+            redis,
+            limiter: Arc::new(DegradedLimiter::new()),
+        }
+    }
+
+    /// Current breaker state, for `/health` and dashboards.
+    pub fn rate_limit_breaker_state(&self) -> BreakerState {
+        self.limiter.state(now_ms())
     }
 
     /// Cheap clone of the shared `ConnectionManager` (Arc-based internally).
@@ -156,33 +183,40 @@ impl SentinelCore {
     // ── Trust level ───────────────────────────────────────────────────────────
 
     /// Returns the trust level for a device.
-    /// Fails closed: if Redis or DB are unavailable, returns `TrustLevel::Flagged`
-    /// (restricted limits) rather than propagating a 500 that could cause retry storms.
+    ///
+    /// Redis here is only a **cache** in front of `device_flags`; Postgres is the
+    /// authority. So a Redis failure must not decide the answer — it used to return
+    /// `Flagged`, which caps a device at 5 messages/hour, meaning a Redis outage
+    /// silently demoted every user on the instance on top of the rate limiter also
+    /// degrading. Two degradations compounding on one dependency.
+    ///
+    /// Now a Redis failure only costs the cache: the DB lookup below still runs and
+    /// still returns the correct level. `Flagged` remains the fallback for a *DB*
+    /// failure, where we genuinely cannot tell a banned device from a fresh one.
     pub async fn trust_level(&self, device_id: &str) -> Result<TrustLevel> {
         match self.trust_level_inner(device_id).await {
             Ok(level) => Ok(level),
             Err(e) => {
-                warn!(error = %e, device_id = %device_id, "Trust level check failed — falling back to Flagged");
+                warn!(error = %e, device_id = %device_id, "Trust level check failed (database) — falling back to Flagged");
                 Ok(TrustLevel::Flagged)
             }
         }
     }
 
     async fn trust_level_inner(&self, device_id: &str) -> Result<TrustLevel> {
-        let mut conn = self.redis().await?;
-
-        // Fast path: ban/flag cached in Redis
         let ban_key = format!("sentinel:ban:{}", device_id);
         let flag_key = format!("sentinel:flag:{}", device_id);
 
-        let is_banned: bool = conn.exists(&ban_key).await?;
-        if is_banned {
-            return Ok(TrustLevel::Banned);
-        }
-
-        let is_flagged: bool = conn.exists(&flag_key).await?;
-        if is_flagged {
-            return Ok(TrustLevel::Flagged);
+        // Fast path: ban/flag cached in Redis. A cache miss and a cache *error* are the
+        // same thing here — both mean "ask Postgres" — so neither may abort the lookup.
+        let mut cache = self.redis().await.ok();
+        if let Some(conn) = cache.as_mut() {
+            if conn.exists(&ban_key).await.unwrap_or(false) {
+                return Ok(TrustLevel::Banned);
+            }
+            if conn.exists(&flag_key).await.unwrap_or(false) {
+                return Ok(TrustLevel::Flagged);
+            }
         }
 
         // Check DB for permanent bans/flags (with ban_expires_at support)
@@ -204,17 +238,22 @@ impl SentinelCore {
                         self.clear_ban(device_id).await?;
                         return self.age_based_level(device_id).await;
                     }
-                    // Temp ban still active — set TTL in Redis
+                    // Temp ban still active — refresh the cache if we have one. Best-effort:
+                    // failing to *write* the cache must not change the verdict we already know.
                     let remaining = (expires_at - chrono::Utc::now()).num_seconds().max(1);
-                    let _: () = conn.set_ex(&ban_key, "1", remaining as u64).await?;
-                } else {
+                    if let Some(conn) = cache.as_mut() {
+                        let _: Result<(), _> = conn.set_ex(&ban_key, "1", remaining as u64).await;
+                    }
+                } else if let Some(conn) = cache.as_mut() {
                     // Permanent ban — set without TTL (re-check in 7d)
-                    let _: () = conn.set_ex(&ban_key, "1", BAN_FLAG_TTL).await?;
+                    let _: Result<(), _> = conn.set_ex(&ban_key, "1", BAN_FLAG_TTL).await;
                 }
                 return Ok(TrustLevel::Banned);
             }
             if row.is_flagged {
-                let _: () = conn.set_ex(&flag_key, "1", BAN_FLAG_TTL).await?;
+                if let Some(conn) = cache.as_mut() {
+                    let _: Result<(), _> = conn.set_ex(&flag_key, "1", BAN_FLAG_TTL).await;
+                }
                 return Ok(TrustLevel::Flagged);
             }
         }
@@ -311,40 +350,105 @@ impl SentinelCore {
     ///
     /// The counter this reads was never incremented by anything before, so the per-device
     /// hourly limit had never actually limited anything — only the user-level ceiling did.
-    pub async fn consume_msg_quota(
-        &self,
-        device_id: &str,
-        trust: TrustLevel,
-    ) -> Result<QuotaOutcome> {
-        self.consume(&msg_key(device_id), trust.msg_limit_hour(), MSG_WINDOW_TTL)
-            .await
+    pub async fn consume_msg_quota(&self, device_id: &str, trust: TrustLevel) -> QuotaOutcome {
+        self.charge_window(
+            &msg_key(device_id),
+            trust.msg_limit_hour(),
+            MSG_WINDOW_TTL,
+            "sentinel_msg_quota",
+        )
+        .await
     }
 
     /// User-level aggregate message quota: same hourly ceiling as per-device, but shared
     /// across all devices of the user. Prevents N-device bypass.
     /// Key: `sentinel:rate:msg:user:{user_id}`
-    pub async fn consume_user_msg_quota(
-        &self,
-        user_id: &str,
-        trust: TrustLevel,
-    ) -> Result<QuotaOutcome> {
-        // Previously `.unwrap_or(1)`, which swallowed every Redis failure and allowed the
-        // send — fail-open, while the device-level check one line above failed closed on
-        // the same outage. The caller already has an error branch; let it reach it.
-        self.consume(
+    pub async fn consume_user_msg_quota(&self, user_id: &str, trust: TrustLevel) -> QuotaOutcome {
+        self.charge_window(
             &format!("sentinel:rate:msg:user:{}", user_id),
             trust.msg_limit_hour(),
             MSG_WINDOW_TTL,
+            "sentinel_user_msg_quota",
         )
         .await
     }
 
-    async fn consume(&self, key: &str, limit: i32, ttl_secs: i64) -> Result<QuotaOutcome> {
+    /// Charge one send to a rate-limit window, **degrading instead of denying** when
+    /// Redis cannot answer.
+    ///
+    /// This is deliberately infallible. Rate limits live in a single Redis, so failing
+    /// closed here made one Redis hiccup a total messaging outage — every send from
+    /// every device refused, clients retrying into a wall. An approximate ceiling for
+    /// the length of an outage is a far smaller harm than no messaging at all, and it
+    /// is the policy already applied to auth anti-bruteforce, which is the more
+    /// security-sensitive control of the two.
+    ///
+    /// While the breaker is open Redis is not attempted at all: during an outage the
+    /// per-send cost is not one error but one *connection timeout*, which is what turns
+    /// a Redis blip into a latency collapse.
+    async fn charge_window(
+        &self,
+        key: &str,
+        limit: i32,
+        ttl_secs: i64,
+        control: &'static str,
+    ) -> QuotaOutcome {
         if limit <= 0 {
-            return Ok(quota_outcome(0, limit));
+            return quota_outcome(0, limit);
         }
-        let used = self.incr_window(key, ttl_secs).await?;
-        Ok(quota_outcome(used, limit))
+        let now_ms = now_ms();
+
+        if self.limiter.should_skip_redis(now_ms) {
+            return self.charge_locally(key, limit, ttl_secs, control);
+        }
+
+        match self.incr_window(key, ttl_secs).await {
+            Ok(used) => {
+                if self.limiter.state(now_ms) != BreakerState::Closed {
+                    info!(
+                        control,
+                        "Rate-limit Redis recovered — leaving degraded mode, Redis is authoritative again"
+                    );
+                    // Drop the outage's counters: keeping them would double-charge every
+                    // device against both the local window and the Redis one.
+                    self.limiter.clear();
+                }
+                self.limiter.record_success();
+                quota_outcome(used, limit)
+            }
+            Err(e) => {
+                if self.limiter.record_failure(now_ms) {
+                    tracing::error!(
+                        error = %e,
+                        control,
+                        "Rate-limit Redis unreachable — degrading to per-instance limits (sends continue)"
+                    );
+                }
+                self.charge_locally(key, limit, ttl_secs, control)
+            }
+        }
+    }
+
+    fn charge_locally(
+        &self,
+        key: &str,
+        limit: i32,
+        ttl_secs: i64,
+        control: &'static str,
+    ) -> QuotaOutcome {
+        construct_metrics::record_abuse_fail_open(control);
+        let out = self.limiter.charge(key, limit, ttl_secs, now_secs());
+        if !out.tracked {
+            // The fallback table is full — the send goes through uncounted. Alert on this:
+            // sustained non-zero means degraded mode has stopped limiting anything.
+            construct_metrics::record_abuse_fail_open("sentinel_degraded_untracked");
+        }
+        QuotaOutcome {
+            allowed: out.allowed,
+            remaining: None,
+            limit,
+            degraded: true,
+        }
     }
 
     /// Increment rate-limit violation counter for stats.
@@ -390,17 +494,9 @@ impl SentinelCore {
         // Check device-level hourly message rate.
         // Fail-closed: if Redis is unavailable, deny the send rather than allowing
         // unlimited traffic. The client should retry after the backoff.
-        let device_quota = match self.consume_msg_quota(caller_device_id, trust).await {
-            Ok(q) => q,
-            Err(e) => {
-                tracing::error!(error = %e, device_id = %caller_device_id, "Redis unavailable in msg_quota — failing closed");
-                return Ok(SendPermission {
-                    allowed: false,
-                    denial_reason: "Rate-limit service temporarily unavailable".into(),
-                    retry_after_seconds: 30,
-                });
-            }
-        };
+        // Never denies because Redis is down — see `charge_window`. A Redis outage now
+        // degrades the ceiling instead of removing the ability to send.
+        let device_quota = self.consume_msg_quota(caller_device_id, trust).await;
         if !device_quota.allowed {
             self.record_violation().await;
             return Ok(SendPermission {
@@ -415,17 +511,7 @@ impl SentinelCore {
         if let Some(user_id) = caller_user_id
             && !user_id.is_empty()
         {
-            let user_quota = match self.consume_user_msg_quota(user_id, trust).await {
-                Ok(q) => q,
-                Err(e) => {
-                    tracing::error!(error = %e, user_id = %user_id, "Redis unavailable in user_msg_quota — failing closed");
-                    return Ok(SendPermission {
-                        allowed: false,
-                        denial_reason: "Rate-limit service temporarily unavailable".into(),
-                        retry_after_seconds: 30,
-                    });
-                }
-            };
+            let user_quota = self.consume_user_msg_quota(user_id, trust).await;
             if !user_quota.allowed {
                 self.record_violation().await;
                 return Ok(SendPermission {
@@ -791,9 +877,9 @@ mod tests {
 
     #[test]
     fn quota_remaining_counts_down_and_never_goes_negative() {
-        assert_eq!(quota_outcome(1, 10).remaining, 9);
-        assert_eq!(quota_outcome(10, 10).remaining, 0);
-        assert_eq!(quota_outcome(50, 10).remaining, 0);
+        assert_eq!(quota_outcome(1, 10).remaining, Some(9));
+        assert_eq!(quota_outcome(10, 10).remaining, Some(0));
+        assert_eq!(quota_outcome(50, 10).remaining, Some(0));
     }
 
     #[test]

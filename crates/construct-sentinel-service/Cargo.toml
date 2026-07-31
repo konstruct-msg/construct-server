@@ -11,6 +11,9 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 
+# Metrics — degraded-mode visibility (fail-open counters)
+construct-metrics = { path = "../construct-metrics" }
+
 # Database / Redis
 sqlx        = { workspace = true }
 redis       = { workspace = true }
