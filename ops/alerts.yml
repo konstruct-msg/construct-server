@@ -1,0 +1,89 @@
+# =============================================================================
+# Construct Server — Prometheus alert rules
+# =============================================================================
+# Loaded via `rule_files` in prometheus.yml. No Alertmanager is deployed yet, so
+# these surface on Prometheus' /alerts page and through Grafana; routing them to a
+# human needs Alertmanager.
+#
+# The Redis rules exist because this Redis is not a pure cache — it holds the
+# offline delivery queues. Running it `noeviction` converts "silently drop a
+# user's queued messages" into "reject writes loudly", which is only an
+# improvement if someone sees the pressure building first.
+# =============================================================================
+
+groups:
+  - name: redis
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is unreachable"
+          description: >
+            Offline delivery queues, rate limits and caches are all in this instance.
+            Messaging sends continue (the sentinel limiter degrades to per-instance
+            counters), but queued offline delivery is stalled.
+
+      # Leading indicator. With noeviction, hitting 100% means writes start failing —
+      # including offline-queue writes — so this must be acted on before it gets there.
+      - alert: RedisMemoryPressure
+        expr: redis_memory_max_bytes > 0 and redis_memory_used_bytes / redis_memory_max_bytes > 0.75
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis above 75% of maxmemory"
+          description: >
+            At 100% Redis rejects writes (noeviction). Check for an abandoned offline
+            queue or raise maxmemory — the box has headroom.
+
+      - alert: RedisMemoryCritical
+        expr: redis_memory_max_bytes > 0 and redis_memory_used_bytes / redis_memory_max_bytes > 0.90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis above 90% of maxmemory — writes will start failing"
+
+      # Should be flat at zero forever now. Any movement means either the policy was
+      # changed back to an evicting one, or Redis is evicting despite noeviction —
+      # both mean queued messages can disappear without an error.
+      - alert: RedisKeysEvicted
+        expr: increase(redis_evicted_keys_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis evicted keys — offline messages may have been dropped"
+          description: >
+            With maxmemory-policy=noeviction this should be impossible. Check the
+            running config: `redis-cli config get maxmemory-policy`.
+
+  - name: sentinel
+    rules:
+      # The limiter degrading is by design (better than refusing every send), but it
+      # means limits are approximate and per-instance while it lasts.
+      - alert: SentinelRateLimitDegraded
+        expr: increase(construct_msg_abuse_fail_open_total{control=~"sentinel_.*_quota"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sentinel rate limiting is running on per-instance fallback counters"
+          description: >
+            Redis is not answering the quota path. The circuit breaker recovers on its
+            own once Redis returns; sustained firing means it is not returning.
+
+      # The fallback table is full, so degraded mode has stopped limiting anything.
+      - alert: SentinelDegradedUntracked
+        expr: increase(construct_msg_abuse_fail_open_total{control="sentinel_degraded_untracked"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Degraded rate limiter is at capacity — sends are passing uncounted"
+          description: >
+            Reaching 50k tracked keys needs 50k verified devices. Treat as a possible
+            abuse campaign coinciding with a Redis outage.
