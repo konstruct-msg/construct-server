@@ -15,6 +15,9 @@ mod stream;
 mod token_redeem;
 mod trust;
 
+#[cfg(test)]
+mod sealed_matrix_tests;
+
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -533,7 +536,15 @@ mod tests {
         let proto = convert_envelope_to_proto(env).unwrap();
 
         assert!(proto.sender.is_none(), "sealed sender must hide sender");
+        assert!(
+            proto.sender_device.is_none(),
+            "sealed sender must hide sender device"
+        );
         assert_eq!(proto.recipient.as_ref().unwrap().user_id, "bob");
+        assert!(
+            proto.conversation_id.is_empty(),
+            "conversation_id must stay empty on sealed delivery (server-visible metadata)"
+        );
 
         let sealed = proto.sealed_sender.expect("sealed_sender must be set");
         assert_eq!(

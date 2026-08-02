@@ -917,6 +917,31 @@ mod tests {
         assert!(env.validate().is_ok());
     }
 
+    /// U1 — sealed envelope must never carry a server-visible sender id.
+    #[test]
+    fn from_sealed_sender_empties_sender_and_marks_sealed() {
+        let env = MessageEnvelope::from_sealed_sender(
+            "mid-1".to_string(),
+            "recipient-uuid".to_string(),
+            b"opaque-sealed-inner".to_vec(),
+        );
+        assert!(
+            env.sender_id.is_empty(),
+            "sealed path must not store a sender_id (receipt maps / block use this)"
+        );
+        assert!(env.is_sealed_sender);
+        assert_eq!(env.message_type, MessageType::SealedSender);
+        assert_eq!(env.recipient_id, "recipient-uuid");
+        assert!(
+            env.sealed_inner_b64.is_some(),
+            "sealed_inner must be retained for delivery to the recipient"
+        );
+        assert!(
+            env.proto_content_type.is_none(),
+            "content type must not ride a server-visible envelope field for sealed"
+        );
+    }
+
     #[test]
     fn test_validate_mls_message_requires_mls_payload() {
         let mut env = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {

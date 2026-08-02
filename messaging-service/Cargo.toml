@@ -66,6 +66,7 @@ curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.13"
 sha2-dalek-compat = { package = "sha2", version = "0.10" }
+ed25519-compact = { version = "2.0", features = ["pem", "random"] }
 
 [features]
 integration_tests = []
