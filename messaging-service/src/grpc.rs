@@ -1059,6 +1059,31 @@ mod sealed_dispatch_error_tests {
         assert_eq!(status.message(), "privacy_pass:missing_token");
     }
 
+    /// U3 — every redeem label must surface as a stable `privacy_pass:{label}` status.
+    #[test]
+    fn all_token_rejected_labels_map_to_failed_precondition() {
+        for label in [
+            "missing_token",
+            "invalid_token",
+            "double_spent",
+            "decrypt_failed",
+            "redis_error",
+            "not_configured",
+        ] {
+            let status = map_sealed_dispatch_error(anyhow::Error::new(TokenRejected { label }));
+            assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "label {label}"
+            );
+            assert_eq!(
+                status.message(),
+                format!("privacy_pass:{label}"),
+                "label {label}"
+            );
+        }
+    }
+
     #[test]
     fn other_errors_stay_internal() {
         let status = map_sealed_dispatch_error(anyhow::anyhow!("redis down"));

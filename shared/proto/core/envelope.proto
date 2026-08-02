@@ -340,32 +340,40 @@ message Reaction {
 }
 
 // ============================================================================
-// Sealed Sender — Split-Knowledge Onion Envelope for Federation Privacy
+// Sealed Sender — server-visible outer / recipient-only identity
 // ============================================================================
 //
-// Architecture: no single server sees the full sender→recipient pair.
+// Used for BOTH local (same-server) and federated sealed delivery. Always-on
+// client stealth builds a SealedInner for peer traffic; the server routes by
+// recipient only and must not learn the sender from the envelope.
 //
-//   Home Server (A):  knows sender (JWT session), sees only recipient_server
-//   Dest Server (B):  knows recipient_user_id, cannot see sender
-//   Recipient (Bob):  decrypts sender_cert_ciphertext → learns sender identity
+//   Destination server:  recipient_user_id + opaque sealed blob + PP token
+//                        (+ IP / size / time). MUST NOT parse for content kind.
+//   Federation home hop: recipient_server + opaque sealed_inner (do not open).
+//   Recipient:           opens sender_cert_ciphertext → sender identity;
+//                        decrypts encrypted_payload → E2E content + type.
 //
-// Used ONLY for cross-server (federation) messages. Local messages use the
-// regular Envelope.sender field since the server already knows both parties.
+// Transitional: clients may still post SealedInner via authenticated
+// SendMessage (server sees JWT at send time). Real-time anonymity requires
+// unauthenticated SendSealedMessage. See construct-docs decisions:
+// sealed-sender-authenticated-transitional, stealth-sealed-sender-v2-always-on.
 // ============================================================================
 
-// SealedSenderEnvelope — outer wrapper visible to the home server
-// Home server uses recipient_server for S2S routing, then forwards sealed_inner
-// opaquely to the destination server.
+// SealedSenderEnvelope — outer wrapper on the wire / federation hop
+// For federation: home server routes by recipient_server and forwards
+// sealed_inner opaquely. Local SendSealedMessage may leave recipient_server empty.
 message SealedSenderEnvelope {
-  // Destination federation server domain
+  // Destination federation server domain (empty = local destination server)
   // Example: "eu.konstruct.cc"
   string recipient_server = 1;
 
-  // Serialized SealedInner — opaque to home server (do NOT parse)
+  // Serialized SealedInner
+  // Federation home hop: treat as opaque. Destination may decode for routing
+  // fields only (recipient_user_id, delivery_tag, token_*).
   bytes sealed_inner = 2;
 
   // Anti-replay HMAC: HMAC-SHA256(server_secret, sealed_inner || timestamp)
-  // Home server validates freshness before forwarding
+  // Home server validates freshness before forwarding (federation)
   bytes forwarding_token = 3;
 
   // Timestamp for freshness check (reject if >5 min old)
@@ -375,8 +383,10 @@ message SealedSenderEnvelope {
   reserved 5 to 15;
 }
 
-// SealedInner — delivered to the destination server
-// Server sees recipient but NOT sender identity.
+// SealedInner — opened only on the destination messaging path
+// Server-allowed knowledge: recipient_user_id, delivery_tag, token_*,
+// ciphertext size. Not allowed for routing/UI: content kind, priority, TTL
+// (those belong inside the E2E payload — see content_type deprecation note).
 message SealedInner {
   // Recipient user ID (local to destination server)
   string recipient_user_id = 1;
@@ -393,13 +403,18 @@ message SealedInner {
   // Opaque E2EE payload (Double Ratchet encrypted message)
   bytes encrypted_payload = 4;
 
-  // Content type (needed by server for priority routing / notification text)
+  // DEPRECATED (server-visible metadata leak) — do not use for new protocol work.
+  // Historical: real content type for sealed sends (outer Envelope cleared in Phase 3).
+  // Destination server must ignore. Target: 1-byte type lives inside encrypted_payload
+  // (or binary SessionControl / MessageContent only); then stop writing this field
+  // (default UNSPECIFIED). Enum values 0–26 fit in a single u8.
+  // Server MUST NOT use this for priority, notification text, or routing.
   ContentType content_type = 5;
 
-  // Message priority
+  // DEPRECATED — same as content_type; ignore on server; do not write on new clients.
   MessagePriority priority = 6;
 
-  // TTL in seconds (0 = no expiration)
+  // DEPRECATED — TTL belongs in E2E semantics if needed; server ignores.
   uint32 ttl = 7;
 
   // Privacy Pass blind token — anonymous spend credential (optional).

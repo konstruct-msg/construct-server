@@ -2649,6 +2649,7 @@ dependencies = [
  "construct-utils",
  "curve25519-dalek",
  "dotenvy",
+ "ed25519-compact",
  "futures-core",
  "hex",
  "hkdf 0.13.0",
