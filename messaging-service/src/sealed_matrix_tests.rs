@@ -79,8 +79,10 @@ fn make_config(
     paseto_pub: &str,
     policy: StealthTokenPolicy,
 ) -> Config {
-    let mut messaging = MessagingConfig::default();
-    messaging.stealth_token_policy = policy;
+    let messaging = MessagingConfig {
+        stealth_token_policy: policy,
+        ..MessagingConfig::default()
+    };
 
     Config {
         database_url: database.to_string(),
@@ -252,7 +254,10 @@ async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
     let redis_conn = match try_redis().await {
         Some(c) => c,
         None => {
-            eprintln!("sealed_matrix: redis unavailable at {} — skipping", redis_url());
+            eprintln!(
+                "sealed_matrix: redis unavailable at {} — skipping",
+                redis_url()
+            );
             return None;
         }
     };
@@ -364,18 +369,16 @@ fn build_sealed_envelope(
     token_nonce: Option<&[u8]>,
     token_bytes: Option<&[u8]>,
 ) -> core_proto::SealedSenderEnvelope {
-    let mut inner = core_proto::SealedInner::default();
-    inner.recipient_user_id = recipient.to_string();
-    inner.delivery_tag = delivery_tag.to_vec();
-    inner.sender_cert_ciphertext = vec![0u8; 48]; // opaque to server
-    inner.encrypted_payload = b"fake-e2ee-payload".to_vec();
     // content_type / priority / ttl left at proto defaults (deprecated server-visible fields)
-    if let Some(n) = token_nonce {
-        inner.token_nonce = n.to_vec();
-    }
-    if let Some(b) = token_bytes {
-        inner.token_bytes = b.to_vec();
-    }
+    let inner = core_proto::SealedInner {
+        recipient_user_id: recipient.to_string(),
+        delivery_tag: delivery_tag.to_vec(),
+        sender_cert_ciphertext: vec![0u8; 48], // opaque to server
+        encrypted_payload: b"fake-e2ee-payload".to_vec(),
+        token_nonce: token_nonce.map(|n| n.to_vec()).unwrap_or_default(),
+        token_bytes: token_bytes.map(|b| b.to_vec()).unwrap_or_default(),
+        ..core_proto::SealedInner::default()
+    };
 
     core_proto::SealedSenderEnvelope {
         recipient_server: String::new(), // local
@@ -394,10 +397,7 @@ async fn stream_len(conn: &mut redis::aio::ConnectionManager, recipient: &uuid::
         .unwrap_or(0)
 }
 
-async fn receipt_sender_exists(
-    conn: &mut redis::aio::ConnectionManager,
-    message_id: &str,
-) -> bool {
+async fn receipt_sender_exists(conn: &mut redis::aio::ConnectionManager, message_id: &str) -> bool {
     let key = format!("receipt:sender:{message_id}");
     let n: i64 = redis::cmd("EXISTS")
         .arg(&key)
@@ -608,10 +608,12 @@ async fn i5_i6_sealed_leaves_no_sender_mapping_but_writes_stream() {
         mac.update(resp.message_id.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     };
-    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM delivery_pending WHERE message_hash = $1")
-        .bind(&message_hash)
-        .fetch_one(&*h.ctx.db_pool)
-        .await
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM delivery_pending WHERE message_hash = $1",
+    )
+    .bind(&message_hash)
+    .fetch_one(&*h.ctx.db_pool)
+    .await
     {
         Ok(count) => assert_eq!(
             count, 0,
