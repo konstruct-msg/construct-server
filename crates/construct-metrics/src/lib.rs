@@ -323,6 +323,17 @@ pub static GRPC_STREAM_RECONNECTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .expect("Failed to register GRPC_STREAM_RECONNECTS_TOTAL metric")
 });
 
+/// Poll started with `last_stream_id = None` after Subscribe already carried a
+/// `since_cursor`. After the catch-up-after-subscribe fix this must stay at zero —
+/// a non-zero value means the open-time race (or a similar ordering bug) regressed.
+pub static MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_msg_poll_missing_cursor_after_subscribe_total",
+        "MessageStream poll started without cursor after Subscribe carried since_cursor (regression canary)"
+    ))
+    .expect("Failed to register MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL metric")
+});
+
 // ============================================================================
 // Security / Key Transparency Metrics
 // ============================================================================

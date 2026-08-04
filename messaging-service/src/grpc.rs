@@ -10,7 +10,10 @@ use tonic::{Request, Response, Status};
 use crate::context::MessagingServiceContext;
 use crate::core;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
-use crate::stream::{handle_stream_request, poll_messages, spawn_inbox_wakeup};
+use crate::stream::{
+    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request, poll_messages,
+    spawn_inbox_wakeup,
+};
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, messaging_service_server::MessagingService,
 };
@@ -83,10 +86,13 @@ impl MessagingService for MessagingGrpcService {
             // XREAD calls from different stream tasks can proceed in parallel.
             let mut stream_queue = context.queue.lock().await.clone();
 
-            // Track last seen stream_id for pagination
-            let mut last_stream_id: Option<String> = None;
-            // Initialise from auth metadata; may also be set from first Send message
+            // Initialise from auth metadata (Bearer); envelope.sender is never trusted.
             let mut user_id: Option<uuid::Uuid> = auth_user_id;
+            // last_stream_id stays None until Subscribe applies since_cursor (or
+            // subscribe-grace expires) so the first XREAD does not replay the
+            // whole offline retention window. Wakeup/interval polls stay gated
+            // until initial_catchup_done.
+            let mut catchup = StreamCatchupState::default();
 
             // Unique ID for this stream connection — used to correlate open/close log lines
             let stream_conn_id = uuid::Uuid::new_v4();
@@ -127,8 +133,14 @@ impl MessagingService for MessagingGrpcService {
                 context.config.messaging.stream_heartbeat_interval_secs,
             ));
 
-            // If user_id is already known from auth metadata, subscribe now and
-            // flush any messages that arrived before the stream opened.
+            // Wait for Subscribe (with optional since_cursor) before the first
+            // offline XREAD. iOS sends Subscribe immediately after open; grace
+            // covers clients that never Subscribe (poll from stream start).
+            let subscribe_grace = tokio::time::sleep(SUBSCRIBE_CATCHUP_GRACE);
+            tokio::pin!(subscribe_grace);
+
+            // If user_id is already known from auth metadata, arm inbox wakeup and
+            // mark online — but do NOT poll yet (wait for Subscribe or grace).
             if let Some(uid) = user_id {
                 spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                 wakeup_subscribed = true;
@@ -138,22 +150,11 @@ impl MessagingService for MessagingGrpcService {
                 {
                     tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
                 }
-                if let Err(e) = poll_messages(
-                    &mut stream_queue,
-                    &context.config.messaging,
-                    uid,
-                    &mut last_stream_id,
-                    &tx,
-                )
-                .await
-                {
-                    tracing::warn!("Initial poll error: {}", e);
-                }
             }
 
             let close_reason = 'stream: loop {
-                // Lazy subscribe: subscribe as soon as user_id becomes known
-                // (e.g. from the first Send message if not in auth metadata).
+                // Lazy inbox wakeup: arm as soon as user_id becomes known.
+                // Catch-up poll still waits for Subscribe or grace (not here).
                 if !wakeup_subscribed && let Some(uid) = user_id {
                     spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
                     wakeup_subscribed = true;
@@ -162,17 +163,6 @@ impl MessagingService for MessagingGrpcService {
                         .await
                     {
                         tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
-                    }
-                    if let Err(e) = poll_messages(
-                        &mut stream_queue,
-                        &context.config.messaging,
-                        uid,
-                        &mut last_stream_id,
-                        &tx,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Initial poll error: {}", e);
                     }
                 }
 
@@ -186,8 +176,8 @@ impl MessagingService for MessagingGrpcService {
                                     &context,
                                     &tx,
                                     &mut user_id,
-                                    &mut last_stream_id,
                                     &mut stream_queue,
+                                    &mut catchup,
                                 ).await {
                                     tracing::warn!(error = %e, "Error handling stream request");
                                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
@@ -227,22 +217,57 @@ impl MessagingService for MessagingGrpcService {
                         }
                     }
 
-                    // Push: new message arrived — deliver immediately
-                    Some(()) = wakeup_rx.recv() => {
-                        if let Some(uid) = user_id
-                            && let Err(e) = poll_messages(&mut stream_queue, &context.config.messaging, uid, &mut last_stream_id, &tx).await {
-                                tracing::warn!("Error polling messages after wakeup: {}", e);
+                    // Subscribe never arrived: catch up from current cursor (usually None
+                    // → stream start). Only clients that skip Subscribe take this path.
+                    _ = &mut subscribe_grace, if !catchup.initial_catchup_done && user_id.is_some() => {
+                        if let Some(uid) = user_id {
+                            tracing::debug!(
+                                user_id = %uid,
+                                last_stream_id = ?catchup.last_stream_id,
+                                "Subscribe grace elapsed without Subscribe — offline catch-up"
+                            );
+                            if let Err(e) = poll_messages(
+                                &mut stream_queue,
+                                &context.config.messaging,
+                                uid,
+                                &mut catchup.last_stream_id,
+                                &tx,
+                                catchup.subscribe_with_cursor_seen,
+                            )
+                            .await
+                            {
+                                tracing::warn!("Grace catch-up poll error: {}", e);
                             }
+                        }
+                        catchup.initial_catchup_done = true;
+                    }
+
+                    // Push: new message arrived — deliver immediately (after initial catch-up)
+                    Some(()) = wakeup_rx.recv(), if catchup.initial_catchup_done => {
+                        if let Some(uid) = user_id
+                            && let Err(e) = poll_messages(
+                                &mut stream_queue,
+                                &context.config.messaging,
+                                uid,
+                                &mut catchup.last_stream_id,
+                                &tx,
+                                catchup.subscribe_with_cursor_seen,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Error polling messages after wakeup: {}", e);
+                        }
                     }
 
                     // Fallback poll (covers missed pub/sub events and reconnects)
-                    _ = poll_interval.tick() => {
+                    _ = poll_interval.tick(), if catchup.initial_catchup_done => {
                         if let Some(uid) = user_id && let Err(e) = poll_messages(
                                 &mut stream_queue,
                                 &context.config.messaging,
                                 uid,
-                                &mut last_stream_id,
+                                &mut catchup.last_stream_id,
                                 &tx,
+                                catchup.subscribe_with_cursor_seen,
                             ).await {
                                 tracing::warn!("Error polling messages: {}", e);
                             }

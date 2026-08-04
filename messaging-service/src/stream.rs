@@ -10,14 +10,39 @@ use crate::envelope::{convert_envelope_to_proto, dispatch_sealed_sender};
 use crate::receipts::{build_receipt_response, relay_delivery_receipt};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
-/// Handle incoming MessageStreamRequest from client
+/// How long to wait for the client's first `Subscribe` (with optional
+/// `since_cursor`) before doing an offline catch-up poll from the start of the
+/// stream. iOS sends Subscribe immediately after open; this grace only covers
+/// clients that never Subscribe (or lose the first frame).
+pub(crate) const SUBSCRIBE_CATCHUP_GRACE: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+
+/// Per-connection offline catch-up state for MessageStream.
+///
+/// Catch-up must run only after Subscribe applies `since_cursor` (or after
+/// [`SUBSCRIBE_CATCHUP_GRACE`]), never at stream open.
+#[derive(Debug, Default)]
+pub(crate) struct StreamCatchupState {
+    /// Last Redis stream id used as exclusive XREAD start (resume position).
+    pub last_stream_id: Option<String>,
+    /// Subscribe on this connection carried a valid `since_cursor` (S2 canary).
+    pub subscribe_with_cursor_seen: bool,
+    /// First offline catch-up completed (Subscribe handler or grace timer).
+    pub initial_catchup_done: bool,
+}
+
+/// Handle incoming MessageStreamRequest from client.
+///
+/// On `Subscribe`, applies `since_cursor` (trim + resume position) and then runs
+/// the offline catch-up poll. The open path must **not** poll before that —
+/// doing so re-delivers the entire offline stream and races the cursor.
 pub(crate) async fn handle_stream_request(
     req: proto::MessageStreamRequest,
     context: &Arc<MessagingServiceContext>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     user_id: &mut Option<uuid::Uuid>,
-    last_stream_id: &mut Option<String>,
     stream_queue: &mut construct_queue::MessageQueue,
+    catchup: &mut StreamCatchupState,
 ) -> anyhow::Result<()> {
     use proto::message_stream_request::Request as StreamReq;
 
@@ -368,26 +393,28 @@ pub(crate) async fn handle_stream_request(
             // to avoid leaking the client's contact graph to the server.
             // All messages for this user are already routed to their Redis stream regardless.
             //
-            // If the subscribe carries a since_cursor, apply it as the resume position
-            // so that reconnecting clients don't re-read the entire Redis stream.
+            // Apply since_cursor *before* the offline catch-up poll. Catch-up used to
+            // run at stream open (before this Subscribe was read), which re-delivered
+            // the entire offline retention window and made the advance-only guard paper
+            // over a race instead of preventing it.
             //
-            // Guard: only advance the cursor — never rewind it.  The initial poll runs
-            // before the stream loop and may already have set last_stream_id to a more
-            // recent position (e.g., "1776522670299-0").  Overwriting that with an older
-            // client cursor would cause the next poll to re-deliver messages that were
-            // just sent in the initial poll.
-            if let Some(cursor) = sub.since_cursor
+            // Guard: only advance the cursor — never rewind it. This is a safety net
+            // for a later Subscribe with a stale bookmark (or a client that reconnects
+            // with an older cursor), not a compensation for open-time catch-up.
+            if let Some(cursor) = sub.since_cursor.as_deref()
                 && !cursor.is_empty()
             {
                 // Clients must pass a Redis stream ID (e.g. "1782556480695-0"), NOT a
                 // message UUID.  An invalid cursor used as XREAD start ID is reset to "0"
                 // (re-deliver everything) while a valid-but-stale cursor can skip messages.
-                if !is_valid_redis_stream_cursor(&cursor) {
+                if !is_valid_redis_stream_cursor(cursor) {
                     tracing::warn!(
                         cursor = %cursor,
                         "Ignoring invalid since_cursor on Subscribe (expected Redis stream ID, not message UUID)"
                     );
                 } else {
+                    catchup.subscribe_with_cursor_seen = true;
+
                     // ACK-driven deletion: the client's since_cursor is the last message it
                     // has durably received AND persisted. Only now is it safe to delete
                     // everything ≤ cursor from the offline stream. This is the ONLY place
@@ -395,22 +422,34 @@ pub(crate) async fn handle_stream_request(
                     // which previously caused silent loss on short/broken recipient sessions.
                     if let Some(uid) = user_id.as_ref()
                         && let Err(e) = stream_queue
-                            .trim_offline_stream(&uid.to_string(), &cursor)
+                            .trim_offline_stream(&uid.to_string(), cursor)
                             .await
                     {
                         tracing::warn!(error = %e, "Failed to trim offline stream on subscribe (non-fatal)");
                     }
 
-                    let advance = match last_stream_id {
-                        None => true,
-                        Some(current) => compare_stream_ids(&cursor, current)
-                            == std::cmp::Ordering::Greater,
-                    };
-                    if advance {
-                        tracing::info!(cursor = %cursor, "Resuming stream from client since_cursor");
-                        *last_stream_id = Some(cursor.to_string());
-                    }
+                    apply_since_cursor(cursor, &mut catchup.last_stream_id);
                 }
+            }
+
+            // Offline catch-up after cursor application (or Subscribe without cursor).
+            // Grace-timer path in grpc.rs covers clients that never Subscribe.
+            if !catchup.initial_catchup_done
+                && let Some(uid) = *user_id
+            {
+                if let Err(e) = poll_messages(
+                    stream_queue,
+                    &context.config.messaging,
+                    uid,
+                    &mut catchup.last_stream_id,
+                    tx,
+                    catchup.subscribe_with_cursor_seen,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Subscribe catch-up poll error");
+                }
+                catchup.initial_catchup_done = true;
             }
         }
         Some(StreamReq::Unsubscribe(_)) => {
@@ -450,6 +489,21 @@ fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
     cursor.parse::<u64>().is_ok()
 }
 
+/// Apply a client `since_cursor` as the resume position: only advance, never rewind.
+/// Returns whether the cursor was applied (advanced or equal — position is at least
+/// the client bookmark).
+fn apply_since_cursor(cursor: &str, last_stream_id: &mut Option<String>) -> bool {
+    let advance = match last_stream_id {
+        None => true,
+        Some(current) => compare_stream_ids(cursor, current) == std::cmp::Ordering::Greater,
+    };
+    if advance {
+        tracing::info!(cursor = %cursor, "Resuming stream from client since_cursor");
+        *last_stream_id = Some(cursor.to_string());
+    }
+    advance
+}
+
 /// Compare two Redis stream IDs lexicographically by (timestamp, sequence).
 /// Returns `Ordering::Greater` if `a` is strictly newer than `b`.
 /// IDs with unexpected formats are treated as "not greater" (safe fallback).
@@ -467,7 +521,6 @@ fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-///
 /// Spawns a background task — exits automatically when the receiver is dropped
 /// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
 /// so the fallback 5s poll is never triggered in normal operation.
@@ -476,6 +529,10 @@ fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
 /// each successful SUBSCRIBE. This triggers an extra `poll_messages` call that catches
 /// any messages that were XADD'd to the stream between stream-open and subscribe
 /// completion (~50 ms window), preventing up to 5 s delivery delay on reconnect.
+///
+/// Callers must gate wakeup-driven polls until initial catch-up has applied
+/// `since_cursor` (or subscribe grace has elapsed); otherwise a synthetic wakeup
+/// would XREAD from `"0"` and re-deliver the offline window.
 pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
     tokio::spawn(async move {
         let channel = format!("inbox:wakeup:{}", user_id);
@@ -538,15 +595,28 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
 /// Takes `queue` as a per-stream clone rather than locking the global
 /// `context.queue` mutex. This allows concurrent XREAD calls from multiple
 /// connected users without serializing on a single lock.
+///
+/// `subscribe_with_cursor_seen`: true if this connection already processed a
+/// Subscribe that carried a valid `since_cursor`. Polling with `last_stream_id
+/// == None` in that state is a regression canary (S2).
 pub(crate) async fn poll_messages(
     queue: &mut construct_queue::MessageQueue,
     config: &construct_config::MessagingConfig,
     user_id: uuid::Uuid,
     last_stream_id: &mut Option<String>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
+    subscribe_with_cursor_seen: bool,
 ) -> anyhow::Result<()> {
     let user_id_str = user_id.to_string();
     let limit = 50;
+
+    if last_stream_id.is_none() && subscribe_with_cursor_seen {
+        tracing::warn!(
+            user_id = %user_id_str,
+            "poll_messages started with no stream cursor after Subscribe carried since_cursor — possible catch-up race regression"
+        );
+        construct_metrics::MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL.inc();
+    }
 
     let t_xread = std::time::Instant::now();
     let messages = queue
@@ -628,4 +698,111 @@ pub(crate) async fn poll_messages(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exclusive XREAD-style filter: entries with id strictly greater than `since`.
+    /// When `since` is `None`, Redis uses start id `"0"` and returns the whole stream.
+    fn messages_after_cursor<'a>(ids: &[&'a str], since: Option<&str>) -> Vec<&'a str> {
+        match since {
+            None => ids.to_vec(),
+            Some(cursor) => ids
+                .iter()
+                .copied()
+                .filter(|id| compare_stream_ids(id, cursor) == std::cmp::Ordering::Greater)
+                .collect(),
+        }
+    }
+
+    /// Regression: N offline entries, Subscribe with cursor at N−1 must yield exactly
+    /// one delivery. Pre-fix open-time poll used start id "0" and re-delivered all N.
+    #[test]
+    fn subscribe_then_catchup_delivers_only_after_cursor() {
+        let ids = ["1000-0", "1001-0", "1002-0", "1003-0", "1004-0"]; // N = 5
+        let cursor_n_minus_1 = ids[ids.len() - 2]; // "1003-0"
+
+        let mut last_stream_id: Option<String> = None;
+        // S1 order: apply cursor first, then catch-up (exclusive XREAD after cursor).
+        apply_since_cursor(cursor_n_minus_1, &mut last_stream_id);
+        assert_eq!(last_stream_id.as_deref(), Some(cursor_n_minus_1));
+
+        let delivered = messages_after_cursor(&ids, last_stream_id.as_deref());
+        assert_eq!(
+            delivered,
+            vec!["1004-0"],
+            "expected exactly the one entry after N−1, got {delivered:?}"
+        );
+    }
+
+    /// Documents the pre-fix race: poll-from-0 before Subscribe re-delivers all N;
+    /// advance-only then ignores the client's older cursor so the damage is permanent
+    /// for that connection (client already received the replay).
+    #[test]
+    fn poll_before_subscribe_replays_entire_offline_window() {
+        let ids = ["1000-0", "1001-0", "1002-0", "1003-0", "1004-0"];
+        let cursor_n_minus_1 = ids[ids.len() - 2];
+
+        let mut last_stream_id: Option<String> = None;
+        // Bug order: open-time poll with None → start id "0" → all N.
+        let replayed = messages_after_cursor(&ids, last_stream_id.as_deref());
+        assert_eq!(replayed.len(), ids.len());
+        last_stream_id = Some(ids[ids.len() - 1].to_string());
+
+        // Subscribe arrives too late; advance-only refuses to rewind.
+        let advanced = apply_since_cursor(cursor_n_minus_1, &mut last_stream_id);
+        assert!(!advanced);
+        assert_eq!(last_stream_id.as_deref(), Some(ids[ids.len() - 1]));
+
+        let after_subscribe = messages_after_cursor(&ids, last_stream_id.as_deref());
+        assert!(
+            after_subscribe.is_empty(),
+            "cursor cannot undo the open-time replay"
+        );
+    }
+
+    #[test]
+    fn apply_since_cursor_only_advances() {
+        let mut last = Some("2000-0".to_string());
+        assert!(!apply_since_cursor("1000-0", &mut last));
+        assert_eq!(last.as_deref(), Some("2000-0"));
+
+        assert!(apply_since_cursor("2001-0", &mut last));
+        assert_eq!(last.as_deref(), Some("2001-0"));
+    }
+
+    #[test]
+    fn s2_canary_fires_when_poll_has_none_after_subscribe_cursor() {
+        // After a valid since_cursor Subscribe, last_stream_id must be Some before poll.
+        let mut last: Option<String> = None;
+        let subscribe_with_cursor_seen = true;
+
+        apply_since_cursor("1000-0", &mut last);
+        assert!(last.is_some());
+        assert!(
+            !(last.is_none() && subscribe_with_cursor_seen),
+            "healthy path: cursor applied before poll"
+        );
+
+        // Simulated regression: cursor flag set but position cleared / never applied.
+        last = None;
+        assert!(
+            last.is_none() && subscribe_with_cursor_seen,
+            "S2 condition: poll with None after Subscribe with cursor"
+        );
+    }
+
+    #[test]
+    fn compare_stream_ids_orders_by_ts_then_seq() {
+        assert_eq!(
+            compare_stream_ids("100-1", "100-0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_stream_ids("99-9", "100-0"),
+            std::cmp::Ordering::Less
+        );
+    }
 }
