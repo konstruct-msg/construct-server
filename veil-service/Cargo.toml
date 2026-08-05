@@ -4,6 +4,10 @@ license = "AGPL-3.0-only"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "veil_service"
+path = "src/lib.rs"
+
 [[bin]]
 name = "veil-service"
 path = "src/main.rs"
