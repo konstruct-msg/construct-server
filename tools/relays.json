@@ -17,7 +17,7 @@
       "port": 443,
       "domain": "api.divany-kresla.uk",
       "sni": "api.divany-kresla.uk",
-      "spki_sha256": "bb42af0f12a95779fb45dcbe3039746616b51aacf8c7cc954ba6cbb048055943",
+      "spki_sha256": "5621e47a745614de08efb054b01388f3bcf32c763ecf5f0aeaeb6b0785ff6861",
       "bridge_cert": "zdfEJKLpy4nVo09zbd/5q3Yx02FyL7Tlr+5Aurww51IbYacIWIqbcTndB1UL+n2g68XBQw",
       "wt_path": "/api/stream",
       "wt_host_header": "api.divany-kresla.uk",
