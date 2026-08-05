@@ -79,6 +79,13 @@ pub enum IssueError {
     InvalidVeilPk(usize),
     #[error("unknown role: {0}")]
     InvalidRole(u32),
+    /// `relay_address` was empty and no relays are configured at all.
+    #[error("no relays configured")]
+    NoRelaysConfigured,
+    /// `relay_address` was empty but more than one relay is configured — the client
+    /// must name the primary (auto first-issue still always sends the seed address).
+    #[error("relay_address required when multiple relays are configured")]
+    RelayAddressRequired,
 }
 
 /// Result of issuing a capability.
@@ -104,6 +111,206 @@ fn random_bytes(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     getrandom::getrandom(&mut b).expect("OS CSPRNG unavailable");
     b
+}
+
+/// Parse `VEIL_RELAYS` multi-front records: `address,scope,spki,sni` separated by `;`.
+/// Malformed records are skipped (and counted in the return's second field).
+/// Whitespace around fields is trimmed; blank records are ignored.
+pub fn parse_relays_spec(spec: &str) -> (HashMap<String, RelayInfo>, usize) {
+    let mut relays = HashMap::new();
+    let mut skipped = 0usize;
+    for record in spec.split(';') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = record.split(',').map(|s| s.trim()).collect();
+        match f.as_slice() {
+            [addr, scope, spki, sni] if !addr.is_empty() => {
+                relays.insert(
+                    addr.to_string(),
+                    RelayInfo {
+                        scope: scope.to_string(),
+                        spki: spki.to_string(),
+                        sni: sni.to_string(),
+                    },
+                );
+            }
+            _ => skipped += 1,
+        }
+    }
+    (relays, skipped)
+}
+
+/// Insert the legacy single-relay env vars if `address` is non-empty and not already set.
+pub fn merge_legacy_relay(
+    relays: &mut HashMap<String, RelayInfo>,
+    address: &str,
+    scope: &str,
+    spki: &str,
+    sni: &str,
+) {
+    if address.is_empty() {
+        return;
+    }
+    relays
+        .entry(address.to_string())
+        .or_insert_with(|| RelayInfo {
+            scope: scope.to_string(),
+            spki: spki.to_string(),
+            sni: sni.to_string(),
+        });
+}
+
+/// Resolve the primary relay address for an IssueVeilCapability call.
+///
+/// Empty `requested` is accepted when exactly one relay is configured (handy for
+/// auto first-issue clients that only know "the" front). With N>1 the client must
+/// name the primary so Salmon-lite alternate selection has a well-defined exclude set.
+pub fn resolve_primary_relay<'a>(
+    relays: &'a HashMap<String, RelayInfo>,
+    requested: &str,
+) -> Result<&'a str, IssueError> {
+    let requested = requested.trim();
+    if !requested.is_empty() {
+        return relays
+            .get_key_value(requested)
+            .map(|(k, _)| k.as_str())
+            .ok_or_else(|| IssueError::UnknownRelay(requested.to_string()));
+    }
+    match relays.len() {
+        0 => Err(IssueError::NoRelaysConfigured),
+        1 => Ok(relays.keys().next().map(|s| s.as_str()).expect("len==1")),
+        _ => Err(IssueError::RelayAddressRequired),
+    }
+}
+
+/// Intermediate mint result for a B2 bearer capability (before DB persist).
+pub struct MintedB2 {
+    pub issued: IssuedCapability,
+    pub ticket_id: Vec<u8>,
+    pub auth_key: Vec<u8>,
+    pub not_before: i64,
+    pub suite_id: u8,
+    pub relay_scope: String,
+}
+
+/// Intermediate mint result for a B1 key-bound capability (before DB persist).
+pub struct MintedV2 {
+    pub issued: IssuedCapability,
+    pub ticket_id: Vec<u8>,
+    pub veil_pk: [u8; VEIL_PK_LEN],
+    pub role: u8,
+    pub not_before: i64,
+    pub suite_id: u8,
+    pub relay_scope: String,
+}
+
+/// Mint (sign) a B2 bearer capability without touching the database.
+///
+/// Separated from persist so unit tests can exercise the full sign→encode path
+/// offline (and so a future batch issuer can mint many before a single flush).
+pub fn mint_capability_b2(
+    issuer: &SigningKey,
+    relay_address: &str,
+    relay: &RelayInfo,
+    ticket_ttl_secs: i64,
+    now: i64,
+) -> MintedB2 {
+    let not_before = now;
+    let not_after = now + ticket_ttl_secs;
+    let ticket_id = random_bytes(16);
+    let auth_key = random_bytes(32);
+    let suite_id = SUITE_CLASSIC_V1;
+
+    let msg = signing_message(
+        &ticket_id,
+        &auth_key,
+        not_before,
+        not_after,
+        suite_id,
+        &relay.scope,
+    );
+    let sig: [u8; 64] = issuer.sign(&msg).to_bytes();
+    let blob = encode_capability(
+        &ticket_id,
+        &auth_key,
+        not_before,
+        not_after,
+        suite_id,
+        &relay.scope,
+        &sig,
+    );
+
+    MintedB2 {
+        issued: IssuedCapability {
+            blob,
+            relay_address: relay_address.to_string(),
+            spki: relay.spki.clone(),
+            sni: relay.sni.clone(),
+            not_after,
+            capability_version: 1,
+        },
+        ticket_id,
+        auth_key,
+        not_before,
+        suite_id,
+        relay_scope: relay.scope.clone(),
+    }
+}
+
+/// Mint (sign) a B1 key-bound capability without touching the database.
+pub fn mint_capability_v2(
+    issuer: &SigningKey,
+    relay_address: &str,
+    relay: &RelayInfo,
+    veil_pk: [u8; VEIL_PK_LEN],
+    role: u8,
+    ticket_ttl_secs: i64,
+    now: i64,
+) -> MintedV2 {
+    let not_before = now;
+    let not_after = now + ticket_ttl_secs;
+    let ticket_id = random_bytes(16);
+    let suite_id = SUITE_CLASSIC_V1;
+
+    let msg = signing_message_v2(
+        &ticket_id,
+        &veil_pk,
+        role,
+        not_before,
+        not_after,
+        suite_id,
+        &relay.scope,
+    );
+    let sig: [u8; 64] = issuer.sign(&msg).to_bytes();
+    let blob = encode_capability_v2(
+        &ticket_id,
+        &veil_pk,
+        role,
+        not_before,
+        not_after,
+        suite_id,
+        &relay.scope,
+        &sig,
+    );
+
+    MintedV2 {
+        issued: IssuedCapability {
+            blob,
+            relay_address: relay_address.to_string(),
+            spki: relay.spki.clone(),
+            sni: relay.sni.clone(),
+            not_after,
+            capability_version: 2,
+        },
+        ticket_id,
+        veil_pk,
+        role,
+        not_before,
+        suite_id,
+        relay_scope: relay.scope.clone(),
+    }
 }
 
 /// Build the domain-separated message the issuer signs (matches the protocol crate).
@@ -210,31 +417,12 @@ pub async fn issue_capability(
         .get(relay_address)
         .ok_or_else(|| IssueError::UnknownRelay(relay_address.to_string()))?;
 
-    let now = unix_now();
-    let not_before = now;
-    let not_after = now + ctx.ticket_ttl_secs;
-    let ticket_id = random_bytes(16);
-    let auth_key = random_bytes(32);
-    let suite_id = SUITE_CLASSIC_V1;
-
-    let msg = signing_message(
-        &ticket_id,
-        &auth_key,
-        not_before,
-        not_after,
-        suite_id,
-        &relay.scope,
-    );
-    let sig: [u8; 64] = ctx.issuer.sign(&msg).to_bytes();
-
-    let blob = encode_capability(
-        &ticket_id,
-        &auth_key,
-        not_before,
-        not_after,
-        suite_id,
-        &relay.scope,
-        &sig,
+    let minted = mint_capability_b2(
+        &ctx.issuer,
+        relay_address,
+        relay,
+        ctx.ticket_ttl_secs,
+        unix_now(),
     );
 
     sqlx::query(
@@ -242,24 +430,17 @@ pub async fn issue_capability(
          (ticket_id, auth_key, user_id, relay_scope, not_before, not_after, suite_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
-    .bind(&ticket_id)
-    .bind(&auth_key)
+    .bind(&minted.ticket_id)
+    .bind(&minted.auth_key)
     .bind(user_id)
-    .bind(&relay.scope)
-    .bind(not_before)
-    .bind(not_after)
-    .bind(suite_id as i16)
+    .bind(&minted.relay_scope)
+    .bind(minted.not_before)
+    .bind(minted.issued.not_after)
+    .bind(minted.suite_id as i16)
     .execute(&*ctx.db_pool)
     .await?;
 
-    Ok(IssuedCapability {
-        blob,
-        relay_address: relay_address.to_string(),
-        spki: relay.spki.clone(),
-        sni: relay.sni.clone(),
-        not_after,
-        capability_version: 1,
-    })
+    Ok(minted.issued)
 }
 
 /// Issue (sign + persist) a fresh **key-bound** (B1) capability for `user_id` on
@@ -287,32 +468,14 @@ pub async fn issue_capability_v2(
         .get(relay_address)
         .ok_or_else(|| IssueError::UnknownRelay(relay_address.to_string()))?;
 
-    let now = unix_now();
-    let not_before = now;
-    let not_after = now + ctx.ticket_ttl_secs;
-    let ticket_id = random_bytes(16);
-    let suite_id = SUITE_CLASSIC_V1;
-
-    let msg = signing_message_v2(
-        &ticket_id,
-        &veil_pk,
+    let minted = mint_capability_v2(
+        &ctx.issuer,
+        relay_address,
+        relay,
+        veil_pk,
         role,
-        not_before,
-        not_after,
-        suite_id,
-        &relay.scope,
-    );
-    let sig: [u8; 64] = ctx.issuer.sign(&msg).to_bytes();
-
-    let blob = encode_capability_v2(
-        &ticket_id,
-        &veil_pk,
-        role,
-        not_before,
-        not_after,
-        suite_id,
-        &relay.scope,
-        &sig,
+        ctx.ticket_ttl_secs,
+        unix_now(),
     );
 
     sqlx::query(
@@ -320,25 +483,18 @@ pub async fn issue_capability_v2(
          (ticket_id, veil_pk, role, user_id, relay_scope, not_before, not_after, suite_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
-    .bind(&ticket_id[..])
-    .bind(&veil_pk[..])
-    .bind(role as i16)
+    .bind(&minted.ticket_id[..])
+    .bind(&minted.veil_pk[..])
+    .bind(minted.role as i16)
     .bind(user_id)
-    .bind(&relay.scope)
-    .bind(not_before)
-    .bind(not_after)
-    .bind(suite_id as i16)
+    .bind(&minted.relay_scope)
+    .bind(minted.not_before)
+    .bind(minted.issued.not_after)
+    .bind(minted.suite_id as i16)
     .execute(&*ctx.db_pool)
     .await?;
 
-    Ok(IssuedCapability {
-        blob,
-        relay_address: relay_address.to_string(),
-        spki: relay.spki.clone(),
-        sni: relay.sni.clone(),
-        not_after,
-        capability_version: 2,
-    })
+    Ok(minted.issued)
 }
 
 /// Issue one capability, dispatching bearer (B2) vs key-bound (B1) exactly as the
@@ -412,6 +568,9 @@ pub struct IssuedBundle {
 /// Alternates use the **same** issuance path (bearer vs key-bound) as the primary, so a
 /// key-bound request yields key-bound alternates bound to the same `veil_pk`. If ≤1 relay
 /// is configured, `alternates` is empty and behaviour is identical to the pre-v1 handler.
+///
+/// Empty `relay_address` is resolved via [`resolve_primary_relay`] (single-relay default)
+/// so auto first-issue clients that omit the field still work in the common N=1 deploy.
 pub async fn issue_bundle(
     ctx: &VeilServiceContext,
     user_id: Uuid,
@@ -420,10 +579,11 @@ pub async fn issue_bundle(
     role: u32,
     k: usize,
 ) -> Result<IssuedBundle, IssueError> {
-    let primary = issue_one(ctx, user_id, relay_address, veil_pk, role).await?;
+    let primary_addr = resolve_primary_relay(&ctx.relays, relay_address)?.to_string();
+    let primary = issue_one(ctx, user_id, &primary_addr, veil_pk, role).await?;
 
     let epoch = unix_now() / ALT_ROTATION_SECS;
-    let alt_addrs = select_alternate_addresses(&ctx.relays, relay_address, user_id, k, epoch);
+    let alt_addrs = select_alternate_addresses(&ctx.relays, &primary_addr, user_id, k, epoch);
 
     let mut alternates = Vec::with_capacity(alt_addrs.len());
     for addr in alt_addrs {
@@ -441,9 +601,25 @@ pub async fn issue_bundle(
     })
 }
 
+/// Pure EntryDirectory planning step: given N configured relays, return the primary
+/// address (after resolve) and the K alternate addresses that *would* be issued.
+/// No minting / no DB — used by tests and diagnostics.
+pub fn plan_bundle_addresses(
+    relays: &HashMap<String, RelayInfo>,
+    relay_address: &str,
+    user_id: Uuid,
+    k: usize,
+    epoch: i64,
+) -> Result<(String, Vec<String>), IssueError> {
+    let primary = resolve_primary_relay(relays, relay_address)?.to_string();
+    let alts = select_alternate_addresses(relays, &primary, user_id, k, epoch);
+    Ok((primary, alts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, Verifier, VerifyingKey};
 
     fn relay_set(addrs: &[&str]) -> HashMap<String, RelayInfo> {
         addrs
@@ -453,12 +629,66 @@ mod tests {
                     a.to_string(),
                     RelayInfo {
                         scope: "ru".into(),
-                        spki: "pin".into(),
-                        sni: "sni".into(),
+                        spki: format!("pin-{a}"),
+                        sni: format!("sni-{a}"),
                     },
                 )
             })
             .collect()
+    }
+
+    fn test_issuer() -> SigningKey {
+        SigningKey::from_bytes(&[9u8; 32])
+    }
+
+    /// Offline B2 verify — same checks a relay performs (domain + window layout).
+    fn verify_b2_blob(vk: &VerifyingKey, blob: &[u8], expected_scope: &str) -> bool {
+        let fixed = 66; // through scope_len
+        if blob.len() < fixed + 64 {
+            return false;
+        }
+        let scope_len = blob[65] as usize;
+        if blob.len() != fixed + scope_len + 64 {
+            return false;
+        }
+        let scope = &blob[66..66 + scope_len];
+        if scope != expected_scope.as_bytes() {
+            return false;
+        }
+        let sig_bytes: [u8; 64] = match blob[66 + scope_len..].try_into() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        // message = "veil-cap-v1" || blob[0..65] || scope  (no scope_len)
+        let mut msg = CAP_DOMAIN.to_vec();
+        msg.extend_from_slice(&blob[0..65]);
+        msg.extend_from_slice(scope);
+        vk.verify(&msg, &sig).is_ok()
+    }
+
+    fn verify_v2_blob(vk: &VerifyingKey, blob: &[u8], expected_scope: &str) -> bool {
+        let fixed = 67;
+        if blob.len() < fixed + 64 {
+            return false;
+        }
+        let scope_len = blob[66] as usize;
+        if blob.len() != fixed + scope_len + 64 {
+            return false;
+        }
+        let scope = &blob[67..67 + scope_len];
+        if scope != expected_scope.as_bytes() {
+            return false;
+        }
+        let sig_bytes: [u8; 64] = match blob[67 + scope_len..].try_into() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let mut msg = CAP_V2_DOMAIN.to_vec();
+        msg.extend_from_slice(&blob[0..66]);
+        msg.extend_from_slice(scope);
+        vk.verify(&msg, &sig).is_ok()
     }
 
     #[test]
@@ -571,5 +801,180 @@ mod tests {
     fn invalid_veil_pk_length_is_rejected() {
         let err = IssueError::InvalidVeilPk(31);
         assert!(err.to_string().contains("32"));
+    }
+
+    // ── parse / resolve / mint (auto first-issue support) ───────────────────
+
+    #[test]
+    fn parse_relays_spec_happy_and_skip_malformed() {
+        let (relays, skipped) = parse_relays_spec(
+            "a.example:443,ru,aa,sni-a; bad-record; b.example:443, eu , bb , sni-b ;",
+        );
+        assert_eq!(skipped, 1);
+        assert_eq!(relays.len(), 2);
+        assert_eq!(relays["a.example:443"].scope, "ru");
+        assert_eq!(relays["a.example:443"].spki, "aa");
+        assert_eq!(relays["b.example:443"].scope, "eu");
+        assert_eq!(relays["b.example:443"].sni, "sni-b");
+    }
+
+    #[test]
+    fn parse_relays_spec_empty_is_empty() {
+        let (relays, skipped) = parse_relays_spec("");
+        assert!(relays.is_empty());
+        assert_eq!(skipped, 0);
+        let (relays, skipped) = parse_relays_spec(";;;");
+        assert!(relays.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn merge_legacy_does_not_override_multi() {
+        let mut relays = parse_relays_spec("a:1,ru,pin-a,sni-a").0;
+        merge_legacy_relay(&mut relays, "a:1", "other", "pin-other", "sni-other");
+        assert_eq!(relays["a:1"].spki, "pin-a", "VEIL_RELAYS wins over legacy");
+        merge_legacy_relay(&mut relays, "b:1", "eu", "pin-b", "sni-b");
+        assert_eq!(relays.len(), 2);
+        assert_eq!(relays["b:1"].scope, "eu");
+    }
+
+    #[test]
+    fn resolve_primary_empty_with_single_relay() {
+        let relays = relay_set(&["only:443"]);
+        assert_eq!(resolve_primary_relay(&relays, "").unwrap(), "only:443");
+        assert_eq!(
+            resolve_primary_relay(&relays, "  only:443  ").unwrap(),
+            "only:443"
+        );
+    }
+
+    #[test]
+    fn resolve_primary_empty_with_multi_requires_address() {
+        let relays = relay_set(&["a:1", "b:1"]);
+        match resolve_primary_relay(&relays, "") {
+            Err(IssueError::RelayAddressRequired) => {}
+            other => panic!("expected RelayAddressRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_primary_empty_with_none_is_no_relays() {
+        let relays = HashMap::new();
+        match resolve_primary_relay(&relays, "") {
+            Err(IssueError::NoRelaysConfigured) => {}
+            other => panic!("expected NoRelaysConfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_primary_unknown_is_error() {
+        let relays = relay_set(&["a:1"]);
+        match resolve_primary_relay(&relays, "ghost:443") {
+            Err(IssueError::UnknownRelay(r)) => assert_eq!(r, "ghost:443"),
+            other => panic!("expected UnknownRelay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_bundle_single_relay_no_alternates() {
+        let relays = relay_set(&["a:1"]);
+        let (primary, alts) =
+            plan_bundle_addresses(&relays, "", Uuid::from_u128(1), DEFAULT_ALTERNATES_K, 0)
+                .unwrap();
+        assert_eq!(primary, "a:1");
+        assert!(alts.is_empty());
+    }
+
+    #[test]
+    fn plan_bundle_multi_k3_excludes_primary() {
+        let relays = relay_set(&["a:1", "b:1", "c:1", "d:1", "e:1"]);
+        let user = Uuid::from_u128(99);
+        let (primary, alts) =
+            plan_bundle_addresses(&relays, "a:1", user, DEFAULT_ALTERNATES_K, 42).unwrap();
+        assert_eq!(primary, "a:1");
+        assert_eq!(alts.len(), 3);
+        assert!(!alts.contains(&"a:1".to_string()));
+        // Stable: re-plan yields same set.
+        let (_, alts2) =
+            plan_bundle_addresses(&relays, "a:1", user, DEFAULT_ALTERNATES_K, 42).unwrap();
+        assert_eq!(alts, alts2);
+    }
+
+    #[test]
+    fn mint_b2_blob_verifies_offline_and_carries_coords() {
+        let issuer = test_issuer();
+        let vk = issuer.verifying_key();
+        let relay = RelayInfo {
+            scope: "ru".into(),
+            spki: "deadbeef".into(),
+            sni: "front.example".into(),
+        };
+        let now = 1_700_000_000i64;
+        let minted = mint_capability_b2(&issuer, "front.example:443", &relay, 3600, now);
+        assert_eq!(minted.issued.capability_version, 1);
+        assert_eq!(minted.issued.relay_address, "front.example:443");
+        assert_eq!(minted.issued.spki, "deadbeef");
+        assert_eq!(minted.issued.sni, "front.example");
+        assert_eq!(minted.issued.not_after, now + 3600);
+        assert_eq!(minted.ticket_id.len(), 16);
+        assert_eq!(minted.auth_key.len(), 32);
+        assert!(
+            verify_b2_blob(&vk, &minted.issued.blob, "ru"),
+            "relay-side offline verify must accept backend mint"
+        );
+    }
+
+    #[test]
+    fn mint_v2_blob_verifies_offline_and_binds_veil_pk() {
+        let issuer = test_issuer();
+        let vk = issuer.verifying_key();
+        let relay = RelayInfo {
+            scope: "ru".into(),
+            spki: "pin".into(),
+            sni: "sni".into(),
+        };
+        let veil_pk = [0xABu8; 32];
+        let minted = mint_capability_v2(
+            &issuer,
+            "front:443",
+            &relay,
+            veil_pk,
+            ROLE_USER,
+            DEFAULT_TICKET_TTL_SECS,
+            1_700_000_000,
+        );
+        assert_eq!(minted.issued.capability_version, 2);
+        assert_eq!(&minted.issued.blob[16..48], &veil_pk);
+        assert_eq!(minted.issued.blob[48], ROLE_USER);
+        assert!(verify_v2_blob(&vk, &minted.issued.blob, "ru"));
+    }
+
+    #[test]
+    fn mint_v2_role_relay_is_encoded() {
+        let issuer = test_issuer();
+        let relay = RelayInfo {
+            scope: "".into(),
+            spki: "p".into(),
+            sni: "s".into(),
+        };
+        let minted = mint_capability_v2(&issuer, "r:443", &relay, [1u8; 32], ROLE_RELAY, 60, 100);
+        assert_eq!(minted.role, ROLE_RELAY);
+        assert_eq!(minted.issued.blob[48], ROLE_RELAY);
+    }
+
+    #[test]
+    fn two_mints_are_distinct() {
+        // Auto first-issue / renew must never re-issue the same ticket_id.
+        let issuer = test_issuer();
+        let relay = RelayInfo {
+            scope: "ru".into(),
+            spki: "p".into(),
+            sni: "s".into(),
+        };
+        let a = mint_capability_b2(&issuer, "r:1", &relay, 60, 100);
+        let b = mint_capability_b2(&issuer, "r:1", &relay, 60, 100);
+        assert_ne!(a.ticket_id, b.ticket_id);
+        assert_ne!(a.auth_key, b.auth_key);
+        assert_ne!(a.issued.blob, b.issued.blob);
     }
 }

@@ -5,16 +5,15 @@ use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
-use std::collections::HashMap;
 use std::{env, sync::Arc};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
 use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::veil_service_server::{VeilService, VeilServiceServer};
-
-mod core;
-use core::{RelayInfo, VeilServiceContext};
+use veil_service::core::{
+    self, RelayInfo, VeilServiceContext, merge_legacy_relay, parse_relays_spec,
+};
 
 #[derive(Clone)]
 struct VeilGrpcService {
@@ -43,12 +42,20 @@ impl VeilService for VeilGrpcService {
             core::IssueError::InvalidRole(r) => {
                 Status::invalid_argument(format!("invalid role: {r}"))
             }
+            core::IssueError::NoRelaysConfigured => {
+                Status::failed_precondition("no relays configured on veil-service")
+            }
+            core::IssueError::RelayAddressRequired => Status::invalid_argument(
+                "relay_address required when multiple relays are configured",
+            ),
         };
 
         // EntryDirectory v1: issue the requested (primary) capability plus up to K
         // pre-issued alternate fronts on other configured relays. A non-empty veil_pk
         // requests key-bound CapabilityV2 (AUTH v3) for all of them; otherwise bearer
-        // B2. See decisions/{veil-ticket-provisioning-system,entry-directory-design}.md.
+        // B2. Empty relay_address is resolved to the sole configured relay (N=1) so
+        // auto first-issue still works if the client omits it.
+        // See decisions/{veil-ticket-provisioning-system,entry-directory-design}.md.
         let bundle = core::issue_bundle(
             &self.context,
             user_id,
@@ -106,44 +113,27 @@ async fn health_check() -> Json<serde_json::Value> {
 ///     multi-front source; whitespace around fields is trimmed, blank records skipped.
 ///   - `VEIL_RELAY_ADDRESS` (+ `_SCOPE`/`_SPKI`/`_SNI`): the legacy single-relay vars,
 ///     kept for back-compat. Added if `VEIL_RELAYS` did not already define that address.
-fn load_relays() -> HashMap<String, RelayInfo> {
-    let mut relays = HashMap::new();
-
-    if let Ok(spec) = env::var("VEIL_RELAYS") {
-        for record in spec.split(';') {
-            let record = record.trim();
-            if record.is_empty() {
-                continue;
-            }
-            let f: Vec<&str> = record.split(',').map(|s| s.trim()).collect();
-            match f.as_slice() {
-                [addr, scope, spki, sni] if !addr.is_empty() => {
-                    relays.insert(
-                        addr.to_string(),
-                        RelayInfo {
-                            scope: scope.to_string(),
-                            spki: spki.to_string(),
-                            sni: sni.to_string(),
-                        },
-                    );
-                }
-                _ => tracing::warn!(
-                    record,
-                    "skipping malformed VEIL_RELAYS record (want address,scope,spki,sni)"
-                ),
-            }
+fn load_relays() -> std::collections::HashMap<String, RelayInfo> {
+    let mut relays = if let Ok(spec) = env::var("VEIL_RELAYS") {
+        let (map, skipped) = parse_relays_spec(&spec);
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped malformed VEIL_RELAYS record(s) (want address,scope,spki,sni)"
+            );
         }
-    }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
 
-    if let Ok(addr) = env::var("VEIL_RELAY_ADDRESS")
-        && !addr.is_empty()
-    {
-        relays.entry(addr).or_insert_with(|| RelayInfo {
-            scope: env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
-            spki: env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
-            sni: env::var("VEIL_RELAY_SNI").unwrap_or_default(),
-        });
-    }
+    merge_legacy_relay(
+        &mut relays,
+        &env::var("VEIL_RELAY_ADDRESS").unwrap_or_default(),
+        &env::var("VEIL_RELAY_SCOPE").unwrap_or_default(),
+        &env::var("VEIL_RELAY_SPKI").unwrap_or_default(),
+        &env::var("VEIL_RELAY_SNI").unwrap_or_default(),
+    );
 
     relays
 }
@@ -189,10 +179,19 @@ async fn main() -> Result<()> {
     let relays = load_relays();
     if relays.is_empty() {
         tracing::warn!(
-            "No relays configured (VEIL_RELAY_ADDRESS unset) — IssueVeilCapability will reject all requests"
+            "No relays configured (set VEIL_RELAYS and/or VEIL_RELAY_ADDRESS) — IssueVeilCapability will reject all requests"
         );
     } else {
-        info!("Configured relays: {:?}", relays.keys().collect::<Vec<_>>());
+        info!(
+            count = relays.len(),
+            relays = ?relays.keys().collect::<Vec<_>>(),
+            "Configured VEIL fronts"
+        );
+        if relays.len() == 1 {
+            info!(
+                "Single front configured — EntryDirectory alternates will be empty until VEIL_RELAYS lists N>1"
+            );
+        }
     }
 
     let context = Arc::new(VeilServiceContext {
