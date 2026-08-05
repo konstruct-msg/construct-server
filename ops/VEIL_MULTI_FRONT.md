@@ -165,9 +165,10 @@ server-handed alternates even when `VEIL_RELAYS` is correct.
 
 **Checklist:**
 1. VPS outside RU DPI (e.g. EU commercial VPS — not the same AS as primary if possible).
-2. Domain that looks like ordinary HTTPS (honest-front cover site already in construct-veil).
-3. Same deploy as Option A (`construct-veil` relay + cover + certbot).
-4. Wire into A/B/C trust set (§2).
+2. Domain that looks like ordinary HTTPS — **do not re-use divany-kresla branding**.
+3. Cover image: **`construct-veil/deploy/cover-site-weather/`** (NearSky — IP weather + Open-Meteo + SSE). Primary stays on furniture `cover-site/`.
+4. Relay: same `construct-veil` stack (`--site cover:8080`, same `ISSUER_PUBKEY`).
+5. Wire into A/B/C trust set (§2).
 
 **Budget note:** one cheap VPS + domain is enough for EntryDirectory v1 (K=1 alternate). More fronts improve enumeration resistance and block survival later.
 
