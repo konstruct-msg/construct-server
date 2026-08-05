@@ -195,6 +195,22 @@ Cloudflare/Workers-style or shared CDN hostname. Highest collateral cost for a c
 | 5 | Sign+deploy manifest + client seed | Client accepts alternates |
 | 6 | Failover smoke | Full EntryDirectory Source 1 |
 
+### Concrete pilot: nearsky.ru → divany IP (chain)
+
+Target layout (Selectel domestic + existing divany clean at `195.133.44.113`):
+
+```text
+client → nearsky.ru (chain) → 195.133.44.113:443 (SNI api.divany-kresla.uk) → DO backend
+client → api.divany-kresla.uk (direct) → DO backend   # primary when reachable
+```
+
+- **IP dial is supported:** `--chain-upstream-addr 195.133.44.113:443` +
+  `--chain-upstream-sni api.divany-kresla.uk` + SPKI pin (no DNS required on nearsky).
+- Full steps, ROLE_RELAY issuance, compose overlay:
+  **`construct-veil/deploy/CHAIN.md`** + `docker-compose.chain.yml`.
+- Client seed order: divany first, nearsky second (ISP blocks divany → Selectel still
+  reaches 195.133.44.113).
+
 ---
 
 ## 5. Related
