@@ -755,10 +755,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "construct-extractors"
-version = "0.17.0"
-
-[[package]]
 name = "construct-federation"
 version = "0.17.0"
 dependencies = [

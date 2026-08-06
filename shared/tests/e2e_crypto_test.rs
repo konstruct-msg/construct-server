@@ -19,10 +19,6 @@
 //! - ⚠️  Simplified Double Ratchet (no state update yet)
 //! - ⚠️  Simplified X3DH (no OTPKs yet)
 //!
-//! ## Status
-//! Registration helpers still target removed REST `/api/v1/auth/*`.
-//! Re-enable after porting helpers to gRPC AuthService/DeviceService.
-//!
 //! ## Future Enhancements
 //! - [ ] Full Double Ratchet with message number tracking
 //! - [ ] X3DH with one-time prekeys
@@ -31,20 +27,23 @@
 
 mod test_utils;
 
-use base64::{Engine as _, engine::general_purpose};
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit},
 };
 use construct_server_shared::shared::proto::{
     core::v1::{Envelope, UserId},
-    services::v1::{SendMessageRequest, messaging_service_client::MessagingServiceClient},
+    services::v1::{
+        DevicePublicKeys, GetPowChallengeRequest, PowSolution, RegisterDeviceRequest,
+        SendMessageRequest, auth_service_client::AuthServiceClient,
+        messaging_service_client::MessagingServiceClient,
+    },
 };
 use ed25519_dalek::{Signer, SigningKey};
 use hkdf::Hkdf;
 use rand_core::OsRng;
 use sha2::Sha256;
-use test_utils::{TestUser, spawn_app};
+use test_utils::{TestUser, solve_pow, spawn_app};
 use tonic::transport::Channel;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -141,107 +140,85 @@ fn decrypt_message(
 // Helper: Register user with real cryptographic keys
 // ============================================================================
 
-/// Register a test user with REAL cryptographic keys (not dummy).
-/// Uses the current passwordless device-based API.
+/// Register a test user with REAL cryptographic keys via gRPC AuthService.
 /// Returns (TestUser, identity_signing_key, signed_prekey_secret, signed_prekey_public)
 async fn register_user_with_crypto(
     ctx: &test_utils::TestApp,
-    _username: &str,
+    username: &str,
 ) -> (TestUser, SigningKey, StaticSecret, PublicKey) {
     use sha2::Digest;
     use x25519_dalek::StaticSecret;
 
-    let client = reqwest::Client::new();
-
-    // 1. Generate Ed25519 identity signing key
     let identity_signing_key = SigningKey::generate(&mut OsRng);
     let identity_verifying_key = identity_signing_key.verifying_key();
 
-    // 2. Generate X25519 identity key pair (for E2EE identity)
     let identity_x25519_secret = StaticSecret::random_from_rng(OsRng);
     let identity_x25519_public = PublicKey::from(&identity_x25519_secret);
 
-    // 3. Generate signed prekey (X25519, reusable StaticSecret so we can return it)
     let signed_prekey_secret = StaticSecret::random_from_rng(OsRng);
     let signed_prekey_public = PublicKey::from(&signed_prekey_secret);
 
-    // 4. Sign prekey with KonstruktX3DH-v1 prologue
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1
+        message.extend_from_slice(&[0x00, 0x01]);
         message.extend_from_slice(signed_prekey_public.as_bytes());
         identity_signing_key.sign(&message)
     };
 
-    // 5. Derive device_id = SHA256(identity_x25519_public)[0..16] as hex
     let device_id = {
         let hash = Sha256::digest(identity_x25519_public.as_bytes());
         hex::encode(&hash[0..16])
     };
 
-    // 6. Get PoW challenge
-    let challenge: test_utils::ChallengeResponse = client
-        .get(&format!(
-            "http://{}/api/v1/auth/challenge",
-            ctx.auth_address
-        ))
-        .send()
+    let channel = Channel::from_shared(format!("http://{}", ctx.grpc_auth_address))
+        .expect("auth grpc uri")
+        .connect()
         .await
-        .expect("Failed to get PoW challenge")
-        .json()
+        .expect("connect auth grpc");
+    let mut auth = AuthServiceClient::new(channel);
+
+    let challenge = auth
+        .get_pow_challenge(GetPowChallengeRequest {})
         .await
-        .expect("Failed to parse PoW challenge");
+        .expect("GetPowChallenge")
+        .into_inner();
 
-    // 7. Solve PoW
-    let (nonce, hash) = test_utils::solve_pow(&challenge.challenge, challenge.difficulty);
+    let (nonce, hash) = solve_pow(&challenge.challenge, challenge.difficulty);
 
-    // 8. Register device
-    let register_body = serde_json::json!({
-        "username": _username,
-        "deviceId": device_id,
-        "publicKeys": {
-            "verifyingKey": general_purpose::STANDARD.encode(identity_verifying_key.as_bytes()),
-            "identityPublic": general_purpose::STANDARD.encode(identity_x25519_public.as_bytes()),
-            "signedPrekeyPublic": general_purpose::STANDARD.encode(signed_prekey_public.as_bytes()),
-            "signedPrekeySignature": general_purpose::STANDARD.encode(prekey_signature.to_bytes()),
-            "cryptoSuite": "Curve25519+Ed25519"
-        },
-        "powSolution": {
-            "challenge": challenge.challenge,
-            "nonce": nonce,
-            "hash": hash
-        }
-    });
-
-    let register_response = client
-        .post(&format!(
-            "http://{}/api/v1/auth/register-device",
-            ctx.auth_address
-        ))
-        .json(&register_body)
-        .send()
+    let reg = auth
+        .register_device(RegisterDeviceRequest {
+            username: Some(username.to_string()),
+            device_id,
+            public_keys: Some(DevicePublicKeys {
+                verifying_key: identity_verifying_key.as_bytes().to_vec(),
+                identity_public: identity_x25519_public.as_bytes().to_vec(),
+                signed_prekey_public: signed_prekey_public.as_bytes().to_vec(),
+                signed_prekey_signature: prekey_signature.to_bytes().to_vec(),
+                crypto_suite: "Curve25519+Ed25519".to_string(),
+                hybrid_identity_key: None,
+                hybrid_identity_signature: None,
+                signed_prekey_hybrid_signature: None,
+                supports_pq_ratchet: false,
+            }),
+            pow_solution: Some(PowSolution {
+                challenge: challenge.challenge,
+                nonce,
+                hash,
+            }),
+            identity_public_key: None,
+            identity_key_type: None,
+        })
         .await
-        .expect("Failed to register device");
+        .expect("RegisterDevice")
+        .into_inner();
 
-    let status = register_response.status();
-    if status != reqwest::StatusCode::CREATED {
-        panic!(
-            "Registration failed ({}): {}",
-            status,
-            register_response.text().await.unwrap()
-        );
-    }
-
-    let reg: test_utils::RegisterDeviceResponse = register_response
-        .json()
-        .await
-        .expect("Failed to parse registration response");
+    let tokens = reg.tokens.expect("tokens");
 
     (
         TestUser {
-            user_id: reg.user_id,
-            access_token: reg.access_token,
+            user_id: tokens.user_id,
+            access_token: tokens.access_token,
         },
         identity_signing_key,
         signed_prekey_secret,
@@ -254,7 +231,6 @@ async fn register_user_with_crypto(
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "REST auth harness removed; port to gRPC AuthService"]
 async fn test_e2e_x3dh_key_exchange_and_encryption() {
     // Start test server
     let ctx = spawn_app().await;
@@ -377,7 +353,6 @@ async fn test_e2e_x3dh_key_exchange_and_encryption() {
 }
 
 #[tokio::test]
-#[ignore = "REST auth harness removed; port to gRPC AuthService"]
 async fn test_e2e_invalid_ciphertext_detection() {
     // Start test server
     let ctx = spawn_app().await;
@@ -430,7 +405,6 @@ async fn test_e2e_invalid_ciphertext_detection() {
 }
 
 #[tokio::test]
-#[ignore = "REST auth harness removed; port to gRPC AuthService"]
 async fn test_e2e_first_message_has_message_number_zero() {
     // This test validates Signal Protocol §3.3 requirement:
     // "The first message in a session MUST have messageNumber=0"

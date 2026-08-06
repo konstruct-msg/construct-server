@@ -42,7 +42,6 @@ members = [
     "crates/construct-delivery-ack",
     "crates/construct-pending",
     "crates/construct-context",
-    "crates/construct-extractors",
     "crates/construct-user-service",
 ]
 
