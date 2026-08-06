@@ -17,13 +17,7 @@ mod invite_core;
 mod recovery;
 
 use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use base64::{Engine as _, engine::general_purpose as b64};
 use construct_config::Config;
 use construct_server_shared::{db::DbPool, queue::MessageQueue};
