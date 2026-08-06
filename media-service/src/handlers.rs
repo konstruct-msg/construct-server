@@ -1,23 +1,23 @@
 // ============================================================================
-// Media Service Handlers
+// Media Service REST Handlers — RETIRED
+// ============================================================================
+//
+// Production serves media exclusively over gRPC (`MediaService` in main.rs).
+// These Axum handlers remain only so the library crate still compiles for any
+// residual unit tests. They intentionally return 410 Gone / refuse to write
+// files — do not re-enable without re-auditing path traversal and auth.
+//
 // ============================================================================
 
 use super::types::*;
-use super::utils::*;
 use crate::config::MediaConfig;
-use anyhow::Result;
 use axum::{
     Json,
-    body::Body,
-    extract::{Multipart, Path, State},
-    http::{StatusCode, header},
-    response::Response,
+    extract::{Path, State},
+    http::StatusCode,
 };
 use std::sync::Arc;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tracing::warn;
-use uuid::Uuid;
 
 /// Shared application state
 #[derive(Clone)]
@@ -33,160 +33,28 @@ pub async fn health_check(State(_state): State<AppState>) -> Json<HealthResponse
     })
 }
 
-/// Upload media endpoint
+/// REST upload — permanently disabled (use gRPC UploadMedia).
 pub async fn upload_media(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
+    State(_state): State<AppState>,
 ) -> Result<Json<UploadResponse>, StatusCode> {
-    let config = &state.config;
-
-    // Extract token and file from multipart
-    let mut upload_token = None;
-    let mut file_data = None;
-    let mut filename = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-    {
-        match field.name() {
-            Some("token") => {
-                upload_token = Some(field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?);
-            }
-            Some("file") => {
-                filename = field.file_name().map(|s| s.to_string());
-                file_data = Some(field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?);
-            }
-            _ => continue,
-        }
-    }
-
-    let token = upload_token.ok_or(StatusCode::BAD_REQUEST)?;
-    let data = file_data.ok_or(StatusCode::BAD_REQUEST)?;
-
-    // Validate token
-    if !validate_upload_token(&token, &config.hmac_secret) {
-        warn!("Invalid upload token provided");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Check file size
-    if data.len() > config.max_file_size {
-        warn!("File too large: {} bytes", data.len());
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    // Generate media ID
-    let media_id = Uuid::new_v4().to_string();
-
-    // Create storage directory if needed
-    fs::create_dir_all(&config.storage_dir)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Save file
-    let file_path = config.storage_dir.join(&media_id);
-    let mut file = fs::File::create(&file_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    file.write_all(&data)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Calculate expiration time
-    let expires_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .as_secs()
-        + config.file_ttl_seconds;
-
-    tracing::info!(
-        media_id = %media_id,
-        size_bytes = data.len(),
-        filename = ?filename,
-        expires_at = expires_at,
-        "Media file uploaded successfully"
-    );
-
-    Ok(Json(UploadResponse {
-        media_id,
-        expires_at,
-    }))
+    warn!("REST media upload rejected — use gRPC MediaService.UploadMedia");
+    Err(StatusCode::GONE)
 }
 
-/// Download media endpoint
+/// REST download — permanently disabled (use gRPC DownloadMedia).
 pub async fn download_media(
-    State(state): State<AppState>,
-    Path(media_id): Path<String>,
-) -> Result<Response<Body>, StatusCode> {
-    let config = &state.config;
-    let file_path = config.storage_dir.join(&media_id);
-
-    // Check if file exists
-    if !file_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    // Read file
-    let data = fs::read(&file_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Create response with binary data
-    let body = Body::from(data);
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CACHE_CONTROL, "public, max-age=86400") // 24 hours
-        .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(response)
-}
-
-/// Delete media endpoint (admin only).
-///
-/// Not mounted by the production gRPC binary (`main.rs` only exposes /health
-/// and /metrics over HTTP). Kept for lib/tests — requires
-/// `Authorization: Bearer <MEDIA_ADMIN_TOKEN>` matching the env secret.
-pub async fn delete_media(
-    State(state): State<AppState>,
-    Path(media_id): Path<String>,
-    headers: axum::http::HeaderMap,
+    State(_state): State<AppState>,
+    Path(_media_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let expected = std::env::var("MEDIA_ADMIN_TOKEN").unwrap_or_default();
-    if expected.is_empty() {
-        tracing::error!("MEDIA_ADMIN_TOKEN not configured — rejecting delete");
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let provided = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        warn!("media delete rejected: invalid or missing admin token");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let config = &state.config;
-    let file_path = config.storage_dir.join(&media_id);
-
-    match fs::remove_file(&file_path).await {
-        Ok(_) => {
-            tracing::info!(media_id = %media_id, "Media file deleted");
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
+    warn!("REST media download rejected — use gRPC MediaService.DownloadMedia");
+    Err(StatusCode::GONE)
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    if a.len() != b.len() {
-        return false;
-    }
-    a.ct_eq(b).into()
+/// REST delete — permanently disabled (use gRPC DeleteMedia with admin token).
+pub async fn delete_media(
+    State(_state): State<AppState>,
+    Path(_media_id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    warn!("REST media delete rejected — use gRPC MediaService.DeleteMedia");
+    Err(StatusCode::GONE)
 }

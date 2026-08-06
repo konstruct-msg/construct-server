@@ -8,6 +8,15 @@
 //     rewrite EXTRACT(EPOCH...) → strftime('%s',...), change UUID columns to TEXT)
 // Multi-instance (load balancer) is only needed at ~10k+ concurrent uploads;
 // until then a single dedicated instance with SQLite is sufficient.
+//
+// SECURITY (media blobs):
+// - Clients upload E2E-encrypted ciphertext. The server never decrypts, parses,
+//   or executes object bytes (no image codecs, no archive extraction, no scripts).
+// - Objects are UUID-named files mode 0600 under MEDIA_STORAGE_DIR; served only as
+//   application/octet-stream over gRPC. A planted binary/script cannot RCE the
+//   server unless something else later executes that path — which this service
+//   never does.
+// - REST upload/download paths are retired; only gRPC MediaService is public via Caddy.
 
 use anyhow::{Context as _, Result};
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -16,9 +25,9 @@ use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_server_shared::db::DbPool;
 use serde_json::json;
-use std::{env, sync::Arc};
+use std::{env, sync::Arc, time::Duration};
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -27,9 +36,11 @@ use proto::media_service_server::{MediaService, MediaServiceServer};
 
 mod config;
 mod core;
+mod rate_limit;
 mod utils;
 
 use config::MediaConfig;
+use rate_limit::SlidingWindowLimiter;
 
 pub struct MediaServiceContext {
     pub db_pool: Arc<DbPool>,
@@ -37,6 +48,8 @@ pub struct MediaServiceContext {
     pub public_host: String,
     /// Verifies Bearer access tokens for authenticated RPCs (token mint / delete).
     pub auth: Arc<AuthManager>,
+    /// Per-user mint rate limit (GenerateUploadToken).
+    pub mint_limiter: Arc<SlidingWindowLimiter>,
 }
 
 #[derive(Clone)]
@@ -55,7 +68,7 @@ fn require_authed_user(
 }
 
 // Constants for chunk sizes
-const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB chunks
+const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB chunks (capped further by tonic max_decoding)
 
 #[tonic::async_trait]
 impl MediaService for MediaGrpcService {
@@ -66,35 +79,41 @@ impl MediaService for MediaGrpcService {
         &self,
         request: Request<proto::GenerateUploadTokenRequest>,
     ) -> Result<Response<proto::GenerateUploadTokenResponse>, Status> {
-        // Auth required: unauthenticated mint was an open storage-abuse vector.
-        // UploadMedia still accepts only the short-lived HMAC upload_token capability.
         let user_id = require_authed_user(self.context.auth.as_ref(), request.metadata())?;
         let req = request.into_inner();
 
-        // Validate expected size if provided
-        if let Some(expected_size) = req.expected_size {
-            if expected_size <= 0 {
-                return Err(Status::invalid_argument("Expected size must be positive"));
-            }
-            if expected_size > self.context.media_config.max_file_size as i64 {
-                return Err(Status::invalid_argument(format!(
-                    "Expected size {} exceeds maximum {}",
-                    expected_size, self.context.media_config.max_file_size
-                )));
-            }
+        if !self.context.mint_limiter.check_and_record(user_id) {
+            warn!(user_id = %user_id, "Media upload token rate limit exceeded");
+            return Err(Status::resource_exhausted(format!(
+                "Upload token rate limit exceeded (max {} per hour)",
+                self.context.media_config.rate_limit_per_hour
+            )));
         }
 
-        // Generate token using core logic
-        let token = core::generate_upload_token(&self.context.media_config.hmac_secret)
-            .map_err(|e| Status::internal(format!("Failed to generate token: {}", e)))?;
+        // Cap for this token: min(requested, configured max), bound into HMAC.
+        let configured_max = self.context.media_config.max_file_size as i64;
+        let max_size = match req.expected_size {
+            Some(expected) => {
+                if expected <= 0 {
+                    return Err(Status::invalid_argument("Expected size must be positive"));
+                }
+                if expected > configured_max {
+                    return Err(Status::invalid_argument(format!(
+                        "Expected size {} exceeds maximum {}",
+                        expected, configured_max
+                    )));
+                }
+                expected
+            }
+            None => configured_max,
+        };
 
-        // Format: media_id|expires_at|signature
-        let upload_token = format!(
-            "{}|{}|{}",
-            token.media_id, token.expires_at, token.signature
-        );
+        let token =
+            core::generate_upload_token(&self.context.media_config.hmac_secret, user_id, max_size)
+                .map_err(|e| Status::internal(format!("Failed to generate token: {}", e)))?;
 
-        // Build expires_at as ISO 8601 timestamp
+        let upload_token = core::format_upload_token(&token);
+
         let expires_at = DateTime::from_timestamp(token.expires_at, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
@@ -102,6 +121,7 @@ impl MediaService for MediaGrpcService {
         info!(
             user_id = %user_id,
             media_id = %token.media_id,
+            max_size = max_size,
             "Issued media upload token"
         );
 
@@ -111,7 +131,7 @@ impl MediaService for MediaGrpcService {
                 "grpc://{}/MediaService/UploadMedia",
                 self.context.public_host
             ),
-            max_file_size: self.context.media_config.max_file_size as i64,
+            max_file_size: max_size,
             expires_at,
         }))
     }
@@ -127,82 +147,102 @@ impl MediaService for MediaGrpcService {
         let mut upload_state: Option<core::UploadState> = None;
         let mut media_id: Option<String> = None;
         let mut expected_hash: Option<String> = None;
+        let mut token_max_size: i64 = self.context.media_config.max_file_size as i64;
 
-        // Process chunks
         while let Some(chunk_msg) = stream
             .message()
             .await
             .map_err(|e| Status::internal(format!("Stream error: {}", e)))?
         {
-            // First chunk must contain upload_token
             if upload_state.is_none() {
                 let token = chunk_msg.upload_token.ok_or_else(|| {
                     Status::invalid_argument("First chunk must contain upload_token")
                 })?;
 
-                // Validate token
-                let (mid, _expires) =
+                let claims =
                     core::validate_upload_token(&token, &self.context.media_config.hmac_secret)
                         .map_err(|e| Status::permission_denied(format!("Invalid token: {}", e)))?;
 
-                media_id = Some(mid.clone());
-
-                // Create upload state
-                let mut state = core::UploadState::new(&self.context.media_config.storage_dir, mid)
+                // One-time: reject if metadata already exists for this media_id.
+                if core::get_metadata(&self.context.db_pool, &claims.media_id)
                     .await
-                    .map_err(|e| {
-                        Status::internal(format!("Failed to create upload state: {}", e))
-                    })?;
+                    .map_err(|e| Status::internal(format!("Database error: {}", e)))?
+                    .is_some()
+                {
+                    return Err(Status::already_exists(
+                        "Upload token already consumed (media exists)",
+                    ));
+                }
 
-                // Set expected size if provided
-                state.expected_size = chunk_msg.total_size;
+                // Never allow token max above server config (defense if config lowered).
+                token_max_size = claims
+                    .max_size
+                    .min(self.context.media_config.max_file_size as i64);
+
+                media_id = Some(claims.media_id.clone());
+
+                let state = core::UploadState::new(
+                    &self.context.media_config.storage_dir,
+                    claims.media_id,
+                    token_max_size,
+                )
+                .await
+                .map_err(|e| {
+                    // Distinguish one-time collision from I/O
+                    let msg = e.to_string();
+                    if msg.contains("already exists") {
+                        Status::already_exists(msg)
+                    } else {
+                        Status::internal(format!("Failed to create upload state: {}", e))
+                    }
+                })?;
 
                 upload_state = Some(state);
             }
 
-            // Store expected hash from last chunk
             if chunk_msg.is_last {
                 expected_hash = chunk_msg.file_hash.clone();
             }
 
-            // Write chunk data
             if !chunk_msg.chunk.is_empty() {
                 let state = upload_state.as_mut().unwrap();
-                state
-                    .write_chunk(&chunk_msg.chunk)
-                    .await
-                    .map_err(|e| Status::internal(format!("Write failed: {}", e)))?;
-
-                // Check size limit
-                if state.total_received > self.context.media_config.max_file_size {
-                    // Abort upload and cleanup - take ownership
+                if let Err(e) = state.write_chunk(&chunk_msg.chunk).await {
                     if let Some(s) = upload_state.take() {
                         let _ = s.abort().await;
                     }
-                    return Err(Status::resource_exhausted("File size limit exceeded"));
+                    let msg = e.to_string();
+                    if msg.contains("size limit") {
+                        return Err(Status::resource_exhausted(msg));
+                    }
+                    return Err(Status::internal(format!("Write failed: {}", e)));
                 }
             }
 
-            // Finish on last chunk
             if chunk_msg.is_last {
                 break;
             }
         }
 
-        // Finalize upload
         let state = upload_state.ok_or_else(|| Status::invalid_argument("No chunks received"))?;
 
-        let mid = media_id.unwrap();
-        let (file_path, computed_hash, total_size) = state
-            .finalize()
-            .await
-            .map_err(|e| Status::internal(format!("Finalize failed: {}", e)))?;
+        if state.total_received == 0 {
+            let _ = state.abort().await;
+            return Err(Status::invalid_argument("Empty upload rejected"));
+        }
 
-        // Verify hash if provided
+        let mid = media_id.unwrap();
+        let (file_path, computed_hash, total_size) = state.finalize().await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("already exists") {
+                Status::already_exists(msg)
+            } else {
+                Status::internal(format!("Finalize failed: {}", e))
+            }
+        })?;
+
         if let Some(expected) = expected_hash
             && computed_hash != expected
         {
-            // Delete the file since hash doesn't match
             let _ = tokio::fs::remove_file(&file_path).await;
             return Err(Status::data_loss(format!(
                 "Hash mismatch: expected {}, got {}",
@@ -210,14 +250,10 @@ impl MediaService for MediaGrpcService {
             )));
         }
 
-        // Save metadata to database
-        let storage_key = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&mid)
-            .to_string();
+        // storage_key is always the bare UUID filename (never a client path).
+        let storage_key = mid.clone();
 
-        let metadata = core::save_metadata(
+        let metadata = match core::save_metadata(
             &self.context.db_pool,
             &mid,
             total_size as i64,
@@ -226,14 +262,25 @@ impl MediaService for MediaGrpcService {
             &computed_hash,
         )
         .await
-        .map_err(|e| Status::internal(format!("Failed to save metadata: {}", e)))?;
+        {
+            Ok(m) => m,
+            Err(e) => {
+                // Roll back on-disk object if DB insert fails (e.g. unique race).
+                let _ = tokio::fs::remove_file(&file_path).await;
+                return Err(Status::internal(format!("Failed to save metadata: {}", e)));
+            }
+        };
 
-        // Build expires_at as ISO 8601
         let expires_at = DateTime::from_timestamp(metadata.expires_at, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
 
-        info!(media_id = %mid, size = total_size, "Media uploaded successfully");
+        info!(
+            media_id = %mid,
+            size = total_size,
+            max_size = token_max_size,
+            "Media uploaded successfully"
+        );
 
         Ok(Response::new(proto::UploadMediaResponse {
             media_id: mid,
@@ -260,30 +307,34 @@ impl MediaService for MediaGrpcService {
         let req = request.into_inner();
         let media_id = req.media_id;
 
-        // Validate media_id format
         if media_id.is_empty() {
             return Err(Status::invalid_argument("media_id is required"));
         }
+        // Reject non-UUID early (blocks path-ish probes before DB).
+        if Uuid::parse_str(&media_id).is_err() {
+            return Err(Status::invalid_argument("media_id must be a UUID"));
+        }
 
-        // Get metadata from database
         let metadata = core::get_metadata(&self.context.db_pool, &media_id)
             .await
             .map_err(|e| Status::internal(format!("Database error: {}", e)))?
             .ok_or_else(|| Status::not_found("Media not found"))?;
 
-        // Build file path
-        let file_path = self
-            .context
-            .media_config
-            .storage_dir
-            .join(&metadata.storage_key);
+        let now = Utc::now().timestamp();
+        if metadata.expires_at < now {
+            return Err(Status::not_found("Media expired"));
+        }
 
-        // Check if file exists
+        let file_path = core::safe_object_path(
+            &self.context.media_config.storage_dir,
+            &metadata.storage_key,
+        )
+        .map_err(|_| Status::not_found("Media file not found"))?;
+
         if !file_path.exists() {
             return Err(Status::not_found("Media file not found on disk"));
         }
 
-        // Create download stream
         let mut download_stream = core::DownloadStream::new(&file_path, CHUNK_SIZE)
             .await
             .map_err(|e| Status::internal(format!("Failed to open file: {}", e)))?;
@@ -291,7 +342,6 @@ impl MediaService for MediaGrpcService {
         let total_size = download_stream.total_size();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
-        // Spawn streaming task
         tokio::spawn(async move {
             let mut chunk_number = 0i32;
 
@@ -309,6 +359,7 @@ impl MediaService for MediaGrpcService {
                             } else {
                                 None
                             },
+                            // Never advertise executable or HTML types — always opaque blob.
                             content_type: if chunk_number == 0 {
                                 Some("application/octet-stream".to_string())
                             } else {
@@ -349,18 +400,13 @@ impl MediaService for MediaGrpcService {
         &self,
         request: Request<proto::DeleteMediaRequest>,
     ) -> Result<Response<proto::DeleteMediaResponse>, Status> {
-        // Require authenticated caller in addition to admin_token HMAC capability.
-        // Prevents unauthenticated probing of the delete surface via Caddy.
         let _caller = require_authed_user(self.context.auth.as_ref(), request.metadata())?;
         let req = request.into_inner();
 
-        // Validate admin token (HMAC capability bound to media_id + short TTL)
-        // Admin token format: {media_id}|{timestamp}|{signature}
         if req.admin_token.is_empty() {
             return Err(Status::permission_denied("Admin token required"));
         }
 
-        // Validate token format
         let parts: Vec<&str> = req.admin_token.split('|').collect();
         if parts.len() != 3 {
             return Err(Status::permission_denied("Invalid admin token format"));
@@ -370,12 +416,13 @@ impl MediaService for MediaGrpcService {
         let timestamp_str = parts[1];
         let signature = parts[2];
 
-        // Verify media_id matches
         if token_media_id != req.media_id {
             return Err(Status::permission_denied("Token media_id mismatch"));
         }
+        if Uuid::parse_str(&req.media_id).is_err() {
+            return Err(Status::invalid_argument("media_id must be a UUID"));
+        }
 
-        // Verify timestamp (allow 5 minute window)
         let timestamp: i64 = timestamp_str
             .parse()
             .map_err(|_| Status::permission_denied("Invalid timestamp in token"))?;
@@ -384,14 +431,12 @@ impl MediaService for MediaGrpcService {
             return Err(Status::permission_denied("Token expired"));
         }
 
-        // Verify signature
         let message = format!("{}|{}", token_media_id, timestamp_str);
         let expected_sig = utils::compute_hmac(&message, &self.context.media_config.hmac_secret);
-        if signature != expected_sig {
+        if !utils::hmac_eq(signature, &expected_sig) {
             return Err(Status::permission_denied("Invalid signature"));
         }
 
-        // Delete media
         let deleted = core::delete_media(
             &self.context.db_pool,
             &self.context.media_config.storage_dir,
@@ -426,22 +471,27 @@ impl MediaService for MediaGrpcService {
         if req.media_id.is_empty() {
             return Err(Status::invalid_argument("media_id is required"));
         }
+        if Uuid::parse_str(&req.media_id).is_err() {
+            return Err(Status::invalid_argument("media_id must be a UUID"));
+        }
 
-        // Get metadata from database
         let metadata = core::get_metadata(&self.context.db_pool, &req.media_id)
             .await
             .map_err(|e| Status::internal(format!("Database error: {}", e)))?
             .ok_or_else(|| Status::not_found("Media not found"))?;
 
-        // Check if file exists on disk
-        let file_path = self
-            .context
-            .media_config
-            .storage_dir
-            .join(&metadata.storage_key);
-        let exists = file_path.exists();
+        let now = Utc::now().timestamp();
+        if metadata.expires_at < now {
+            return Err(Status::not_found("Media expired"));
+        }
 
-        // Format timestamps as ISO 8601
+        let file_path = core::safe_object_path(
+            &self.context.media_config.storage_dir,
+            &metadata.storage_key,
+        )
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
         let created_at = DateTime::from_timestamp(metadata.created_at, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default();
@@ -456,7 +506,7 @@ impl MediaService for MediaGrpcService {
             content_type: Some("application/octet-stream".to_string()),
             created_at,
             expires_at,
-            exists,
+            exists: file_path,
         }))
     }
 }
@@ -468,10 +518,25 @@ async fn health_check() -> impl IntoResponse {
     )
 }
 
+async fn run_cleanup_loop(pool: Arc<DbPool>, config: Arc<MediaConfig>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(3600));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match core::cleanup_expired_media(&pool, &config.storage_dir).await {
+            Ok(n) if n > 0 => info!(deleted = n, "Media TTL cleanup removed expired objects"),
+            Ok(_) => {}
+            Err(e) => error!(error = %e, "Media TTL cleanup failed"),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let main_config = Config::from_env()?;
-    let media_config = Arc::new(MediaConfig::from_env());
+    let media_config = Arc::new(MediaConfig::from_env().context(
+        "Invalid media configuration — set MEDIA_UPLOAD_TOKEN_SECRET or MEDIA_HMAC_SECRET",
+    )?);
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(&main_config.rust_log))
@@ -480,8 +545,21 @@ async fn main() -> Result<()> {
 
     info!("=== Media Service Starting ===");
     info!("Storage: {}", media_config.storage_dir.display());
+    info!(
+        "Max file size: {} bytes, mint rate limit: {}/hour",
+        media_config.max_file_size, media_config.rate_limit_per_hour
+    );
 
     tokio::fs::create_dir_all(&media_config.storage_dir).await?;
+    // Ensure storage dir itself is not world-writable/executable where possible.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &media_config.storage_dir,
+            std::fs::Permissions::from_mode(0o700),
+        );
+    }
 
     let db_pool = Arc::new(DbPool::connect(&main_config.database_url).await?);
     sqlx::migrate!("../shared/migrations")
@@ -497,11 +575,26 @@ async fn main() -> Result<()> {
     );
     info!("JWT/PASETO verification enabled for media-service");
 
+    let mint_limiter = Arc::new(SlidingWindowLimiter::new(
+        media_config.rate_limit_per_hour,
+        Duration::from_secs(3600),
+    ));
+
+    // Background TTL cleanup (DB expires_at + orphan .partial files).
+    {
+        let pool = Arc::clone(&db_pool);
+        let cfg = Arc::clone(&media_config);
+        tokio::spawn(async move {
+            run_cleanup_loop(pool, cfg).await;
+        });
+    }
+
     let context = Arc::new(MediaServiceContext {
         db_pool,
         media_config: media_config.clone(),
         public_host,
         auth,
+        mint_limiter,
     });
 
     let grpc_context = context.clone();
@@ -518,7 +611,9 @@ async fn main() -> Result<()> {
             main_config.grpc_keepalive_timeout_secs,
         )
         .add_service(
-            MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024), // 2 MB per chunk
+            // 2 MB max per message — bounds memory even if a client lies about size
+            // until the stream-level max_file_size check fires.
+            MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024),
         )
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await
@@ -526,8 +621,9 @@ async fn main() -> Result<()> {
             tracing::error!(error = %e, "gRPC server failed");
         }
     });
-    info!("Media gRPC listening on [::]:50056");
+    info!("Media gRPC listening on {grpc_bind_address}");
 
+    // HTTP: health + metrics only. No REST upload/download (retired).
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
@@ -539,7 +635,10 @@ async fn main() -> Result<()> {
 
     let listener =
         construct_server_shared::mptcp_or_tcp_listener(&media_config.bind_address).await?;
-    info!("Media REST listening on {}", media_config.bind_address);
+    info!(
+        "Media health/metrics listening on {}",
+        media_config.bind_address
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(construct_server_shared::shutdown_signal())
@@ -755,15 +854,14 @@ mod tests {
     }
 
     #[test]
-    fn upload_token_roundtrip_still_works() {
-        // Capability path after mint remains HMAC-only (no Bearer on UploadMedia).
-        let secret = "test-media-hmac-secret";
-        let token = core::generate_upload_token(secret).unwrap();
-        let wire = format!(
-            "{}|{}|{}",
-            token.media_id, token.expires_at, token.signature
-        );
-        let (mid, _) = core::validate_upload_token(&wire, secret).unwrap();
-        assert_eq!(mid, token.media_id);
+    fn upload_token_v2_roundtrip_binds_user_and_size() {
+        let secret = "test-media-hmac-secret-32chars!!";
+        let uid = Uuid::new_v4();
+        let token = core::generate_upload_token(secret, uid, 4096).unwrap();
+        let wire = core::format_upload_token(&token);
+        let claims = core::validate_upload_token(&wire, secret).unwrap();
+        assert_eq!(claims.media_id, token.media_id);
+        assert_eq!(claims.user_id, uid);
+        assert_eq!(claims.max_size, 4096);
     }
 }
