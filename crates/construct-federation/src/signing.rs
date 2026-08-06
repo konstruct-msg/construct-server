@@ -244,8 +244,10 @@ impl PublicKeyCache {
     pub fn new() -> Self {
         Self {
             cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            // No redirects: a 30x to http://169.254.169.254 would bypass hostname checks.
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|e| {
                     tracing::error!(error = %e, "Failed to create HTTP client for public key cache");
@@ -258,6 +260,12 @@ impl PublicKeyCache {
     ///
     /// Cache TTL: 1 hour
     pub async fn get_public_key(&self, domain: &str) -> Result<String, SigningError> {
+        // SSRF: validate before any network I/O (and before using domain as cache key).
+        crate::ssrf::assert_hostname_resolves_public(domain).map_err(|e| {
+            tracing::warn!(domain = %domain, error = %e, "Rejected federation domain (SSRF guard)");
+            SigningError::RemoteKeyFetch(format!("SSRF guard: {e}"))
+        })?;
+
         // Check cache first
         {
             match self.cache.read() {
@@ -299,6 +307,10 @@ impl PublicKeyCache {
 
     /// Fetch public key from .well-known/konstruct
     async fn fetch_public_key(&self, domain: &str) -> Result<String, SigningError> {
+        // Re-check immediately before dial (DNS rebinding window is still a residual risk).
+        crate::ssrf::assert_hostname_resolves_public(domain)
+            .map_err(|e| SigningError::RemoteKeyFetch(format!("SSRF guard: {e}")))?;
+
         let url = format!("https://{}/.well-known/konstruct", domain);
 
         tracing::debug!(domain = %domain, url = %url, "Fetching public key from remote server");

@@ -28,12 +28,17 @@ pub struct FederationEndpoints {
 
 /// Discover federation info for a domain
 pub async fn discover_instance(domain: &str) -> Result<FederationInfo> {
+    crate::ssrf::assert_hostname_resolves_public(domain)
+        .map_err(|e| anyhow::anyhow!("SSRF guard rejected domain: {e}"))?;
+
     let well_known_url = format!("https://{}/.well-known/konstruct", domain);
 
     tracing::debug!(domain = %domain, url = %well_known_url, "Discovering federation instance");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        // Do not follow redirects to private IPs / metadata endpoints.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let response = client.get(&well_known_url).send().await?;

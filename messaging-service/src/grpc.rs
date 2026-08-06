@@ -927,14 +927,18 @@ pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
 
 /// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
 /// Caddy's `reverse_proxy`). Used only for the unauthenticated `SendSealedMessage`
-/// rate limit — mirrors `construct-auth-service::devices::extract_client_ip`,
-/// adapted from axum `HeaderMap` to tonic `MetadataMap`.
+/// rate limit.
+///
+/// SECURITY: take the **rightmost** `X-Forwarded-For` entry, not the leftmost.
+/// Caddy *appends* the real connecting peer after any client-supplied values, so
+/// the leftmost hop is attacker-controlled and can rotate to dodge rate limits.
+/// Matches `key-service` bundle rate-limit IP extraction.
 fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
     if let Some(forwarded) = metadata
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
     {
-        let ip = forwarded.split(',').next().unwrap_or("").trim();
+        let ip = forwarded.split(',').next_back().unwrap_or("").trim();
         if !ip.is_empty() {
             return ip.to_string();
         }
