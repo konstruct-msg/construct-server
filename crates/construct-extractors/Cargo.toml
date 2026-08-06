@@ -1,8 +1,0 @@
-[package]
-name = "construct-extractors"
-license = "AGPL-3.0-only"
-version.workspace = true
-edition.workspace = true
-
-# Placeholder crate — REST extractors removed. No runtime deps required.
-[dependencies]

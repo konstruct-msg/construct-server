@@ -16,7 +16,6 @@ use argon2::{
 use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::{ApnsEnvironment, Config};
 use construct_context::AppContext;
 use construct_error::AppError;
@@ -30,6 +29,8 @@ use construct_server_shared::{
     queue::MessageQueue,
     shared::proto::services::v1::{
         self as proto_svc,
+        auth_service_client::AuthServiceClient,
+        auth_service_server::{AuthService as GrpcAuthService, AuthServiceServer},
         messaging_service_server::{
             MessagingService as GrpcMessagingService, MessagingServiceServer,
         },
@@ -53,9 +54,11 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 /// Test application with all microservices
 pub struct TestApp {
-    /// Legacy: points to auth service for backward compatibility
+    /// Legacy: points to auth HTTP for backward compatibility
     pub address: String,
     pub auth_address: String,
+    /// gRPC AuthService (GetPowChallenge / RegisterDevice) for client registration
+    pub grpc_auth_address: String,
     pub user_address: String,
     pub messaging_address: String,
     pub grpc_messaging_address: String,
@@ -280,8 +283,169 @@ pub async fn cleanup_rate_limits(redis_url: &str) {
     }
 }
 
-/// Spawn auth service
-async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String {
+/// Minimal gRPC AuthService for integration tests (PoW + device registration).
+#[derive(Clone)]
+struct TestAuthGrpcService {
+    context: Arc<AuthServiceContext>,
+}
+
+fn app_error_to_status(e: AppError) -> GrpcStatus {
+    // Keep mapping coarse — tests only need registration success/failure.
+    match e {
+        AppError::Validation(msg) | AppError::Auth(msg) => GrpcStatus::invalid_argument(msg),
+        AppError::NotFound(msg) => GrpcStatus::not_found(msg),
+        other => GrpcStatus::internal(other.to_string()),
+    }
+}
+
+#[tonic::async_trait]
+impl GrpcAuthService for TestAuthGrpcService {
+    async fn get_pow_challenge(
+        &self,
+        _request: GrpcRequest<proto_svc::GetPowChallengeRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetPowChallengeResponse>, GrpcStatus> {
+        let app_context = Arc::new(self.context.to_app_context());
+        let (_headers, axum::Json(challenge)) =
+            construct_server_shared::auth_service::core::get_pow_challenge(
+                app_context,
+                axum::http::HeaderMap::new(),
+            )
+            .await
+            .map_err(app_error_to_status)?;
+        Ok(GrpcResponse::new(proto_svc::GetPowChallengeResponse {
+            challenge: challenge.challenge,
+            difficulty: challenge.difficulty,
+            expires_at: challenge.expires_at,
+        }))
+    }
+
+    async fn register_device(
+        &self,
+        request: GrpcRequest<proto_svc::RegisterDeviceRequest>,
+    ) -> Result<GrpcResponse<proto_svc::RegisterDeviceResponse>, GrpcStatus> {
+        let req = request.into_inner();
+        let public_keys = req
+            .public_keys
+            .ok_or_else(|| GrpcStatus::invalid_argument("public_keys is required"))?;
+        let pow_solution = req
+            .pow_solution
+            .ok_or_else(|| GrpcStatus::invalid_argument("pow_solution is required"))?;
+        let app_context = Arc::new(self.context.to_app_context());
+        let (_status, axum::Json(response)) =
+            construct_server_shared::auth_service::core::register_device(
+                app_context,
+                axum::http::HeaderMap::new(),
+                construct_server_shared::auth_service::core::RegisterDeviceInput {
+                    username: req.username,
+                    device_id: req.device_id,
+                    public_keys:
+                        construct_server_shared::auth_service::core::DevicePublicKeysInput {
+                            verifying_key: public_keys.verifying_key,
+                            identity_public: public_keys.identity_public,
+                            signed_prekey_public: public_keys.signed_prekey_public,
+                            signed_prekey_signature: public_keys.signed_prekey_signature,
+                            crypto_suite: public_keys.crypto_suite,
+                            supports_pq_ratchet: public_keys.supports_pq_ratchet,
+                        },
+                    pow_solution: construct_server_shared::auth_service::core::PowSolutionInput {
+                        challenge: pow_solution.challenge,
+                        nonce: pow_solution.nonce,
+                        hash: pow_solution.hash,
+                    },
+                    identity_public_key: req.identity_public_key,
+                    identity_key_type: req.identity_key_type,
+                },
+            )
+            .await
+            .map_err(app_error_to_status)?;
+
+        Ok(GrpcResponse::new(proto_svc::RegisterDeviceResponse {
+            tokens: Some(proto_svc::AuthTokensResponse {
+                user_id: response.user_id,
+                access_token: response.access_token,
+                refresh_token: response.refresh_token,
+                expires_at: chrono::Utc::now().timestamp() + response.expires_in as i64,
+                veil_bridge_cert: None,
+            }),
+        }))
+    }
+
+    async fn authenticate_device(
+        &self,
+        _: GrpcRequest<proto_svc::AuthenticateDeviceRequest>,
+    ) -> Result<GrpcResponse<proto_svc::AuthenticateDeviceResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("authenticate_device"))
+    }
+    async fn refresh_token(
+        &self,
+        _: GrpcRequest<proto_svc::RefreshTokenRequest>,
+    ) -> Result<GrpcResponse<proto_svc::RefreshTokenResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("refresh_token"))
+    }
+    async fn verify_token(
+        &self,
+        _: GrpcRequest<proto_svc::VerifyTokenRequest>,
+    ) -> Result<GrpcResponse<proto_svc::VerifyTokenResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("verify_token"))
+    }
+    async fn logout(
+        &self,
+        _: GrpcRequest<proto_svc::LogoutRequest>,
+    ) -> Result<GrpcResponse<proto_svc::LogoutResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("logout"))
+    }
+    async fn set_recovery_key(
+        &self,
+        _: GrpcRequest<proto_svc::SetRecoveryKeyRequest>,
+    ) -> Result<GrpcResponse<proto_svc::SetRecoveryKeyResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("set_recovery_key"))
+    }
+    async fn get_recovery_status(
+        &self,
+        _: GrpcRequest<proto_svc::GetRecoveryStatusRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetRecoveryStatusResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("get_recovery_status"))
+    }
+    async fn recover_account(
+        &self,
+        _: GrpcRequest<proto_svc::RecoverAccountRequest>,
+    ) -> Result<GrpcResponse<proto_svc::RecoverAccountResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("recover_account"))
+    }
+    async fn store_recovery_bundle(
+        &self,
+        _: GrpcRequest<proto_svc::StoreRecoveryBundleRequest>,
+    ) -> Result<GrpcResponse<proto_svc::StoreRecoveryBundleResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("store_recovery_bundle"))
+    }
+    async fn get_recovery_bundle(
+        &self,
+        _: GrpcRequest<proto_svc::GetRecoveryBundleRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetRecoveryBundleResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("get_recovery_bundle"))
+    }
+    async fn get_sender_certificate(
+        &self,
+        _: GrpcRequest<proto_svc::GetSenderCertificateRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetSenderCertificateResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("get_sender_certificate"))
+    }
+    async fn issue_tokens(
+        &self,
+        _: GrpcRequest<proto_svc::IssueTokensRequest>,
+    ) -> Result<GrpcResponse<proto_svc::IssueTokensResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("issue_tokens"))
+    }
+    async fn approve_join_request(
+        &self,
+        _: GrpcRequest<proto_svc::ApproveJoinRequestRequest>,
+    ) -> Result<GrpcResponse<proto_svc::ApproveJoinRequestResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("approve_join_request"))
+    }
+}
+
+/// Spawn auth HTTP health + gRPC AuthService. Returns (http_address, grpc_address).
+async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (String, String) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let address = format!("127.0.0.1:{}", port);
@@ -302,7 +466,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         token_enc_pub: None,
     });
 
-    // Health/ready only — client auth is gRPC AuthService.
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route(
@@ -313,13 +476,28 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             }),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        .with_state(context);
+        .with_state(context.clone());
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    address
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_port = grpc_listener.local_addr().unwrap().port();
+    let grpc_address = format!("127.0.0.1:{}", grpc_port);
+    let grpc_service = TestAuthGrpcService { context };
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(AuthServiceServer::new(grpc_service))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
+            .await
+            .unwrap();
+    });
+
+    (address, grpc_address)
 }
 
 /// Spawn user service
@@ -605,7 +783,8 @@ pub async fn spawn_app() -> TestApp {
     let config = Arc::new(create_test_config(&db_name).await);
     let db_pool_arc = Arc::new(db_pool.clone());
 
-    let auth_address = spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
+    let (auth_address, grpc_auth_address) =
+        spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
     let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
     let (messaging_address, grpc_messaging_address) =
         spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
@@ -618,6 +797,7 @@ pub async fn spawn_app() -> TestApp {
     TestApp {
         address: auth_address.clone(), // Legacy compatibility
         auth_address,
+        grpc_auth_address,
         user_address,
         messaging_address,
         grpc_messaging_address,
@@ -643,7 +823,8 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
     let config = Arc::new(create_test_config(&db_name).await);
     let db_pool_arc = Arc::new(db_pool.clone());
 
-    let auth_address = spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
+    let (auth_address, grpc_auth_address) =
+        spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
     let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
     let (messaging_address, grpc_messaging_address) =
         spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
@@ -662,6 +843,7 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
     TestApp {
         address: auth_address.clone(), // Legacy compatibility
         auth_address,
+        grpc_auth_address,
         user_address,
         messaging_address,
         grpc_messaging_address,
@@ -681,7 +863,7 @@ pub async fn spawn_auth_app() -> SingleServiceApp {
     let config = Arc::new(create_test_config(&db_name).await);
     let db_pool_arc = Arc::new(db_pool.clone());
 
-    let address = spawn_auth_service(config.clone(), db_pool_arc).await;
+    let (address, _grpc) = spawn_auth_service(config.clone(), db_pool_arc).await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
@@ -827,114 +1009,81 @@ fn count_leading_zero_bits(hash_bytes: &[u8]) -> u32 {
     count
 }
 
-/// Register a new user using passwordless device-based authentication.
+/// Register a new user via gRPC AuthService (passwordless device registration).
 ///
-/// This function:
-/// 1. Generates Ed25519 + X25519 key pairs
-/// 2. Gets PoW challenge from server
-/// 3. Solves PoW (fast with difficulty=1 in tests)
-/// 4. Registers device with server
-/// 5. Returns (user_id, access_token)
+/// `auth_grpc_address` is host:port of the test AuthService (see `TestApp.grpc_auth_address`).
+/// Returns (user_id, access_token).
 pub async fn register_user_passwordless(
-    client: &reqwest::Client,
-    auth_address: &str,
+    _client: &reqwest::Client,
+    auth_grpc_address: &str,
     username: Option<&str>,
 ) -> (String, String) {
-    // 1. Generate Ed25519 signing key (for authentication)
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
-    // 2. Generate X25519 key pair (for E2EE identity)
     let identity_secret = EphemeralSecret::random_from_rng(OsRng);
     let identity_public = X25519PublicKey::from(&identity_secret);
 
-    // 3. Generate signed prekey (X25519 for Double Ratchet)
     let prekey_secret = EphemeralSecret::random_from_rng(OsRng);
     let prekey_public = X25519PublicKey::from(&prekey_secret);
 
-    // 3.5. Generate signedPrekeySignature for X3DH
-    // Signature over: prologue || signed_prekey_public
-    // Prologue = "KonstruktX3DH-v1" || crypto_suite_id (2 bytes BE, 0x0001 for Curve25519+Ed25519)
     let prekey_signature = {
         let mut message = Vec::new();
         message.extend_from_slice(b"KonstruktX3DH-v1");
-        message.extend_from_slice(&[0x00, 0x01]); // crypto_suite_id = 1 (Curve25519+Ed25519)
+        message.extend_from_slice(&[0x00, 0x01]);
         message.extend_from_slice(prekey_public.as_bytes());
         signing_key.sign(&message)
     };
 
-    // 4. Compute device_id = SHA256(identity_public)[0..16] as hex
     let device_id = {
         let hash = Sha256::digest(identity_public.as_bytes());
         hex::encode(&hash[0..16])
     };
 
-    // 5. Get PoW challenge from server
-    let challenge_url = format!("http://{}/api/v1/auth/challenge", auth_address);
-    let challenge_response = client
-        .get(&challenge_url)
-        .send()
+    let channel = tonic::transport::Channel::from_shared(format!("http://{auth_grpc_address}"))
+        .expect("auth grpc uri")
+        .connect()
         .await
-        .expect("Failed to get PoW challenge");
+        .expect("connect auth grpc");
+    let mut auth = AuthServiceClient::new(channel);
 
-    assert_eq!(
-        challenge_response.status(),
-        reqwest::StatusCode::OK,
-        "Challenge request failed: {:?}",
-        challenge_response.text().await
-    );
-
-    let challenge: ChallengeResponse = client
-        .get(&challenge_url)
-        .send()
+    let challenge = auth
+        .get_pow_challenge(proto_svc::GetPowChallengeRequest {})
         .await
-        .expect("Failed to get PoW challenge")
-        .json()
-        .await
-        .expect("Failed to parse challenge response");
+        .expect("GetPowChallenge")
+        .into_inner();
 
-    // 6. Solve PoW (with difficulty=1 in tests, this is instant)
     let (nonce, hash) = solve_pow(&challenge.challenge, challenge.difficulty);
 
-    // 7. Build registration request
-    let register_request = serde_json::json!({
-        "username": username,
-        "deviceId": device_id,
-        "publicKeys": {
-            "verifyingKey": BASE64.encode(verifying_key.as_bytes()),
-            "identityPublic": BASE64.encode(identity_public.as_bytes()),
-            "signedPrekeyPublic": BASE64.encode(prekey_public.as_bytes()),
-            "signedPrekeySignature": BASE64.encode(prekey_signature.to_bytes()),
-            "cryptoSuite": "Curve25519+Ed25519"
-        },
-        "powSolution": {
-            "challenge": challenge.challenge,
-            "nonce": nonce,
-            "hash": hash
-        }
-    });
-
-    // 8. Register device
-    let register_url = format!("http://{}/api/v1/auth/register-device", auth_address);
-    let register_response = client
-        .post(&register_url)
-        .json(&register_request)
-        .send()
+    let reg = auth
+        .register_device(proto_svc::RegisterDeviceRequest {
+            username: username.map(|s| s.to_string()),
+            device_id,
+            public_keys: Some(proto_svc::DevicePublicKeys {
+                verifying_key: verifying_key.as_bytes().to_vec(),
+                identity_public: identity_public.as_bytes().to_vec(),
+                signed_prekey_public: prekey_public.as_bytes().to_vec(),
+                signed_prekey_signature: prekey_signature.to_bytes().to_vec(),
+                crypto_suite: "Curve25519+Ed25519".to_string(),
+                hybrid_identity_key: None,
+                hybrid_identity_signature: None,
+                signed_prekey_hybrid_signature: None,
+                supports_pq_ratchet: false,
+            }),
+            pow_solution: Some(proto_svc::PowSolution {
+                challenge: challenge.challenge,
+                nonce,
+                hash,
+            }),
+            identity_public_key: None,
+            identity_key_type: None,
+        })
         .await
-        .expect("Failed to send registration request");
+        .expect("RegisterDevice")
+        .into_inner();
 
-    let status = register_response.status();
-    if status != reqwest::StatusCode::CREATED {
-        let error_text = register_response.text().await.unwrap();
-        panic!("Registration failed (status {}): {}", status, error_text);
-    }
-
-    let auth_response: RegisterDeviceResponse = register_response
-        .json()
-        .await
-        .expect("Failed to parse registration response");
-
-    (auth_response.user_id, auth_response.access_token)
+    let tokens = reg.tokens.expect("tokens in RegisterDeviceResponse");
+    (tokens.user_id, tokens.access_token)
 }
 
 // ============================================================================
@@ -952,7 +1101,7 @@ pub struct TestUser {
 pub async fn register_test_user(ctx: &TestApp, username: &str) -> TestUser {
     let client = reqwest::Client::new();
     let (user_id, access_token) =
-        register_user_passwordless(&client, &ctx.auth_address, Some(username)).await;
+        register_user_passwordless(&client, &ctx.grpc_auth_address, Some(username)).await;
 
     TestUser {
         user_id,
