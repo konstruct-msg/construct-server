@@ -95,10 +95,7 @@ async fn claim_federation_message_id(
     message_id: &str,
 ) -> Result<bool, FedHttpErr> {
     if message_id.is_empty() || message_id.len() > 128 {
-        return Err(fed_err(
-            StatusCode::BAD_REQUEST,
-            "invalid message_id",
-        ));
+        return Err(fed_err(StatusCode::BAD_REQUEST, "invalid message_id"));
     }
     // origin is already SSRF-checked by PublicKeyCache; keep key bounded.
     let key = format!("fed:msg:{origin_server}:{message_id}");

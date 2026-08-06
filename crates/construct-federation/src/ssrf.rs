@@ -77,10 +77,7 @@ pub fn validate_federation_hostname(domain: &str) -> Result<(), String> {
         if label.is_empty() || label.len() > 63 {
             return Err("invalid DNS label length".into());
         }
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-        {
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err("invalid characters in domain".into());
         }
         if label.starts_with('-') || label.ends_with('-') {
