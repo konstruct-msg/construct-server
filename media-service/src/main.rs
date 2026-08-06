@@ -148,6 +148,8 @@ impl MediaService for MediaGrpcService {
         let mut media_id: Option<String> = None;
         let mut expected_hash: Option<String> = None;
         let mut token_max_size: i64 = self.context.media_config.max_file_size as i64;
+        // Bound into the HMAC at mint time — used for audit logs on the capability path.
+        let mut uploader_user_id: Option<Uuid> = None;
 
         while let Some(chunk_msg) = stream
             .message()
@@ -180,6 +182,7 @@ impl MediaService for MediaGrpcService {
                     .min(self.context.media_config.max_file_size as i64);
 
                 media_id = Some(claims.media_id.clone());
+                uploader_user_id = Some(claims.user_id);
 
                 let state = core::UploadState::new(
                     &self.context.media_config.storage_dir,
@@ -277,6 +280,7 @@ impl MediaService for MediaGrpcService {
 
         info!(
             media_id = %mid,
+            user_id = %uploader_user_id.unwrap_or(Uuid::nil()),
             size = total_size,
             max_size = token_max_size,
             "Media uploaded successfully"
