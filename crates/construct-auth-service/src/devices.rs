@@ -38,19 +38,20 @@ use construct_error::AppError;
 // IP Extraction & Adaptive PoW
 // ============================================================================
 
-/// Extract client IP from X-Forwarded-For / X-Real-IP headers (set by Traefik/Envoy).
+/// Extract client IP from X-Forwarded-For / X-Real-IP headers (set by Caddy).
 /// Falls back to "unknown" if not present.
+///
+/// SECURITY: use the **rightmost** XFF hop. Caddy appends the connecting peer
+/// after any client-supplied values — leftmost is attacker-controlled.
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
-    // X-Forwarded-For: client, proxy1, proxy2 — take first (real client)
     if let Some(forwarded) = headers.get("x-forwarded-for")
         && let Ok(val) = forwarded.to_str()
     {
-        let ip = val.split(',').next().unwrap_or("").trim();
+        let ip = val.split(',').next_back().unwrap_or("").trim();
         if !ip.is_empty() {
             return ip.to_string();
         }
     }
-    // X-Real-IP set by Envoy/nginx
     if let Some(real_ip) = headers.get("x-real-ip")
         && let Ok(val) = real_ip.to_str()
     {

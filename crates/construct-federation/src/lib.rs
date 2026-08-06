@@ -13,8 +13,10 @@ pub mod client;
 pub mod discovery;
 pub mod mtls;
 pub mod signing;
+pub mod ssrf;
 
 pub use client::FederationClient;
 pub use discovery::discover_instance;
 pub use mtls::{FederationTrustStore, MtlsConfig};
 pub use signing::{FederatedEnvelope, PublicKeyCache, ServerSigner, SigningError};
+pub use ssrf::{assert_hostname_resolves_public, is_public_ip, validate_federation_hostname};

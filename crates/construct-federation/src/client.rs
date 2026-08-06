@@ -146,6 +146,8 @@ impl FederationClient {
     /// The remote server should verify the signature using our public key from
     /// .well-known/konstruct.
     pub async fn send_message(&self, target_domain: &str, message: &ChatMessage) -> Result<()> {
+        crate::ssrf::assert_hostname_resolves_public(target_domain)
+            .map_err(|e| anyhow::anyhow!("SSRF guard rejected target domain: {e}"))?;
         let url = format!("https://{target_domain}/federation/v1/messages");
 
         let envelope = FederatedEnvelope {

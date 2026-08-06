@@ -332,22 +332,21 @@ pub fn add_security_headers(headers: &mut hyper::HeaderMap, is_https: bool) {
 /// # Returns
 /// IP address as a string (normalized, without brackets for IPv6)
 pub fn extract_client_ip(headers: &axum::http::HeaderMap, direct_ip: Option<IpAddr>) -> String {
-    // 1. Check X-Forwarded-For (first IP in chain)
+    // 1. X-Forwarded-For: take the **rightmost** hop. With a single trusted edge
+    // (Caddy) that *appends* the peer IP, rightmost is the real connecting client;
+    // leftmost is attacker-controlled if the client pre-sets the header.
     if let Some(forwarded_for) = headers.get("x-forwarded-for")
         && let Ok(forwarded_str) = forwarded_for.to_str()
     {
-        // X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
-        // We want the first (original client) IP
-        let first_ip = forwarded_str.split(',').next().unwrap_or("").trim();
-        if !first_ip.is_empty() {
-            // Try to parse as IP address
-            if let Ok(ip) = first_ip.parse::<IpAddr>() {
-                return normalize_ip(ip);
-            }
+        let hop = forwarded_str.split(',').next_back().unwrap_or("").trim();
+        if !hop.is_empty()
+            && let Ok(ip) = hop.parse::<IpAddr>()
+        {
+            return normalize_ip(ip);
         }
     }
 
-    // 2. Check X-Real-IP (single IP, often set by nginx)
+    // 2. X-Real-IP (single IP, often set by nginx/Caddy)
     if let Some(real_ip) = headers.get("x-real-ip")
         && let Ok(real_ip_str) = real_ip.to_str()
         && let Ok(ip) = real_ip_str.trim().parse::<IpAddr>()
