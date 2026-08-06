@@ -2,9 +2,8 @@
 // Test Utilities for Microservices
 // ============================================================================
 //
-// Provides test infrastructure for REST API integration tests.
-// Spawns individual microservices (auth, user, messaging, notification)
-// with isolated test databases.
+// Spawns lightweight HTTP health stubs + messaging gRPC for integration tests.
+// Client REST APIs were removed — product auth is gRPC AuthService.
 //
 // ============================================================================
 
@@ -14,23 +13,20 @@ use argon2::{
     Argon2, ParamsBuilder, Version,
     password_hash::{PasswordHasher, SaltString},
 };
-use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::middleware::{self as axum_middleware, Next};
-use axum::routing::{get, post, put};
+use axum::routing::get;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_config::{ApnsEnvironment, Config};
 use construct_context::AppContext;
 use construct_error::AppError;
-use construct_extractors::TrustedUser;
 use construct_server_shared::{
     apns::{ApnsClient, DeviceTokenEncryption},
     auth::AuthManager,
-    auth_service::{AuthServiceContext, handlers as auth_handlers},
+    auth_service::AuthServiceContext,
     health,
     message::types::{MessageEnvelope, ProtoEnvelopeContext},
-    notification_service::{NotificationServiceContext, handlers as notification_handlers},
+    notification_service::NotificationServiceContext,
     queue::MessageQueue,
     shared::proto::services::v1::{
         self as proto_svc,
@@ -54,27 +50,6 @@ use tokio::{net::TcpListener, sync::Mutex};
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 use uuid::Uuid;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
-
-/// Axum middleware: validate Bearer JWT and inject x-user-id header for TrustedUser extractor.
-/// In production this is done by the Gateway; in tests we replicate the behavior directly.
-async fn jwt_to_user_id_middleware(
-    State(auth_manager): State<Arc<AuthManager>>,
-    mut req: axum::http::Request<axum::body::Body>,
-    next: Next,
-) -> axum::response::Response {
-    if let Some(auth_header) = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_owned())
-        && let Ok(claims) = auth_manager.verify_token(&auth_header)
-        && let Ok(val) = axum::http::HeaderValue::from_str(&claims.sub)
-    {
-        req.headers_mut().insert("x-user-id", val);
-    }
-    next.run(req).await
-}
 
 /// Test application with all microservices
 pub struct TestApp {
@@ -327,6 +302,7 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
         token_enc_pub: None,
     });
 
+    // Health/ready only — client auth is gRPC AuthService.
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route(
@@ -337,21 +313,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             }),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        // Passwordless device-based authentication endpoints
-        .route(
-            "/api/v1/auth/challenge",
-            get(auth_handlers::get_pow_challenge),
-        )
-        .route(
-            "/api/v1/auth/register-device",
-            post(auth_handlers::register_device),
-        )
-        .route(
-            "/api/v1/auth/device",
-            post(auth_handlers::authenticate_device),
-        )
-        .route("/api/v1/auth/refresh", post(auth_handlers::refresh_token))
-        .route("/api/v1/auth/logout", post(auth_handlers::logout))
         .with_state(context);
 
     tokio::spawn(async move {
@@ -391,12 +352,6 @@ async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String
             }),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        // Note: REST account/invite routes removed — use gRPC UserService instead
-        // Note: /api/v1/keys/upload and /api/v1/users/:id/public-key removed — gRPC only (KeyService)
-        .layer(axum_middleware::from_fn_with_state(
-            context.auth_manager.clone(),
-            jwt_to_user_id_middleware,
-        ))
         .with_state(context);
 
     tokio::spawn(async move {
@@ -561,26 +516,6 @@ async fn spawn_messaging_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (
             }),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        .route(
-            "/api/v1/messages/confirm",
-            post(
-                |State(ctx): State<Arc<AppContext>>,
-                 TrustedUser(user_id): TrustedUser,
-                 Json(data): Json<construct_types::api::ConfirmMessageRequest>| async move {
-                    let uid = uuid::Uuid::parse_str(&user_id.to_string()).map_err(|_| {
-                        construct_error::AppError::Validation(
-                            "Invalid authenticated user ID".to_string(),
-                        )
-                    })?;
-                    let result = confirm_pending_message_for_test(ctx, uid, &data.temp_id).await?;
-                    Ok::<_, construct_error::AppError>((axum::http::StatusCode::OK, Json(result)))
-                },
-            ),
-        )
-        .layer(axum_middleware::from_fn_with_state(
-            context.auth_manager.clone(),
-            jwt_to_user_id_middleware,
-        ))
         .with_state(context.clone());
 
     tokio::spawn(async move {
@@ -651,18 +586,6 @@ async fn spawn_notification_service(config: Arc<Config>, db_pool: Arc<PgPool>) -
             ),
         )
         .route("/health/live", get(health::liveness_check_handler))
-        .route(
-            "/api/v1/notifications/register-device",
-            post(notification_handlers::register_device),
-        )
-        .route(
-            "/api/v1/notifications/unregister-device",
-            post(notification_handlers::unregister_device),
-        )
-        .route(
-            "/api/v1/notifications/preferences",
-            put(notification_handlers::update_preferences),
-        )
         .with_state(context);
 
     tokio::spawn(async move {

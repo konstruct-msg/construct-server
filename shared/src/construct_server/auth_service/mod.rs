@@ -1,10 +1,11 @@
 // Auth service business logic is in crates/construct-auth-service.
 // This module re-exports it and adds proto adapters that need access to the
 // shared proto types (not available in the standalone crate).
+//
+// Client auth is gRPC-only (identity-service). REST handlers were removed.
 
 pub use construct_auth_service::context::AuthServiceContext;
 pub use construct_auth_service::devices;
-pub mod handlers;
 
 pub mod core {
     pub use construct_auth_service::core::*;

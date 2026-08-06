@@ -2,17 +2,13 @@
 // construct-user-service
 // ============================================================================
 //
-// User service business logic: account management, key operations,
-// invite system, and account deletion.
-// Extracted from shared/ for reuse across the monolith and the
-// user-service microservice binary.
+// Non-HTTP business helpers for user account metadata.
+// Invite / account-deletion product paths live in identity-service gRPC
+// (`invite_core`, UserService.DeleteAccount). REST wrappers removed.
 //
 // ============================================================================
 
-pub mod account;
-pub mod account_deletion;
 pub mod context;
 pub mod core;
-pub mod invites;
 
 pub use context::UserServiceContext;
