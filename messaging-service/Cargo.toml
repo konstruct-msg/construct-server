@@ -16,7 +16,6 @@ construct-federation = { path = "../crates/construct-federation" }
 construct-queue = { path = "../crates/construct-queue" }
 construct-utils = { path = "../crates/construct-utils" }
 construct-crypto = { path = "../crates/construct-crypto" }
-construct-extractors = { path = "../crates/construct-extractors" }
 construct-error = { path = "../crates/construct-error" }
 construct-types = { path = "../crates/construct-types" }
 

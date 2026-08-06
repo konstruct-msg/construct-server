@@ -16,7 +16,7 @@ Deployable services (see `ops/docker-compose.prod.yml`):
 | `gateway` | `gateway` | HTTP 3000 / 9443 | /health, /.well-known, /federation S2S; veil/obfs4 proxy → caddy:8080 |
 | `identity` | `identity-service` | 50051 | Merged Auth + Device + DeviceLink + User + Invite; PoW; Privacy Pass token issuance; sender certificates |
 | `messaging` | `messaging-service` | 50053 | MessageStream, send, sealed sender + Privacy Pass redemption, Redis direct delivery, APNs push (prod + sandbox), Sentinel anti-spam (in-process) |
-| `media` | `media-service` | 50056 | Encrypted upload/download; storage on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`), 7d retention (`MEDIA_FILE_TTL_SECONDS`) |
+| `media` | `media-service` | 50056 | Encrypted upload/download (gRPC only); storage on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`), 7d retention (`MEDIA_FILE_TTL_SECONDS`) |
 | `veil` | `veil-service` | 50056 (separate deployment) | VEIL obfuscation ticket provisioning |
 | `key` | `key-service` | 50057 | X3DH pre-key management, ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS groups (RFC 9420) + Broadcast channels, Sender Key encryption |

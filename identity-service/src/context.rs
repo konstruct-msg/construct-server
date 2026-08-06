@@ -63,6 +63,9 @@ impl IdentityServiceContext {
             .with_config(self.config.clone())
             .with_server_instance_id(uuid::Uuid::new_v4().to_string());
 
+        if let Some(signer) = &self.server_signer {
+            builder = builder.with_server_signer(signer.clone());
+        }
         if let Some(client) = apns_client {
             builder = builder.with_apns_client(client);
         }
