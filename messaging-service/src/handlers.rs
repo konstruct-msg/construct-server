@@ -1,5 +1,10 @@
 // ============================================================================
-// Messaging Service Handlers
+// Messaging Service Handlers (legacy Axum REST)
+// ============================================================================
+//
+// Auth: Bearer access token required via `rest_auth::require_bearer_user_id`.
+// `TrustedUser` (x-user-id only) is no longer accepted on these paths.
+//
 // ============================================================================
 
 use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
@@ -9,6 +14,7 @@ use uuid::Uuid;
 use crate::context::MessagingServiceContext;
 use crate::core as messaging_core;
 use crate::notification_core;
+use crate::rest_auth::require_bearer_user_id;
 use construct_config::ApnsEnvironments;
 use construct_context::AppContext;
 use construct_error::AppError;
@@ -23,10 +29,10 @@ fn app_state(context: &Arc<MessagingServiceContext>) -> State<Arc<AppContext>> {
 
 pub async fn send_control_message(
     State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
     headers: HeaderMap,
     Json(data): Json<EndSessionData>,
 ) -> Result<impl IntoResponse, AppError> {
+    let user_id = require_bearer_user_id(&context.auth_manager, &headers)?;
     messaging_core::send_control_message(
         app_state(&context),
         TrustedUser(user_id),
@@ -49,11 +55,13 @@ fn notif_state(
 /// POST /api/v1/notifications/register-device
 pub async fn register_device(
     State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
+    headers: HeaderMap,
     Json(request): Json<
         construct_server_shared::notification_service::notifications::RegisterDeviceRequest,
     >,
 ) -> Result<impl IntoResponse, AppError> {
+    let user_id = require_bearer_user_id(&context.auth_manager, &headers)?;
+
     // 512: APNs tokens are 64 hex chars, but FCM registration tokens routinely exceed 128.
     if request.device_token.is_empty() || request.device_token.len() > 512 {
         tracing::warn!(
@@ -96,12 +104,6 @@ pub async fn register_device(
         },
         device_id: None,
         push_provider: "apns".to_string(),
-        // Was hardcoded to "production", which is a guess this endpoint has no basis for:
-        // the request carried no environment at all. A sandbox token filed as production
-        // is rejected with BadDeviceToken, indistinguishable from a dead token, and the
-        // sender then deletes it — so the guess cost users their push silently. Now the
-        // client may declare one environment or several, and an absent/garbled value
-        // records both candidates for the sender to probe.
         push_environment: request
             .environment
             .as_deref()
@@ -127,11 +129,12 @@ pub async fn register_device(
 /// POST /api/v1/notifications/unregister-device
 pub async fn unregister_device(
     State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
+    headers: HeaderMap,
     Json(request): Json<
         construct_server_shared::notification_service::notifications::UnregisterDeviceRequest,
     >,
 ) -> Result<impl IntoResponse, AppError> {
+    let user_id = require_bearer_user_id(&context.auth_manager, &headers)?;
     let notif_ctx = notif_state(&context)?;
     let input = notification_core::UnregisterDeviceTokenInput {
         user_id,
@@ -158,11 +161,12 @@ pub async fn unregister_device(
 /// PUT /api/v1/notifications/preferences
 pub async fn update_preferences(
     State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
+    headers: HeaderMap,
     Json(request): Json<
         construct_server_shared::notification_service::notifications::UpdatePreferencesRequest,
     >,
 ) -> Result<impl IntoResponse, AppError> {
+    let user_id = require_bearer_user_id(&context.auth_manager, &headers)?;
     let valid_filters = [
         "silent",
         "visible_all",
@@ -211,9 +215,10 @@ pub async fn update_preferences(
 #[allow(dead_code)]
 pub async fn confirm_message(
     State(context): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
+    headers: HeaderMap,
     Json(data): Json<ConfirmMessageRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let user_id = require_bearer_user_id(&context.auth_manager, &headers)?;
     let user_id = Uuid::parse_str(&user_id.to_string())
         .map_err(|_| AppError::Validation("Invalid authenticated user ID".to_string()))?;
     let result =

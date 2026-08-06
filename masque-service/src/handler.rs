@@ -29,11 +29,17 @@ pub async fn masque_ws_handler(
 ) -> Response {
     if !config.auth_token.is_empty() {
         let expected = format!("Bearer {}", config.auth_token);
-        let ok = headers
+        let provided = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == expected)
-            .unwrap_or(false);
+            .unwrap_or("");
+        // Constant-time compare (length mismatch → false without early digest leak).
+        let ok = {
+            use subtle::ConstantTimeEq;
+            let a = provided.as_bytes();
+            let b = expected.as_bytes();
+            a.len() == b.len() && bool::from(a.ct_eq(b))
+        };
         if !ok {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }

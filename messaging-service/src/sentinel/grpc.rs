@@ -63,10 +63,19 @@ fn require_admin<T>(req: &Request<T>) -> Result<(), Status> {
         .get("x-admin-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if provided != expected {
+    // Constant-time compare to avoid timing leaks on the admin secret.
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
         return Err(Status::permission_denied("Invalid admin token"));
     }
     Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.ct_eq(b))
 }
 
 fn spam_category_str(cat: i32) -> &'static str {
