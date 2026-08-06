@@ -114,43 +114,42 @@ pub(crate) async fn handle_inbound_sealed(
         ));
     }
 
-    // ── Signature verification ───────────────────────────────────────────
-    if let Some(sig) = &req.server_signature {
-        let cache = PublicKeyCache::new();
-        match cache.get_public_key(&req.origin_server).await {
-            Ok(remote_pk) => {
-                let envelope = FederatedEnvelope {
-                    message_id: req.message_id.clone(),
-                    from: String::new(),
-                    to: String::new(),
-                    origin_server: req.origin_server.clone(),
-                    destination_server: context.config.federation.instance_domain.clone(),
-                    timestamp: req.timestamp,
-                    payload_hash: req.payload_hash.clone(),
-                };
-                if ServerSigner::verify_signature(&remote_pk, &envelope, sig).is_err() {
-                    return Err((
-                        StatusCode::UNAUTHORIZED,
-                        Json(serde_json::json!({"error": "invalid server signature"})),
-                    ));
-                }
-            }
-            Err(e) => {
+    // ── Signature verification (always required when federation is enabled) ─
+    // Accepting unsigned S2S bodies would let any client inject sealed payloads
+    // once federation is flipped on — require Ed25519 server_signature always.
+    let sig = req.server_signature.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "server_signature required"})),
+        )
+    })?;
+    let cache = PublicKeyCache::new();
+    match cache.get_public_key(&req.origin_server).await {
+        Ok(remote_pk) => {
+            let envelope = FederatedEnvelope {
+                message_id: req.message_id.clone(),
+                from: String::new(),
+                to: String::new(),
+                origin_server: req.origin_server.clone(),
+                destination_server: context.config.federation.instance_domain.clone(),
+                timestamp: req.timestamp,
+                payload_hash: req.payload_hash.clone(),
+            };
+            if ServerSigner::verify_signature(&remote_pk, &envelope, sig).is_err() {
                 return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(
-                        serde_json::json!({"error": format!("failed to fetch origin public key: {}", e)}),
-                    ),
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid server signature"})),
                 ));
             }
         }
-    } else if context.config.federation.mtls.required {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(
-                serde_json::json!({"error": "signature required when FEDERATION_MTLS_REQUIRED=true"}),
-            ),
-        ));
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({"error": format!("failed to fetch origin public key: {}", e)}),
+                ),
+            ));
+        }
     }
 
     // ── Decode sealed_inner and dispatch ─────────────────────────────────
@@ -230,43 +229,40 @@ pub(crate) async fn handle_inbound_message(
         ));
     }
 
-    // ── Signature verification ───────────────────────────────────────────
-    if let Some(sig) = &req.server_signature {
-        let cache = PublicKeyCache::new();
-        match cache.get_public_key(&req.origin_server).await {
-            Ok(remote_pk) => {
-                let envelope = FederatedEnvelope {
-                    message_id: req.message_id.clone(),
-                    from: req.from.clone(),
-                    to: req.to.clone(),
-                    origin_server: req.origin_server.clone(),
-                    destination_server: context.config.federation.instance_domain.clone(),
-                    timestamp: req.timestamp,
-                    payload_hash: req.payload_hash.clone(),
-                };
-                if ServerSigner::verify_signature(&remote_pk, &envelope, sig).is_err() {
-                    return Err((
-                        StatusCode::UNAUTHORIZED,
-                        Json(serde_json::json!({"error": "invalid server signature"})),
-                    ));
-                }
-            }
-            Err(e) => {
+    // ── Signature verification (always required when federation is enabled) ─
+    let sig = req.server_signature.as_ref().ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "server_signature required"})),
+        )
+    })?;
+    let cache = PublicKeyCache::new();
+    match cache.get_public_key(&req.origin_server).await {
+        Ok(remote_pk) => {
+            let envelope = FederatedEnvelope {
+                message_id: req.message_id.clone(),
+                from: req.from.clone(),
+                to: req.to.clone(),
+                origin_server: req.origin_server.clone(),
+                destination_server: context.config.federation.instance_domain.clone(),
+                timestamp: req.timestamp,
+                payload_hash: req.payload_hash.clone(),
+            };
+            if ServerSigner::verify_signature(&remote_pk, &envelope, sig).is_err() {
                 return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(
-                        serde_json::json!({"error": format!("failed to fetch origin public key: {}", e)}),
-                    ),
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid server signature"})),
                 ));
             }
         }
-    } else if context.config.federation.mtls.required {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(
-                serde_json::json!({"error": "signature required when FEDERATION_MTLS_REQUIRED=true"}),
-            ),
-        ));
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({"error": format!("failed to fetch origin public key: {}", e)}),
+                ),
+            ));
+        }
     }
 
     // ── Build MessageEnvelope and dispatch ───────────────────────────────

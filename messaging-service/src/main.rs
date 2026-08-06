@@ -9,6 +9,7 @@ mod media_routes;
 mod notification_core;
 mod notification_grpc;
 mod receipts;
+mod rest_auth;
 mod sentinel;
 mod spent_tag;
 mod stream;

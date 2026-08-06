@@ -1,9 +1,11 @@
 // ============================================================================
-// Media Routes - REST API for Media Upload Tokens
+// Media Routes - REST API for Media Upload Tokens (legacy)
 // ============================================================================
 //
-// Provides REST endpoint for generating media upload tokens.
-// Clients use these tokens to upload encrypted media files to media-service.
+// Prefer gRPC MediaService.GenerateUploadToken on media-service.
+// This REST path remains for transitional clients but now requires Bearer auth
+// (no TrustedUser / x-user-id spoof) and mints tokens in the same v2 wire
+// format as media-service: `{media_id}|{expires}|{max_size}|{user_id}|{hmac}`.
 //
 // Endpoints:
 // - POST /api/v1/media/token - Generate upload token
@@ -11,18 +13,18 @@
 // ============================================================================
 
 use crate::context::MessagingServiceContext;
-use axum::{Json, extract::State, http::StatusCode};
-use construct_extractors::TrustedUser;
+use crate::rest_auth::require_bearer_user_id;
+use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Request for media upload token
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaTokenRequest {
-    /// Optional: specify file size for validation
+    /// Optional: specify file size for validation (bound into the token)
     #[serde(default)]
-    #[allow(dead_code)]
     pub expected_size: Option<usize>,
 }
 
@@ -30,11 +32,11 @@ pub struct MediaTokenRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaTokenResponse {
-    /// One-time upload token
+    /// One-time upload token (opaque; format is media-service v2)
     pub upload_token: String,
     /// Media server upload URL
     pub upload_url: String,
-    /// Maximum file size in bytes
+    /// Maximum file size in bytes for this token
     pub max_file_size: usize,
     /// Token expiry (ISO 8601)
     pub expires_at: String,
@@ -52,10 +54,19 @@ pub struct MediaTokenError {
 /// POST /api/v1/media/token
 pub async fn generate_media_token(
     State(ctx): State<Arc<MessagingServiceContext>>,
-    TrustedUser(user_id): TrustedUser,
-    Json(_payload): Json<MediaTokenRequest>,
+    headers: HeaderMap,
+    Json(payload): Json<MediaTokenRequest>,
 ) -> Result<Json<MediaTokenResponse>, (StatusCode, Json<MediaTokenError>)> {
-    // Check if media is enabled
+    let user_id = require_bearer_user_id(&ctx.auth_manager, &headers).map_err(|e| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(MediaTokenError {
+                error: e.to_string(),
+                code: "AUTH_REQUIRED".to_string(),
+            }),
+        )
+    })?;
+
     if !ctx.config.media.enabled {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -66,7 +77,6 @@ pub async fn generate_media_token(
         ));
     }
 
-    // Check if upload_token_secret is configured
     if ctx.config.media.upload_token_secret.is_empty() {
         tracing::error!("MEDIA_UPLOAD_TOKEN_SECRET is not configured");
         return Err((
@@ -104,62 +114,72 @@ pub async fn generate_media_token(
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to check media rate limit");
-            // Continue anyway - don't block uploads due to Redis issues
         }
     }
     drop(queue);
 
-    // Generate upload token
-    let token = generate_upload_token(&ctx.config.media.upload_token_secret);
+    let configured_max = ctx.config.media.max_file_size;
+    let max_size = match payload.expected_size {
+        Some(n) if n == 0 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(MediaTokenError {
+                    error: "expected_size must be positive".to_string(),
+                    code: "INVALID_SIZE".to_string(),
+                }),
+            ));
+        }
+        Some(n) if n > configured_max => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(MediaTokenError {
+                    error: format!("expected_size exceeds maximum {configured_max}"),
+                    code: "INVALID_SIZE".to_string(),
+                }),
+            ));
+        }
+        Some(n) => n,
+        None => configured_max,
+    };
 
-    // Calculate expiry (5 minutes from now)
+    let token = generate_upload_token_v2(
+        &ctx.config.media.upload_token_secret,
+        user_id,
+        max_size as i64,
+    );
+
     let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
-
-    // Construct upload URL
     let upload_url = format!("{}/upload", ctx.config.media.base_url);
 
-    tracing::info!(
-        user_id = %user_id,
-        "Generated media upload token"
-    );
+    tracing::info!(user_id = %user_id, max_size = max_size, "Generated media upload token (REST v2)");
 
     Ok(Json(MediaTokenResponse {
         upload_token: token,
         upload_url,
-        max_file_size: ctx.config.media.max_file_size,
+        max_file_size: max_size,
         expires_at: expires_at.to_rfc3339(),
     }))
 }
 
-/// Generate a one-time upload token
-/// Format: {timestamp_hex}.{random_hex}.{hmac_hex}
-fn generate_upload_token(secret: &str) -> String {
+/// media-service v2 wire format:
+/// `{media_id}|{expires_at}|{max_size}|{user_id}|{hmac_hex}`
+fn generate_upload_token_v2(secret: &str, user_id: Uuid, max_size: i64) -> String {
     use hmac::{Hmac, Mac, digest::KeyInit};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
 
-    // SECURITY: Handle system time errors gracefully
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "System time is before UNIX_EPOCH, using fallback timestamp");
-            std::time::Duration::from_secs(1577836800)
-        })
-        .as_secs();
+    let media_id = Uuid::new_v4();
+    let expires_at = chrono::Utc::now().timestamp() + 300;
+    let message = format!("{}|{}|{}|{}", media_id, expires_at, max_size, user_id);
 
-    let timestamp_hex = format!("{:x}", timestamp);
-    let random_bytes: [u8; 16] = rand::random();
-    let random_hex = hex::encode(random_bytes);
-
-    let message = format!("{}.{}", timestamp_hex, random_hex);
-
-    // Compute HMAC
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(message.as_bytes());
-    let result = mac.finalize();
-    let hmac = hex::encode(result.into_bytes());
+    let hmac = hex::encode(mac.finalize().into_bytes());
 
-    format!("{}.{}.{}", timestamp_hex, random_hex, hmac)
+    format!(
+        "{}|{}|{}|{}|{}",
+        media_id, expires_at, max_size, user_id, hmac
+    )
 }
