@@ -4,12 +4,9 @@ mod envelope;
 mod fail_open;
 mod federation;
 mod grpc;
-mod handlers;
-mod media_routes;
 mod notification_core;
 mod notification_grpc;
 mod receipts;
-mod rest_auth;
 mod sentinel;
 mod spent_tag;
 mod stream;
@@ -24,7 +21,7 @@ use axum::{
     Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_config::Config;
@@ -317,9 +314,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Create router
+    // HTTP: health/metrics + federation S2S only.
+    // Client APIs are gRPC (MessagingService, NotificationService, MediaService).
     let app = Router::new()
-        // Health check
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
@@ -327,27 +324,7 @@ async fn main() -> Result<()> {
             "/metrics",
             get(construct_server_shared::metrics::metrics_handler),
         )
-        // Phase 4.5: Control messages endpoint
-        .route("/api/v1/control", post(handlers::send_control_message))
-        // Media upload token endpoint
-        .route(
-            "/api/v1/media/token",
-            post(media_routes::generate_media_token),
-        )
-        // Notification device registration (merged from notification-service)
-        .route(
-            "/api/v1/notifications/register-device",
-            post(handlers::register_device),
-        )
-        .route(
-            "/api/v1/notifications/unregister-device",
-            post(handlers::unregister_device),
-        )
-        .route(
-            "/api/v1/notifications/preferences",
-            put(handlers::update_preferences),
-        )
-        // Federation S2S inbound endpoints
+        // Federation S2S inbound (not client REST — signed server-to-server)
         .route(
             "/federation/v1/sealed",
             post(federation::handle_inbound_sealed),
@@ -356,7 +333,6 @@ async fn main() -> Result<()> {
             "/federation/v1/messages",
             post(federation::handle_inbound_message),
         )
-        // Apply middleware
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -364,8 +340,10 @@ async fn main() -> Result<()> {
         )
         .with_state(context);
 
-    // Start server
-    info!("Messaging Service listening on {}", config.bind_address);
+    info!(
+        "Messaging Service HTTP listening on {} (health/metrics + federation S2S)",
+        config.bind_address
+    );
 
     let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await

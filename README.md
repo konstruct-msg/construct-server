@@ -132,7 +132,7 @@ Message flow (Redis-direct, no Kafka):
   (never touches a SQL database — no message content persistence)
 ```
 
-**gRPC-first architecture.** Core messaging, auth, and key management are gRPC. REST endpoints exist only for health, discovery, notification registration, and federation S2S.
+**gRPC-first architecture.** Client APIs (messaging, auth, keys, media, notifications) are gRPC only. HTTP remains for health/metrics, public discovery (`/.well-known`), and federation S2S.
 
 ---
 
@@ -232,7 +232,7 @@ Contributions are welcome. Before contributing, read the threat model below.
 ### Rules for contributors
 
 1. **Privacy is non-negotiable.** No feature ships that adds server-side visibility into user behavior, content, or metadata.
-2. **No new REST endpoints for core functionality.** The architecture is gRPC-first. REST endpoints exist only for health, discovery, federation S2S, and notification registration.
+2. **No client REST.** gRPC-only for product APIs. HTTP is limited to health/metrics, `/.well-known` discovery, and federation S2S.
 3. **No PII in logs.** User IDs are HMAC-hashed before logging. IPs are never logged.
 4. **Test your crypto changes.** Security-critical code requires unit tests with known vectors.
 5. **Secrets never in source.** No keys, tokens, or credentials in any committed file — not even test fixtures.

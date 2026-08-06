@@ -7,9 +7,9 @@
 //   UserService, InviteService                     ← from user-service
 //
 // HTTP (port 8081):
-//   /api/v1/auth/*             — auth endpoints
-//   /api/v1/users/me/delete-*  — device-signed account deletion
-//   /.well-known/*, /jwks.json — discovery + JWKS
+//   /health*, /metrics         — ops probes
+//   /.well-known/*, /public-key — discovery + JWKS
+// Client auth/user/invite are gRPC only (port 50051).
 // ============================================================================
 
 mod context;
@@ -22,14 +22,11 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::get,
 };
 use base64::{Engine as _, engine::general_purpose as b64};
 use construct_config::Config;
-use construct_server_shared::{
-    auth_service::AuthServiceContext, db::DbPool, queue::MessageQueue,
-    user_service::UserServiceContext,
-};
+use construct_server_shared::{db::DbPool, queue::MessageQueue};
 use context::IdentityServiceContext;
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -3087,23 +3084,6 @@ async fn main() -> Result<()> {
         info!("BUNDLE_SIGNING_KEY matches published BUNDLE_SIGNING_PUBLIC_KEY ✓");
     }
 
-    // Build sub-contexts for HTTP handlers that delegate to existing shared handlers
-    let auth_svc_ctx = Arc::new(AuthServiceContext {
-        db_pool: identity_ctx.db_pool.clone(),
-        queue: identity_ctx.queue.clone(),
-        auth_manager: identity_ctx.auth_manager.clone(),
-        config: identity_ctx.config.clone(),
-        server_signer: identity_ctx.server_signer.clone(),
-        token_enc_pub: identity_ctx.token_enc_pub,
-    });
-
-    let user_svc_ctx = Arc::new(UserServiceContext {
-        db_pool: identity_ctx.db_pool.clone(),
-        queue: identity_ctx.queue.clone(),
-        auth_manager: identity_ctx.auth_manager.clone(),
-        config: identity_ctx.config.clone(),
-    });
-
     // Start gRPC server (all 5 services on one port)
     let grpc_bind_address =
         env::var("IDENTITY_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50051".to_string());
@@ -3144,42 +3124,9 @@ async fn main() -> Result<()> {
         grpc_bind_address
     );
 
-    // HTTP router — sub-routers with their own state, merged into one app
-    let auth_http = Router::new()
-        .route(
-            "/api/v1/auth/challenge",
-            get(construct_server_shared::auth_service::handlers::get_pow_challenge),
-        )
-        .route(
-            "/api/v1/auth/register-device",
-            post(construct_server_shared::auth_service::handlers::register_device),
-        )
-        .route(
-            "/api/v1/auth/device",
-            post(construct_server_shared::auth_service::handlers::authenticate_device),
-        )
-        .route(
-            "/api/v1/auth/refresh",
-            post(construct_server_shared::auth_service::handlers::refresh_token),
-        )
-        .route(
-            "/api/v1/auth/logout",
-            post(construct_server_shared::auth_service::handlers::logout),
-        )
-        .with_state(auth_svc_ctx);
-
-    let user_http = Router::new()
-        .route(
-            "/api/v1/users/me/delete-challenge",
-            get(construct_server_shared::user_service::handlers::get_delete_challenge),
-        )
-        .route(
-            "/api/v1/users/me/delete-confirm",
-            post(construct_server_shared::user_service::handlers::confirm_delete),
-        )
-        .with_state(user_svc_ctx);
-
-    let identity_http = Router::new()
+    // HTTP: health/metrics + public key discovery only.
+    // Auth / user / invite client APIs are gRPC on IDENTITY_GRPC_BIND_ADDRESS.
+    let app = Router::new()
         .route("/health", get(health_check))
         .route("/health/ready", get(health_check))
         .route("/health/live", get(health_check))
@@ -3193,19 +3140,17 @@ async fn main() -> Result<()> {
         )
         .route("/.well-known/jwks.json", get(get_jwks))
         .route("/public-key", get(get_public_key))
-        .with_state(identity_ctx);
-
-    let app = Router::new()
-        .merge(auth_http)
-        .merge(user_http)
-        .merge(identity_http)
+        .with_state(identity_ctx)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .into_inner(),
         );
 
-    info!("Identity Service HTTP listening on {}", config.bind_address);
+    info!(
+        "Identity Service HTTP listening on {} (health/metrics + well-known)",
+        config.bind_address
+    );
 
     let listener = construct_server_shared::mptcp_or_tcp_listener(&config.bind_address)
         .await
