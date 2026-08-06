@@ -120,7 +120,7 @@ pub async fn generate_media_token(
 
     let configured_max = ctx.config.media.max_file_size;
     let max_size = match payload.expected_size {
-        Some(n) if n == 0 => {
+        Some(0) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(MediaTokenError {
