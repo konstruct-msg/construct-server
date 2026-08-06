@@ -447,10 +447,10 @@ pub async fn delete_media(pool: &sqlx::PgPool, storage_dir: &Path, media_id: &st
     let metadata = get_metadata(pool, media_id).await?;
 
     if let Some(meta) = metadata {
-        if let Ok(file_path) = safe_object_path(storage_dir, &meta.storage_key) {
-            if file_path.exists() {
-                fs::remove_file(&file_path).await?;
-            }
+        if let Ok(file_path) = safe_object_path(storage_dir, &meta.storage_key)
+            && file_path.exists()
+        {
+            fs::remove_file(&file_path).await?;
         }
         // Also drop any leftover partial
         let partial = storage_dir.join(format!("{}.partial", meta.media_id));
@@ -481,10 +481,10 @@ pub async fn cleanup_expired_media(pool: &sqlx::PgPool, storage_dir: &Path) -> R
     let mut deleted = 0u64;
     for (media_id, storage_key) in rows {
         let id = media_id.to_string();
-        if let Ok(path) = safe_object_path(storage_dir, &storage_key) {
-            if path.exists() {
-                let _ = fs::remove_file(&path).await;
-            }
+        if let Ok(path) = safe_object_path(storage_dir, &storage_key)
+            && path.exists()
+        {
+            let _ = fs::remove_file(&path).await;
         }
         let partial = storage_dir.join(format!("{id}.partial"));
         if partial.exists() {
@@ -504,17 +504,15 @@ pub async fn cleanup_expired_media(pool: &sqlx::PgPool, storage_dir: &Path) -> R
             if !name.ends_with(".partial") {
                 continue;
             }
-            if let Ok(meta) = fs::metadata(&path).await {
-                if let Ok(modified) = meta.modified() {
-                    if now
-                        .duration_since(modified)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                        > 3600
-                    {
-                        let _ = fs::remove_file(&path).await;
-                    }
-                }
+            if let Ok(meta) = fs::metadata(&path).await
+                && let Ok(modified) = meta.modified()
+                && now
+                    .duration_since(modified)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    > 3600
+            {
+                let _ = fs::remove_file(&path).await;
             }
         }
     }
