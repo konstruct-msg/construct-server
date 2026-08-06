@@ -5,18 +5,25 @@
 // Pure business logic for media operations, independent of transport layer.
 // Supports streaming uploads/downloads with chunking.
 //
+// Security model (gRPC-only production path):
+// - Blobs are client-side E2E ciphertext. The server never decrypts, executes,
+//   or interprets file contents (no shell, no image codec, no archive unpack).
+// - On-disk objects are UUID-named, mode 0600, under MEDIA_STORAGE_DIR only.
+// - Upload tokens are HMAC-bound to media_id + expiry + max_size + user_id and
+//   are single-use (create_new final object + DB unique media_id).
+//
 // ============================================================================
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::config::MediaConfig;
-use crate::utils::compute_hmac;
+use crate::utils::{compute_hmac, hmac_eq};
 
 // ============================================================================
 // Core Types
@@ -34,10 +41,23 @@ pub struct MediaMetadata {
     pub storage_key: String,
 }
 
+/// Claims extracted from a validated upload token.
+#[derive(Debug, Clone)]
+pub struct UploadTokenClaims {
+    pub media_id: String,
+    #[allow(dead_code)]
+    pub expires_at: i64,
+    /// Max bytes this upload may write (bound into the HMAC).
+    pub max_size: i64,
+    pub user_id: Uuid,
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadToken {
     pub media_id: String,
     pub expires_at: i64,
+    pub max_size: i64,
+    pub user_id: Uuid,
     pub signature: String,
 }
 
@@ -45,124 +65,234 @@ pub struct UploadToken {
 // Token Management
 // ============================================================================
 
-/// Generate upload token (one-time use, 5 minute TTL)
-pub fn generate_upload_token(secret: &str) -> Result<UploadToken> {
+/// Wire format v2 (pipe-separated):
+///   `{media_id}|{expires_at}|{max_size}|{user_id}|{signature}`
+/// Message for HMAC:
+///   `{media_id}|{expires_at}|{max_size}|{user_id}`
+///
+/// v1 (`media_id|expires|sig`) is deliberately rejected — no silent downgrade.
+pub fn generate_upload_token(secret: &str, user_id: Uuid, max_size: i64) -> Result<UploadToken> {
+    if max_size <= 0 {
+        bail!("max_size must be positive");
+    }
     let media_id = Uuid::new_v4().to_string();
     let expires_at = Utc::now().timestamp() + 300; // 5 minutes
 
-    // Message format: {media_id}|{expires_at}
-    let message = format!("{}|{}", media_id, expires_at);
+    let message = format!("{}|{}|{}|{}", media_id, expires_at, max_size, user_id);
     let signature = compute_hmac(&message, secret);
 
     Ok(UploadToken {
         media_id,
         expires_at,
+        max_size,
+        user_id,
         signature,
     })
 }
 
-/// Validate upload token
-/// Format: {media_id}|{expires_at}|{signature}
-pub fn validate_upload_token(token: &str, secret: &str) -> Result<(String, i64), &'static str> {
+/// Format token for the wire.
+pub fn format_upload_token(token: &UploadToken) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        token.media_id, token.expires_at, token.max_size, token.user_id, token.signature
+    )
+}
+
+/// Validate upload token (format, expiry, constant-time HMAC).
+pub fn validate_upload_token(token: &str, secret: &str) -> Result<UploadTokenClaims, &'static str> {
     let parts: Vec<&str> = token.split('|').collect();
-    if parts.len() != 3 {
+    if parts.len() != 5 {
         return Err("Invalid token format");
     }
 
     let media_id = parts[0];
+    // media_id must be a UUID — rejects path traversal payloads early
+    if Uuid::parse_str(media_id).is_err() {
+        return Err("Invalid media_id in token");
+    }
+
     let expires_at = parts[1]
         .parse::<i64>()
         .map_err(|_| "Invalid expiration timestamp")?;
-    let signature = parts[2];
+    let max_size = parts[2].parse::<i64>().map_err(|_| "Invalid max_size")?;
+    if max_size <= 0 {
+        return Err("Invalid max_size");
+    }
+    let user_id = Uuid::parse_str(parts[3]).map_err(|_| "Invalid user_id in token")?;
+    let signature = parts[4];
 
-    // Check expiration
     let now = Utc::now().timestamp();
     if now > expires_at {
         return Err("Token expired");
     }
 
-    // Verify signature
-    let message = format!("{}|{}", media_id, expires_at);
-    let expected_signature = compute_hmac(&message, secret);
-
-    if signature != expected_signature {
+    let message = format!("{}|{}|{}|{}", media_id, expires_at, max_size, user_id);
+    let expected = compute_hmac(&message, secret);
+    if !hmac_eq(signature, &expected) {
         return Err("Invalid signature");
     }
 
-    Ok((media_id.to_string(), expires_at))
+    Ok(UploadTokenClaims {
+        media_id: media_id.to_string(),
+        expires_at,
+        max_size,
+        user_id,
+    })
+}
+
+// ============================================================================
+// Path safety
+// ============================================================================
+
+/// Resolve a storage object path under `storage_dir`.
+///
+/// Accepts only a bare UUID string (no separators, no `..`). Prevents path
+/// traversal even if a future caller feeds `storage_key` from untrusted input.
+pub fn safe_object_path(storage_dir: &Path, key: &str) -> Result<PathBuf> {
+    if key.is_empty()
+        || key.contains('/')
+        || key.contains('\\')
+        || key.contains("..")
+        || key.contains('\0')
+    {
+        bail!("invalid storage key");
+    }
+    let id = Uuid::parse_str(key).context("storage key must be a UUID")?;
+    Ok(storage_dir.join(id.to_string()))
 }
 
 // ============================================================================
 // File Storage Operations
 // ============================================================================
 
-/// Upload chunk state (tracks multi-chunk upload)
+/// Upload chunk state (tracks multi-chunk upload).
+///
+/// Writes go to `{media_id}.partial` with mode 0600, then atomic rename to the
+/// final UUID path on finalize. Final path uses `create_new` semantics via rename
+/// over non-existing target — if final already exists, finalize fails (one-time).
 pub struct UploadState {
     #[allow(dead_code)]
     pub media_id: String,
-    pub file_path: PathBuf,
+    pub max_size: i64,
+    pub partial_path: PathBuf,
+    pub final_path: PathBuf,
     pub file: Option<fs::File>,
     pub hasher: Sha256,
     pub total_received: usize,
-    pub expected_size: Option<i64>,
 }
 
 impl UploadState {
-    pub async fn new(storage_dir: &PathBuf, media_id: String) -> Result<Self> {
-        // Ensure storage directory exists
+    pub async fn new(storage_dir: &Path, media_id: String, max_size: i64) -> Result<Self> {
         fs::create_dir_all(storage_dir).await?;
 
-        let file_path = storage_dir.join(&media_id);
-        let file = fs::File::create(&file_path).await?;
+        let final_path = safe_object_path(storage_dir, &media_id)?;
+        if final_path.exists() {
+            bail!("media object already exists (token already used)");
+        }
+
+        let partial_path = storage_dir.join(format!("{media_id}.partial"));
+        // Drop any leftover partial from a crashed prior attempt.
+        if partial_path.exists() {
+            let _ = fs::remove_file(&partial_path).await;
+        }
+
+        let file = open_exclusive_0600(&partial_path).await?;
 
         Ok(Self {
             media_id,
-            file_path,
+            max_size,
+            partial_path,
+            final_path,
             file: Some(file),
             hasher: Sha256::new(),
             total_received: 0,
-            expected_size: None,
         })
     }
 
-    /// Write chunk to file and update hash
+    /// Write chunk; enforces token-bound max_size.
     pub async fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
+        let new_total = self
+            .total_received
+            .checked_add(chunk.len())
+            .context("size overflow")?;
+        if new_total as i64 > self.max_size {
+            bail!("File size limit exceeded");
+        }
+
         if let Some(ref mut file) = self.file {
             file.write_all(chunk).await?;
             self.hasher.update(chunk);
-            self.total_received += chunk.len();
+            self.total_received = new_total;
         } else {
-            anyhow::bail!("File already finalized");
+            bail!("File already finalized");
         }
         Ok(())
     }
 
-    /// Finalize upload and return hash
+    /// Finalize: fsync, rename partial → final (no-exec 0600 blob).
     pub async fn finalize(mut self) -> Result<(PathBuf, String, usize)> {
-        // Close file
         if let Some(file) = self.file.take() {
+            file.sync_all().await.ok();
             drop(file);
         }
 
-        // Calculate final hash
-        let hash = hex::encode(self.hasher.finalize());
+        if self.final_path.exists() {
+            let _ = fs::remove_file(&self.partial_path).await;
+            bail!("media object already exists (token already used)");
+        }
 
-        Ok((self.file_path, hash, self.total_received))
+        fs::rename(&self.partial_path, &self.final_path)
+            .await
+            .context("atomic rename to final media path")?;
+
+        // Re-assert non-executable permissions after rename (platform-dependent).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&self.final_path, perms);
+        }
+
+        let hash = hex::encode(self.hasher.finalize());
+        Ok((self.final_path, hash, self.total_received))
     }
 
-    /// Abort upload and cleanup
+    /// Abort upload and cleanup partial file.
     pub async fn abort(mut self) -> Result<()> {
-        // Close file
         if let Some(file) = self.file.take() {
             drop(file);
         }
-
-        // Delete partial file
-        if self.file_path.exists() {
-            fs::remove_file(&self.file_path).await?;
+        if self.partial_path.exists() {
+            fs::remove_file(&self.partial_path).await?;
         }
-
         Ok(())
+    }
+}
+
+/// Create a new file with mode 0600 (owner read/write only, never executable).
+///
+/// Media blobs are never interpreted by the server. Mode 0600 is defense-in-depth
+/// so a compromised co-tenant process cannot execute a planted binary either.
+async fn open_exclusive_0600(path: &Path) -> Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let std_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("create {}", path.display()))?;
+        Ok(fs::File::from_std(std_file))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+            .with_context(|| format!("create {}", path.display()))?)
     }
 }
 
@@ -175,7 +305,7 @@ pub struct DownloadStream {
 }
 
 impl DownloadStream {
-    pub async fn new(file_path: &PathBuf, chunk_size: usize) -> Result<Self> {
+    pub async fn new(file_path: &Path, chunk_size: usize) -> Result<Self> {
         let file = fs::File::open(file_path).await?;
         let metadata = file.metadata().await?;
         let total_size = metadata.len();
@@ -188,7 +318,6 @@ impl DownloadStream {
         })
     }
 
-    /// Read next chunk
     pub async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>> {
         if self.bytes_read >= self.total_size {
             return Ok(None);
@@ -208,11 +337,6 @@ impl DownloadStream {
 
     pub fn total_size(&self) -> u64 {
         self.total_size
-    }
-
-    #[allow(dead_code)]
-    pub fn bytes_read(&self) -> u64 {
-        self.bytes_read
     }
 
     pub fn is_complete(&self) -> bool {
@@ -270,7 +394,7 @@ pub async fn save_metadata(
 
 /// Get media metadata from database
 pub async fn get_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<Option<MediaMetadata>> {
-    let media_id_uuid = Uuid::parse_str(media_id)?;
+    let media_id_uuid = Uuid::parse_str(media_id).context("media_id must be a UUID")?;
 
     let record = sqlx::query!(
         r#"
@@ -319,33 +443,84 @@ pub async fn delete_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<bool
 }
 
 /// Delete media file from storage and database
-pub async fn delete_media(
-    pool: &sqlx::PgPool,
-    storage_dir: &std::path::Path,
-    media_id: &str,
-) -> Result<bool> {
-    // Get metadata first
+pub async fn delete_media(pool: &sqlx::PgPool, storage_dir: &Path, media_id: &str) -> Result<bool> {
     let metadata = get_metadata(pool, media_id).await?;
 
     if let Some(meta) = metadata {
-        // Delete file from storage
-        let file_path = storage_dir.join(&meta.storage_key);
-        if file_path.exists() {
-            fs::remove_file(&file_path).await?;
+        if let Ok(file_path) = safe_object_path(storage_dir, &meta.storage_key) {
+            if file_path.exists() {
+                fs::remove_file(&file_path).await?;
+            }
+        }
+        // Also drop any leftover partial
+        let partial = storage_dir.join(format!("{}.partial", meta.media_id));
+        if partial.exists() {
+            let _ = fs::remove_file(&partial).await;
         }
 
-        // Delete metadata from database
         delete_metadata(pool, media_id).await?;
-
         Ok(true)
     } else {
         Ok(false)
     }
 }
 
-// ============================================================================
-// Validation
-// ============================================================================
+/// Delete all DB rows + files past expires_at. Returns count deleted.
+pub async fn cleanup_expired_media(pool: &sqlx::PgPool, storage_dir: &Path) -> Result<u64> {
+    // Runtime query (not query!) so SQLX_OFFLINE builds don't need a cache refresh.
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT media_id, storage_key
+        FROM media_files
+        WHERE expires_at < NOW()
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut deleted = 0u64;
+    for (media_id, storage_key) in rows {
+        let id = media_id.to_string();
+        if let Ok(path) = safe_object_path(storage_dir, &storage_key) {
+            if path.exists() {
+                let _ = fs::remove_file(&path).await;
+            }
+        }
+        let partial = storage_dir.join(format!("{id}.partial"));
+        if partial.exists() {
+            let _ = fs::remove_file(&partial).await;
+        }
+        if delete_metadata(pool, &id).await? {
+            deleted += 1;
+        }
+    }
+
+    // Orphan partials older than 1 hour (crashed uploads)
+    if let Ok(mut entries) = fs::read_dir(storage_dir).await {
+        let now = std::time::SystemTime::now();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.ends_with(".partial") {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(&path).await {
+                if let Ok(modified) = meta.modified() {
+                    if now
+                        .duration_since(modified)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                        > 3600
+                    {
+                        let _ = fs::remove_file(&path).await;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(deleted)
+}
 
 /// Validate file size limits
 #[allow(dead_code)]
@@ -353,16 +528,61 @@ pub fn validate_file_size(size: i64, config: &MediaConfig) -> Result<(), &'stati
     if size <= 0 {
         return Err("File size must be positive");
     }
-
     if size > config.max_file_size as i64 {
         return Err("File exceeds maximum size limit");
     }
-
     Ok(())
 }
 
-/// Calculate file expiration timestamp (15 days from now)
-#[allow(dead_code)]
-pub fn calculate_expiration() -> i64 {
-    Utc::now().timestamp() + (15 * 24 * 60 * 60) // 15 days
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::compute_hmac;
+
+    #[test]
+    fn token_roundtrip_binds_user_and_size() {
+        let secret = "test-media-hmac-secret-32chars!!";
+        let uid = Uuid::new_v4();
+        let tok = generate_upload_token(secret, uid, 1024).unwrap();
+        let wire = format_upload_token(&tok);
+        let claims = validate_upload_token(&wire, secret).unwrap();
+        assert_eq!(claims.media_id, tok.media_id);
+        assert_eq!(claims.max_size, 1024);
+        assert_eq!(claims.user_id, uid);
+    }
+
+    #[test]
+    fn token_rejects_tampered_max_size() {
+        let secret = "test-media-hmac-secret-32chars!!";
+        let uid = Uuid::new_v4();
+        let tok = generate_upload_token(secret, uid, 1024).unwrap();
+        // Bump max_size without re-signing
+        let wire = format!(
+            "{}|{}|{}|{}|{}",
+            tok.media_id, tok.expires_at, 999_999_999, tok.user_id, tok.signature
+        );
+        assert!(validate_upload_token(&wire, secret).is_err());
+    }
+
+    #[test]
+    fn token_rejects_v1_format() {
+        let secret = "test-media-hmac-secret-32chars!!";
+        let mid = Uuid::new_v4();
+        let exp = Utc::now().timestamp() + 300;
+        let msg = format!("{}|{}", mid, exp);
+        let sig = compute_hmac(&msg, secret);
+        let v1 = format!("{}|{}|{}", mid, exp, sig);
+        assert!(validate_upload_token(&v1, secret).is_err());
+    }
+
+    #[test]
+    fn safe_object_path_blocks_traversal() {
+        let dir = PathBuf::from("/data/media");
+        assert!(safe_object_path(&dir, "../etc/passwd").is_err());
+        assert!(safe_object_path(&dir, "foo/bar").is_err());
+        assert!(safe_object_path(&dir, "").is_err());
+        let id = Uuid::new_v4().to_string();
+        let p = safe_object_path(&dir, &id).unwrap();
+        assert_eq!(p, dir.join(&id));
+    }
 }

@@ -38,6 +38,7 @@ const QUOTE_SENSITIVE: &[&str] = &[
     "USERNAME_HMAC_SECRET",
     "CONTACT_HMAC_SECRET",
     "MEDIA_HMAC_SECRET",
+    "MEDIA_UPLOAD_TOKEN_SECRET",
     "CSRF_SECRET",
     "DELIVERY_SECRET_KEY",
     "LOG_HASH_SALT",
@@ -105,7 +106,8 @@ fn reject_known_insecure_string(name: &str, value: &str) -> Result<()> {
         ("TURN_SECRET", INSECURE_TURN_SECRET) | ("TURN_SECRET", "") | ("MASQUE_AUTH_TOKEN", "")
     ) || t == "construct-insecure-username-hmac"
         || t == "construct-insecure-contact-hmac"
-        || t == "construct-insecure-envelope-key!!";
+        || t == "construct-insecure-envelope-key!!"
+        || t == "change-me-in-production";
     if bad && !allow_insecure_secrets() {
         bail!(
             "{name} is set to a known insecure/default value. Generate a real secret \
@@ -213,6 +215,19 @@ pub fn validate() -> Result<()> {
                      For local-only insecure defaults set ALLOW_INSECURE_SECRETS=true."
                 );
             }
+        }
+        // Media HMAC: either alias is enough; media-service also fail-fasts itself.
+        // Only enforce when media appears configured (MEDIA_ENABLED or either secret set).
+        let media_enabled = present("MEDIA_ENABLED")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+        let media_secret_set = present("MEDIA_HMAC_SECRET").is_some()
+            || present("MEDIA_UPLOAD_TOKEN_SECRET").is_some();
+        if media_enabled && !media_secret_set {
+            bail!(
+                "MEDIA_ENABLED=true but neither MEDIA_UPLOAD_TOKEN_SECRET nor MEDIA_HMAC_SECRET \
+                 is set. Generate with: openssl rand -hex 32"
+            );
         }
     }
 

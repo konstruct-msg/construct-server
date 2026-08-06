@@ -4,46 +4,42 @@
 
 use hmac::{Hmac, Mac, digest::KeyInit};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Validate upload token
-/// Expected format: {timestamp_hex}.{random_hex}.{hmac_hex}
-#[allow(dead_code)]
-pub fn validate_upload_token(token: &str, secret: &str) -> bool {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        tracing::warn!(
-            "Invalid token format: expected 3 parts, got {}",
-            parts.len()
-        );
-        return false;
-    }
-
-    let timestamp_hex = parts[0];
-    let random_hex = parts[1];
-    let expected_hmac = parts[2];
-
-    // Validate hex format
-    if hex::decode(timestamp_hex).is_err() || hex::decode(random_hex).is_err() {
-        tracing::warn!("Invalid hex encoding in token");
-        return false;
-    }
-
-    // Reconstruct message
-    let message = format!("{}.{}", timestamp_hex, random_hex);
-    let computed_hmac = compute_hmac(&message, secret);
-
-    // Constant-time comparison
-    expected_hmac == computed_hmac
-}
-
-/// Compute HMAC-SHA256
+/// Compute HMAC-SHA256, hex-encoded lowercase.
 pub fn compute_hmac(message: &str, secret: &str) -> String {
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
 
-    let result = mac.finalize();
-    hex::encode(result.into_bytes())
+/// Constant-time equality for equal-length hex HMAC digests.
+///
+/// Returns false if either side is not valid hex or lengths differ (after decode),
+/// without short-circuiting on the first differing nibble of the digest bytes.
+pub fn hmac_eq(a_hex: &str, b_hex: &str) -> bool {
+    let (Ok(a), Ok(b)) = (hex::decode(a_hex), hex::decode(b_hex)) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(&b).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_roundtrip_and_ct_eq() {
+        let h = compute_hmac("hello", "secret-at-least-32-chars-long!!");
+        assert!(hmac_eq(&h, &h));
+        assert!(!hmac_eq(&h, "00"));
+        let other = compute_hmac("other", "secret-at-least-32-chars-long!!");
+        assert!(!hmac_eq(&h, &other));
+    }
 }
