@@ -4,16 +4,5 @@ license = "AGPL-3.0-only"
 version.workspace = true
 edition.workspace = true
 
+# Placeholder crate — REST extractors removed. No runtime deps required.
 [dependencies]
-construct-db      = { path = "../construct-db" }
-construct-error   = { path = "../construct-error" }
-
-axum         = { workspace = true }
-serde_json   = { workspace = true }
-uuid         = { workspace = true }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-sha2         = "0.11"
-tracing    = { workspace = true }
-tokio      = { workspace = true }
-hex        = { workspace = true }
-async-trait = { workspace = true }

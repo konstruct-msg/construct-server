@@ -29,7 +29,6 @@ construct-federation    = { path = "../crates/construct-federation" }
 construct-delivery-ack  = { path = "../crates/construct-delivery-ack" }
 construct-pending       = { path = "../crates/construct-pending" }
 construct-context        = { path = "../crates/construct-context" }
-construct-extractors     = { path = "../crates/construct-extractors" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 tokio = {workspace = true}

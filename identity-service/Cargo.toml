@@ -14,7 +14,6 @@ construct-server-shared = { path = "../shared" }
 construct-crypto = { path = "../crates/construct-crypto" }
 construct-db = { path = "../crates/construct-db" }
 construct-error = { path = "../crates/construct-error" }
-construct-extractors = { path = "../crates/construct-extractors" }
 crypto-agility = { path = "../crates/crypto-agility" }
 
 tokio = { workspace = true }

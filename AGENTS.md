@@ -34,7 +34,8 @@ Deployable services (see `ops/docker-compose.prod.yml`):
 `identity-service` is a wrapper over business-logic crates
 (`crates/construct-auth-service`, `crates/construct-user-service`); notification logic
 lives in `messaging-service` (`notification_core.rs`).
-Shared handler logic lives in `shared/src/construct_server/<service>/`.
+Shared re-exports live in `shared/src/construct_server/<service>/` (core/proto adapters only —
+client REST handlers removed; product APIs are gRPC).
 
 ### Shared crate
 `shared/` (`construct-server-shared`) contains:
