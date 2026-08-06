@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine as _;
+use chrono::Utc;
 use construct_federation::{FederatedEnvelope, PublicKeyCache, ServerSigner};
 use construct_rate_limit::sliding_window_check_and_record;
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,13 @@ use tracing::info;
 
 use crate::context::MessagingServiceContext;
 use crate::envelope::dispatch_sealed_sender;
+
+/// Max |now − S2S timestamp| accepted for federated envelopes (seconds).
+/// Stops indefinite replay of valid signed payloads after the origin key is still trusted.
+const FEDERATION_TIMESTAMP_MAX_SKEW_SECS: i64 = 300;
+
+/// How long we remember a federated message_id for replay rejection (7 days).
+const FEDERATION_MSG_DEDUP_TTL_SECS: u64 = 7 * 24 * 3600;
 
 // ── Request / Response types ──────────────────────────────────────────────
 
@@ -51,14 +59,75 @@ pub(crate) struct FederationResponse {
     pub(crate) message_id: String,
 }
 
-// ── Rate limiting helper ──────────────────────────────────────────────────
+// ── Rate limiting / anti-replay helpers ───────────────────────────────────
+
+type FedHttpErr = (StatusCode, Json<serde_json::Value>);
+
+fn fed_err(status: StatusCode, msg: &str) -> FedHttpErr {
+    (status, Json(serde_json::json!({"error": msg})))
+}
+
+/// Reject envelopes whose timestamp is outside the allowed skew window.
+fn validate_federation_timestamp(timestamp: u64) -> Result<(), FedHttpErr> {
+    let now = Utc::now().timestamp();
+    let ts = timestamp as i64;
+    if (now - ts).abs() > FEDERATION_TIMESTAMP_MAX_SKEW_SECS {
+        tracing::warn!(
+            timestamp,
+            now,
+            skew_limit = FEDERATION_TIMESTAMP_MAX_SKEW_SECS,
+            "Federated envelope timestamp outside allowed skew"
+        );
+        return Err(fed_err(
+            StatusCode::UNAUTHORIZED,
+            "envelope timestamp outside allowed skew",
+        ));
+    }
+    Ok(())
+}
+
+/// Claim `(origin, message_id)` once in Redis. Returns `Ok(true)` if this is the
+/// first delivery, `Ok(false)` if already seen (idempotent replay).
+/// Fail-**closed** on Redis error: without dedup a signed envelope can be replayed forever.
+async fn claim_federation_message_id(
+    context: &MessagingServiceContext,
+    origin_server: &str,
+    message_id: &str,
+) -> Result<bool, FedHttpErr> {
+    if message_id.is_empty() || message_id.len() > 128 {
+        return Err(fed_err(
+            StatusCode::BAD_REQUEST,
+            "invalid message_id",
+        ));
+    }
+    // origin is already SSRF-checked by PublicKeyCache; keep key bounded.
+    let key = format!("fed:msg:{origin_server}:{message_id}");
+    let mut conn = context.redis_conn.clone();
+    // SET NX → Some("OK") if claimed, None if key already existed.
+    let result: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(FEDERATION_MSG_DEDUP_TTL_SECS)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Federation message_id claim failed (fail-closed)");
+            fed_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "federation dedup temporarily unavailable",
+            )
+        })?;
+    Ok(result.is_some())
+}
 
 /// Check per-origin sliding window rate limit.
 /// Returns `Ok(())` if allowed, `Err(429)` if exceeded.
 async fn check_origin_rate_limit(
     context: &MessagingServiceContext,
     origin_server: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(), FedHttpErr> {
     let max_per_hour = context.config.federation.max_requests_per_origin_per_hour;
     if max_per_hour <= 0 {
         return Ok(());
@@ -101,6 +170,8 @@ pub(crate) async fn handle_inbound_sealed(
             Json(serde_json::json!({"error": "federation not enabled"})),
         ));
     }
+
+    validate_federation_timestamp(req.timestamp)?;
 
     // ── Per-origin rate limit ────────────────────────────────────────────
     check_origin_rate_limit(&context, &req.origin_server).await?;
@@ -150,6 +221,22 @@ pub(crate) async fn handle_inbound_sealed(
                 ),
             ));
         }
+    }
+
+    // ── Anti-replay: claim message_id after signature verifies ───────────
+    if !claim_federation_message_id(&context, &req.origin_server, &req.message_id).await? {
+        info!(
+            message_id = %req.message_id,
+            origin = %req.origin_server,
+            "Duplicate federated sealed message_id — idempotent accept"
+        );
+        return Ok((
+            StatusCode::OK,
+            Json(FederationResponse {
+                status: "duplicate".to_string(),
+                message_id: req.message_id,
+            }),
+        ));
     }
 
     // ── Decode sealed_inner and dispatch ─────────────────────────────────
@@ -217,6 +304,8 @@ pub(crate) async fn handle_inbound_message(
         ));
     }
 
+    validate_federation_timestamp(req.timestamp)?;
+
     // ── Per-origin rate limit ────────────────────────────────────────────
     check_origin_rate_limit(&context, &req.origin_server).await?;
 
@@ -263,6 +352,22 @@ pub(crate) async fn handle_inbound_message(
                 ),
             ));
         }
+    }
+
+    // ── Anti-replay: claim message_id after signature verifies ───────────
+    if !claim_federation_message_id(&context, &req.origin_server, &req.message_id).await? {
+        info!(
+            message_id = %req.message_id,
+            origin = %req.origin_server,
+            "Duplicate federated message_id — idempotent accept"
+        );
+        return Ok((
+            StatusCode::OK,
+            Json(FederationResponse {
+                status: "duplicate".to_string(),
+                message_id: req.message_id,
+            }),
+        ));
     }
 
     // ── Build MessageEnvelope and dispatch ───────────────────────────────
@@ -326,6 +431,25 @@ pub(crate) async fn handle_inbound_message(
                 Json(serde_json::json!({"error": format!("delivery failed: {}", e)})),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod anti_replay_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_within_skew_ok() {
+        let now = Utc::now().timestamp() as u64;
+        assert!(validate_federation_timestamp(now).is_ok());
+        assert!(validate_federation_timestamp(now.saturating_sub(60)).is_ok());
+    }
+
+    #[test]
+    fn timestamp_too_old_or_future_rejected() {
+        let now = Utc::now().timestamp() as u64;
+        assert!(validate_federation_timestamp(now.saturating_sub(10_000)).is_err());
+        assert!(validate_federation_timestamp(now.saturating_add(10_000)).is_err());
     }
 }
 

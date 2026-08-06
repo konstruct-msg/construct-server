@@ -32,13 +32,19 @@ pub struct FederationClient {
 }
 
 impl FederationClient {
+    fn default_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            // No redirects: a 30x to a private IP would bypass SSRF host checks.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to create HTTP client")
+    }
+
     /// Create a new federation client without signing (legacy/testing mode)
     pub fn new() -> Self {
         Self {
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+            http_client: Self::default_http_client(),
             server_signer: None,
             instance_domain: "unknown".to_string(),
         }
@@ -47,10 +53,7 @@ impl FederationClient {
     /// Create a new federation client with server signing
     pub fn new_with_signer(signer: Arc<ServerSigner>, instance_domain: String) -> Self {
         Self {
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"),
+            http_client: Self::default_http_client(),
             server_signer: Some(signer),
             instance_domain,
         }
@@ -122,12 +125,14 @@ impl FederationClient {
                 let tls_config = build_rustls_client_config(store, &mtls_config)?;
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
+                    .redirect(reqwest::redirect::Policy::none())
                     .tls_backend_preconfigured(tls_config)
                     .build()
                     .context("Failed to create HTTP client with mTLS configuration")?
             }
             None => reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .danger_accept_invalid_certs(!mtls_config.verify_server_cert)
                 .build()
                 .context("Failed to create HTTP client with mTLS configuration")?,
@@ -238,6 +243,8 @@ impl FederationClient {
         sealed_inner: &[u8],
         timestamp: i64,
     ) -> Result<()> {
+        crate::ssrf::assert_hostname_resolves_public(target_domain)
+            .map_err(|e| anyhow::anyhow!("SSRF guard rejected sealed target domain: {e}"))?;
         let url = format!("https://{target_domain}/federation/v1/sealed");
 
         let sealed_inner_hash = FederatedEnvelope::hash_payload(
