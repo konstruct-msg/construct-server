@@ -596,8 +596,8 @@ impl MessageQueue {
     }
 
     /// Trim a user's offline stream up to and including `ack_id` (the client's
-    /// acknowledged `since_cursor`). This is the only place offline messages are
-    /// deleted — ack-driven, never by the server's send position. See `DeliveryManager`.
+    /// acknowledged `since_cursor` from Subscribe or GetPendingMessages). This is
+    /// the only deletion path — ack-driven, never by the server's send position.
     pub async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
         delivery::DeliveryManager::new(
             &mut self.client,

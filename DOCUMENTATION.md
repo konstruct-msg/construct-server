@@ -254,13 +254,18 @@ stream `delivery:offline:{user_id}` (7-day TTL). On reconnect his client subscri
 1. reads **forward** from that cursor and streams the backlog to the client
    (`read_user_messages_from_stream` — side-effect-free, no deletion);
 2. deletes (`XTRIM MINID ack+1`) only messages **≤ `since_cursor`** — i.e. only what the
-   client has acknowledged — in `MessageQueue::trim_offline_stream`, invoked from the
-   `Subscribe` handler in `stream.rs`.
+   client has acknowledged — in `MessageQueue::trim_offline_stream`, invoked from
+   MessageStream `Subscribe` **and** unary `GetPendingMessages` (BackgroundFetch path).
 
 Deletion is driven by the client's durable acknowledgement, **never** by the server's send
 position. A short or broken session re-delivers (the client dedups by `message_id`) but never
 loses an un-acknowledged message. The 7-day TTL and `trim_streams_by_age` are the backstop for
 streams that are never acknowledged.
+
+**Wake push:** `dispatch_envelope` sends APNs silent `new_message` only when the recipient
+has **no** active MessageStream (`user:{id}:server_instance_id` absent). Online recipients
+are woken via Redis `inbox:wakeup` only — silent push while online caused client reconnect
+storms and full offline-stream redelivery.
 
 > **History:** before 2026-06, `read_stream_messages` trimmed the stream by the server's *read
 > position* on every poll. A message buffered into the gRPC channel but not yet received by a

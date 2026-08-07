@@ -334,6 +334,31 @@ pub static MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL: Lazy<IntCounter> = Laz
     .expect("Failed to register MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL metric")
 });
 
+/// Silent APNs `new_message` push skipped because the recipient already has an
+/// active MessageStream (`user:{id}:server_instance_id` present). Realtime delivery
+/// uses Redis `inbox:wakeup` — pushing while online causes client reconnect storms
+/// and full offline-stream redelivery.
+pub static MSG_PUSH_SKIPPED_ONLINE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_msg_push_skipped_online_total",
+        "Blind new_message pushes skipped because recipient has an active MessageStream"
+    ))
+    .expect("Failed to register MSG_PUSH_SKIPPED_ONLINE_TOTAL metric")
+});
+
+/// Offline stream XTRIM driven by client `since_cursor` (durable ACK).
+/// Label `path`: "subscribe" | "get_pending"
+pub static MSG_OFFLINE_TRIM_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_offline_trim_total",
+            "Offline delivery stream trims driven by client since_cursor ACK"
+        ),
+        &["path"]
+    )
+    .expect("Failed to register MSG_OFFLINE_TRIM_TOTAL metric")
+});
+
 // ============================================================================
 // Security / Key Transparency Metrics
 // ============================================================================

@@ -11,8 +11,8 @@ use crate::context::MessagingServiceContext;
 use crate::core;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
 use crate::stream::{
-    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request, poll_messages,
-    spawn_inbox_wakeup,
+    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request,
+    is_valid_redis_stream_cursor, poll_messages, spawn_inbox_wakeup,
 };
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, messaging_service_server::MessagingService,
@@ -775,11 +775,40 @@ impl MessagingService for MessagingGrpcService {
         let limit = req.limit.unwrap_or(50).min(100) as usize;
         let since = req.since_cursor.as_deref();
 
-        // Hold the lock only for the XREAD operation — release immediately after so other
+        // Hold the lock only for trim + XREAD — release immediately after so other
         // handlers (other getPendingMessages calls, send_message) are not blocked during
         // the message-building loop below.
+        //
+        // ACK-driven deletion (same contract as MessageStream Subscribe): when the
+        // client passes since_cursor it asserts durable receipt of everything ≤ that
+        // Redis stream id. Without this trim, BackgroundFetch re-read the full offline
+        // window on every silent-push cycle while Subscribe was the only trim path.
         let stream_messages = {
             let mut queue = self.context.queue.lock().await;
+            if let Some(cursor) = since
+                && !cursor.is_empty()
+            {
+                if !is_valid_redis_stream_cursor(cursor) {
+                    tracing::warn!(
+                        cursor = %cursor,
+                        "Ignoring invalid since_cursor on GetPendingMessages (expected Redis stream ID)"
+                    );
+                } else {
+                    match queue.trim_offline_stream(&user_id, cursor).await {
+                        Ok(()) => {
+                            construct_metrics::MSG_OFFLINE_TRIM_TOTAL
+                                .with_label_values(&["get_pending"])
+                                .inc();
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to trim offline stream on GetPendingMessages (non-fatal)"
+                            );
+                        }
+                    }
+                }
+            }
             queue
                 .read_user_messages_from_stream(&user_id, None, since, limit)
                 .await
