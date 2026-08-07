@@ -6,9 +6,27 @@ use uuid::Uuid;
 use construct_context::AppContext;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
-use construct_metrics::{MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, record_abuse_fail_open};
+use construct_metrics::{
+    MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, MSG_PUSH_SKIPPED_ONLINE_TOTAL,
+    record_abuse_fail_open,
+};
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_utils::log_safe_id;
+
+/// Whether dispatch should fire a silent APNs wake for this recipient.
+///
+/// When the recipient already has a live MessageStream, Redis `inbox:wakeup`
+/// delivers in real time. An APNs silent push is redundant and historically
+/// caused the iOS client to force-reconnect the stream on every message,
+/// re-XREADing the entire untrimmed offline backlog (reconnect storm).
+///
+/// Presence is user-level (`user:{id}:server_instance_id`), not per-device:
+/// if any device holds a stream we skip push. Offline secondary devices still
+/// pick up from Redis on next open; multi-device online tracking is a separate
+/// improvement.
+pub(crate) fn should_send_wake_push(recipient_online: bool) -> bool {
+    !recipient_online
+}
 
 /// Look up active device IDs for a recipient.
 /// Returns an empty Vec on error so callers fall back to the user-level stream.
@@ -116,6 +134,22 @@ pub async fn dispatch_envelope(
     {
         tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
     }
+
+    // Presence check under the same lock as the stream write so we observe the
+    // online flag set by an active MessageStream on this (or another) instance.
+    // Redis error → treat as offline (fail-open: still send APNs wake).
+    let recipient_online = match queue.get_user_server_instance(recipient_id).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                recipient_hash = %log_safe_id(recipient_id, salt),
+                "Failed to check recipient online status — will send wake push"
+            );
+            false
+        }
+    };
     drop(queue);
     tracing::debug!(
         redis_ms = t_lock.elapsed().as_millis(),
@@ -158,27 +192,40 @@ pub async fn dispatch_envelope(
         });
     }
 
-    // Send silent push notification directly via APNs (non-critical background task)
+    // Silent APNs only when the recipient has no live MessageStream. Online
+    // recipients are woken via inbox:wakeup; pushing them causes reconnect storms.
     if let Some(notif_ctx) = notification_context {
-        let ctx = notif_ctx;
-        let recipient = recipient_id.clone();
-        tokio::spawn(async move {
-            let Ok(recipient_uuid) = Uuid::parse_str(&recipient) else {
-                return;
-            };
-            let input = crate::notification_core::SendBlindNotificationInput {
-                user_id: recipient_uuid,
-                badge_count: None,
-                activity_type: Some("new_message".to_string()),
-                conversation_id: None,
-            };
-            match crate::notification_core::send_blind_notification(&ctx, input).await {
-                Ok(_) => tracing::debug!("Blind notification sent via embedded APNs"),
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to send blind notification (non-critical)")
+        if should_send_wake_push(recipient_online) {
+            let ctx = notif_ctx;
+            let recipient = recipient_id.clone();
+            tokio::spawn(async move {
+                let Ok(recipient_uuid) = Uuid::parse_str(&recipient) else {
+                    return;
+                };
+                let input = crate::notification_core::SendBlindNotificationInput {
+                    user_id: recipient_uuid,
+                    badge_count: None,
+                    activity_type: Some("new_message".to_string()),
+                    conversation_id: None,
+                };
+                match crate::notification_core::send_blind_notification(&ctx, input).await {
+                    Ok(_) => tracing::debug!("Blind notification sent via embedded APNs"),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to send blind notification (non-critical)"
+                        )
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            MSG_PUSH_SKIPPED_ONLINE_TOTAL.inc();
+            tracing::debug!(
+                recipient_hash = %log_safe_id(recipient_id, salt),
+                message_id = %message_id,
+                "Skipping silent push — recipient has active MessageStream"
+            );
+        }
     }
 
     Ok(())
@@ -260,7 +307,17 @@ pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::receipt_routing_hash;
+    use super::{receipt_routing_hash, should_send_wake_push};
+
+    #[test]
+    fn wake_push_skipped_when_recipient_online() {
+        assert!(!should_send_wake_push(true));
+    }
+
+    #[test]
+    fn wake_push_sent_when_recipient_offline() {
+        assert!(should_send_wake_push(false));
+    }
 
     #[test]
     fn receipt_hash_is_stable_for_same_inputs() {

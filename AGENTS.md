@@ -83,6 +83,12 @@ messaging-service (stream loop per connected device)
 
 Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written, so old clients without `x-device-id` continue to receive messages.
 
+**Wake push:** APNs silent `new_message` is skipped when `user:{user_id}:server_instance_id`
+is set (active MessageStream). Online delivery uses `inbox:wakeup` only — silent push
+while online caused client reconnect storms + full offline redelivery. Offline-stream
+trim is ACK-driven via `since_cursor` on both MessageStream `Subscribe` and
+`GetPendingMessages`.
+
 **Critical channel name**: `inbox:wakeup:{user_id}`.
 
 **Serialization**: envelopes must use `rmp_serde::encode::to_vec_named` on write and `rmp_serde::from_slice` on read.

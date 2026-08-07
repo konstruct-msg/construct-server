@@ -125,10 +125,10 @@ impl<'a> DeliveryManager<'a> {
 
         // NOTE: reads are intentionally side-effect free. Messages are deleted ONLY
         // via `trim_offline_stream`, driven by the client's acknowledged cursor
-        // (SubscribeRequest.since_cursor) — never by the server's read/send position.
-        // The previous trim-on-read deleted messages that were merely buffered into the
-        // gRPC channel but not yet durably received+persisted by the client, causing
-        // silent message loss on short/broken sessions. See: ack-driven offline delivery.
+        // (MessageStream Subscribe or GetPendingMessages since_cursor) — never by the
+        // server's read/send position. The previous trim-on-read deleted messages that
+        // were merely buffered into the gRPC channel but not yet durably received+persisted
+        // by the client, causing silent message loss on short/broken sessions.
 
         if entries.is_empty() {
             return Ok(vec![]);
@@ -145,11 +145,10 @@ impl<'a> DeliveryManager<'a> {
 
     /// Trim a user's offline stream up to and INCLUDING `ack_id`.
     ///
-    /// This is the ONLY place messages are deleted from the offline stream. Deletion is
-    /// driven by the client's acknowledged cursor (`SubscribeRequest.since_cursor` = the
-    /// last message the client durably received and persisted in a prior session), never
-    /// by the server's read/send position. This guarantees at-least-once delivery: a
-    /// short or broken session can re-deliver but never lose an un-acknowledged message.
+    /// This is the ONLY function that deletes from the offline stream. Callers are
+    /// MessageStream `Subscribe` and `GetPendingMessages` when the client passes a
+    /// durable `since_cursor` (last Redis stream ID it has persisted). Never trim by
+    /// the server's read/send position — that caused silent loss on short sessions.
     pub(crate) async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 

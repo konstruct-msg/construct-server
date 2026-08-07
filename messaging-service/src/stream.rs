@@ -417,15 +417,26 @@ pub(crate) async fn handle_stream_request(
 
                     // ACK-driven deletion: the client's since_cursor is the last message it
                     // has durably received AND persisted. Only now is it safe to delete
-                    // everything ≤ cursor from the offline stream. This is the ONLY place
-                    // offline messages are deleted — never by the server's read/send position,
-                    // which previously caused silent loss on short/broken recipient sessions.
-                    if let Some(uid) = user_id.as_ref()
-                        && let Err(e) = stream_queue
+                    // everything ≤ cursor from the offline stream. Trim also runs from
+                    // GetPendingMessages with the same cursor contract — never by the
+                    // server's read/send position (that caused silent loss on short sessions).
+                    if let Some(uid) = user_id.as_ref() {
+                        match stream_queue
                             .trim_offline_stream(&uid.to_string(), cursor)
                             .await
-                    {
-                        tracing::warn!(error = %e, "Failed to trim offline stream on subscribe (non-fatal)");
+                        {
+                            Ok(()) => {
+                                construct_metrics::MSG_OFFLINE_TRIM_TOTAL
+                                    .with_label_values(&["subscribe"])
+                                    .inc();
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to trim offline stream on subscribe (non-fatal)"
+                                );
+                            }
+                        }
                     }
 
                     apply_since_cursor(cursor, &mut catchup.last_stream_id);
@@ -479,7 +490,8 @@ pub(crate) async fn handle_stream_request(
 }
 
 /// Returns true when `cursor` is a valid Redis stream resume position.
-fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
+/// Shared by MessageStream Subscribe and GetPendingMessages ACK trim.
+pub(crate) fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
     if cursor == "0" || cursor == "$" {
         return true;
     }
@@ -792,6 +804,17 @@ mod tests {
             last.is_none() && subscribe_with_cursor_seen,
             "S2 condition: poll with None after Subscribe with cursor"
         );
+    }
+
+    #[test]
+    fn redis_stream_cursor_accepts_stream_ids_rejects_uuids() {
+        assert!(is_valid_redis_stream_cursor("1786052214011-0"));
+        assert!(is_valid_redis_stream_cursor("0"));
+        assert!(is_valid_redis_stream_cursor("1772726016")); // bare ms timestamp
+        assert!(!is_valid_redis_stream_cursor(
+            "d22fc8d6-21eb-42dd-9739-baf26fbe67bf"
+        ));
+        assert!(!is_valid_redis_stream_cursor("not-a-cursor"));
     }
 
     #[test]
