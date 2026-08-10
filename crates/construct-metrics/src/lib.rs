@@ -419,8 +419,9 @@ pub static STEALTH_TOKEN_PRESENT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 
 /// Result of a Privacy Pass token redemption attempt.
 /// Label `mode`: "warn" | "enforce"
-/// Label `result`: "ok" | "missing_token" | "decrypt_failed" | "invalid_token"
-///   | "double_spent" | "redis_error" | "not_configured"
+/// Label `result`: "ok" | "unit_covered" | "missing_token" | "decrypt_failed"
+///   | "invalid_token" | "double_spent" | "unit_exhausted" | "redis_error"
+///   | "not_configured"
 pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         opts!(

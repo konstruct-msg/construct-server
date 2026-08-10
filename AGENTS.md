@@ -164,8 +164,14 @@ Full context: construct-docs `decisions/sealed-sender-anti-abuse-economics.md` a
 - Under `enforce`, rejection = typed `FAILED_PRECONDITION` with message
   `privacy_pass:{label}`; labels from `TokenRedeemResult::as_label`:
   `missing_token` / `invalid_token` / `double_spent` / `decrypt_failed` /
-  `redis_error` / `not_configured`. The iOS client does a one-shot
-  replenish-and-retry and NEVER downgrades to identified send (anonymity invariant).
+  `redis_error` / `not_configured` / `unit_exhausted`. Accept labels:
+  `ok` / `unit_covered`. The iOS client does a one-shot replenish-and-retry
+  and NEVER downgrades to identified send (anonymity invariant).
+- **Logical-message unit**: multi-chunk bodies (albums) share
+  `SealedInner.token_spend_id` (32 bytes). First wire envelope redeems a
+  token and opens `pp:unit:{sha256(id)}`; further envelopes with the same
+  spend_id are `unit_covered` without a new token (cap 256). Empty spend_id
+  = legacy per-envelope spend. One album must cost one token, not one per chunk.
 - Rollout state and warn-metric validation live in the runbook — check it before
   flipping `enforce`.
 

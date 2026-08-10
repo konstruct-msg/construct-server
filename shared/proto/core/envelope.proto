@@ -420,9 +420,26 @@ message SealedInner {
   // Privacy Pass blind token — anonymous spend credential (optional).
   // When present, destination server verifies the token against the
   // Privacy Pass issuer public key before delivering the message.
-  // Sender consumes one token per STEALTH message from their local wallet.
+  //
+  // Economic unit is one *logical* message (e.g. a text, or a whole media
+  // album / multi-chunk body), not one wire envelope. Chunked E2EE bodies
+  // become many sealed sends; attaching a fresh token to every chunk burns
+  // the young-account hourly wallet on a single album.
+  //
+  // Contract:
+  //   • token_nonce / token_bytes — present on the *first* wire envelope of
+  //     the logical message (pays for the whole set).
+  //   • token_spend_id — optional 32-byte random id, identical on every
+  //     wire envelope of that logical message. After the first envelope
+  //     redeems a token, further envelopes that carry the same spend_id
+  //     (token optional) are accepted without a new spend, up to the
+  //     server chunk cap (256). Empty = legacy per-envelope redemption.
   bytes token_nonce = 16;
   bytes token_bytes = 17;
+
+  // Shared across all wire envelopes of one logical message (see above).
+  // Server-visible anti-abuse metadata only; not identity.
+  bytes token_spend_id = 18;
 
   // Reserved for future sealed fields
   reserved 8 to 15;

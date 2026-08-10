@@ -1127,6 +1127,7 @@ mod sealed_dispatch_error_tests {
             "decrypt_failed",
             "redis_error",
             "not_configured",
+            "unit_exhausted",
         ] {
             let status = map_sealed_dispatch_error(anyhow::Error::new(TokenRejected { label }));
             assert_eq!(
