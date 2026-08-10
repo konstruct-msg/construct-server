@@ -640,7 +640,7 @@ async fn redeem_missing_token_label_is_stable() {
     let Some(mut conn) = try_redis().await else {
         return;
     };
-    let result = redeem_token_checked(&mut conn, Some(&[1u8; 32]), None, &[], &[]).await;
+    let result = redeem_token_checked(&mut conn, Some(&[1u8; 32]), None, &[], &[], &[]).await;
     // server_secret None → NotConfigured takes precedence over empty token in redeem_token_checked
     assert!(
         matches!(

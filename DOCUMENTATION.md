@@ -558,6 +558,10 @@ docker logs construct-caddy --tail 50
 - Retention: 7 days from upload (`MEDIA_FILE_TTL_SECONDS`; downloads do not extend)
 
 **Sealed sender anti-abuse (stealth):**
+
+Logical-message unit: multi-chunk sealed bodies share `SealedInner.token_spend_id`.
+One Privacy Pass token pays for the whole set (first envelope redeems; follow-ups are
+`unit_covered`, max 256). Empty `token_spend_id` keeps legacy per-envelope spend.
 - Per-message Privacy Pass tokens (VOPRF, ristretto255): issuance in identity-service
   (hourly + age-tiered caps), redemption in messaging-service
 - `MSG_STEALTH_TOKEN_POLICY` off/warn/enforce; typed enforce rejection

@@ -205,12 +205,17 @@ pub(crate) async fn dispatch_sealed_sender(
             .inc();
 
         let mut conn = context.redis_conn.clone();
+        // Logical-message unit: `token_spend_id` shared across multi-chunk wire
+        // envelopes so one Privacy Pass token pays for the whole set (album /
+        // large body), not one token per chunk. Empty spend_id = legacy
+        // per-envelope redemption.
         let result = crate::token_redeem::redeem_token_checked(
             &mut conn,
             context.token_issuer_key.as_ref(),
             context.token_enc_static_secret.as_ref(),
             &sealed_inner.token_nonce,
             &sealed_inner.token_bytes,
+            &sealed_inner.token_spend_id,
         )
         .await;
 
@@ -219,7 +224,7 @@ pub(crate) async fn dispatch_sealed_sender(
             .with_label_values(&[mode_label, result_label])
             .inc();
 
-        if result != crate::token_redeem::TokenRedeemResult::Ok {
+        if !result.is_accept() {
             if policy == StealthTokenPolicy::Enforce {
                 tracing::warn!(
                     result = result_label,
@@ -234,11 +239,12 @@ pub(crate) async fn dispatch_sealed_sender(
                     "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
                 );
             }
-        } else if policy == StealthTokenPolicy::Warn {
+        } else if policy == StealthTokenPolicy::Warn
+            && result == crate::token_redeem::TokenRedeemResult::Ok
+        {
             // Success-path visibility for the warn-mode validation window: confirms the
             // client→server VOPRF round-trip works end-to-end (first redemption of a real
-            // client token). Mirrors the client's "sealed send WITH token" log. Only in
-            // warn (temporary validation); enforce keeps the success path silent.
+            // client token). unit_covered is silent (expected for multi-chunk follow-ups).
             tracing::info!("sealed sender: Privacy Pass token redeemed OK (warn-mode validation)");
         }
     }
