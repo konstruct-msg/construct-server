@@ -432,8 +432,10 @@ message SealedInner {
   //   • token_spend_id — optional 32-byte random id, identical on every
   //     wire envelope of that logical message. After the first envelope
   //     redeems a token, further envelopes that carry the same spend_id
-  //     (token optional) are accepted without a new spend, up to the
-  //     server chunk cap (256). Empty = legacy per-envelope redemption.
+  //     and same recipient_user_id (token optional) are accepted without
+  //     a new spend, up to the server chunk cap (256). The unit is bound
+  //     to the recipient so a client-chosen id cannot cover other users.
+  //     Empty = legacy per-envelope redemption.
   bytes token_nonce = 16;
   bytes token_bytes = 17;
 

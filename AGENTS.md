@@ -109,6 +109,7 @@ trim is ACK-driven via `since_cursor` on both MessageStream `Subscribe` and
 | `pow_challenge:{token}` | String (SETEX) | identity-service | PoW challenge storage |
 | `rate:pp_tokens:{user_id}:{hour}` | Counter (INCRBY+EXPIRE) | identity-service | Privacy Pass hourly issuance counter |
 | `spent:{sha256(nonce)}` | String (SET NX EX 30d) | messaging-service | Privacy Pass double-spend guard |
+| `pp:unit:{sha256(spend_id\|recipient)}` | String (INCR, TTL 2h) | messaging-service | Paid logical-message unit (multi-chunk cover; bound to recipient) |
 | `sealed:exact:{sha256(tag)}` / `sealed:seen:{sha256(tag)}` | String (5 min / 24 h) | messaging-service | `SealedInner.delivery_tag` replay guard |
 | `invalidated_token:{jti}` | String (TTL) | identity/messaging | Revoked access-token blocklist |
 
@@ -169,9 +170,12 @@ Full context: construct-docs `decisions/sealed-sender-anti-abuse-economics.md` a
   and NEVER downgrades to identified send (anonymity invariant).
 - **Logical-message unit**: multi-chunk bodies (albums) share
   `SealedInner.token_spend_id` (32 bytes). First wire envelope redeems a
-  token and opens `pp:unit:{sha256(id)}`; further envelopes with the same
-  spend_id are `unit_covered` without a new token (cap 256). Empty spend_id
-  = legacy per-envelope spend. One album must cost one token, not one per chunk.
+  token and opens `pp:unit:{sha256(spend_id || "|" || recipient_user_id)}`;
+  further envelopes with the same spend_id **and** same recipient are
+  `unit_covered` without a new token (cap 256). Recipient binding is
+  required: spend_id is client-chosen and must not cover other users
+  (see construct-docs `backend/TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC.md`).
+  Empty spend_id = legacy per-envelope spend. One album → one token.
 - Rollout state and warn-metric validation live in the runbook — check it before
   flipping `enforce`.
 

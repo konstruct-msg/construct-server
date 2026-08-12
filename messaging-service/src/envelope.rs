@@ -207,8 +207,10 @@ pub(crate) async fn dispatch_sealed_sender(
         let mut conn = context.redis_conn.clone();
         // Logical-message unit: `token_spend_id` shared across multi-chunk wire
         // envelopes so one Privacy Pass token pays for the whole set (album /
-        // large body), not one token per chunk. Empty spend_id = legacy
-        // per-envelope redemption.
+        // large body), not one token per chunk. The unit is bound to
+        // `recipient_user_id` so a client-chosen spend_id cannot cover
+        // envelopes to other users (TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC).
+        // Empty spend_id = legacy per-envelope redemption.
         let result = crate::token_redeem::redeem_token_checked(
             &mut conn,
             context.token_issuer_key.as_ref(),
@@ -216,6 +218,7 @@ pub(crate) async fn dispatch_sealed_sender(
             &sealed_inner.token_nonce,
             &sealed_inner.token_bytes,
             &sealed_inner.token_spend_id,
+            &recipient_id,
         )
         .await;
 
