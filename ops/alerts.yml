@@ -1,9 +1,12 @@
 # =============================================================================
 # Construct Server — Prometheus alert rules
 # =============================================================================
-# Loaded via `rule_files` in prometheus.yml. No Alertmanager is deployed yet, so
-# these surface on Prometheus' /alerts page and through Grafana; routing them to a
-# human needs Alertmanager.
+# Loaded via `rule_files` in prometheus.yml and routed to a human by Alertmanager.
+#
+# Both of those were untrue until 2026-08-12: this file was mounted into the
+# Prometheus container but `rule_files` was never set, so not one rule here had
+# ever evaluated — while this header claimed otherwise. A rule that is written
+# where it is read, not where it runs, is a comment.
 #
 # The Redis rules exist because this Redis is not a pure cache — it holds the
 # offline delivery queues. Running it `noeviction` converts "silently drop a
@@ -87,3 +90,95 @@ groups:
           description: >
             Reaching 50k tracked keys needs 50k verified devices. Treat as a possible
             abuse campaign coinciding with a Redis outage.
+
+  # ── Is the wiring itself alive ──────────────────────────────────────────────
+  #
+  # A wrong scrape target is silent: the job simply sits DOWN and every alert
+  # depending on it stays green forever because it has no data. `auth:8081`
+  # pointed at a service renamed to `identity` and nobody noticed; the Redis
+  # exporter was never scraped at all, which meant the memory alerts below could
+  # not have fired even once. This alert makes that class loud.
+  - name: observability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} is down"
+          description: >
+            {{ $labels.job }} ({{ $labels.instance }}) has not answered a scrape for
+            5 minutes. Either the service is down or the target is wrong — check the
+            port it actually serves /metrics on. PORT for most services, METRICS_PORT
+            for group and signalling.
+
+  # ── Capacity: the triggers for scaling, so the answer is not a guess ────────
+  - name: capacity
+    rules:
+      # Disk fills from media (7-day retention) and Postgres. 25% free is the last
+      # comfortable moment to move media to object storage rather than the first
+      # panicked one.
+      - alert: DiskFillingUp
+        expr: >
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than 25% disk free on {{ $labels.mountpoint }}"
+          description: >
+            Media retention is 7 days from upload and downloads do not extend it, so
+            steady growth here means arrival rate exceeded expiry rate. This is the
+            trigger to move media to S3-compatible storage.
+
+      - alert: DiskCritical
+        expr: >
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+          / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Less than 10% disk free on {{ $labels.mountpoint }}"
+
+      - alert: HostMemoryPressure
+        expr: >
+          node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host has under 15% memory available"
+          description: >
+            Vertical upgrade before splitting Postgres or Redis onto their own host —
+            a network hop on every query is a worse trade below a few thousand users.
+
+      # Load per core, not raw load: the same number means nothing without the
+      # core count.
+      - alert: HostLoadSustained
+        expr: >
+          node_load15 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 1.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "15-minute load above 1.5 per core for half an hour"
+          description: >
+            Sustained, not spiky. Look for a cause before adding cores — server-side
+            crypto is not the workload here, so CPU pressure usually means something
+            is looping.
+
+      - alert: PostgresConnectionsHigh
+        expr: >
+          sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.70
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres above 70% of max_connections"
+          description: >
+            Add pgbouncer before moving Postgres to its own host — connection
+            exhaustion is almost always pooling, not capacity.
+

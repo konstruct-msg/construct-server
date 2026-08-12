@@ -450,6 +450,86 @@ services:
     networks:
       - internal
 
+  # ── Observability ───────────────────────────────────────────────────────────
+  #
+  # None of this is published. Every port below binds to 127.0.0.1 only, the same
+  # as Prometheus already did: reach them over WireGuard/Tailscale or an SSH
+  # tunnel. A public grafana.<domain> would be an attack surface on the host that
+  # runs the messaging server, and it would advertise the infrastructure — the
+  # opposite of what the rest of this system is for.
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: construct-alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Bot token as a file, never in the config or the environment.
+      - ./alertmanager/telegram_token:/etc/alertmanager/telegram_token:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - internal
+
+  # Host CPU, memory and disk. Until this existed there was no way to answer
+  # "is it time to scale" except by guessing.
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    container_name: construct-node-exporter
+    restart: unless-stopped
+    pid: host
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - internal
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    container_name: construct-postgres-exporter
+    restart: unless-stopped
+    environment:
+      # ${POSTGRES_PASSWORD} is a compose-level variable (the postgres service
+      # itself reads it the same way) — NOT an app.env secret. Re-declaring an
+      # app.env key here would blank it; see the compose env_file gotcha above.
+      DATA_SOURCE_NAME: "postgresql://construct:${POSTGRES_PASSWORD}@postgres:5432/construct?sslmode=disable"
+      PG_EXPORTER_EXTEND_QUERY_PATH: ""
+    depends_on:
+      - postgres
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: construct-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      # Datasource + the construct-overview dashboard have been sitting in the
+      # repo unused because this service was never declared — only its volume was.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - internal
+
+
 volumes:
   postgres-data:
   redis-data:
@@ -457,6 +537,7 @@ volumes:
   caddy-data:
   prometheus-data:
   grafana-data:
+  alertmanager-data:
 
 networks:
   internal:
