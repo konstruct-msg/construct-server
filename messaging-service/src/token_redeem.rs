@@ -17,14 +17,19 @@
 //      sufficient — this isn't a replay *window* problem, it's spend-once-ever
 //      within the TTL.
 //
-// Logical-message unit (`token_spend_id`):
+// Logical-message unit (`token_spend_id` + recipient):
 //   Multi-chunk E2EE bodies (albums, large media) become many sealed wire
 //   envelopes. The economic unit is one *logical* message, not one envelope.
 //   Clients put a shared 32-byte `token_spend_id` on every chunk of that
 //   message and a Privacy Pass token on the first only. After the first
-//   envelope redeems a token we mark `pp:unit:{sha256(spend_id)}` paid; later
-//   envelopes with the same spend_id are accepted without a new spend, up to
-//   `MAX_ENVELOPES_PER_SPEND_UNIT` (matches client `maxChunks` = 256).
+//   envelope redeems a token we mark
+//   `pp:unit:{sha256(spend_id || "|" || recipient_user_id)}` paid; later
+//   envelopes with the same spend_id **and** same recipient are accepted
+//   without a new spend, up to `MAX_ENVELOPES_PER_SPEND_UNIT` (matches client
+//   `maxChunks` = 256). Binding the unit to the recipient is required: spend_id
+//   is client-chosen, so without the recipient a single token could cover up to
+//   256 envelopes to 256 different users. See construct-docs
+//   `backend/TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC.md`.
 //
 // Enforcement (off/warn/enforce) is applied by the caller in `envelope.rs`;
 // this module only reports what happened.
@@ -95,8 +100,10 @@ impl TokenRedeemResult {
 /// Redeem (or cover) a sealed send's Privacy Pass obligation.
 ///
 /// * `token_spend_id` — optional shared id for a multi-envelope logical message.
-///   When a prior envelope already paid for this id, returns [`TokenRedeemResult::UnitCovered`]
-///   without consuming another token.
+///   When a prior envelope already paid for this id **to the same recipient**,
+///   returns [`TokenRedeemResult::UnitCovered`] without consuming another token.
+/// * `recipient_user_id` — routing address of this envelope; bound into the unit
+///   key so a client-chosen `spend_id` cannot cover envelopes to other users.
 /// * Empty spend id → legacy per-envelope redemption.
 pub async fn redeem_token_checked(
     conn: &mut redis::aio::ConnectionManager,
@@ -105,10 +112,20 @@ pub async fn redeem_token_checked(
     token_nonce: &[u8],
     token_bytes: &[u8],
     token_spend_id: &[u8],
+    recipient_user_id: &str,
 ) -> TokenRedeemResult {
     match (token_issuer_key, server_secret) {
         (Some(k), Some(secret)) => {
-            redeem_for_sealed_send(conn, k, secret, token_nonce, token_bytes, token_spend_id).await
+            redeem_for_sealed_send(
+                conn,
+                k,
+                secret,
+                token_nonce,
+                token_bytes,
+                token_spend_id,
+                recipient_user_id,
+            )
+            .await
         }
         _ => TokenRedeemResult::NotConfigured,
     }
@@ -121,6 +138,7 @@ async fn redeem_for_sealed_send(
     token_nonce: &[u8],
     token_bytes: &[u8],
     token_spend_id: &[u8],
+    recipient_user_id: &str,
 ) -> TokenRedeemResult {
     let spend_id = match normalize_spend_id(token_spend_id) {
         Ok(id) => id,
@@ -129,7 +147,7 @@ async fn redeem_for_sealed_send(
 
     // Follow-up chunks of a paid logical message: no new token required.
     if let Some(id) = spend_id {
-        match try_cover_with_paid_unit(conn, id).await {
+        match try_cover_with_paid_unit(conn, id, recipient_user_id).await {
             UnitLookup::Covered => return TokenRedeemResult::UnitCovered,
             UnitLookup::Exhausted => return TokenRedeemResult::UnitExhausted,
             UnitLookup::NeedToken => {}
@@ -147,10 +165,10 @@ async fn redeem_for_sealed_send(
     .await;
 
     // First envelope of a multi-chunk set: after a successful spend, open the unit
-    // so remaining chunks with the same spend_id are covered.
+    // so remaining chunks with the same (spend_id, recipient) are covered.
     if result == TokenRedeemResult::Ok
         && let Some(id) = spend_id
-        && let Err(()) = open_spend_unit(conn, id).await
+        && let Err(()) = open_spend_unit(conn, id, recipient_user_id).await
     {
         // Redis failed after the token was already spent — deliver anyway
         // (fail-open for the unit bookkeeping; next chunks may need tokens).
@@ -177,16 +195,30 @@ fn normalize_spend_id(raw: &[u8]) -> Result<Option<&[u8]>, ()> {
     Ok(Some(raw))
 }
 
-fn unit_key(spend_id: &[u8]) -> String {
-    format!("pp:unit:{}", hex::encode(Sha256::digest(spend_id)))
+/// Redis key for a paid logical-message unit.
+///
+/// Hashes `spend_id || "|" || recipient_user_id` so:
+/// - the key is fixed-length regardless of id format, and
+/// - the domain separator prevents `(spend_id="…a", user="b…")` colliding with
+///   `(spend_id="…ab", user="…")`.
+///
+/// Recipient binding is the anti-abuse property: without it a client-chosen
+/// `spend_id` lets one token cover envelopes to many different users.
+fn unit_key(spend_id: &[u8], recipient_user_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(spend_id);
+    hasher.update(b"|");
+    hasher.update(recipient_user_id.as_bytes());
+    format!("pp:unit:{}", hex::encode(hasher.finalize()))
 }
 
-/// If `pp:unit:{id}` exists and count < max, INCR and return Covered.
+/// If `pp:unit:{h(spend_id|recipient)}` exists and count < max, INCR and return Covered.
 async fn try_cover_with_paid_unit(
     conn: &mut redis::aio::ConnectionManager,
     spend_id: &[u8],
+    recipient_user_id: &str,
 ) -> UnitLookup {
-    let key = unit_key(spend_id);
+    let key = unit_key(spend_id, recipient_user_id);
     // Atomic: only INCR when the key exists and is below the cap.
     // Returns: 1 covered, 0 need token, -1 exhausted.
     let script = redis::Script::new(
@@ -223,8 +255,9 @@ async fn try_cover_with_paid_unit(
 async fn open_spend_unit(
     conn: &mut redis::aio::ConnectionManager,
     spend_id: &[u8],
+    recipient_user_id: &str,
 ) -> Result<(), ()> {
-    let key = unit_key(spend_id);
+    let key = unit_key(spend_id, recipient_user_id);
     // SET NX so a concurrent first-envelope race doesn't reset the counter.
     // If the key already exists, INCR (another paying envelope finished first).
     let script = redis::Script::new(
@@ -386,12 +419,51 @@ mod tests {
         assert!(!TokenRedeemResult::UnitExhausted.is_accept());
     }
 
+    const RECIPIENT_A: &str = "user-a-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const RECIPIENT_B: &str = "user-b-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
     #[test]
     fn normalize_spend_id_rules() {
         assert_eq!(normalize_spend_id(&[]), Ok(None));
         let id = random_bytes32();
         assert_eq!(normalize_spend_id(&id), Ok(Some(id.as_slice())));
         assert!(normalize_spend_id(&[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn unit_key_binds_recipient_and_uses_domain_separator() {
+        let spend = [0xABu8; 32];
+        let k_a = unit_key(&spend, RECIPIENT_A);
+        let k_b = unit_key(&spend, RECIPIENT_B);
+        assert_ne!(
+            k_a, k_b,
+            "same spend_id to different recipients must differ"
+        );
+        assert!(k_a.starts_with("pp:unit:"));
+        assert_eq!(k_a.len(), "pp:unit:".len() + 64);
+
+        // Domain separator: (spend||"|")||recipient must not collide with
+        // alternate concatenations that omit the separator.
+        let mut spend_with_suffix = spend.to_vec();
+        spend_with_suffix.push(b'|');
+        spend_with_suffix.extend_from_slice(b"x");
+        let alt = unit_key(&spend_with_suffix, &RECIPIENT_A[1..]);
+        // Not a formal collision proof, but different inputs must hash differently
+        // when recipient prefixes differ via the separator.
+        assert_ne!(unit_key(&spend, RECIPIENT_A), alt);
+    }
+
+    async fn try_redis() -> Option<redis::aio::ConnectionManager> {
+        let redis_client =
+            redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
+        redis::aio::ConnectionManager::new(redis_client).await.ok()
+    }
+
+    fn issue_sealed(issuer: &[u8; 32], server_secret: &X25519StaticSecret) -> ([u8; 32], Vec<u8>) {
+        let token_nonce = random_bytes32();
+        let token = issue_client_token(issuer, &token_nonce);
+        let sealed = seal_token_for_server(&token, server_secret);
+        (token_nonce, sealed)
     }
 
     #[tokio::test]
@@ -416,9 +488,7 @@ mod tests {
             "issued token must verify on the redemption path before Redis double-spend logic"
         );
 
-        let redis_client =
-            redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
-        let Ok(mut conn) = redis::aio::ConnectionManager::new(redis_client).await else {
+        let Some(mut conn) = try_redis().await else {
             eprintln!(
                 "skipping Redis-backed double-spend portion: redis://127.0.0.1:6379 unavailable"
             );
@@ -439,6 +509,7 @@ mod tests {
             &token_nonce,
             &sealed_token,
             &[],
+            RECIPIENT_A,
         )
         .await;
         assert_eq!(first, TokenRedeemResult::Ok);
@@ -450,6 +521,7 @@ mod tests {
             &token_nonce,
             &sealed_token,
             &[],
+            RECIPIENT_A,
         )
         .await;
         assert_eq!(second, TokenRedeemResult::DoubleSpent);
@@ -461,25 +533,22 @@ mod tests {
             .expect("test cleanup must succeed");
     }
 
-    /// One token + shared spend_id covers subsequent token-less wire envelopes.
+    /// One token + shared spend_id covers subsequent token-less wire envelopes
+    /// **to the same recipient**.
     #[tokio::test]
     async fn spend_unit_covers_followup_chunks_without_new_token() {
         let token_issuer_key = random_bytes32();
         let server_secret = X25519StaticSecret::from(random_bytes32());
-        let token_nonce = random_bytes32();
-        let token = issue_client_token(&token_issuer_key, &token_nonce);
-        let sealed_token = seal_token_for_server(&token, &server_secret);
+        let (token_nonce, sealed_token) = issue_sealed(&token_issuer_key, &server_secret);
         let spend_id = random_bytes32();
 
-        let redis_client =
-            redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
-        let Ok(mut conn) = redis::aio::ConnectionManager::new(redis_client).await else {
+        let Some(mut conn) = try_redis().await else {
             eprintln!("skipping spend-unit test: redis unavailable");
             return;
         };
 
         let spent_key = format!("spent:{}", hex::encode(Sha256::digest(token_nonce)));
-        let unit = unit_key(&spend_id);
+        let unit = unit_key(&spend_id, RECIPIENT_A);
         let _: () = redis::cmd("DEL")
             .arg(&spent_key)
             .arg(&unit)
@@ -495,11 +564,12 @@ mod tests {
             &token_nonce,
             &sealed_token,
             &spend_id,
+            RECIPIENT_A,
         )
         .await;
         assert_eq!(first, TokenRedeemResult::Ok);
 
-        // Chunks 2..N: no token, same spend_id → covered.
+        // Chunks 2..N: no token, same spend_id + recipient → covered.
         for _ in 0..5 {
             let follow = redeem_token_checked(
                 &mut conn,
@@ -508,6 +578,7 @@ mod tests {
                 &[],
                 &[],
                 &spend_id,
+                RECIPIENT_A,
             )
             .await;
             assert_eq!(follow, TokenRedeemResult::UnitCovered);
@@ -521,6 +592,7 @@ mod tests {
             &[],
             &[],
             &[],
+            RECIPIENT_A,
         )
         .await;
         assert_eq!(no_unit, TokenRedeemResult::MissingToken);
@@ -533,24 +605,117 @@ mod tests {
             .expect("cleanup");
     }
 
+    /// The fix: spend_id paid for recipient A does not cover recipient B.
+    #[tokio::test]
+    async fn spend_unit_does_not_cover_different_recipient() {
+        let token_issuer_key = random_bytes32();
+        let server_secret = X25519StaticSecret::from(random_bytes32());
+        let (token_nonce, sealed_token) = issue_sealed(&token_issuer_key, &server_secret);
+        let spend_id = random_bytes32();
+
+        let Some(mut conn) = try_redis().await else {
+            eprintln!("skipping recipient-binding test: redis unavailable");
+            return;
+        };
+
+        let spent_key = format!("spent:{}", hex::encode(Sha256::digest(token_nonce)));
+        let unit_a = unit_key(&spend_id, RECIPIENT_A);
+        let unit_b = unit_key(&spend_id, RECIPIENT_B);
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_key)
+            .arg(&unit_a)
+            .arg(&unit_b)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &token_nonce,
+                &sealed_token,
+                &spend_id,
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+
+        // Same spend_id, different recipient, no token → MissingToken (unit not paid for B).
+        let cross = redeem_token_checked(
+            &mut conn,
+            Some(&token_issuer_key),
+            Some(&server_secret),
+            &[],
+            &[],
+            &spend_id,
+            RECIPIENT_B,
+        )
+        .await;
+        assert_eq!(cross, TokenRedeemResult::MissingToken);
+
+        // B can still open its own unit with its own token.
+        let (nonce_b, sealed_b) = issue_sealed(&token_issuer_key, &server_secret);
+        let spent_b = format!("spent:{}", hex::encode(Sha256::digest(nonce_b)));
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_b)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &nonce_b,
+                &sealed_b,
+                &spend_id,
+                RECIPIENT_B,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &[],
+                &[],
+                &spend_id,
+                RECIPIENT_B,
+            )
+            .await,
+            TokenRedeemResult::UnitCovered
+        );
+
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_key)
+            .arg(&spent_b)
+            .arg(&unit_a)
+            .arg(&unit_b)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+    }
+
+    /// Cap holds per (spend_id, recipient); envelope 257 → UnitExhausted.
     #[tokio::test]
     async fn spend_unit_exhausted_at_max_envelopes() {
         let token_issuer_key = random_bytes32();
         let server_secret = X25519StaticSecret::from(random_bytes32());
-        let token_nonce = random_bytes32();
-        let token = issue_client_token(&token_issuer_key, &token_nonce);
-        let sealed_token = seal_token_for_server(&token, &server_secret);
+        let (token_nonce, sealed_token) = issue_sealed(&token_issuer_key, &server_secret);
         let spend_id = random_bytes32();
 
-        let redis_client =
-            redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
-        let Ok(mut conn) = redis::aio::ConnectionManager::new(redis_client).await else {
+        let Some(mut conn) = try_redis().await else {
             eprintln!("skipping spend-unit exhaust test: redis unavailable");
             return;
         };
 
         let spent_key = format!("spent:{}", hex::encode(Sha256::digest(token_nonce)));
-        let unit = unit_key(&spend_id);
+        let unit = unit_key(&spend_id, RECIPIENT_A);
         let _: () = redis::cmd("DEL")
             .arg(&spent_key)
             .arg(&unit)
@@ -567,6 +732,7 @@ mod tests {
                 &token_nonce,
                 &sealed_token,
                 &spend_id,
+                RECIPIENT_A,
             )
             .await,
             TokenRedeemResult::Ok
@@ -587,6 +753,7 @@ mod tests {
             &[],
             &[],
             &spend_id,
+            RECIPIENT_A,
         )
         .await;
         assert_eq!(exhausted, TokenRedeemResult::UnitExhausted);
@@ -594,6 +761,180 @@ mod tests {
         let _: () = redis::cmd("DEL")
             .arg(&spent_key)
             .arg(&unit)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+    }
+
+    /// Cap is not shared across recipients: 256 to A then 256 to B each need
+    /// their own paying first envelope and succeed independently.
+    #[tokio::test]
+    async fn spend_unit_caps_are_independent_per_recipient() {
+        let token_issuer_key = random_bytes32();
+        let server_secret = X25519StaticSecret::from(random_bytes32());
+        let spend_id = random_bytes32();
+        let (nonce_a, sealed_a) = issue_sealed(&token_issuer_key, &server_secret);
+        let (nonce_b, sealed_b) = issue_sealed(&token_issuer_key, &server_secret);
+
+        let Some(mut conn) = try_redis().await else {
+            eprintln!("skipping independent-cap test: redis unavailable");
+            return;
+        };
+
+        let spent_a = format!("spent:{}", hex::encode(Sha256::digest(nonce_a)));
+        let spent_b = format!("spent:{}", hex::encode(Sha256::digest(nonce_b)));
+        let unit_a = unit_key(&spend_id, RECIPIENT_A);
+        let unit_b = unit_key(&spend_id, RECIPIENT_B);
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_a)
+            .arg(&spent_b)
+            .arg(&unit_a)
+            .arg(&unit_b)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &nonce_a,
+                &sealed_a,
+                &spend_id,
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+        // Force A to the cap.
+        let _: () = redis::cmd("SET")
+            .arg(&unit_a)
+            .arg(MAX_ENVELOPES_PER_SPEND_UNIT)
+            .arg("EX")
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .expect("seed max A");
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &[],
+                &[],
+                &spend_id,
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::UnitExhausted
+        );
+
+        // B is a separate unit: paying envelope + follow-up still works.
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &nonce_b,
+                &sealed_b,
+                &spend_id,
+                RECIPIENT_B,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &[],
+                &[],
+                &spend_id,
+                RECIPIENT_B,
+            )
+            .await,
+            TokenRedeemResult::UnitCovered
+        );
+
+        let _: () = redis::cmd("DEL")
+            .arg(&spent_a)
+            .arg(&spent_b)
+            .arg(&unit_a)
+            .arg(&unit_b)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+    }
+
+    /// Empty spend_id: legacy per-envelope redemption (no unit bookkeeping).
+    #[tokio::test]
+    async fn empty_spend_id_is_per_envelope() {
+        let token_issuer_key = random_bytes32();
+        let server_secret = X25519StaticSecret::from(random_bytes32());
+        let (nonce1, sealed1) = issue_sealed(&token_issuer_key, &server_secret);
+        let (nonce2, sealed2) = issue_sealed(&token_issuer_key, &server_secret);
+
+        let Some(mut conn) = try_redis().await else {
+            eprintln!("skipping empty-spend_id test: redis unavailable");
+            return;
+        };
+
+        let spent1 = format!("spent:{}", hex::encode(Sha256::digest(nonce1)));
+        let spent2 = format!("spent:{}", hex::encode(Sha256::digest(nonce2)));
+        let _: () = redis::cmd("DEL")
+            .arg(&spent1)
+            .arg(&spent2)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &nonce1,
+                &sealed1,
+                &[],
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+        // Second envelope without spend_id and without a token → missing.
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &[],
+                &[],
+                &[],
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::MissingToken
+        );
+        // Second envelope with its own token still works.
+        assert_eq!(
+            redeem_token_checked(
+                &mut conn,
+                Some(&token_issuer_key),
+                Some(&server_secret),
+                &nonce2,
+                &sealed2,
+                &[],
+                RECIPIENT_A,
+            )
+            .await,
+            TokenRedeemResult::Ok
+        );
+
+        let _: () = redis::cmd("DEL")
+            .arg(&spent1)
+            .arg(&spent2)
             .query_async(&mut conn)
             .await
             .expect("cleanup");
