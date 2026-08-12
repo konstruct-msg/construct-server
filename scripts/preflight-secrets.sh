@@ -120,6 +120,24 @@ if [[ -z "$masque" ]]; then
   warn "MASQUE_AUTH_TOKEN absent — masque-service will fail-boot in production (open relay)."
 fi
 
+# --- alerting path -----------------------------------------------------------
+# Alert rules existed for months and never evaluated, because prometheus.yml had
+# no rule_files and there was no Alertmanager. Now that both exist, the next way
+# to end up with silent alerting is a receiver nobody finished wiring — so the
+# half-configured state is an error rather than a surprise at 03:00.
+AM_DIR="$(dirname "$0")/../ops/alertmanager"
+
+if [[ -f "$AM_DIR/alertmanager.yml" ]]; then
+  if grep -qE '^[[:space:]]*chat_id:[[:space:]]*0[[:space:]]*$' "$AM_DIR/alertmanager.yml"; then
+    err "Alertmanager chat_id is still 0 — alerts will fire and reach nobody. Set it in ops/alertmanager/alertmanager.yml."
+  fi
+  if [[ ! -s "$AM_DIR/telegram_token" ]]; then
+    err "ops/alertmanager/telegram_token is missing or empty — Alertmanager cannot authenticate (see telegram_token.example)."
+  elif grep -q "PUT_YOUR_BOT_TOKEN_HERE" "$AM_DIR/telegram_token" 2>/dev/null; then
+    err "ops/alertmanager/telegram_token still holds the placeholder."
+  fi
+fi
+
 # --- consistency reminders (cannot verify across hosts from one file) --------
 echo
 echo "Reminders (not checkable from a single file):"

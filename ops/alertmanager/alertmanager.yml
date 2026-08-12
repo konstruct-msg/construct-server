@@ -1,0 +1,75 @@
+# =============================================================================
+# Alertmanager — the receiver the alert rules never had
+# =============================================================================
+# ops/alerts.yml was written carefully and, until 2026-08-12, evaluated never:
+# prometheus.yml had no `rule_files`, and there was no Alertmanager to route to
+# even if it had. A threshold nobody is told about is a comment with YAML syntax.
+#
+# Telegram is the default because it needs no SMTP relay and reaches a phone,
+# which is where an operator actually is at 03:00. Swap `telegram_configs` for
+# `email_configs` or `webhook_configs` if you would rather; the routing above it
+# does not change.
+#
+# Setup (once):
+#   1. Create a bot via @BotFather, keep the token.
+#   2. Send it a message, then read your chat id from
+#      https://api.telegram.org/bot<TOKEN>/getUpdates
+#   3. echo -n '<TOKEN>' > ops/alertmanager/telegram_token   (chmod 600, gitignored)
+#   4. Replace `chat_id: 0` below with the number — it is not a secret.
+#   5. ./scripts/preflight-secrets.sh   (it fails while the token or chat id is unset)
+# =============================================================================
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # One notification per alertname+severity rather than per firing instance, so a
+  # host-wide problem is one message and not twelve.
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  # Long, deliberately. These alerts are capacity and wiring signals, not pages:
+  # re-sending every few minutes is how people learn to ignore a channel.
+  repeat_interval: 12h
+  receiver: telegram
+
+  routes:
+    # Critical means something is failing now — Redis refusing writes stops
+    # message delivery outright, because maxmemory-policy is noeviction.
+    - matchers:
+        - severity = "critical"
+      receiver: telegram
+      group_wait: 0s
+      repeat_interval: 1h
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/telegram_token
+        # 0 is not a real chat and never will be: preflight-secrets.sh refuses
+        # to pass while it is still 0, so an unconfigured Alertmanager cannot be
+        # mistaken for a working one. Must be an integer — amtool rejects a string.
+        chat_id: 0
+        parse_mode: HTML
+        send_resolved: true
+        message: |
+          <b>{{ .Status | toUpper }}</b> {{ .CommonLabels.alertname }}
+          {{ range .Alerts }}{{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+inhibit_rules:
+  # A critical disk alert implies the warning; do not send both.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "instance"]
+
+  # If the target is down, every rule that reads its metrics is stale rather than
+  # healthy. Suppress the derived noise and report the cause.
+  - source_matchers:
+      - alertname = "TargetDown"
+    target_matchers:
+      - severity = "warning"
+    equal: ["job"]

@@ -65,3 +65,6 @@ fuzz/
 # Relay manifest private signing key — NEVER commit
 tools/relay_signing_key.hex
 *relay_signing_key*
+
+# Alertmanager bot token (never commit)
+ops/alertmanager/telegram_token
