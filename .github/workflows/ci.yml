@@ -389,6 +389,17 @@ jobs:
             echo "=== Verifying services ==="
             docker compose -f ops/docker-compose.prod.yml --env-file .env ps
 
+            # Every deploy now pulls a UNIQUE tag (version+sha) — which is what
+            # makes "what is running?" answerable, and also means images stop
+            # overwriting each other and start accumulating one per deploy. By
+            # 2026-08-13 there were 124 construct-server images at ~300MB and the
+            # disk was 83% full; the DiskFillingUp alert would have read that as
+            # media growth and pointed at S3, which would have been the wrong
+            # move for the right number. A week of tags is kept for rollback.
+            docker image prune -af --filter "until=168h" 2>&1 | tail -1 || true
+            docker builder prune -af 2>&1 | tail -1 || true
+            df -h / | tail -1
+
             echo "✅ Deploy complete: ghcr.io/konstruct-msg/construct-server:$VERSION"
 
       - name: Notify deploy result
