@@ -116,9 +116,9 @@ panel(R2, "Ошибки сигналинга", [("sum by (code) (rate(construct_
 R2b = "КЛЮЧИ И ПОДКЛЮЧЕНИЯ"
 
 panel(R2b, "Устройства без одноразовых предключей",
-      [("construct_otpk_devices_exhausted", "исчерпано"),
-       ("construct_otpk_devices_low", "меньше 10"),
-       ("construct_otpk_devices_total", "всего активных")],
+      [("max(construct_otpk_devices_exhausted)", "исчерпано"),
+       ("max(construct_otpk_devices_low)", "меньше 10"),
+       ("max(construct_otpk_devices_total)", "всего активных")],
       idle=True, w=12,
       desc="Устройство с нулём OTPK не ломается заметно: собеседник получает "
            "SPK-only bundle, сессия устанавливается, но без одноразового ключа — "

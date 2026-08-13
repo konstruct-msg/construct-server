@@ -1408,7 +1408,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "construct_otpk_devices_exhausted",
+          "expr": "max(construct_otpk_devices_exhausted)",
           "legendFormat": "исчерпано",
           "refId": "A",
           "instant": false,
@@ -1419,7 +1419,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "construct_otpk_devices_low",
+          "expr": "max(construct_otpk_devices_low)",
           "legendFormat": "меньше 10",
           "refId": "B",
           "instant": false,
@@ -1430,7 +1430,7 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "construct_otpk_devices_total",
+          "expr": "max(construct_otpk_devices_total)",
           "legendFormat": "всего активных",
           "refId": "C",
           "instant": false,

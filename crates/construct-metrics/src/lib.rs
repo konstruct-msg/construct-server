@@ -514,6 +514,16 @@ pub fn record_auth_security_fail_open(control: &'static str) {
 /// ever increment — a worse lie than the blank. `*Vec` metrics register the
 /// family but emit no sample until a label set exists, which is correct: we do
 /// not know the labels in advance and inventing one would fabricate a series.
+///
+/// Nor is every real metric listed. This function runs in all seven services, so
+/// forcing one here makes all seven report it. That is right for a metric about
+/// the process ("this service has 0 active streams" is true) and wrong for one
+/// about global state: `construct_otpk_devices_exhausted` is computed by
+/// key-service from the database, and media-service reporting 0 is not a low
+/// reading, it is a service answering a question it was never asked. Six flat
+/// zeros beside one real line is the same false reassurance as a blank panel,
+/// only harder to notice. The fleet gauges are therefore left to appear when
+/// key-service's inventory poll first sets them, within a minute of boot.
 pub fn init_registry() {
     Lazy::force(&MESSAGES_SENT_TOTAL);
     Lazy::force(&MESSAGE_DELIVERY_TIME);
@@ -528,9 +538,6 @@ pub fn init_registry() {
     Lazy::force(&STEALTH_SEALED_LOCAL_TOTAL);
     Lazy::force(&OTPK_UPLOADED_TOTAL);
     Lazy::force(&OTPK_CONSUMED_TOTAL);
-    Lazy::force(&OTPK_DEVICES_TOTAL);
-    Lazy::force(&OTPK_DEVICES_LOW);
-    Lazy::force(&OTPK_DEVICES_EXHAUSTED);
     Lazy::force(&GRPC_STREAMS_ACTIVE);
     Lazy::force(&GRPC_STREAMS_OPENED_TOTAL);
 
@@ -622,6 +629,11 @@ mod tests {
             // to be declared. Named here so that reintroducing one without a
             // producer fails loudly instead of reappearing on a dashboard.
             "construct_otpk_remaining",
+            // Real metrics, but only key-service can answer them — see the note
+            // on init_registry. Present here because a service that does not
+            // compute a fleet number must not publish a zero for it.
+            "construct_otpk_devices_exhausted",
+            "construct_otpk_devices_total",
             "construct_session_heal_attempts_total",
             "construct_turn_active_allocations",
             "construct_kt_proof_failures_total",
@@ -629,8 +641,10 @@ mod tests {
         ] {
             assert!(
                 !text.contains(orphan),
-                "{orphan} has no producer in the workspace; registering it puts a \
-                 fake zero on the dashboard. Either instrument it or leave it out."
+                "{orphan} must not be registered by init_registry: it either has \
+                 no producer at all, or has one in a single service — and this \
+                 function runs in all seven. Both cases put a zero on the \
+                 dashboard that nothing stands behind."
             );
         }
     }
