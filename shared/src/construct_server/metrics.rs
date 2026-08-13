@@ -19,10 +19,20 @@ pub async fn metrics_handler() -> axum::response::Response<String> {
     // Auto-register health on first scrape using SERVICE_NAME env var.
     static HEALTH_REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     HEALTH_REGISTERED.get_or_init(|| {
-        if let Ok(name) = std::env::var("SERVICE_NAME") {
-            let label: &'static str = Box::leak(name.into_boxed_str());
-            GATEWAY_SERVICE_HEALTH.with_label_values(&[label]).set(1.0);
-        }
+        let name = std::env::var("SERVICE_NAME").unwrap_or_else(|_| "unknown".to_string());
+        let label: &'static str = Box::leak(name.into_boxed_str());
+        GATEWAY_SERVICE_HEALTH.with_label_values(&[label]).set(1.0);
+
+        // Piggy-backs on the same first-scrape hook so that adding build
+        // identity did not require editing eight service mains — each of which
+        // would have been a place to forget it later.
+        BUILD_INFO
+            .with_label_values(&[
+                label,
+                crate::build_info::VERSION,
+                crate::build_info::GIT_SHA_SHORT,
+            ])
+            .set(1.0);
     });
     match gather_metrics() {
         Ok(body) => axum::response::Response::builder()
