@@ -192,6 +192,18 @@ def rules_and_metrics() -> list[tuple[str, str, set[str]]]:
 # ── live ────────────────────────────────────────────────────────────────────
 
 
+def declared_in_source(metric: str) -> bool:
+    """Is this metric name written anywhere in the Rust workspace?
+
+    Exporters (node_*, pg_*, redis_*) are not, and must therefore be scraped to
+    exist at all — for them, absent series is always a finding.
+    """
+    import subprocess
+    r = subprocess.run(["git", "grep", "-q", "-F", metric, "--", "*.rs"],
+                       cwd=ROOT, capture_output=True)
+    return r.returncode == 0
+
+
 def api(base: str, path: str, **params) -> dict:
     url = f"{base}{path}"
     if params:
@@ -228,10 +240,29 @@ def check_live(base: str) -> bool:
     for group, alert, metrics in rules_and_metrics():
         for metric in sorted(metrics):
             res = api(base, "/api/v1/query", query=f"count({metric})")
-            if not res["data"]["result"]:
-                ok = False
-                fail(f"{group}/{alert} reads `{metric}`, which has no series — "
-                     f"the rule cannot fire. Is its exporter scraped?")
+            if res["data"]["result"]:
+                continue
+            # "No series" has two very different causes and only one is a defect.
+            # A labelled counter is registered on its FIRST increment, so a
+            # counter for something that has never happened is legitimately
+            # absent — construct_msg_abuse_fail_open_total means the sentinel
+            # limiter has never degraded, which is the outcome we want. Failing
+            # on that would train everyone to ignore this output.
+            #
+            # The distinguishing question is whether anything can ever produce
+            # it. If the name appears in the source, the wiring exists and we are
+            # waiting for the event; if it appears nowhere, the rule is reading a
+            # metric that does not exist — a typo, a rename, or an exporter that
+            # was never scraped, which is exactly the class this script is for.
+            if declared_in_source(metric):
+                print(f"  note: {group}/{alert} reads `{metric}` — declared in the "
+                      f"source but never yet incremented. Expected while the "
+                      f"condition it counts has not occurred.")
+                continue
+            ok = False
+            fail(f"{group}/{alert} reads `{metric}`, which has no series and "
+                 f"appears in no source file — the rule cannot fire. Is its "
+                 f"exporter scraped, or is the name wrong?")
 
     ams = api(base, "/api/v1/alertmanagers")["data"]["activeAlertmanagers"]
     if not ams:
