@@ -284,3 +284,15 @@ AGPL-3.0-only — see [LICENSE](LICENSE). Network use = source-disclosure obliga
 **Konstruct™** / **Конструкт™** and the logo are trademarks of Maxim Eliseyev. The open-source
 license on this code does **not** grant trademark rights — see [TRADEMARK.md](TRADEMARK.md).
 Forks that distribute a modified version must rebrand.
+
+## После клонирования
+
+```bash
+git config core.hooksPath .githooks
+```
+
+`hooksPath` — локальная настройка и не переносится с клоном, поэтому строку надо повторить
+в каждой копии. Хук прогоняет `cargo fmt --check`, `scripts/check-observability.py` и
+clippy — то же, что CI решает первым, до сборки образа. 2026-08-13 три коммита подряд
+выглядели выложенными, не будучи выложенными: Format Check падал на одной строке и
+останавливал деплой.
