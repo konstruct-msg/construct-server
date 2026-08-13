@@ -217,7 +217,13 @@ pub static ACTIVE_CALLS: Lazy<IntGauge> = Lazy::new(|| {
 // cardinality besides. These three answer the operational question ("can devices
 // still start new sessions?") without naming anyone.
 //
-// The first reading, 2026-08-13: 123 active devices, 76 of them at zero.
+// The first reading, 2026-08-13: 123 active devices, 76 of them at zero — but
+// read that with its denominator. `devices` has no last-seen column, so every
+// device ever registered and not deactivated is counted forever. By month of
+// registration: March 35 of 35 exhausted, April 26 of 29, June 3 of 21, August
+// 1 of 5. The 76 is mostly abandoned test registrations from before the fleet
+// replenished properly, not live devices failing now. The slope is the signal;
+// the absolute number will stay pessimistic until there is a last-seen column.
 
 /// Active devices known to the server, denominator for the two below.
 pub static OTPK_DEVICES_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
