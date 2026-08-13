@@ -90,7 +90,7 @@ services:
   #
   # Growth is bounded on three sides, so `noeviction` cannot wedge on normal use:
   # XADD MAXLEN ~10000 per stream, ACK-driven XTRIM, and a 30-day sweep
-  # (messaging-service/src/main.rs). Alerts in ops/alerts.yml are the safety net —
+  # (messaging-service/src/main.rs). Alerts in ops/prometheus/alerts.yml are the safety net —
   # any eviction or sustained memory pressure is a signal, not routine.
   redis:
     image: redis:7-alpine
@@ -444,8 +444,14 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      # The DIRECTORY, not the two files. A single-file bind mount binds an
+      # inode, and `git reset --hard` (what the deploy does) replaces the file
+      # rather than rewriting it — so the container went on serving the old
+      # inode, invisibly, forever. On 2026-08-13 the host file and the file
+      # inside this container had different sha256 sums and Prometheus had just
+      # logged "Completed loading of configuration file". Mounting the directory
+      # makes a replaced file visible, which is what makes SIGHUP mean anything.
+      - ./prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
     networks:
       - internal

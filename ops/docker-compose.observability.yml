@@ -39,9 +39,12 @@ services:
     ports:
       - "127.0.0.1:9093:9093"
     volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      # Bot token as a file, never in the config or the environment.
-      - ./alertmanager/telegram_token:/etc/alertmanager/telegram_token:ro
+      # The directory, for the same reason as Prometheus above: a single-file
+      # bind mount pins an inode and the deploy's `git reset --hard` replaces
+      # files. It also means the bot token — which lives here and is gitignored —
+      # is simply absent until created, instead of Docker inventing an empty
+      # DIRECTORY at that path and Alertmanager failing with "is a directory".
+      - ./alertmanager:/etc/alertmanager:ro
       - alertmanager-data:/alertmanager
     networks:
       - internal
