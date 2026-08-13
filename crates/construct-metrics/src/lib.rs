@@ -94,6 +94,24 @@ pub static GATEWAY_CIRCUIT_BREAKER_STATE: Lazy<GaugeVec> = Lazy::new(|| {
 });
 
 /// Service health status (1=healthy, 0=unhealthy)
+/// Which build is running, as labels on a constant 1.
+///
+/// The standard Prometheus `*_build_info` pattern: the value carries no
+/// information, the labels do. It exists because the workspace semver could not
+/// answer "what is deployed?" — it only moves on a manual bump, so many commits
+/// share one number. `count(count by (commit) (construct_build_info)) > 1` then
+/// means a partial rollout: some containers on the old image, some on the new.
+pub static BUILD_INFO: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        opts!(
+            "construct_build_info",
+            "Build identity of the running binary (always 1; read the labels)"
+        ),
+        &["service", "version", "commit"]
+    )
+    .expect("Failed to register BUILD_INFO metric")
+});
+
 pub static GATEWAY_SERVICE_HEALTH: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         opts!(

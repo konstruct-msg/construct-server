@@ -432,6 +432,11 @@ async fn well_known_construct_server(
         "server": {
             "domain": domain,
             "version": env!("CARGO_PKG_VERSION"),
+            // The semver alone cannot answer "what is running?" — it only moves
+            // on a manual bump, so many commits share one number and one image
+            // tag. The commit can.
+            "commit": construct_server_shared::build_info::GIT_SHA_SHORT,
+            "build": construct_server_shared::build_info::full(),
         },
         "grpc_endpoint": format!("{}:443", domain),
         "signaling_endpoint": format!("{}:443", domain),

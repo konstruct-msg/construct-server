@@ -41,6 +41,14 @@ COPY masque-service ./masque-service
 # `--workspace` is required: cargo rejects `--exclude` without it. The root is a
 # virtual manifest with no `default-members`, so `--workspace` selects the same
 # set the bare `--bins` did — this only drops masque, nothing else changes.
+# The commit this image was built from, baked into every binary by
+# shared/build.rs. Declared immediately before the build so the layer cache is
+# only invalidated by the SHA changing — which it must, or the image would not
+# match the code. CI passes --build-arg GIT_SHA=${{ github.sha }}; a local
+# `docker build` without it falls back to `git rev-parse` inside build.rs.
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
+
 RUN cargo build --release --workspace --bins --exclude masque-service
 
 # Runtime stage

@@ -292,6 +292,8 @@ jobs:
       packages: write
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
+      # The tag the deploy actually pulls. Unique per commit, unlike VERSION.
+      image_tag: ${{ steps.version.outputs.IMAGE_TAG }}
     steps:
       - uses: actions/checkout@v4
 
@@ -299,8 +301,15 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-12)
+          # The semver alone is not a build identity: it only moves when someone
+          # runs bump-version.sh, so several commits share one tag and
+          # `docker pull ...:0.17.4` can return any of them. Deploys pull this
+          # instead — one commit, one immutable tag.
+          IMAGE_TAG="${VERSION}-${SHORT_SHA}"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version: $VERSION"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Building $IMAGE_TAG (semver $VERSION, commit ${GITHUB_SHA})"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -318,7 +327,10 @@ jobs:
           context: .
           file: ops/Dockerfile
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
+            ghcr.io/${{ github.repository_owner }}/construct-server:${{ steps.version.outputs.IMAGE_TAG }}
             ghcr.io/${{ github.repository_owner }}/construct-server:${{ steps.version.outputs.VERSION }}
             ghcr.io/${{ github.repository_owner }}/construct-server:latest
           cache-from: type=gha
@@ -336,7 +348,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
-          VERSION: ${{ needs.docker.outputs.version }}
+          VERSION: ${{ needs.docker.outputs.image_tag }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
