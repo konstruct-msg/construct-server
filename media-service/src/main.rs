@@ -263,6 +263,7 @@ impl MediaService for MediaGrpcService {
             "local",
             &storage_key,
             &computed_hash,
+            self.context.media_config.file_ttl_seconds as i64,
         )
         .await
         {

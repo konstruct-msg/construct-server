@@ -108,7 +108,20 @@ services:
     image: redis:7-alpine
     container_name: construct-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy noeviction
+    # `--appendonly yes` дописан 2026-08-13. Без него сохранялись только
+    # RDB-снимки со стандартными точками (3600s/1 изменение, 300s/100,
+    # 60s/10000), то есть жёсткое падение хоста теряло до часа записей —
+    # включая офлайн-очереди. Это ровно то, от чего защищает noeviction выше:
+    # политика не даёт молча вытеснить недоставленное, а слой сохранения терял
+    # то же самое другим путём. everysec — потеря не более секунды, стоимость
+    # ниже, чем у always.
+    #
+    # ВКЛЮЧАТЬ ТОЛЬКО В ТАКОМ ПОРЯДКЕ: сперва `CONFIG SET appendonly yes` на
+    # живом инстансе (форк пишет AOF из памяти), убедиться, что
+    # /data/appendonlydir непуст, и лишь потом эта строка. Рестарт с
+    # `appendonly yes` и пустым appendonlydir поднимает Redis с ПУСТЫМ
+    # датасетом — AOF старше RDB по приоритету загрузки.
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec
     volumes:
       - redis-data:/data
     healthcheck:
