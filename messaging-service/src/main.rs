@@ -339,7 +339,10 @@ async fn main() -> Result<()> {
                     .await
                 {
                     Ok(r) if r.rows_affected() > 0 => {
-                        tracing::info!(deleted = r.rows_affected(), "Swept expired delivery_pending")
+                        tracing::info!(
+                            deleted = r.rows_affected(),
+                            "Swept expired delivery_pending"
+                        )
                     }
                     Ok(_) => {}
                     Err(e) => {
