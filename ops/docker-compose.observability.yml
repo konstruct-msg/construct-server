@@ -54,6 +54,14 @@ services:
     container_name: construct-grafana
     restart: unless-stopped
     environment:
+      # Applied when Grafana CREATES the admin user, and never again. The
+      # grafana-data volume here was created 2026-03-01 by an earlier attempt, so
+      # the fresh container came up with a five-month-old password and this
+      # variable was simply ignored — env said one thing, grafana.db held
+      # another, and the only symptom was a login that would not take.
+      # To change it on an existing volume:
+      #   docker exec construct-grafana grafana cli --homepath /usr/share/grafana \
+      #     admin reset-admin-password '<new>'
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
