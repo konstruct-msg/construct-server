@@ -70,6 +70,14 @@ def compose_mounts() -> dict[str, Path]:
     return mounts
 
 
+def is_mounted(path: Path, mounted: dict[str, Path]) -> bool:
+    """A file counts as mounted if it, or any directory above it, is a source."""
+    for p in [path, *path.parents]:
+        if str(p) in mounted:
+            return True
+    return False
+
+
 def check_no_orphan_configs() -> bool:
     """A config copy that nothing mounts is worse than no copy at all.
 
@@ -83,11 +91,35 @@ def check_no_orphan_configs() -> bool:
     for path in OPS.rglob("*.yml"):
         if path.name not in names:
             continue
-        if str(path.resolve()) not in mounted:
+        if not is_mounted(path.resolve(), mounted):
             ok = False
             fail(f"{path.relative_to(ROOT)} is mounted by no compose file — "
                  f"editing it changes nothing that runs. Delete it, or mount it.")
     return ok
+
+
+def check_file_mounts() -> None:
+    """Single-file bind mounts do not survive the deploy. Reported, not enforced.
+
+    `docker run -v ./x.yml:/etc/x.yml` binds an inode. The deploy runs
+    `git reset --hard`, which REPLACES files rather than rewriting them, so the
+    container keeps serving the content it started with — no error, no warning,
+    and `docker logs` even says the config was reloaded. Verified on 2026-08-13:
+    host and container disagreed on the sha256 of prometheus.yml minutes after a
+    successful SIGHUP reload.
+
+    Prometheus and Alertmanager now mount their directories. Caddy still mounts
+    a file, and restructuring the public TLS terminator is not something to do
+    inside an unrelated change — so this warns, loudly, rather than failing. Until
+    it is moved, a Caddyfile change needs `docker compose up -d --force-recreate
+    caddy` by hand; it does NOT take effect on deploy.
+    """
+    for host, compose in sorted(compose_mounts().items()):
+        p = Path(host)
+        if p.is_file():
+            print(f"  WARN {compose.name}: {p.relative_to(ROOT)} is a single-FILE "
+                  f"bind mount — `git reset --hard` on deploy will not reach the "
+                  f"container. Mount its directory, or force-recreate by hand.")
 
 
 def check_mount_sources_exist() -> bool:
@@ -143,7 +175,7 @@ def metrics_in(expr: str) -> set[str]:
 
 def rules_and_metrics() -> list[tuple[str, str, set[str]]]:
     """(group, alert, metrics) for every rule, without a YAML dependency."""
-    text = (OPS / "alerts.yml").read_text(encoding="utf-8")
+    text = (OPS / "prometheus/alerts.yml").read_text(encoding="utf-8")
     out: list[tuple[str, str, set[str]]] = []
     group = "?"
     for block in re.finditer(
@@ -187,7 +219,7 @@ def check_live(base: str) -> bool:
     declared = {alert for _, alert, _ in rules_and_metrics()}
     for alert in sorted(declared - loaded):
         ok = False
-        fail(f"rule {alert} is in ops/alerts.yml but not loaded by the running "
+        fail(f"rule {alert} is in ops/prometheus/alerts.yml but not loaded by the running "
              f"Prometheus — it is evaluating a different file.")
 
     # The point of the whole exercise: a rule whose metrics have no series is
@@ -222,12 +254,13 @@ def main() -> int:
     # first is how a two-line fix turns into two round trips.
     ok = check_no_orphan_configs()
     ok = check_mount_sources_exist() and ok
+    check_file_mounts()
 
     rules = rules_and_metrics()
     if not rules:
         # A self-test, because an extractor that silently finds nothing would
         # make every check below pass. Same trap the mutation harness fell into.
-        fail("parsed 0 rules out of ops/alerts.yml — the extractor is broken, "
+        fail("parsed 0 rules out of ops/prometheus/alerts.yml — the extractor is broken, "
              "not the config.")
         return 1
     print(f"  {len(rules)} alert rule(s) parsed, "

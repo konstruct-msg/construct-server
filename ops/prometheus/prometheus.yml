@@ -4,13 +4,16 @@
 # All services expose /metrics on their HTTP port (or METRICS_PORT where set).
 # Targets use Docker internal DNS hostnames (same network as Prometheus).
 #
-# THIS is the file docker-compose.prod.yml mounts (`./prometheus.yml`). A second
-# copy lived at ops/prometheus/prometheus.yml until 2026-08-13 and was mounted by
-# nothing; commit 7aec799 ("connect the alerting path") edited that copy, so for a
-# day the repository said node-exporter and postgres-exporter were scraped and the
-# running Prometheus had never heard of them — with five capacity rules quietly
-# evaluating to nothing. Two files, one meaning, no one enforcing agreement: the
-# same shape of defect the alerting path already had. Do not create a second copy.
+# This file is reached because docker-compose.prod.yml mounts this DIRECTORY as
+# /etc/prometheus. Until 2026-08-13 it mounted two individual files instead, and
+# a second copy of this config sat one level up at ops/prometheus.yml. Commit
+# 7aec799 ("connect the alerting path") edited the copy nothing mounted, so for a
+# day the repository said node-exporter and postgres-exporter were scraped while
+# the running Prometheus had never heard of either — and five capacity rules
+# evaluated against nothing, which on the /alerts page looks exactly like health.
+#
+# Two files, one meaning, nothing enforcing agreement. Do not make a second copy;
+# scripts/check-observability.py fails if one appears.
 # =============================================================================
 
 global:
@@ -73,7 +76,7 @@ scrape_configs:
       - targets: ['gateway:3000']
 
   # Redis holds the offline delivery queues, so its memory headroom is a
-  # data-durability signal, not just a capacity one. See ops/alerts.yml.
+  # data-durability signal, not just a capacity one. See alerts.yml beside this file.
   - job_name: redis
     static_configs:
       - targets: ['redis-exporter:9121']
