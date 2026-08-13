@@ -23,6 +23,13 @@ pub async fn metrics_handler() -> axum::response::Response<String> {
         let label: &'static str = Box::leak(name.into_boxed_str());
         GATEWAY_SERVICE_HEALTH.with_label_values(&[label]).set(1.0);
 
+        // Everything a service can report starts existing at 0 on the first
+        // scrape, instead of appearing only when the event first happens and
+        // vanishing again on the next deploy. Without this the dashboard reads
+        // "No data" for an idle server — the same picture it would show for a
+        // dead one.
+        init_registry();
+
         // Piggy-backs on the same first-scrape hook so that adding build
         // identity did not require editing eight service mains — each of which
         // would have been a place to forget it later.
