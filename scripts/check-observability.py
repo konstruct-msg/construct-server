@@ -168,6 +168,76 @@ def check_grafana_provisioning() -> bool:
     return ok
 
 
+def check_metrics_have_producers() -> bool:
+    """A metric declared and never written is a panel that can never fill.
+
+    Sixteen of the 38 metrics in construct-metrics had no producer anywhere in
+    the workspace on 2026-08-13, and the Grafana overview was built on them: five
+    session panels, OTPK inventory, active gRPC streams, KT proofs, all three
+    gateway request panels. Nineteen of 27 panels read "No data" — which looks
+    exactly like an outage and had to be investigated to find out it was not.
+
+    The inverse of the rule in AGENTS.md about a producer with no consumer, and
+    it rots the same way: nothing breaks, the declaration just stops meaning
+    anything.
+
+    A ratchet rather than a threshold. The existing sixteen are listed in
+    scripts/.metrics-without-producer with a reason; the count can only go down.
+    Adding a new unwritten metric fails, and so does leaving a name on the list
+    after it gains a producer — a stale exemption is how a list like this becomes
+    decoration.
+    """
+    import subprocess
+    lib = ROOT / "crates/construct-metrics/src/lib.rs"
+    if not lib.exists():
+        return True
+    src = lib.read_text(encoding="utf-8")
+    declared = re.findall(r'pub static (\w+):[\s\S]{0,400}?"((?:construct|gateway)_[a-z_0-9]+)"', src)
+
+    # A metric is produced if its static is named outside the metrics crate, or
+    # if a helper inside the crate writes it and that helper is called outside.
+    # {STATIC_NAME: helper_fn} — a metric written only through a wrapper is still
+    # produced. Getting this mapping backwards reported the two fail-open
+    # counters as orphans, and they are the ones with the most callers.
+    helpers: dict[str, str] = {}
+    for m in re.finditer(r"pub fn (\w+)\([^)]*\)\s*\{\s*(\w+)\s*\n?\s*\.", src):
+        helpers.setdefault(m.group(2), m.group(1))
+    unproduced = []
+    for static, metric in declared:
+        names = [static] + ([helpers[static]] if static in helpers else [])
+        produced = False
+        for name in names:
+            out = subprocess.run(["git", "grep", "-l", "-w", name, "--", "*.rs"],
+                                 cwd=ROOT, capture_output=True, text=True).stdout.split()
+            if any("construct-metrics" not in f for f in out):
+                produced = True
+                break
+        if not produced:
+            unproduced.append(metric)
+
+    allow_file = ROOT / "scripts/.metrics-without-producer"
+    allowed = set()
+    if allow_file.exists():
+        allowed = {l.split("#")[0].strip() for l in
+                   allow_file.read_text(encoding="utf-8").splitlines()
+                   if l.split("#")[0].strip()}
+
+    ok = True
+    for metric in sorted(set(unproduced) - allowed):
+        ok = False
+        fail(f"{metric} is declared in construct-metrics and written nowhere — a "
+             f"panel or alert reading it can never fill. Instrument it, delete it, "
+             f"or add it to scripts/.metrics-without-producer with a reason.")
+    for metric in sorted(allowed - set(unproduced)):
+        ok = False
+        fail(f"{metric} is listed in scripts/.metrics-without-producer but now HAS "
+             f"a producer — remove the line, or the list stops meaning anything.")
+    if unproduced:
+        print(f"  note: {len(unproduced)} metric(s) declared with no producer "
+              f"(known, see scripts/.metrics-without-producer)")
+    return ok
+
+
 def check_mount_sources_exist() -> bool:
     """Docker creates a *directory* for a missing bind-mount source.
 
@@ -332,6 +402,7 @@ def main() -> int:
     ok = check_no_orphan_configs()
     ok = check_mount_sources_exist() and ok
     ok = check_grafana_provisioning() and ok
+    ok = check_metrics_have_producers() and ok
     check_file_mounts()
 
     rules = rules_and_metrics()

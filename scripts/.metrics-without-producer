@@ -1,0 +1,52 @@
+# Metrics declared in construct-metrics that nothing in the workspace writes.
+#
+# Checked by scripts/check-observability.py. This is a RATCHET, not a budget:
+# a new unwritten metric fails the check, and so does leaving a name here after
+# it gains a producer. The list may only shrink.
+#
+# Why they exist: the Grafana overview was built on them. Nineteen of its 27
+# panels read "No data" — indistinguishable on screen from an outage — because
+# the metric behind them is a declaration and nothing more. Established
+# 2026-08-13 with 16 entries.
+#
+# Each line: metric name, then why it is still here.
+
+# ── Sessions. E2EE session setup happens between clients; the server relays
+#    sealed payloads and cannot see init, healing or END_SESSION as events. To
+#    instrument these at all, the client would have to report them — which is
+#    telemetry, and the product promises none. Most likely these should be
+#    DELETED rather than wired.
+construct_session_init_success_total
+construct_session_init_failure_total
+construct_session_heal_attempts_total
+construct_session_heal_success_total
+construct_end_session_sent_total
+
+# ── OTPK inventory. Genuinely worth having: running out of one-time prekeys
+#    breaks new sessions for everyone contacting that device, and it fails
+#    quietly. key-service knows both numbers at upload and consume time — this
+#    is the strongest candidate on the list.
+construct_otpk_remaining
+construct_otpk_uploaded_total
+construct_otpk_consumed_total
+
+# ── Connected clients. GRPC_STREAMS_ACTIVE would answer "how many devices are
+#    online right now", which nothing currently answers, and reconnect rate is
+#    the first symptom of transport trouble. Second candidate.
+construct_grpc_streams_active
+construct_grpc_stream_reconnects_total
+
+# ── Gateway request metrics. The only per-request latency and error view we
+#    would have; the axum layer exists, nothing records into it. Third candidate.
+gateway_requests_total
+gateway_request_duration_seconds
+gateway_circuit_breaker_state
+
+# ── Key Transparency proof failures. KT verification is client-side; same
+#    problem as the session metrics.
+construct_kt_proof_failures_total
+
+# ── TURN. Allocation counts live in coturn, not in our services; the right fix
+#    is a coturn exporter, not writing these from Rust.
+construct_turn_active_allocations
+construct_calls_turn_relayed_total

@@ -534,6 +534,49 @@ pub fn record_auth_security_fail_open(control: &'static str) {
 // Metrics Collection
 // ============================================================================
 
+/// Force every metric that something can actually write into the registry.
+///
+/// `Lazy` registers on first deref, so a counter that has not yet been
+/// incremented does not exist as far as Prometheus is concerned — and a missing
+/// series is not zero, it is *nothing*. Grafana prints "No data" over a red
+/// background, which is what an outage looks like, for the ordinary state of an
+/// idle server. Worse, it resets on restart: `construct_msg_offline_trim_total`
+/// had series three hours before this was written and none afterwards, purely
+/// because messaging-service was redeployed in between.
+///
+/// Called once from the shared `/metrics` handler, so every service gets it
+/// without eight separate places to forget it.
+///
+/// Only metrics with a real producer are listed. Registering the rest would put
+/// a permanent, authoritative-looking `0` on screen for something nothing can
+/// ever increment — a worse lie than the blank. `*Vec` metrics register the
+/// family but emit no sample until a label set exists, which is correct: we do
+/// not know the labels in advance and inventing one would fabricate a series.
+pub fn init_registry() {
+    Lazy::force(&MESSAGES_SENT_TOTAL);
+    Lazy::force(&MESSAGE_DELIVERY_TIME);
+    Lazy::force(&CALLS_CONNECTED_TOTAL);
+    Lazy::force(&CALLS_MISSED_TOTAL);
+    Lazy::force(&CALLS_DECLINED_TOTAL);
+    Lazy::force(&CALLS_FAILED_TOTAL);
+    Lazy::force(&CALL_SETUP_DURATION_SECONDS);
+    Lazy::force(&ACTIVE_CALLS);
+    Lazy::force(&MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL);
+    Lazy::force(&MSG_PUSH_SKIPPED_ONLINE_TOTAL);
+    Lazy::force(&STEALTH_SEALED_LOCAL_TOTAL);
+
+    // Families only — no children until a label set is produced.
+    Lazy::force(&LEGACY_EDIT_USAGE_TOTAL);
+    Lazy::force(&CALLS_INITIATED_TOTAL);
+    Lazy::force(&SIGNALING_ERRORS_TOTAL);
+    Lazy::force(&MSG_OFFLINE_TRIM_TOTAL);
+    Lazy::force(&AUTH_FAILURES_TOTAL);
+    Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
+    Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);
+    Lazy::force(&MSG_ABUSE_FAIL_OPEN_TOTAL);
+    Lazy::force(&AUTH_SECURITY_FAIL_OPEN_TOTAL);
+}
+
 /// Gather all registered metrics and encode as Prometheus text format
 pub fn gather_metrics() -> Result<String> {
     let mut buffer = vec![];
@@ -567,6 +610,55 @@ mod tests {
         let text = gather_metrics().unwrap();
         assert!(text.contains("construct_msg_abuse_fail_open_total"));
         assert!(text.contains("control=\"sentinel\"") || text.contains("sentinel"));
+    }
+
+    /// The distinction this whole function exists for: after init, an untouched
+    /// counter must be present with the value 0, not absent.
+    ///
+    /// Written against a real symptom. On 2026-08-13 the Grafana overview was
+    /// almost entirely "No data" — nineteen panels — and the natural reading was
+    /// that the server was broken. It was idle. A counter at 0 says "measured,
+    /// nothing happened"; a missing series says nothing at all, and the two are
+    /// indistinguishable on screen.
+    ///
+    /// Note the counter chosen: MSG_PUSH_SKIPPED_ONLINE_TOTAL is incremented
+    /// nowhere in this test file, so if `init_registry` stops forcing it the
+    /// assertion fails. Using MESSAGES_SENT_TOTAL would have passed regardless,
+    /// because test_gather_metrics increments it — tests in one binary share the
+    /// default registry.
+    #[test]
+    fn test_init_registry_makes_untouched_counters_visible_as_zero() {
+        init_registry();
+        let text = gather_metrics().unwrap();
+        assert!(
+            text.contains("construct_msg_push_skipped_online_total 0"),
+            "expected an untouched counter to report 0, got:\n{}",
+            text.lines()
+                .filter(|l| l.contains("push_skipped"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// The other half of the rule: metrics nothing can write must NOT be
+    /// registered. A permanent, authoritative 0 for something no code path
+    /// increments is a worse lie than a blank panel — it looks measured.
+    #[test]
+    fn test_init_registry_does_not_register_unproduced_metrics() {
+        init_registry();
+        let text = gather_metrics().unwrap();
+        for orphan in [
+            "construct_otpk_remaining",
+            "construct_grpc_streams_active",
+            "construct_session_heal_attempts_total",
+            "construct_turn_active_allocations",
+        ] {
+            assert!(
+                !text.contains(orphan),
+                "{orphan} has no producer in the workspace; registering it puts a \
+                 fake zero on the dashboard. Either instrument it or leave it out."
+            );
+        }
     }
 
     #[test]
