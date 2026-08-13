@@ -3,18 +3,41 @@
 # =============================================================================
 # All services expose /metrics on their HTTP port (or METRICS_PORT where set).
 # Targets use Docker internal DNS hostnames (same network as Prometheus).
+#
+# THIS is the file docker-compose.prod.yml mounts (`./prometheus.yml`). A second
+# copy lived at ops/prometheus/prometheus.yml until 2026-08-13 and was mounted by
+# nothing; commit 7aec799 ("connect the alerting path") edited that copy, so for a
+# day the repository said node-exporter and postgres-exporter were scraped and the
+# running Prometheus had never heard of them — with five capacity rules quietly
+# evaluating to nothing. Two files, one meaning, no one enforcing agreement: the
+# same shape of defect the alerting path already had. Do not create a second copy.
 # =============================================================================
 
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-# No Alertmanager is deployed yet, so these fire into Prometheus' own /alerts page
-# and are readable by Grafana. Routing to a human still needs Alertmanager.
+# alerts.yml was mounted into this container from the start and never loaded:
+# without `rule_files` Prometheus does not know it exists, so RedisMemoryCritical
+# had never evaluated once. The file being present is not the same as the rule
+# running — this line is what makes the difference.
 rule_files:
   - /etc/prometheus/alerts.yml
 
+# Prometheus evaluates rules on its own and then forgets them; reaching a person
+# is Alertmanager's job. Until it is running, `up{job="prometheus"}` and the
+# /alerts page are the only place an alert exists.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
+  # Targets are the port a service actually serves /metrics on. That is PORT for
+  # most services (the axum router carrying health + metrics binds bind_address),
+  # and METRICS_PORT only where the service reads it — group and signaling, whose
+  # PORT is the gRPC port instead. Getting this wrong is silent: a bad target just
+  # sits DOWN, which is why TargetDown is now an alert.
   - job_name: identity
     static_configs:
       - targets: ['identity:8081']
@@ -29,11 +52,11 @@ scrape_configs:
 
   - job_name: group
     static_configs:
-      - targets: ['group:8097']
+      - targets: ['group:8097']  # METRICS_PORT; PORT=50058 is gRPC
 
   - job_name: signaling
     static_configs:
-      - targets: ['signaling:8091']
+      - targets: ['signaling:8091']  # METRICS_PORT; PORT=50060 is gRPC
 
   - job_name: media
     static_configs:
@@ -43,6 +66,8 @@ scrape_configs:
     static_configs:
       - targets: ['veil:8080']
 
+  # Gateway serves both the HTTP API and the VEIL relay — relay metrics are
+  # published on the same /metrics endpoint (shared Prometheus registry).
   - job_name: gateway
     static_configs:
       - targets: ['gateway:3000']
@@ -52,3 +77,20 @@ scrape_configs:
   - job_name: redis
     static_configs:
       - targets: ['redis-exporter:9121']
+
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Host CPU / memory / disk. Without it there is no way to answer "is it time to
+  # scale" with anything but a guess — and the whole capacity group in alerts.yml
+  # reads nothing else.
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Self-scrape. `up` for every other job comes from here, and so does the answer
+  # to "was Prometheus itself restarted while I was reading this graph".
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

@@ -374,6 +374,15 @@ jobs:
             sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$VERSION/" .env || echo "IMAGE_TAG=$VERSION" >> .env
             docker compose -f ops/docker-compose.prod.yml --env-file .env up -d
 
+            # prometheus.yml and alerts.yml are bind-mounted, so `up -d` sees no
+            # change in the service definition and leaves the container running
+            # with the config it started with. A scrape job added in this commit
+            # would sit in the repo, deployed and inert — which is exactly how
+            # node-exporter and postgres-exporter spent a day unscraped while
+            # five capacity alerts evaluated against nothing. SIGHUP reloads the
+            # config in place; no restart, no gap in the series.
+            docker kill -s HUP construct-prometheus 2>/dev/null || true
+
             echo "=== Waiting for health checks ==="
             sleep 15
 
