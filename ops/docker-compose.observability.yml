@@ -1,0 +1,77 @@
+# =============================================================================
+# Observability overlay — Grafana + Alertmanager
+# =============================================================================
+# Deliberately a separate file rather than a profile in docker-compose.prod.yml.
+#
+# `${VAR:?}` interpolation is evaluated for the WHOLE compose file before
+# anything runs, and profiles do not exempt a service from it. One unset
+# variable therefore aborts `docker compose up` for every service — and CI runs
+# that immediately after `git reset --hard origin/main`, which would leave the
+# new code on disk beside the old containers still running. A second file is not
+# parsed until it is named, so the ordinary deploy cannot be affected by a
+# secret that only these two need.
+#
+# Prometheus, node-exporter and postgres-exporter stay in the production file:
+# they need no secrets, so metrics start being collected on the next deploy
+# whether or not anyone has finished setting this part up.
+#
+# Usage:
+#   docker compose -f ops/docker-compose.prod.yml \
+#                  -f ops/docker-compose.observability.yml --env-file .env up -d
+#
+# Requires: GRAFANA_ADMIN_PASSWORD in .env, plus a configured Telegram receiver
+# (ops/alertmanager/alertmanager.yml + telegram_token). `./scripts/preflight-secrets.sh`
+# fails while either is missing.
+#
+# Access: everything binds to 127.0.0.1. See construct-docs
+# manuals&instructions/Grafana_Prometheus_Access.md — SSH tunnel or Tailscale,
+# never a public hostname.
+# =============================================================================
+
+services:
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: construct-alertmanager
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Bot token as a file, never in the config or the environment.
+      - ./alertmanager/telegram_token:/etc/alertmanager/telegram_token:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - internal
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: construct-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    volumes:
+      # Datasource + the construct-overview dashboard sat in this repo unused for
+      # months because only the grafana-data volume was ever declared, never the
+      # service that mounts them.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - internal
+
+volumes:
+  grafana-data:
+  alertmanager-data:
+
+networks:
+  internal:
