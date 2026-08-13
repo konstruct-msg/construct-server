@@ -1,6 +1,16 @@
 {
 	grace_period 10s
 	admin 127.0.0.1:2019
+	# Per-request metrics. Caddy is the only process that sees API requests: the
+	# gateway proxied them once and no longer does (its router is /health,
+	# /metrics and /.well-known), so `gateway_requests_total` in construct-metrics
+	# had no producer and could only ever have measured health checks. Removed
+	# there, collected here instead.
+	#
+	# Global option, not the nested `servers { metrics }` — that spelling is
+	# deprecated and `caddy validate` says so.
+	metrics
+
 	servers {
 		# TCP-only: UDP 443 on the host belongs to construct-transport
 		# (SALAMANDER obfuscated QUIC, rcgen self-signed cert). Without this,
@@ -9,6 +19,17 @@
 		# ServerKeyManager's well-known fetch for the stealth token key).
 		protocols h1 h2
 	}
+}
+
+# Prometheus scrape target, reachable only from the compose `internal` network —
+# no host port is published for it.
+#
+# Deliberately NOT the admin API (`admin 127.0.0.1:2019` above stays on
+# loopback): that endpoint can reconfigure or stop Caddy, and exposing it to
+# every container so a scraper can read counters trades the TLS terminator for a
+# graph. This block serves the same registry and nothing else.
+:2020 {
+	metrics /metrics
 }
 
 ams.konstruct.cc {

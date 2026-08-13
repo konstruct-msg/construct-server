@@ -81,6 +81,14 @@ scrape_configs:
     static_configs:
       - targets: ['redis-exporter:9121']
 
+  # Caddy terminates TLS and routes every gRPC call, so it is the only place
+  # per-request latency and status codes exist. `caddy_http_requests_total`,
+  # `caddy_http_request_duration_seconds`. Served on :2020 inside the network;
+  # the admin API on :2019 stays on the container's loopback.
+  - job_name: caddy
+    static_configs:
+      - targets: ['caddy:2020']
+
   - job_name: postgres
     static_configs:
       - targets: ['postgres-exporter:9187']

@@ -359,6 +359,13 @@ pub async fn get_prekey_bundle(
         None
     };
 
+    // Counted here rather than at the call site because this is the only place a
+    // key actually leaves the pool: `consume_otpk` false (drain guard) and an
+    // empty pool both land in the `None` branch, and neither is a consumption.
+    if otp.is_some() {
+        construct_metrics::OTPK_CONSUMED_TOTAL.inc();
+    }
+
     // Try to consume a Kyber one-time pre-key (soft-delete, same pattern as classic OTPK)
     let kyber_otp = if consume_otpk {
         sqlx::query_as::<_, KyberOneTimePreKeyRow>(
@@ -517,6 +524,13 @@ pub async fn get_prekey_bundles(
         } else {
             None
         };
+
+        // Same count in the batch path. Two call sites is the price of the two
+        // query shapes; missing this one would have made the metric read low by
+        // however much of the fleet fetches bundles in batches.
+        if otp.is_some() {
+            construct_metrics::OTPK_CONSUMED_TOTAL.inc();
+        }
 
         // Try to consume a Kyber OTPK for this device
         let kyber_otp = if consume_otpk {
@@ -715,6 +729,8 @@ pub async fn upload_prekeys(
     .fetch_one(db)
     .await?;
 
+    construct_metrics::OTPK_UPLOADED_TOTAL.inc_by(prekeys.len() as u64);
+
     Ok((classic_count as u32, kyber_count as u32))
 }
 
@@ -841,6 +857,8 @@ pub async fn upload_prekeys_hybrid(
     .bind(device_id)
     .fetch_one(db)
     .await?;
+
+    construct_metrics::OTPK_UPLOADED_TOTAL.inc_by(prekeys.len() as u64);
 
     Ok((classic_count as u32, kyber_count as u32))
 }
@@ -1580,6 +1598,53 @@ pub async fn cleanup_expired_archives(db: &PgPool) -> Result<u64> {
 
 /// Hard-delete OTPKs that were soft-expired more than 48 hours ago.
 ///
+/// Fleet-wide one-time pre-key inventory, for metrics.
+///
+/// Counts devices, not keys. A total key count would be dominated by whichever
+/// device last uploaded a hundred of them and would say nothing about whether
+/// anyone can still start a session; the number that matters is how many
+/// devices are at zero, because a peer contacting one of those gets an SPK-only
+/// bundle — the session still forms, but without the one-time key, and neither
+/// user is told.
+///
+/// The LEFT JOIN is load-bearing: a device with no rows in `one_time_prekeys` at
+/// all is exactly the exhausted case, and an inner join would silently drop
+/// precisely the devices being counted.
+pub struct OtpkInventory {
+    pub devices: i64,
+    pub low: i64,
+    pub exhausted: i64,
+}
+
+pub const OTPK_LOW_WATER_MARK: i64 = 10;
+
+pub async fn otpk_inventory(db: &PgPool) -> Result<OtpkInventory> {
+    let row: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT count(*),
+               count(*) FILTER (WHERE n < $1),
+               count(*) FILTER (WHERE n = 0)
+        FROM (
+            SELECT d.device_id, count(o.key_id) AS n
+            FROM devices d
+            LEFT JOIN one_time_prekeys o
+              ON o.device_id = d.device_id AND o.is_expired = false
+            WHERE d.is_active = true
+            GROUP BY d.device_id
+        ) t
+        "#,
+    )
+    .bind(OTPK_LOW_WATER_MARK)
+    .fetch_one(db)
+    .await?;
+
+    Ok(OtpkInventory {
+        devices: row.0,
+        low: row.1,
+        exhausted: row.2,
+    })
+}
+
 /// Called on a schedule (e.g. every hour). The 48-hour window matches
 /// `signed_prekey_archive` and gives in-flight prekey messages time to arrive.
 #[allow(dead_code)]

@@ -228,10 +228,15 @@ def check_metrics_have_producers() -> bool:
         fail(f"{metric} is declared in construct-metrics and written nowhere — a "
              f"panel or alert reading it can never fill. Instrument it, delete it, "
              f"or add it to scripts/.metrics-without-producer with a reason.")
+    declared_names = {metric for _, metric in declared}
     for metric in sorted(allowed - set(unproduced)):
         ok = False
-        fail(f"{metric} is listed in scripts/.metrics-without-producer but now HAS "
-             f"a producer — remove the line, or the list stops meaning anything.")
+        if metric not in declared_names:
+            fail(f"{metric} is listed in scripts/.metrics-without-producer but is no "
+                 f"longer declared at all — delete the line.")
+        else:
+            fail(f"{metric} is listed in scripts/.metrics-without-producer but now HAS "
+                 f"a producer — remove the line, or the list stops meaning anything.")
     if unproduced:
         print(f"  note: {len(unproduced)} metric(s) declared with no producer "
               f"(known, see scripts/.metrics-without-producer)")

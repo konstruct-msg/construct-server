@@ -2,20 +2,22 @@
 //!
 //! Provides centralized metrics collection for monitoring:
 //! - Message delivery
-//! - Gateway performance
-//! - Circuit breaker states
-//! - Service health
-//! - Session lifecycle (init, END_SESSION, healing)
-//! - OTPK key inventory
-//! - Active gRPC streams
-//! - Key Transparency proof failures
+//! - Service health and build identity
+//! - OTPK inventory across the fleet
+//! - Active gRPC message streams
+//!
+//! What is deliberately NOT here: anything only a client can observe. Session
+//! setup, healing, END_SESSION and Key Transparency proofs all happen inside
+//! the E2EE envelope, and a server-side counter for them could only be filled
+//! by clients reporting on themselves. Declarations for those existed here
+//! until 2026-08-13 with no producer, and a Grafana row was built on them.
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use prometheus::{
-    Encoder, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    TextEncoder, opts, register_gauge, register_gauge_vec, register_histogram,
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
+    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, TextEncoder, opts,
+    register_gauge_vec, register_histogram, register_int_counter, register_int_counter_vec,
+    register_int_gauge,
 };
 
 // ============================================================================
@@ -59,39 +61,17 @@ pub static MESSAGE_DELIVERY_TIME: Lazy<Histogram> = Lazy::new(|| {
 // Gateway Metrics
 // ============================================================================
 
-/// Gateway requests total (by service and status code)
-pub static GATEWAY_REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "gateway_requests_total",
-            "Total number of requests processed by gateway"
-        ),
-        &["service", "status_code"]
-    )
-    .expect("Failed to register GATEWAY_REQUESTS_TOTAL metric")
-});
-
-/// Gateway request duration in seconds (histogram)
-pub static GATEWAY_REQUEST_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "gateway_request_duration_seconds",
-        "Request duration in seconds",
-        &["service"]
-    )
-    .expect("Failed to register GATEWAY_REQUEST_DURATION_SECONDS metric")
-});
-
-/// Circuit breaker state (0=Closed, 1=Open, 2=HalfOpen)
-pub static GATEWAY_CIRCUIT_BREAKER_STATE: Lazy<GaugeVec> = Lazy::new(|| {
-    register_gauge_vec!(
-        opts!(
-            "gateway_circuit_breaker_state",
-            "Circuit breaker state (0=Closed, 1=Open, 2=HalfOpen)"
-        ),
-        &["service"]
-    )
-    .expect("Failed to register GATEWAY_CIRCUIT_BREAKER_STATE metric")
-});
+// `gateway_requests_total`, `gateway_request_duration_seconds` and
+// `gateway_circuit_breaker_state` were removed on 2026-08-13. They were declared
+// when the gateway proxied the API; it no longer does — its router serves
+// /health, /metrics and /.well-known, and every real request goes
+// client → Caddy → service over h2c. Instrumenting them would have measured
+// health checks and called it request latency.
+//
+// Per-request latency and errors now come from Caddy itself
+// (`caddy_http_requests_total`, `caddy_http_request_duration_seconds`), which is
+// the only process that sees them. See the `metrics` global option and the
+// `:2020` block in ops/Caddyfile, and the `caddy` scrape job.
 
 /// Service health status (1=healthy, 0=unhealthy)
 /// Which build is running, as labels on a constant 1.
@@ -205,100 +185,68 @@ pub static ACTIVE_CALLS: Lazy<IntGauge> = Lazy::new(|| {
     .expect("Failed to register ACTIVE_CALLS metric")
 });
 
-/// Placeholder: total calls relayed via TURN (incremented by clients / media plane later).
-#[allow(dead_code)]
-pub static CALLS_TURN_RELAYED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "construct_calls_turn_relayed_total",
-        "Total number of calls relayed via TURN (not P2P)"
-    ))
-    .expect("Failed to register CALLS_TURN_RELAYED_TOTAL metric")
-});
-
-/// Placeholder: active TURN allocations (set by TURN service later).
-#[allow(dead_code)]
-pub static TURN_ACTIVE_ALLOCATIONS: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!(
-        "construct_turn_active_allocations",
-        "Current number of active TURN allocations"
-    )
-    .expect("Failed to register TURN_ACTIVE_ALLOCATIONS metric")
-});
+// TURN metrics (`construct_calls_turn_relayed_total`,
+// `construct_turn_active_allocations`) were removed on 2026-08-13. They were
+// declared as placeholders for "the TURN service later"; allocation counts live
+// inside coturn, so the way to get them is a coturn exporter as a scrape target,
+// not a Rust static nothing can reach.
 
 // ============================================================================
-// Session Lifecycle Metrics
+// Session Lifecycle Metrics — REMOVED 2026-08-13
 // ============================================================================
-
-/// Session initialisations that completed successfully.
-/// Label `side`: "initiator" | "responder"
-pub static SESSION_INIT_SUCCESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_session_init_success_total",
-            "Session X3DH initialisations completed successfully"
-        ),
-        &["side"]
-    )
-    .expect("Failed to register SESSION_INIT_SUCCESS_TOTAL metric")
-});
-
-/// Session initialisations that failed.
-/// Label `reason`: "decrypt_failed" | "bundle_fetch_failed" | "otpk_exhausted" | "timeout" | "other"
-pub static SESSION_INIT_FAILURE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_session_init_failure_total",
-            "Session X3DH initialisations that failed"
-        ),
-        &["reason"]
-    )
-    .expect("Failed to register SESSION_INIT_FAILURE_TOTAL metric")
-});
-
-/// END_SESSION signals sent to peers.
-/// Label `reason`: "init_failed" | "manual_reset" | "heal_failed" | "peer_request"
-pub static END_SESSION_SENT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_end_session_sent_total",
-            "END_SESSION signals sent to peers"
-        ),
-        &["reason"]
-    )
-    .expect("Failed to register END_SESSION_SENT_TOTAL metric")
-});
-
-/// Session healing attempts triggered by decrypt failure on msgNum=0.
-pub static SESSION_HEAL_ATTEMPTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "construct_session_heal_attempts_total",
-        "Session healing attempts triggered by decryption failure"
-    ))
-    .expect("Failed to register SESSION_HEAL_ATTEMPTS_TOTAL metric")
-});
-
-/// Session healing attempts that resulted in a recovered session.
-pub static SESSION_HEAL_SUCCESS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "construct_session_heal_success_total",
-        "Session healing attempts that successfully recovered the session"
-    ))
-    .expect("Failed to register SESSION_HEAL_SUCCESS_TOTAL metric")
-});
+//
+// construct_session_init_{success,failure}_total, construct_end_session_sent_total
+// and construct_session_heal_{attempts,success}_total lived here for months with
+// no producer, and the Grafana overview had a whole row built on them showing
+// "No data".
+//
+// They cannot be produced. Session setup, healing and END_SESSION are decisions
+// made between two clients inside the E2EE envelope; the server relays sealed
+// payloads and cannot observe any of it — that is the property being sold. The
+// only way to fill these would be for clients to report their session state,
+// which is telemetry, and the product's answer to telemetry is that there is
+// none.
 
 // ============================================================================
 // OTPK / Key Inventory Metrics
 // ============================================================================
+//
+// Fleet-wide counts, never per device. A gauge labelled by device_id would put
+// an identifier for every account into a metrics endpoint — precisely the shape
+// of data this product exists not to hold — and it would be unbounded
+// cardinality besides. These three answer the operational question ("can devices
+// still start new sessions?") without naming anyone.
+//
+// The first reading, 2026-08-13: 123 active devices, 76 of them at zero.
 
-/// Current number of one-time pre-keys available on the server for a device.
-/// Label `service`: the key-service instance (useful when sharded).
-/// This is a Gauge because the value goes both up (upload) and down (consumption).
-pub static OTPK_REMAINING: Lazy<IntGauge> = Lazy::new(|| {
+/// Active devices known to the server, denominator for the two below.
+pub static OTPK_DEVICES_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
     register_int_gauge!(
-        "construct_otpk_remaining",
-        "Current number of one-time pre-keys available for the local device"
+        "construct_otpk_devices_total",
+        "Active devices, as the denominator for OTPK inventory"
     )
-    .expect("Failed to register OTPK_REMAINING metric")
+    .expect("Failed to register OTPK_DEVICES_TOTAL metric")
+});
+
+/// Devices under the low-water mark — they still work, but not for long.
+pub static OTPK_DEVICES_LOW: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "construct_otpk_devices_low",
+        "Active devices with fewer than 10 unexpired one-time pre-keys"
+    )
+    .expect("Failed to register OTPK_DEVICES_LOW metric")
+});
+
+/// Devices with none left. A peer contacting one of these gets an SPK-only
+/// bundle: the session still establishes, but without the one-time key, so the
+/// initial message loses the forward secrecy that key provides. Silent, and
+/// invisible to both users.
+pub static OTPK_DEVICES_EXHAUSTED: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "construct_otpk_devices_exhausted",
+        "Active devices with zero unexpired one-time pre-keys"
+    )
+    .expect("Failed to register OTPK_DEVICES_EXHAUSTED metric")
 });
 
 /// Total OTPKs uploaded to the server (cumulative).
@@ -332,13 +280,34 @@ pub static GRPC_STREAMS_ACTIVE: Lazy<IntGauge> = Lazy::new(|| {
     .expect("Failed to register GRPC_STREAMS_ACTIVE metric")
 });
 
-/// Total gRPC stream reconnections (client reconnected after disconnect).
-pub static GRPC_STREAM_RECONNECTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+/// Message streams opened. Together with the gauge above this is churn: a high
+/// open rate against a flat active count means clients are reconnecting in a
+/// loop, which has cost real incidents here (signalling slowed by MessageStream
+/// churn) and is invisible from the gauge alone.
+pub static GRPC_STREAMS_OPENED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(opts!(
-        "construct_grpc_stream_reconnects_total",
-        "Total number of gRPC message-stream reconnections"
+        "construct_grpc_streams_opened_total",
+        "Message streams opened since process start"
     ))
-    .expect("Failed to register GRPC_STREAM_RECONNECTS_TOTAL metric")
+    .expect("Failed to register GRPC_STREAMS_OPENED_TOTAL metric")
+});
+
+/// Message streams closed, by reason.
+///
+/// The reasons are the ones the stream loop already computes for its closing log
+/// line — `client_disconnect`, `client_eof`, `handler_error`, `stream_error`,
+/// `heartbeat_tx_closed`, `all_channels_closed`. Naming this "reconnects", as
+/// the previous declaration did, would have hidden the only distinction that
+/// matters: whether the client left or the server dropped it.
+pub static GRPC_STREAMS_CLOSED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_grpc_streams_closed_total",
+            "Message streams closed, by close reason"
+        ),
+        &["reason"]
+    )
+    .expect("Failed to register GRPC_STREAMS_CLOSED_TOTAL metric")
 });
 
 /// Poll started with `last_stream_id = None` after Subscribe already carried a
@@ -381,18 +350,11 @@ pub static MSG_OFFLINE_TRIM_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 // Security / Key Transparency Metrics
 // ============================================================================
 
-/// Key Transparency inclusion/consistency proof failures.
-/// Label `proof_type`: "inclusion" | "consistency" | "root_mismatch"
-pub static KT_PROOF_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_kt_proof_failures_total",
-            "Key Transparency proof verification failures"
-        ),
-        &["proof_type"]
-    )
-    .expect("Failed to register KT_PROOF_FAILURES_TOTAL metric")
-});
+// construct_kt_proof_failures_total was removed on 2026-08-13, for the same
+// reason as the session metrics: KT inclusion and consistency proofs are
+// verified by the client against the log. A proof failing is exactly the case
+// where the server is the suspect, so a server-side counter for it would be
+// evidence supplied by the accused.
 
 /// Authentication failures (JWT validation, device not found, etc.).
 /// Label `reason`: "invalid_token" | "expired" | "device_not_found" | "permission_denied"
@@ -564,6 +526,13 @@ pub fn init_registry() {
     Lazy::force(&MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL);
     Lazy::force(&MSG_PUSH_SKIPPED_ONLINE_TOTAL);
     Lazy::force(&STEALTH_SEALED_LOCAL_TOTAL);
+    Lazy::force(&OTPK_UPLOADED_TOTAL);
+    Lazy::force(&OTPK_CONSUMED_TOTAL);
+    Lazy::force(&OTPK_DEVICES_TOTAL);
+    Lazy::force(&OTPK_DEVICES_LOW);
+    Lazy::force(&OTPK_DEVICES_EXHAUSTED);
+    Lazy::force(&GRPC_STREAMS_ACTIVE);
+    Lazy::force(&GRPC_STREAMS_OPENED_TOTAL);
 
     // Families only — no children until a label set is produced.
     Lazy::force(&LEGACY_EDIT_USAGE_TOTAL);
@@ -573,6 +542,7 @@ pub fn init_registry() {
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);
+    Lazy::force(&GRPC_STREAMS_CLOSED_TOTAL);
     Lazy::force(&MSG_ABUSE_FAIL_OPEN_TOTAL);
     Lazy::force(&AUTH_SECURITY_FAIL_OPEN_TOTAL);
 }
@@ -648,10 +618,14 @@ mod tests {
         init_registry();
         let text = gather_metrics().unwrap();
         for orphan in [
+            // Removed entirely on 2026-08-13 — see the comments where each used
+            // to be declared. Named here so that reintroducing one without a
+            // producer fails loudly instead of reappearing on a dashboard.
             "construct_otpk_remaining",
-            "construct_grpc_streams_active",
             "construct_session_heal_attempts_total",
             "construct_turn_active_allocations",
+            "construct_kt_proof_failures_total",
+            "gateway_requests_total",
         ] {
             assert!(
                 !text.contains(orphan),
