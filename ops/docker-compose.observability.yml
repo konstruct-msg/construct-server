@@ -67,7 +67,12 @@ services:
       # months because only the grafana-data volume was ever declared, never the
       # service that mounts them.
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # /etc/grafana/dashboards, because that is the `options.path` written in
+      # provisioning/dashboards/construct.yaml. This mount said
+      # /var/lib/grafana/dashboards, so the provider watched an empty directory
+      # and the dashboard would have loaded nowhere — the same "declared here,
+      # mounted there" mismatch as prometheus.yml, in a third place.
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     networks:
       - internal

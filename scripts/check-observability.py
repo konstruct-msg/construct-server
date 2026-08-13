@@ -122,6 +122,52 @@ def check_file_mounts() -> None:
                   f"container. Mount its directory, or force-recreate by hand.")
 
 
+def check_grafana_provisioning() -> bool:
+    """The dashboard provider's path must be a directory the compose file mounts.
+
+    provisioning/dashboards/construct.yaml pointed at /etc/grafana/dashboards
+    while the mount put the files in /var/lib/grafana/dashboards. Grafana starts
+    happily, logs nothing alarming, and provisions an empty directory: you get a
+    working Grafana with no dashboards and no reason given. Third instance today
+    of one config naming a path another config does not provide.
+
+    Also checks every panel's datasource uid against the provisioned datasource —
+    a dashboard exported from a different Grafana carries that instance's uid and
+    renders "Datasource not found" on every panel.
+    """
+    ok = True
+    mounts = {}  # container destination -> host source
+    for compose in OPS.glob("docker-compose*.yml"):
+        for m in re.finditer(r"^\s*-\s+(\./[^\s:]+):([^\s:]+)(?::\w+)?\s*$",
+                             compose.read_text(encoding="utf-8"), re.M):
+            mounts[m.group(2)] = (OPS / m.group(1)[2:]).resolve()
+
+    prov = OPS / "grafana/provisioning/dashboards/construct.yaml"
+    if prov.exists():
+        for m in re.finditer(r"^\s*path:\s*(\S+)", prov.read_text(encoding="utf-8"), re.M):
+            want = m.group(1)
+            if want not in mounts:
+                ok = False
+                fail(f"grafana dashboard provider reads {want}, which no compose "
+                     f"file mounts — Grafana will provision an empty directory. "
+                     f"Mounted: {', '.join(sorted(k for k in mounts if 'grafana' in k))}")
+
+    uids = set()
+    ds_dir = OPS / "grafana/provisioning/datasources"
+    for f in ds_dir.glob("*.y*ml") if ds_dir.exists() else []:
+        uids |= set(re.findall(r"^\s*uid:\s*(\S+)", f.read_text(encoding="utf-8"), re.M))
+    for dash in (OPS / "grafana/dashboards").glob("*.json"):
+        used = set(re.findall(r'"uid":\s*"([^"]+)"', dash.read_text(encoding="utf-8")))
+        for uid in sorted(used - uids - {dash.stem}):
+            if uid.startswith("construct-overview"):   # the dashboard's own uid
+                continue
+            ok = False
+            fail(f"{dash.name} references datasource uid \"{uid}\", which is not "
+                 f"provisioned ({', '.join(sorted(uids)) or 'none'}) — every panel "
+                 f"will render 'Datasource not found'.")
+    return ok
+
+
 def check_mount_sources_exist() -> bool:
     """Docker creates a *directory* for a missing bind-mount source.
 
@@ -285,6 +331,7 @@ def main() -> int:
     # first is how a two-line fix turns into two round trips.
     ok = check_no_orphan_configs()
     ok = check_mount_sources_exist() and ok
+    ok = check_grafana_provisioning() and ok
     check_file_mounts()
 
     rules = rules_and_metrics()
