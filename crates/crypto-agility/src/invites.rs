@@ -3,6 +3,34 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+/// How long a signed invite stays redeemable, in seconds.
+///
+/// One meaning, three carriers, in two repositories and two languages:
+///   1. here — `accept_invite` checks it before anything else;
+///   2. `used_invites.expires_at` — the row that makes an invite one-time;
+///   3. iOS `InviteConfig.ttlSeconds` — what the sender's app believes it handed out.
+///
+/// Raising it on the client alone does nothing: the server rejects first, and the
+/// user sees an expiry they cannot explain. Raising it here without raising the
+/// burn row is worse than doing nothing — when that row expires, the same invite
+/// becomes redeemable AGAIN. The TTL and the one-time guarantee are the same
+/// number, which is why `INVITE_BURN_RETENTION_SECONDS` is derived and not typed
+/// out a second time.
+///
+/// 2026-08-13: 300 → 43200 (12h). Five minutes was fine for a QR held between two
+/// phones and unusable for a link sent through another messenger — it expired in
+/// the clipboard. One-time use plus the TOFU `deviceId` pin carry the weight that
+/// a short window was standing in for.
+pub const INVITE_TTL_SECONDS: i64 = 43_200;
+
+/// How long a burn record must outlive the accept that wrote it.
+///
+/// An invite is accepted at most `INVITE_TTL_SECONDS` after signing, so a row
+/// living that long from the burn always covers every remaining second of the
+/// invite's life. The extra hour absorbs clock skew between the two machines —
+/// it is not slack for a wrong TTL.
+pub const INVITE_BURN_RETENTION_SECONDS: i64 = INVITE_TTL_SECONDS + 3_600;
+
 /// Invite token object for one-time contact sharing (v1–v4)
 ///
 /// This structure is cryptographically signed by the user's Identity Key
@@ -16,7 +44,7 @@ use uuid::Uuid;
 ///
 /// Security properties:
 /// - One-time use only (jti tracking prevents replay)
-/// - Short TTL (5 minutes for QR, configurable for links)
+/// - Bounded TTL (`INVITE_TTL_SECONDS`, the same for QR and links)
 /// - Cryptographic authenticity (Ed25519 signature)
 /// - Federation-ready (includes server FQDN)
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,7 +8,9 @@ use construct_server_shared::{
     AppError,
     db::{self as construct_db, DbPool},
 };
-use crypto_agility::{InviteToken, InviteValidationError};
+use crypto_agility::{
+    INVITE_BURN_RETENTION_SECONDS, INVITE_TTL_SECONDS, InviteToken, InviteValidationError,
+};
 
 use crate::context::IdentityServiceContext;
 
@@ -190,7 +192,7 @@ pub async fn accept_invite(
 ) -> Result<AcceptInviteOutput> {
     let invite = input.invite;
 
-    if let Err(e) = invite.validate_with_expiry(300) {
+    if let Err(e) = invite.validate_with_expiry(INVITE_TTL_SECONDS) {
         tracing::warn!(
             jti = %invite.jti,
             version = invite.v,
@@ -245,7 +247,7 @@ pub async fn accept_invite(
         &jti_uuid,
         &creator_user_id,
         invite.device_id.as_deref(),
-        600,
+        INVITE_BURN_RETENTION_SECONDS,
     )
     .await
     .context("Failed to burn invite jti")?;
@@ -311,7 +313,17 @@ pub async fn revoke_invite(
     let jti_uuid = Uuid::parse_str(&input.jti).context("Invalid jti UUID")?;
 
     let revoked =
-        construct_db::burn_used_invite(&context.db_pool, &jti_uuid, &input.user_id, None, 180)
+        // Revocation must outlive the invite it revokes. This was 180s against a
+        // 300s TTL, so an invite revoked at t+10s came back to life at t+190s —
+        // the row that says "dead" expired while the invite was still valid.
+        // Deriving both from one constant is what stops that from recurring.
+        construct_db::burn_used_invite(
+            &context.db_pool,
+            &jti_uuid,
+            &input.user_id,
+            None,
+            INVITE_BURN_RETENTION_SECONDS,
+        )
             .await
             .context("Failed to revoke invite")?;
 
