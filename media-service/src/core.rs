@@ -348,7 +348,21 @@ impl DownloadStream {
 // Database Operations
 // ============================================================================
 
-/// Save media metadata to database
+/// Save media metadata to database.
+///
+/// `ttl_seconds` comes from `MediaConfig::file_ttl_seconds`, and passing it is
+/// the point of this signature. Until 2026-08-13 the INSERT listed no
+/// `expires_at`, so the retention actually applied was the schema default —
+/// `DEFAULT (NOW() + INTERVAL '15 days')` in migration 021 — while the config
+/// said 7 days and `MEDIA_FILE_TTL_SECONDS` was read into a field nothing ever
+/// used. Two numbers for one meaning, and the one written in the config, quoted
+/// in the docs and reasoned about on the client (MediaSendCache keeps a 6-day
+/// TTL specifically to stay under the server's) was the one with no effect.
+///
+/// Runtime query rather than `sqlx::query!` on purpose: the macro checks against
+/// the cached schema in `.sqlx/`, and changing the SQL text of a compile-time
+/// query would need `cargo sqlx prepare` against a live database before any
+/// SQLX_OFFLINE build could succeed. Same reason as `cleanup_expired_media`.
 pub async fn save_metadata(
     pool: &sqlx::PgPool,
     media_id: &str,
@@ -356,39 +370,41 @@ pub async fn save_metadata(
     storage_backend: &str,
     storage_key: &str,
     file_hash: &str,
+    ttl_seconds: i64,
 ) -> Result<MediaMetadata> {
     let media_id_uuid = Uuid::parse_str(media_id)?;
 
-    let record = sqlx::query!(
+    let record: (Uuid, i64, String, String, String, i64, i64) = sqlx::query_as(
         r#"
-        INSERT INTO media_files (media_id, size_bytes, storage_backend, storage_key, file_hash)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO media_files (media_id, size_bytes, storage_backend, storage_key, file_hash, expires_at)
+        VALUES ($1, $2, $3, $4, $5, NOW() + make_interval(secs => $6))
         RETURNING
             media_id,
             size_bytes,
             storage_backend,
             storage_key,
             file_hash,
-            EXTRACT(EPOCH FROM created_at)::BIGINT as "created_at!",
-            EXTRACT(EPOCH FROM expires_at)::BIGINT as "expires_at!"
+            EXTRACT(EPOCH FROM created_at)::BIGINT,
+            EXTRACT(EPOCH FROM expires_at)::BIGINT
         "#,
-        media_id_uuid,
-        size_bytes,
-        storage_backend,
-        storage_key,
-        file_hash
     )
+    .bind(media_id_uuid)
+    .bind(size_bytes)
+    .bind(storage_backend)
+    .bind(storage_key)
+    .bind(file_hash)
+    .bind(ttl_seconds as f64)
     .fetch_one(pool)
     .await?;
 
     Ok(MediaMetadata {
-        media_id: record.media_id.to_string(),
-        size_bytes: record.size_bytes,
-        file_hash: record.file_hash,
-        created_at: record.created_at,
-        expires_at: record.expires_at,
-        storage_backend: record.storage_backend,
-        storage_key: record.storage_key,
+        media_id: record.0.to_string(),
+        size_bytes: record.1,
+        storage_backend: record.2,
+        storage_key: record.3,
+        file_hash: record.4,
+        created_at: record.5,
+        expires_at: record.6,
     })
 }
 

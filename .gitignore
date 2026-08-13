@@ -68,3 +68,6 @@ tools/relay_signing_key.hex
 
 # Alertmanager bot token (never commit)
 ops/alertmanager/telegram_token
+
+# Секреты бэкапа (публичный ключ + адрес Storage Box)
+ops/backup.env
