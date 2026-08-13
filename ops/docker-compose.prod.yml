@@ -64,6 +64,18 @@ services:
       POSTGRES_DB: construct
       POSTGRES_USER: construct
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      # Loopback of the HOST only — never 0.0.0.0. This exists so an SSH tunnel
+      # can reach the database: `ssh -N -L 5432:localhost:5432 <host>`. Without
+      # it the forward has to target the container's bridge IP, which changes on
+      # every recreate, and the failure ("channel open failed") reads like an
+      # sshd problem rather than a moved address.
+      #
+      # Not a new exposure: the container's 5432 was already reachable from the
+      # host over the docker bridge, so anything that can open a socket on this
+      # machine could already reach it. What guards the database is that nothing
+      # outside the machine can, plus POSTGRES_PASSWORD.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

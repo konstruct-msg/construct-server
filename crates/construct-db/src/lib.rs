@@ -238,19 +238,90 @@ pub async fn find_discoverable_user_by_username_hash(
     Ok(user_id)
 }
 
-/// Delete user account and all associated data
-/// This performs a hard delete (cascade will handle related records)
+/// Delete a user account and the data that actually belongs to it.
+///
+/// The previous version deleted one row — `users` — with the comment "cascade
+/// will handle related records". **`devices` has no foreign key to `users` at
+/// all**, so nothing cascaded: every deletion left the account's devices, their
+/// prekeys and their push tokens behind. On 2026-08-13 production held 130
+/// devices against 44 users, 80 of them pointing at users that no longer
+/// existed. The RPC had been answering "Account and all associated data have
+/// been permanently deleted" and writing `GDPR: Account deleted` to the audit
+/// log the whole time.
+///
+/// What still cascades from `users` (real FKs): group_key_packages,
+/// used_invites, user_blocks, voip_tokens.
+///
+/// **Key Transparency is the one thing not deleted, deliberately.**
+/// `kt_leaves.device_id` is ON DELETE RESTRICT, and that is correct: the leaves
+/// are an append-only log whose whole value is that history is never rewritten —
+/// removing entries would invalidate consistency proofs for every other user.
+/// A leaf holds `device_id`, `leaf_hash`, `appended_at`, `leaf_kind`: a
+/// pseudonymous device identifier and a commitment, no personal data. So a
+/// device with a leaf is retired instead of removed — deactivated, with its
+/// keys and push tokens deleted, which is what makes it unusable. Its device_id
+/// remains in the log, referring to nothing.
+///
+/// Everything runs in one transaction: a partial account deletion is worse than
+/// a failed one, because it looks finished.
 pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM users
-        WHERE id = $1
-        "#,
-    )
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+    let mut tx = pool.begin().await.context("Failed to begin deletion")?;
 
+    let devices: Vec<String> =
+        sqlx::query_scalar("SELECT device_id FROM devices WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("Failed to list account devices")?;
+
+    if !devices.is_empty() {
+        // Key material and push tokens go for every device, kept or not: this is
+        // what actually revokes the account rather than hiding it.
+        for (table, column) in [
+            ("device_tokens", "device_id"),
+            ("one_time_prekeys", "device_id"),
+            ("kyber_one_time_pre_keys", "device_id"),
+            ("signed_prekey_archive", "device_id"),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE {column} = ANY($1)"))
+                .bind(&devices)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("Failed to clear {table}"))?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE devices SET is_active = false
+            WHERE device_id = ANY($1)
+              AND EXISTS (SELECT 1 FROM kt_leaves k WHERE k.device_id = devices.device_id)
+            "#,
+        )
+        .bind(&devices)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to retire KT-anchored devices")?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM devices
+            WHERE device_id = ANY($1)
+              AND NOT EXISTS (SELECT 1 FROM kt_leaves k WHERE k.device_id = devices.device_id)
+            "#,
+        )
+        .bind(&devices)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete account devices")?;
+    }
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete user row")?;
+
+    tx.commit().await.context("Failed to commit deletion")?;
     Ok(())
 }
 
