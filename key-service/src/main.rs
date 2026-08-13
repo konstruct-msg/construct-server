@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use construct_server_shared::clients::notification::NotificationClient;
@@ -1304,6 +1304,39 @@ async fn main() -> Result<()> {
     )
     .add_service(KeyServiceServer::new(grpc_service))
     .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal());
+
+    // OTPK inventory across the fleet, refreshed every 60s.
+    //
+    // A poll rather than an increment on every change: the number that matters
+    // is "how many devices are out of one-time pre-keys right now", and that
+    // cannot be maintained incrementally without tracking per-device state in
+    // the process. One aggregate query a minute over a table this size costs
+    // nothing (~10ms at 123 devices) and cannot drift out of sync with the
+    // database the way a counter would.
+    //
+    // The first reading, 2026-08-13, was 123 devices with 76 at zero — a
+    // majority of the fleet handing out SPK-only bundles, which nobody could
+    // have seen before this existed.
+    {
+        let db = context.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                match core::otpk_inventory(&db).await {
+                    Ok(inv) => {
+                        construct_metrics::OTPK_DEVICES_TOTAL.set(inv.devices);
+                        construct_metrics::OTPK_DEVICES_LOW.set(inv.low);
+                        construct_metrics::OTPK_DEVICES_EXHAUSTED.set(inv.exhausted);
+                    }
+                    // Warn, and leave the gauges at their last value rather than
+                    // zeroing them: a failed query is not an empty fleet, and
+                    // "0 devices exhausted" is the reassuring direction to lie in.
+                    Err(e) => warn!("OTPK inventory poll failed: {e}"),
+                }
+            }
+        });
+    }
 
     // HTTP health server
     let http_bind_address =

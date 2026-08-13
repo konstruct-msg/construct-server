@@ -926,7 +926,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 9
+        "y": 111
       },
       "id": 106,
       "options": {
@@ -1004,7 +1004,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 9
+        "y": 111
       },
       "id": 107,
       "options": {
@@ -1060,7 +1060,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 16
+        "y": 118
       },
       "id": 108,
       "options": {
@@ -1116,7 +1116,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 16
+        "y": 118
       },
       "id": 109,
       "options": {
@@ -1194,7 +1194,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 16
+        "y": 118
       },
       "id": 110,
       "options": {
@@ -1250,7 +1250,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 23
+        "y": 125
       },
       "id": 111,
       "options": {
@@ -1317,7 +1317,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 23
+        "y": 125
       },
       "id": 112,
       "options": {
@@ -1340,8 +1340,8 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "sum by (error_type) (rate(construct_signaling_errors_total[5m]))",
-          "legendFormat": "{{error_type}}",
+          "expr": "sum by (code) (rate(construct_signaling_errors_total[5m]))",
+          "legendFormat": "{{code}}",
           "refId": "A",
           "instant": false,
           "format": "time_series"
@@ -1354,9 +1354,435 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 132
       },
       "id": 113,
+      "title": "КЛЮЧИ И ПОДКЛЮЧЕНИЯ",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 133
+      },
+      "id": 114,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Устройства без одноразовых предключей",
+      "description": "Устройство с нулём OTPK не ломается заметно: собеседник получает SPK-only bundle, сессия устанавливается, но без одноразового ключа — начальное сообщение теряет ту форвард-секретность, которую этот ключ даёт. Ни один из двух пользователей об этом не узнает. Первое измерение 2026-08-13: 123 активных устройства, 76 из них на нуле. Растущая доля означает, что клиенты не пополняют запас — смотреть надо на клиент, не на сервер.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "construct_otpk_devices_exhausted",
+          "legendFormat": "исчерпано",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "construct_otpk_devices_low",
+          "legendFormat": "меньше 10",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "construct_otpk_devices_total",
+          "legendFormat": "всего активных",
+          "refId": "C",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 133
+      },
+      "id": 115,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Оборот одноразовых предключей",
+      "description": "Расход устойчиво выше загрузки — запас идёт к нулю, и это тот самый путь, которым 76 устройств туда попали. Резкий скачок расхода без роста трафика — попытка вычерпать чужой запас (для этого есть drain guard, но он виден только здесь).",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum(rate(construct_otpk_uploaded_total[15m]))",
+          "legendFormat": "загружено/с",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum(rate(construct_otpk_consumed_total[15m]))",
+          "legendFormat": "израсходовано/с",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 140
+      },
+      "id": 116,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Открытые потоки сообщений",
+      "description": "Ближайшее к ответу «сколько устройств сейчас онлайн». Высокая частота открытий при ровном числе активных — это переподключения по кругу; такая же картина однажды тормозила сигналинг звонков.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum(construct_grpc_streams_active)",
+          "legendFormat": "активных",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum(rate(construct_grpc_streams_opened_total[5m])) * 60",
+          "legendFormat": "открытий/мин",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 140
+      },
+      "id": 117,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Почему потоки закрываются",
+      "description": "client_disconnect и client_eof — нормальная жизнь мобильного клиента (уход в фон). handler_error и stream_error — это мы, и их доля важнее абсолютного числа.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum by (reason) (rate(construct_grpc_streams_closed_total[15m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 147
+      },
+      "id": 118,
+      "title": "ЗАПРОСЫ (CADDY)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 148
+      },
+      "id": 119,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Запросы по статусам",
+      "description": "Caddy — единственный процесс, который видит запросы API: gateway их больше не проксирует. Рост 5xx здесь — первое, что видно при поломке любого сервиса, раньше алертов по самому сервису.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum by (code) (rate(caddy_http_requests_total[5m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 148
+      },
+      "id": 120,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Задержка запросов",
+      "description": "Включая время апстрима. Расхождение p50 и p99 при неизменном p50 — хвост, а не общая деградация: обычно один медленный запрос к БД.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 155
+      },
+      "id": 121,
       "title": "POSTGRES",
       "type": "row"
     },
@@ -1385,9 +1811,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 119
+        "y": 156
       },
-      "id": 114,
+      "id": 122,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1441,9 +1867,9 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 31
+        "y": 156
       },
-      "id": 115,
+      "id": 123,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1497,9 +1923,9 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 31
+        "y": 156
       },
-      "id": 116,
+      "id": 124,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1564,9 +1990,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 38
+        "y": 163
       },
-      "id": 117,
+      "id": 125,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1612,9 +2038,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 126
+        "y": 170
       },
-      "id": 118,
+      "id": 126,
       "title": "REDIS — он же хранилище недоставленного",
       "type": "row"
     },
@@ -1643,9 +2069,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 127
+        "y": 171
       },
-      "id": 119,
+      "id": 127,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1699,9 +2125,9 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 46
+        "y": 171
       },
-      "id": 120,
+      "id": 128,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1755,9 +2181,9 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 46
+        "y": 171
       },
-      "id": 121,
+      "id": 129,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1822,9 +2248,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 53
+        "y": 178
       },
-      "id": 122,
+      "id": 130,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1870,9 +2296,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 134
+        "y": 185
       },
-      "id": 123,
+      "id": 131,
       "title": "РЕСУРСЫ ПРОЦЕССОВ",
       "type": "row"
     },
@@ -1901,9 +2327,9 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 135
+        "y": 186
       },
-      "id": 124,
+      "id": 132,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1957,9 +2383,9 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 186
       },
-      "id": 125,
+      "id": 133,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1994,9 +2420,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 142
+        "y": 193
       },
-      "id": 126,
+      "id": 134,
       "title": "ЖДЁТ СОБЫТИЙ — производитель есть, событие не наступало",
       "type": "row"
     },
@@ -2025,9 +2451,9 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 143
+        "y": 194
       },
-      "id": 127,
+      "id": 135,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2114,9 +2540,9 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 194
       },
-      "id": 128,
+      "id": 136,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2181,9 +2607,9 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 76
+        "y": 201
       },
-      "id": 129,
+      "id": 137,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2237,9 +2663,9 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 76
+        "y": 201
       },
-      "id": 130,
+      "id": 138,
       "options": {
         "legend": {
           "displayMode": "list",

@@ -109,9 +109,65 @@ panel(R2, "Звонки", [("construct_active_calls", "активных сейч
       desc="Активные звонки — gauge, инициации — счётчик. Расхождение (много "
            "инициаций, ноль активных) означает, что звонки не устанавливаются.")
 
-panel(R2, "Ошибки сигналинга", [("sum by (error_type) (rate(construct_signaling_errors_total[5m]))", "{{error_type}}")],
+panel(R2, "Ошибки сигналинга", [("sum by (code) (rate(construct_signaling_errors_total[5m]))", "{{code}}")],
       idle=True,
       desc="Ближайшее к причине, когда звонки не соединяются.")
+
+R2b = "КЛЮЧИ И ПОДКЛЮЧЕНИЯ"
+
+panel(R2b, "Устройства без одноразовых предключей",
+      [("construct_otpk_devices_exhausted", "исчерпано"),
+       ("construct_otpk_devices_low", "меньше 10"),
+       ("construct_otpk_devices_total", "всего активных")],
+      idle=True, w=12,
+      desc="Устройство с нулём OTPK не ломается заметно: собеседник получает "
+           "SPK-only bundle, сессия устанавливается, но без одноразового ключа — "
+           "начальное сообщение теряет ту форвард-секретность, которую этот ключ "
+           "даёт. Ни один из двух пользователей об этом не узнает. Первое "
+           "измерение 2026-08-13: 123 активных устройства, 76 из них на нуле. "
+           "Растущая доля означает, что клиенты не пополняют запас — смотреть "
+           "надо на клиент, не на сервер.")
+
+panel(R2b, "Оборот одноразовых предключей",
+      [("sum(rate(construct_otpk_uploaded_total[15m]))", "загружено/с"),
+       ("sum(rate(construct_otpk_consumed_total[15m]))", "израсходовано/с")],
+      idle=True, w=12,
+      desc="Расход устойчиво выше загрузки — запас идёт к нулю, и это тот самый "
+           "путь, которым 76 устройств туда попали. Резкий скачок расхода без "
+           "роста трафика — попытка вычерпать чужой запас (для этого есть drain "
+           "guard, но он виден только здесь).")
+
+panel(R2b, "Открытые потоки сообщений",
+      [("sum(construct_grpc_streams_active)", "активных"),
+       ("sum(rate(construct_grpc_streams_opened_total[5m])) * 60", "открытий/мин")],
+      idle=True, w=12,
+      desc="Ближайшее к ответу «сколько устройств сейчас онлайн». Высокая частота "
+           "открытий при ровном числе активных — это переподключения по кругу; "
+           "такая же картина однажды тормозила сигналинг звонков.")
+
+panel(R2b, "Почему потоки закрываются",
+      [("sum by (reason) (rate(construct_grpc_streams_closed_total[15m]))", "{{reason}}")],
+      idle=True, w=12,
+      desc="client_disconnect и client_eof — нормальная жизнь мобильного клиента "
+           "(уход в фон). handler_error и stream_error — это мы, и их доля важнее "
+           "абсолютного числа.")
+
+R2c = "ЗАПРОСЫ (CADDY)"
+
+panel(R2c, "Запросы по статусам",
+      [('sum by (code) (rate(caddy_http_requests_total[5m]))', "{{code}}")],
+      idle=True, w=12,
+      desc="Caddy — единственный процесс, который видит запросы API: gateway их "
+           "больше не проксирует. Рост 5xx здесь — первое, что видно при поломке "
+           "любого сервиса, раньше алертов по самому сервису.")
+
+panel(R2c, "Задержка запросов",
+      [("histogram_quantile(0.50, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))", "p50"),
+       ("histogram_quantile(0.95, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))", "p95"),
+       ("histogram_quantile(0.99, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[5m])))", "p99")],
+      unit="s", idle=True, w=12,
+      desc="Включая время апстрима. Расхождение p50 и p99 при неизменном p50 — "
+           "хвост, а не общая деградация: обычно один медленный запрос к БД.")
 
 R3 = "POSTGRES"
 
@@ -222,7 +278,11 @@ keep = []
 in_cap = False
 for pan in dash["panels"]:
     if pan["type"] == "row":
-        in_cap = pan["title"].startswith("CAPACITY")
+        # Matches the row's Russian title. It said "CAPACITY" for one generation
+        # after the row was translated, silently kept nothing, and dropped ten
+        # verified panels — a string compare against a title someone renames is
+        # the same defect as a path one config names and another provides.
+        in_cap = pan["title"].startswith("ЁМКОСТЬ")
     if in_cap:
         keep.append(pan)
 
@@ -282,14 +342,48 @@ for row, items in by_row.items():
         x += p["w"]
     y += max(p["h"] for p in live)
 
-# capacity row last, renumbered
-for pan in keep:
-    pan = dict(pan)
-    pan["gridPos"] = dict(pan["gridPos"])
-    pan["gridPos"]["y"] += y - 71
-    panels.append(pan)
+panels.extend(dict(pan, gridPos=dict(pan["gridPos"])) for pan in keep)
 
-dash["panels"] = panels
+# Final layout pass. Rows are laid out in ROW_ORDER and each row's panels are
+# rebased onto it, because two different y origins met here once and produced
+# panels stacked on top of each other — the capacity row was carried over with
+# an offset computed from where it used to be. Recomputing beats adjusting.
+ROW_ORDER = ["СОСТОЯНИЕ", "ЁМКОСТЬ", "ТРАФИК", "КЛЮЧИ", "ЗАПРОСЫ",
+             "POSTGRES", "REDIS", "РЕСУРСЫ", "ЖДЁТ"]
+groups, cur = [], None
+for pan in panels:
+    if pan["type"] == "row":
+        cur = [pan]
+        groups.append(cur)
+    elif cur is not None:
+        cur.append(pan)
+groups.sort(key=lambda g: next((i for i, o in enumerate(ROW_ORDER)
+                                if g[0]["title"].startswith(o)), len(ROW_ORDER)))
+
+laid, cursor = [], 0
+for g in groups:
+    g[0]["gridPos"]["y"] = cursor
+    cursor += 1
+    base = min(pan["gridPos"]["y"] for pan in g[1:]) if len(g) > 1 else 0
+    tallest = 0
+    for pan in g[1:]:
+        pan["gridPos"]["y"] = cursor + (pan["gridPos"]["y"] - base)
+        tallest = max(tallest, pan["gridPos"]["y"] + pan["gridPos"]["h"] - cursor)
+    laid.extend(g)
+    cursor += tallest
+
+# Overlapping panels render on top of each other and the dashboard looks broken
+# in a way that reads as a Grafana bug. Cheap to assert, so assert it.
+occupied = {}
+for pan in laid:
+    gp = pan["gridPos"]
+    for xx in range(gp["x"], gp["x"] + gp["w"]):
+        for yy in range(gp["y"], gp["y"] + gp["h"]):
+            other = occupied.get((xx, yy))
+            assert other is None, f"panels overlap: {pan['title']!r} and {other!r}"
+            occupied[(xx, yy)] = pan["title"]
+
+dash["panels"] = panels = laid
 dash["description"] = ("Construct — обзор сервера. Каждая панель построена от метрики, "
                        "которая действительно производится: выражения проверены против "
                        "работающего Prometheus при генерации.")

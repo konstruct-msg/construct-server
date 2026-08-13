@@ -152,6 +152,13 @@ impl MessagingService for MessagingGrpcService {
                 }
             }
 
+            // Open/close are counted around the loop, not at the RPC entry, so the
+            // gauge tracks streams that are actually running rather than requests
+            // that arrived. Every exit from the loop below falls through to the
+            // decrement — there is no early return between here and there.
+            construct_metrics::GRPC_STREAMS_ACTIVE.inc();
+            construct_metrics::GRPC_STREAMS_OPENED_TOTAL.inc();
+
             let close_reason = 'stream: loop {
                 // Lazy inbox wakeup: arm as soon as user_id becomes known.
                 // Catch-up poll still waits for Subscribe or grace (not here).
@@ -285,6 +292,11 @@ impl MessagingService for MessagingGrpcService {
                     else => break 'stream "all_channels_closed",
                 }
             };
+
+            construct_metrics::GRPC_STREAMS_ACTIVE.dec();
+            construct_metrics::GRPC_STREAMS_CLOSED_TOTAL
+                .with_label_values(&[close_reason])
+                .inc();
 
             let lifetime_secs = stream_opened_at.elapsed().as_secs();
             tracing::info!(
