@@ -408,5 +408,10 @@ must not enter E2E semantics. Edits, replies, reactions, deletes, pins MUST use
 All project documentation: `~/Code/construct-docs` (Obsidian vault).
 See `~/Code/construct-docs/AGENTS.md` for writing rules and vault layout.
 
+**Scale / Kafka:** delivery is Redis-direct mailbox, not Kafka. Do not reintroduce
+Kafka as the user offline queue without a new ADR. Growth order, messaging LB
+(no user sticky), and Redis shard-by-user: `construct-docs/architecture/scaling.md`
+and `construct-docs/decisions/redis-direct-delivery-not-kafka.md`.
+
 Session notes: `sessions/YYYY-MM-DD-<topic>.md` with sections `# Context`, `# What Changed`,
 `# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`.

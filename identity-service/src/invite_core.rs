@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use uuid::Uuid;
 
@@ -126,53 +125,9 @@ pub async fn verify_invite_signature(
     Ok(())
 }
 
-pub struct GenerateInviteInput {
-    pub user_id: Uuid,
-    pub device_id: Option<String>,
-    pub ttl_seconds: Option<i64>,
-}
-
-pub struct GenerateInviteOutput {
-    pub jti: String,
-    pub server: String,
-    pub expires_at: i64,
-    pub user_id: String,
-    pub device_id: Option<String>,
-    pub ttl_seconds: i64,
-}
-
-pub async fn generate_invite(
-    context: &IdentityServiceContext,
-    input: GenerateInviteInput,
-) -> Result<GenerateInviteOutput> {
-    let ttl_seconds = input.ttl_seconds.unwrap_or(300);
-    if !(60..=3600).contains(&ttl_seconds) {
-        return Err(
-            AppError::Validation("TTL must be between 60 and 3600 seconds".to_string()).into(),
-        );
-    }
-
-    let jti = Uuid::new_v4();
-    let server = context.config.instance_domain.clone();
-    let now = Utc::now().timestamp();
-    let expires_at = now + ttl_seconds;
-
-    tracing::info!(
-        user_id = %input.user_id,
-        jti = %jti,
-        ttl_seconds = ttl_seconds,
-        "Invite token generated"
-    );
-
-    Ok(GenerateInviteOutput {
-        jti: jti.to_string(),
-        server,
-        expires_at,
-        user_id: input.user_id.to_string(),
-        device_id: input.device_id,
-        ttl_seconds,
-    })
-}
+// GenerateInvite removed (INVITE_LIST_REVOKE_SERVER_SPEC): production clients
+// mint+sign on device (v4, INVITE_TTL_SECONDS). A server issuer with a different
+// TTL was a second parallel invite system by accretion — not allowed.
 
 pub struct AcceptInviteInput {
     pub accepter_user_id: Uuid,
@@ -306,6 +261,16 @@ pub struct RevokeInviteOutput {
     pub message: String,
 }
 
+/// Pre-burn `jti` so a still-valid invite cannot be redeemed.
+///
+/// Contract pinned for clients (INVITE_LIST_REVOKE_SERVER_SPEC §2):
+/// - first burn of this jti → `success: true`
+/// - already burned (redeemed or revoked) → `success: false` + message
+///   (normal outcome, **not** an Err — UI shows "already used")
+/// - DB failure → `Err` → gRPC `Status::internal` (retryable transport/server)
+///
+/// No issuer ownership check and no issuance table: jti is client-random and
+/// unknown until redeem/revoke. Do not reintroduce ListInvites-by-issuance.
 pub async fn revoke_invite(
     context: &IdentityServiceContext,
     input: RevokeInviteInput,
@@ -324,8 +289,8 @@ pub async fn revoke_invite(
             None,
             INVITE_BURN_RETENTION_SECONDS,
         )
-            .await
-            .context("Failed to revoke invite")?;
+        .await
+        .context("Failed to revoke invite")?;
 
     if revoked {
         tracing::info!(jti = %input.jti, user_id = %input.user_id, "Invite revoked");
@@ -342,33 +307,6 @@ pub async fn revoke_invite(
     }
 }
 
-pub struct ListInvitesInput {
-    #[allow(dead_code)]
-    pub user_id: Uuid,
-    #[allow(dead_code)]
-    pub limit: Option<i32>,
-    #[allow(dead_code)]
-    pub include_expired: bool,
-}
-
-pub struct InviteInfo {
-    pub jti: String,
-    pub user_id: String,
-    pub device_id: Option<String>,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub used: bool,
-    pub used_by: Option<String>,
-    pub used_at: Option<i64>,
-}
-
-pub struct ListInvitesOutput {
-    pub invites: Vec<InviteInfo>,
-}
-
-pub async fn list_invites(
-    _context: &IdentityServiceContext,
-    _input: ListInvitesInput,
-) -> Result<ListInvitesOutput> {
-    Ok(ListInvitesOutput { invites: vec![] })
-}
+// ListInvites removed: issuance is not recorded server-side. A successful empty
+// list was indistinguishable from "user has no invites" and invited clients to
+// build a false server-backed list. Clients list from a local mint journal.

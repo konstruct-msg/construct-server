@@ -2484,39 +2484,6 @@ impl UserService for IdentityGrpcService {
 
 #[tonic::async_trait]
 impl InviteService for IdentityGrpcService {
-    async fn generate_invite(
-        &self,
-        request: Request<proto::GenerateInviteRequest>,
-    ) -> Result<Response<proto::GenerateInviteResponse>, Status> {
-        let metadata = request.metadata();
-        let user_id = extract_user_id_from_metadata(&self.context.auth_manager, metadata)?;
-        let device_id = metadata
-            .get("x-device-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let req = request.into_inner();
-
-        let output = invite_core::generate_invite(
-            &self.context,
-            invite_core::GenerateInviteInput {
-                user_id,
-                device_id,
-                ttl_seconds: req.ttl_seconds,
-            },
-        )
-        .await
-        .map_err(|e| Status::internal(format!("Failed to generate invite: {}", e)))?;
-
-        Ok(Response::new(proto::GenerateInviteResponse {
-            jti: output.jti,
-            server: output.server,
-            expires_at: output.expires_at,
-            user_id: output.user_id,
-            device_id: output.device_id,
-            ttl_seconds: output.ttl_seconds,
-        }))
-    }
-
     async fn accept_invite(
         &self,
         request: Request<proto::AcceptInviteRequest>,
@@ -2608,6 +2575,9 @@ impl InviteService for IdentityGrpcService {
             extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
 
+        // Business outcomes are in the response body (success false = already
+        // used). Only real failures become Status::internal so the client can
+        // retry transport errors without treating "already used" as retryable.
         let output = invite_core::revoke_invite(
             &self.context,
             invite_core::RevokeInviteInput {
@@ -2622,43 +2592,6 @@ impl InviteService for IdentityGrpcService {
             success: output.success,
             message: output.message,
         }))
-    }
-
-    async fn list_invites(
-        &self,
-        request: Request<proto::ListInvitesRequest>,
-    ) -> Result<Response<proto::ListInvitesResponse>, Status> {
-        let user_id =
-            extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
-        let req = request.into_inner();
-
-        let output = invite_core::list_invites(
-            &self.context,
-            invite_core::ListInvitesInput {
-                user_id,
-                limit: req.limit,
-                include_expired: req.include_expired.unwrap_or(false),
-            },
-        )
-        .await
-        .map_err(|e| Status::internal(format!("Failed to list invites: {}", e)))?;
-
-        let invites = output
-            .invites
-            .into_iter()
-            .map(|inv| proto::InviteInfo {
-                jti: inv.jti,
-                user_id: inv.user_id,
-                device_id: inv.device_id,
-                created_at: inv.created_at,
-                expires_at: inv.expires_at,
-                used: inv.used,
-                used_by: inv.used_by,
-                used_at: inv.used_at,
-            })
-            .collect();
-
-        Ok(Response::new(proto::ListInvitesResponse { invites }))
     }
 }
 

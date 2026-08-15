@@ -7,8 +7,12 @@ use uuid::Uuid;
 ///
 /// One meaning, three carriers, in two repositories and two languages:
 ///   1. here — `accept_invite` checks it before anything else;
-///   2. `used_invites.expires_at` — the row that makes an invite one-time;
+///   2. `used_invites.expires_at` / burn retention — the row that makes an invite one-time
+///      (and pre-burn on `RevokeInvite`);
 ///   3. iOS `InviteConfig.ttlSeconds` — what the sender's app believes it handed out.
+///
+/// Production path is **device-minted v4** only. Server `GenerateInvite` (a fourth
+/// TTL carrier, default 300s) was removed — see INVITE_LIST_REVOKE_SERVER_SPEC.
 ///
 /// Raising it on the client alone does nothing: the server rejects first, and the
 /// user sees an expiry they cannot explain. Raising it here without raising the
