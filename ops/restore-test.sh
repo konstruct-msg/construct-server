@@ -12,7 +12,7 @@
 #   ./ops/restore-test.sh 20260813T140000Z
 #
 # Переменные — те же ops/backup.env, плюс:
-#   BACKUP_AGE_IDENTITY   путь к приватному ключу (например ~/.config/age/construct.key)
+#   BACKUP_AGE_IDENTITY   путь к приватному ключу (~/.config/age/construct-backup.key)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
