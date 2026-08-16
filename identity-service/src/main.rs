@@ -2508,6 +2508,8 @@ impl InviteService for IdentityGrpcService {
             ts: invite_token.ts,
             sig: invite_token.sig,
             username: invite_token.un,
+            // v5 signed client max-age; absent on v1–v4 → server default in effective_ttl.
+            ttl: invite_token.ttl,
         };
 
         let creator_user_id = invite.uuid;
