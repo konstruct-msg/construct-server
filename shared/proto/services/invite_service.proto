@@ -2,17 +2,13 @@ syntax = "proto3";
 
 package shared.proto.services.v1;
 
-// InviteService — one-time contact invites (v4, device-minted).
+// InviteService — one-time contact invites (device-minted v4/v5).
 //
-// Product path: the client mints and signs the invite (InviteGenerator /
-// InviteConfig.ttlSeconds = INVITE_TTL_SECONDS). The server first learns a
-// given jti exists when it is redeemed (AcceptInvite → burn) or revoked
-// (RevokeInvite → pre-burn). There is no server-side issuance ledger, so
-// there is no ListInvites RPC (see construct-docs
-// backend/INVITE_LIST_REVOKE_SERVER_SPEC.md and server-influence-minimization).
-//
-// GenerateInvite was removed: it was a second issuer with a different TTL
-// (60–3600 s, default 300) that no production client used.
+// Product path: the client mints and signs the invite. Links use the server
+// max TTL (INVITE_TTL_SECONDS = 43200); QR codes use v5 with ttl=300. The
+// server first learns a jti when it is redeemed (AcceptInvite → burn) or
+// revoked (RevokeInvite → pre-burn). No server-side issuance ledger / ListInvites
+// (INVITE_LIST_REVOKE_SERVER_SPEC, server-influence-minimization).
 service InviteService {
   // Accept and burn a device-minted invite token (one-time use).
   rpc AcceptInvite(AcceptInviteRequest) returns (AcceptInviteResponse);
@@ -69,6 +65,12 @@ message InviteToken {
 
   // Username создателя (V3, optional - пустая строка если не установлен)
   optional string un = 9;
+
+  // v5: client-stated maximum age in seconds (required on v=5). Covered by the
+  // Ed25519 signature (canonical ends with |ttl). Server effective =
+  // min(INVITE_TTL_SECONDS, ttl). Absent on v1–v4 → server max. Reject 0 and
+  // ttl < 60. See INVITE_LIST_REVOKE_SERVER_SPEC §4.
+  optional uint32 ttl = 10;
 }
 
 // Ответ после успешного принятия invite

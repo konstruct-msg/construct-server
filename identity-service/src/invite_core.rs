@@ -7,9 +7,7 @@ use construct_server_shared::{
     AppError,
     db::{self as construct_db, DbPool},
 };
-use crypto_agility::{
-    INVITE_BURN_RETENTION_SECONDS, INVITE_TTL_SECONDS, InviteToken, InviteValidationError,
-};
+use crypto_agility::{INVITE_BURN_RETENTION_SECONDS, InviteToken, InviteValidationError};
 
 use crate::context::IdentityServiceContext;
 
@@ -147,11 +145,14 @@ pub async fn accept_invite(
 ) -> Result<AcceptInviteOutput> {
     let invite = input.invite;
 
-    if let Err(e) = invite.validate_with_expiry(INVITE_TTL_SECONDS) {
+    // v5: effective_ttl = min(INVITE_TTL_SECONDS, token.ttl); v1–v4: server max.
+    // Never hardcode INVITE_TTL_SECONDS alone for expiry (INVITE_LIST_REVOKE §4).
+    if let Err(e) = invite.validate_with_expiry() {
         tracing::warn!(
             jti = %invite.jti,
             version = invite.v,
             device_id = ?invite.device_id,
+            ttl = ?invite.ttl,
             error = %e,
             "Invite validation failed"
         );
@@ -165,6 +166,9 @@ pub async fn accept_invite(
             }
             InviteValidationError::InvalidDeviceID => {
                 AppError::Validation("Invalid device ID format".to_string()).into()
+            }
+            InviteValidationError::MissingTtl | InviteValidationError::InvalidTtl => {
+                AppError::Validation(format!("Invalid invite ttl: {}", e)).into()
             }
             _ => AppError::Validation(format!("Invalid invite: {}", e)).into(),
         });
