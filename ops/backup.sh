@@ -119,33 +119,82 @@ if [ "$LOCAL_ONLY" = "1" ]; then
 fi
 
 SSH_OPTS=(-p "$BACKUP_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes)
+# У scp порт — заглавная -P; строчная -p у него значит «сохранить время
+# изменения». Один и тот же массив на оба вызова превращал номер порта в имя
+# локального файла: `scp: stat local "23": No such file or directory`.
+SCP_OPTS=(-P "$BACKUP_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes)
 REMOTE="$BACKUP_SSH_USER@$BACKUP_SSH_HOST"
 DAY_DIR="$BACKUP_REMOTE_DIR/daily/$STAMP"
 
+# У Storage Box ОГРАНИЧЕННЫЙ шелл (`ssh <бокс> help` перечисляет его целиком).
+# Он не поддерживает ни пайпы, ни редиректы, ни `;`, ни `&&` — и, что важнее,
+# не сообщает об этом: лишнее молча отбрасывается, а код возврата остаётся 0.
+# Проверено 2026-08-17 на u651188:
+#
+#   cat X/*.age | sha256sum | cut -d' ' -f1   → пустая строка, код 0
+#   mkdir -p W && cp -r D W/                  → создаёт W, копию НЕ делает, код 0
+#   cd D && ls -1d */ | sort | head | xargs   → Command not found
+#
+# Первые две — это то, ради чего проверка и ротация вообще написаны: сверка
+# сумм не сверяла ничего, а еженедельная копия не создавалась, но в лог шло
+# «недельная копия сделана». Поэтому каждая удалённая операция ниже — ровно
+# одна команда за один вызов ssh, а всё, что требует сортировки и отбора,
+# считается здесь и уходит туда готовым решением.
+#
+# -n обязателен: без него ssh читает stdin, а в ротации ниже box() вызывается
+# внутри `while read`, и первый же вызов съедает остаток списка. Ротация тогда
+# удаляет ровно один каталог за прогон и молча оставляет остальные.
+box() { ssh -n "${SSH_OPTS[@]}" "$REMOTE" "$*"; }
+
 log "загрузка в $REMOTE:$DAY_DIR"
-ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p $DAY_DIR"
-scp "${SSH_OPTS[@]}" -q "$WORK"/*.age "$REMOTE:$DAY_DIR/"
+box mkdir -p "$DAY_DIR"
+scp "${SCP_OPTS[@]}" -q "$WORK"/*.age "$REMOTE:$DAY_DIR/"
 
-# Проверяем размеры на той стороне: scp молчит при усечении на переполненном
-# томе, и обнаруживается это при восстановлении.
-LOCAL_SUM=$(cat "$WORK"/*.age | sha256sum | cut -d' ' -f1)
-REMOTE_SUM=$(ssh "${SSH_OPTS[@]}" "$REMOTE" "cat $DAY_DIR/*.age | sha256sum | cut -d' ' -f1")
-[ "$LOCAL_SUM" = "$REMOTE_SUM" ] || { echo "контрольные суммы разошлись"; exit 1; }
-log "sha256 совпал"
+# Сверяем суммы пофайлово: scp молчит при усечении на переполненном томе, и
+# обнаруживается это при восстановлении. Пофайлово, а не одной суммой по
+# конкатенации, — чтобы падение называло файл, а не факт расхождения.
+log "сверка sha256"
+REMOTE_SUMS="$(box sha256sum "$DAY_DIR/*.age")"
+for f in "$WORK"/*.age; do
+  NAME="$(basename "$f")"
+  LOCAL_SUM="$(sha256sum "$f" | cut -d' ' -f1)"
+  REMOTE_SUM="$(printf '%s\n' "$REMOTE_SUMS" | awk -v n="$DAY_DIR/$NAME" '$2 == n { print $1 }')"
+  [ -n "$REMOTE_SUM" ] || { echo "на боксе нет $NAME — заливка не дошла"; exit 1; }
+  [ "$LOCAL_SUM" = "$REMOTE_SUM" ] || { echo "sha256 разошёлся: $NAME"; exit 1; }
+  log "  $NAME — sha256 совпал"
+done
 
-# По воскресеньям — копия в weekly.
+# По воскресеньям — копия в weekly. Двумя вызовами: `&&` здесь не работает.
 if [ "$(date -u +%u)" = "7" ]; then
-  ssh "${SSH_OPTS[@]}" "$REMOTE" "mkdir -p $BACKUP_REMOTE_DIR/weekly && cp -r $DAY_DIR $BACKUP_REMOTE_DIR/weekly/"
-  log "недельная копия сделана"
+  box mkdir -p "$BACKUP_REMOTE_DIR/weekly"
+  box cp -r "$DAY_DIR" "$BACKUP_REMOTE_DIR/weekly/$STAMP"
+  log "недельная копия сделана: $BACKUP_REMOTE_DIR/weekly/$STAMP"
 fi
 
 # ── Ротация ─────────────────────────────────────────────────────────────────
 # Удаляем только то, что лишнее СВЕРХ лимита, и только если сегодняшняя копия
 # уже на месте (проверка выше прошла). Обратный порядок однажды оставил бы ноль
 # копий в день, когда pg_dump упал.
-ssh "${SSH_OPTS[@]}" "$REMOTE" "
-  cd $BACKUP_REMOTE_DIR/daily 2>/dev/null && ls -1d */ 2>/dev/null | sort | head -n -$BACKUP_KEEP_DAILY | xargs -r rm -rf
-  cd $BACKUP_REMOTE_DIR/weekly 2>/dev/null && ls -1d */ 2>/dev/null | sort | head -n -$BACKUP_KEEP_WEEKLY | xargs -r rm -rf
-  true"
+#
+# Имена каталогов — метки времени вида 20260817T034500Z, поэтому лексикографи-
+# ческая сортировка совпадает с хронологической.
+rotate() { # rotate <daily|weekly> <сколько хранить>
+  local sub="$1" keep="$2" listing stale d
+  listing="$(box ls -1 "$BACKUP_REMOTE_DIR/$sub" 2>/dev/null || true)"
+  [ -n "$listing" ] || return 0
+  # «всё, кроме последних $keep». Не `head -n -$keep`: это расширение GNU, и
+  # тогда строку нельзя прогнать на Маке — а проверять ротацию, не сумев её
+  # запустить, значит отправлять на прод неисполненный код.
+  stale="$(printf '%s\n' "$listing" | tr -d '\r' | sort \
+           | awk -v keep="$keep" '{ a[NR] = $0 } END { for (i = 1; i <= NR - keep; i++) print a[i] }')"
+  [ -n "$stale" ] || return 0
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    box rm -r "$BACKUP_REMOTE_DIR/$sub/$d"
+    log "ротация $sub: удалён $d"
+  done <<< "$stale"
+}
+rotate daily "$BACKUP_KEEP_DAILY"
+rotate weekly "$BACKUP_KEEP_WEEKLY"
 
 log "готово: $DAY_DIR"

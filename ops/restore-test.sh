@@ -22,16 +22,22 @@ set -a; . ./ops/backup.env; set +a
 BACKUP_SSH_PORT="${BACKUP_SSH_PORT:-23}"
 REMOTE="$BACKUP_SSH_USER@$BACKUP_SSH_HOST"
 SSH_OPTS=(-p "$BACKUP_SSH_PORT" -o BatchMode=yes)
+# У scp порт — заглавная -P, строчная у него значит «сохранить время». Общий
+# массив превращал номер порта в имя локального файла.
+SCP_OPTS=(-P "$BACKUP_SSH_PORT" -o BatchMode=yes)
 
 STAMP="${1:-}"
 if [ -z "$STAMP" ]; then
-  STAMP=$(ssh "${SSH_OPTS[@]}" "$REMOTE" "ls -1 $BACKUP_REMOTE_DIR/daily | sort | tail -1" | tr -d '\r/')
+  # sort и tail — здесь, не на боксе: его ограниченный шелл не поддерживает
+  # пайпы и молча отбрасывает всё после первой команды, оставляя код 0. Так
+  # эта строка возвращала не последнюю метку, а весь список сразу.
+  STAMP=$(ssh "${SSH_OPTS[@]}" "$REMOTE" "ls -1 $BACKUP_REMOTE_DIR/daily" | tr -d '\r/' | sort | tail -1)
 fi
 [ -n "$STAMP" ] || { echo "в $BACKUP_REMOTE_DIR/daily пусто — бэкапов НЕТ"; exit 1; }
 echo "проверяем копию $STAMP"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"; docker rm -f construct-restore-test >/dev/null 2>&1 || true' EXIT
-scp "${SSH_OPTS[@]}" -q "$REMOTE:$BACKUP_REMOTE_DIR/daily/$STAMP/pg-*.sql.gz.age" "$WORK/"
+scp "${SCP_OPTS[@]}" -q "$REMOTE:$BACKUP_REMOTE_DIR/daily/$STAMP/pg-*.sql.gz.age" "$WORK/"
 age -d -i "$BACKUP_AGE_IDENTITY" "$WORK"/pg-*.sql.gz.age | gunzip > "$WORK/dump.sql"
 echo "дамп расшифрован: $(wc -l < "$WORK/dump.sql") строк SQL"
 
