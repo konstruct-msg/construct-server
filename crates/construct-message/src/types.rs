@@ -1117,6 +1117,103 @@ mod tests {
         assert_eq!(env.encrypted_payload, b"SESSION_RESET");
     }
 
+    /// The two tests above read JSON. The delivery queue does not use JSON.
+    ///
+    /// `construct-queue` serialises every envelope with `rmp_serde::to_vec_named` and
+    /// `parse_stream_message` reads it back with `rmp_serde::from_slice`, so the only
+    /// compatibility that matters for messages already sitting in Redis is MessagePack.
+    /// A dual reader proven against JSON says nothing about it: the two formats drive
+    /// `deserialize_any` differently, and an entry that fails here is not an error the
+    /// user sees — `read_offline_messages` logs a warning, returns `None`, and advances
+    /// the cursor past it, which deletes the message.
+    ///
+    /// `LegacyEnvelope` mirrors the shape written before `fe25e6e`: binary fields as
+    /// base64 `String`, `sealed_inner_b64` under its old name.
+    #[test]
+    fn legacy_messagepack_entry_still_reads() {
+        use base64::Engine;
+
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyEnvelope {
+            message_id: String,
+            sender_id: String,
+            recipient_id: String,
+            timestamp: i64,
+            message_type: MessageType,
+            encrypted_payload: String,
+            content_hash: String,
+            crypto_suite_id: u16,
+            federated: bool,
+            is_sealed_sender: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            sealed_inner_b64: Option<String>,
+        }
+
+        let sealed = b"opaque-sealed-inner".to_vec();
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&sealed);
+
+        let legacy = LegacyEnvelope {
+            message_id: "legacy-mp".to_string(),
+            sender_id: String::new(),
+            recipient_id: "bob".to_string(),
+            timestamp: 1_700_000_000,
+            message_type: MessageType::SealedSender,
+            encrypted_payload: sealed_b64.clone(),
+            content_hash: "abc".to_string(),
+            crypto_suite_id: 0,
+            federated: false,
+            is_sealed_sender: true,
+            sealed_inner_b64: Some(sealed_b64),
+        };
+
+        let bytes = rmp_serde::encode::to_vec_named(&legacy).expect("legacy writer shape");
+        let env: MessageEnvelope = rmp_serde::from_slice(&bytes)
+            .expect("a MessagePack entry written before fe25e6e must still deserialise");
+
+        assert_eq!(env.sealed_inner.as_deref(), Some(sealed.as_slice()));
+        assert!(env.is_sealed_sender);
+        assert_eq!(env.recipient_id, "bob");
+    }
+
+    /// Same question for a control label, which is not base64 and must survive as bytes.
+    #[test]
+    fn legacy_messagepack_control_label_still_reads() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyControl {
+            message_id: String,
+            sender_id: String,
+            recipient_id: String,
+            timestamp: i64,
+            message_type: MessageType,
+            encrypted_payload: String,
+            content_hash: String,
+            crypto_suite_id: u16,
+            federated: bool,
+            is_sealed_sender: bool,
+        }
+
+        let legacy = LegacyControl {
+            message_id: "ctrl-mp".to_string(),
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            timestamp: 1_700_000_000,
+            message_type: MessageType::ControlMessage,
+            encrypted_payload: "END_SESSION".to_string(),
+            content_hash: "abc".to_string(),
+            crypto_suite_id: 0,
+            federated: false,
+            is_sealed_sender: false,
+        };
+
+        let bytes = rmp_serde::encode::to_vec_named(&legacy).expect("legacy writer shape");
+        let env: MessageEnvelope = rmp_serde::from_slice(&bytes)
+            .expect("a MessagePack control entry written before fe25e6e must still deserialise");
+
+        assert_eq!(env.encrypted_payload, b"END_SESSION");
+    }
+
     // ── validate() ───────────────────────────────────────────────────────────
 
     #[test]
