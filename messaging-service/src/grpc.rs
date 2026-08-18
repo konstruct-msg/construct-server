@@ -813,6 +813,11 @@ impl MessagingService for MessagingGrpcService {
         }
         let since = since.filter(|c| !c.is_empty() && is_valid_redis_stream_cursor(c));
 
+        let mode = if device_id.as_deref().filter(|d| !d.is_empty()).is_some() {
+            "device_merge"
+        } else {
+            "user_only"
+        };
         let stream_messages = {
             let mut queue = self.context.queue.lock().await;
             queue
@@ -820,6 +825,9 @@ impl MessagingService for MessagingGrpcService {
                 .await
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };
+        construct_metrics::MSG_MAILBOX_READ_TOTAL
+            .with_label_values(&["pending", mode])
+            .inc();
 
         // encrypted_payload is opaque — server never reads crypto params from it.
         // Sort is by server timestamp (already chronological from Redis stream).

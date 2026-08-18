@@ -126,6 +126,13 @@ pub struct MessagingConfig {
     /// Per-IP rate limit for `SendSealedMessage` (unauthenticated RPC), events per
     /// 60-second sliding window. Default: 30.
     pub sealed_ip_rate_limit_per_min: u32,
+
+    // ── Mailbox cutover (minimal-server-delivery step 4) ────────────────────
+    /// When true (default), `write_message_to_device_streams` also XADDs the legacy
+    /// user stream `delivery:offline:{user}`. Set `MSG_MAILBOX_USER_WRITE=0` to stop
+    /// user-stream writes after cutover gates pass — device streams remain. Rollback
+    /// = set back to 1. See construct-docs decisions/minimal-server-delivery.md.
+    pub mailbox_user_write: bool,
 }
 
 impl MessagingConfig {
@@ -232,6 +239,15 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+
+            // Default on. Explicit "0"/"false"/"off" disables user-stream XADD.
+            mailbox_user_write: match std::env::var("MSG_MAILBOX_USER_WRITE") {
+                Ok(s) => {
+                    let s = s.trim().to_ascii_lowercase();
+                    !(s == "0" || s == "false" || s == "off" || s == "no")
+                }
+                Err(_) => true,
+            },
         }
     }
 }

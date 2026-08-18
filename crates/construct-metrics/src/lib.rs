@@ -343,6 +343,32 @@ pub static MSG_PUSH_SKIPPED_ONLINE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 // client-cursor XTRIM is retired. Retention is MAXLEN + age sweep; a counter that
 // only counted forbidden deletes would be a permanent zero and a false dashboard.
 
+/// Mailbox reads for cutover gates (minimal-server-delivery step 4).
+/// Labels: `path` = `stream` | `pending`; `mode` = `device_merge` | `user_only`.
+pub static MSG_MAILBOX_READ_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_mailbox_read_total",
+            "Offline mailbox reads by transport path and device-id mode"
+        ),
+        &["path", "mode"]
+    )
+    .expect("Failed to register MSG_MAILBOX_READ_TOTAL metric")
+});
+
+/// Mailbox writes for cutover gates.
+/// Label: `target` = `user` | `device`.
+pub static MSG_MAILBOX_WRITE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_mailbox_write_total",
+            "Offline mailbox XADD writes by target stream kind"
+        ),
+        &["target"]
+    )
+    .expect("Failed to register MSG_MAILBOX_WRITE_TOTAL metric")
+});
+
 // ============================================================================
 // Security / Key Transparency Metrics
 // ============================================================================
@@ -541,6 +567,8 @@ pub fn init_registry() {
     Lazy::force(&LEGACY_EDIT_USAGE_TOTAL);
     Lazy::force(&CALLS_INITIATED_TOTAL);
     Lazy::force(&SIGNALING_ERRORS_TOTAL);
+    Lazy::force(&MSG_MAILBOX_READ_TOTAL);
+    Lazy::force(&MSG_MAILBOX_WRITE_TOTAL);
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);

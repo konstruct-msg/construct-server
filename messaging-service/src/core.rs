@@ -7,8 +7,8 @@ use construct_context::AppContext;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
 use construct_metrics::{
-    MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, MSG_PUSH_SKIPPED_ONLINE_TOTAL,
-    record_abuse_fail_open,
+    MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, MSG_MAILBOX_WRITE_TOTAL,
+    MSG_PUSH_SKIPPED_ONLINE_TOTAL, record_abuse_fail_open,
 };
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_utils::log_safe_id;
@@ -131,10 +131,19 @@ pub async fn dispatch_envelope(
 
     let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
     let mut queue = app_context.queue.lock().await;
+    let write_user = queue.mailbox_user_write_enabled();
     queue
         .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+    if write_user {
+        MSG_MAILBOX_WRITE_TOTAL.with_label_values(&["user"]).inc();
+    }
+    if !device_ids.is_empty() {
+        MSG_MAILBOX_WRITE_TOTAL
+            .with_label_values(&["device"])
+            .inc_by(device_ids.len() as u64);
+    }
 
     if !sender_id.is_empty()
         && let Err(e) = queue.store_message_sender(message_id, sender_id).await

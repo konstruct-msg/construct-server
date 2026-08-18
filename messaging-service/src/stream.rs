@@ -638,9 +638,17 @@ pub(crate) async fn poll_messages(
     }
 
     let t_xread = std::time::Instant::now();
+    let mode = if device_id.filter(|d| !d.is_empty()).is_some() {
+        "device_merge"
+    } else {
+        "user_only"
+    };
     let messages = queue
         .read_mailbox_messages(&user_id_str, device_id, last_stream_id.as_deref(), limit)
         .await?;
+    construct_metrics::MSG_MAILBOX_READ_TOTAL
+        .with_label_values(&["stream", mode])
+        .inc();
     let xread_ms = t_xread.elapsed().as_millis();
 
     let msg_count = messages.len();
@@ -648,6 +656,7 @@ pub(crate) async fn poll_messages(
         tracing::info!(
             user_id = %user_id_str,
             device_id = device_id.unwrap_or(""),
+            mailbox_mode = mode,
             msg_count,
             xread_ms,
             last_stream_id = ?last_stream_id,
