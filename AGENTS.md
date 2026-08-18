@@ -76,19 +76,22 @@ Client ──gRPC──► messaging-service
 messaging-service (stream loop per connected device)
     │
     ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}
-    └─► Redis XREAD delivery:offline:{user_id}:{device_id}  (per-device)
+    └─► Redis XREAD delivery:offline:{user_id}  (user stream today; device streams are write-only orphans)
             │
             └─► gRPC ServerStreamingResponse → client
 ```
 
-Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written, so old clients without `x-device-id` continue to receive messages.
+Fan-out writes both user and per-device streams; **reads still use the user stream only**
+until `minimal-server-delivery` steps 3–4. Device keys are not consumed yet.
 
 **Wake push:** APNs silent `new_message` is skipped when `user:{user_id}:server_instance_id`
 is set (active MessageStream). Online delivery uses `inbox:wakeup` only — silent push
-while online caused client reconnect storms + full offline redelivery. Offline-stream
-trim via `since_cursor` remains only on MessageStream `Subscribe`. `GetPendingMessages`
-uses `since_cursor` as a read offset only (no `XTRIM`) — see construct-docs
-`decisions/minimal-server-delivery.md` step 1.
+while online caused client reconnect storms + full offline redelivery.
+
+**Retention:** `since_cursor` is a **read offset only** (Subscribe + GetPendingMessages).
+Server must not `XTRIM` from a client-asserted cursor — silent-loss class.
+Capacity = `MAXLEN ~` on XADD + age sweep (~30d). See construct-docs
+`decisions/minimal-server-delivery.md` (Accepted).
 
 **Critical channel name**: `inbox:wakeup:{user_id}`.
 

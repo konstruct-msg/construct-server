@@ -415,32 +415,11 @@ pub(crate) async fn handle_stream_request(
                 } else {
                     catchup.subscribe_with_cursor_seen = true;
 
-                    // ACK-driven deletion: the client's since_cursor is the last message it
-                    // has durably received AND persisted. Only now is it safe to delete
-                    // everything ≤ cursor from the offline stream.
-                    // GetPendingMessages no longer trims (minimal-server-delivery.md §1) —
-                    // that path is cancelled/re-paged before the client can persist.
-                    // Never trim by the server's read/send position (silent loss on short
-                    // sessions, 2026-06-08).
-                    if let Some(uid) = user_id.as_ref() {
-                        match stream_queue
-                            .trim_offline_stream(&uid.to_string(), cursor)
-                            .await
-                        {
-                            Ok(()) => {
-                                construct_metrics::MSG_OFFLINE_TRIM_TOTAL
-                                    .with_label_values(&["subscribe"])
-                                    .inc();
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to trim offline stream on subscribe (non-fatal)"
-                                );
-                            }
-                        }
-                    }
-
+                    // since_cursor is a read offset only. Do NOT trim here.
+                    // Client-asserted XTRIM on the shared user mailbox created a silent-loss
+                    // class (paging/cancel races; multi-device fastest-cursor wins). Retention
+                    // is MAXLEN + age sweep. See construct-docs
+                    // decisions/minimal-server-delivery.md (Accepted — step 2).
                     apply_since_cursor(cursor, &mut catchup.last_stream_id);
                 }
             }
@@ -492,7 +471,7 @@ pub(crate) async fn handle_stream_request(
 }
 
 /// Returns true when `cursor` is a valid Redis stream resume position.
-/// Shared by MessageStream Subscribe and GetPendingMessages ACK trim.
+/// Shared by MessageStream Subscribe and GetPendingMessages (read offset only).
 pub(crate) fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
     if cursor == "0" || cursor == "$" {
         return true;

@@ -101,7 +101,7 @@ services:
   # degrades), so a full Redis no longer takes messaging down with it.
   #
   # Growth is bounded on three sides, so `noeviction` cannot wedge on normal use:
-  # XADD MAXLEN ~10000 per stream, ACK-driven XTRIM, and a 30-day sweep
+  # XADD MAXLEN ~10000 per stream and a 30-day age sweep (no client-cursor XTRIM)
   # (messaging-service/src/main.rs). Alerts in ops/prometheus/alerts.yml are the safety net —
   # any eviction or sustained memory pressure is a signal, not routine.
   redis:
