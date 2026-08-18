@@ -138,6 +138,38 @@ fn is_valid_platform(platform: &str) -> bool {
     matches!(platform, "ios" | "macos")
 }
 
+/// What to do with a token every declared endpoint has rejected.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RejectionVerdict {
+    /// Both real endpoints have now said no. The token is dead.
+    Delete,
+    /// Only one endpoint was ever tried, because the client named one. `BadDeviceToken` from
+    /// a single endpoint does not distinguish a dead token from a live one presented to the
+    /// wrong endpoint, so widen the row to both and let the next push find out.
+    Widen,
+}
+/// APNs answers `BadDeviceToken` both for a token that is dead and for a live token sent to the
+/// wrong endpoint. When the row named one environment, a rejection is evidence against the
+/// *pairing*, and the declaration is the likelier half to be wrong — deleting on it destroys a
+/// working token and the client re-registers an identically mislabelled one, so pushes stop for
+/// good.
+///
+/// That loop ran on 2026-08-18. A Beta build installed from Xcode declares `production` in
+/// Info.plist and is signed for development, so APNs minted a sandbox token and the client
+/// announced production; the row was deleted at 13:52:23, re-registered, deleted again at
+/// 14:02:49, and by 14:08 the user had no token at all. The client half is fixed in
+/// `PushEnvironmentResolver`; this is the half that does not need an app update to stop the
+/// bleeding, and that keeps holding when some future build gets its declaration wrong again.
+///
+/// Cost of being wrong in this direction: a genuinely dead token survives one extra push cycle.
+pub(crate) fn verdict_after_rejection(declared_environments: usize) -> RejectionVerdict {
+    if declared_environments > 1 {
+        RejectionVerdict::Delete
+    } else {
+        RejectionVerdict::Widen
+    }
+}
+
 /// Send blind notification (privacy-preserving push)
 pub async fn send_blind_notification(
     context: &NotificationServiceContext,
@@ -294,25 +326,54 @@ pub async fn send_blind_notification(
             }
         }
         if rejected_by_all {
-            tracing::warn!(
-                user_hash = %user_id_hash,
-                push_environment = %token_row.push_environment,
-                push_provider = %token_row.push_provider,
-                "APNs: token rejected by every declared environment — deleting from DB"
-            );
-            if let Err(db_err) =
-                sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+            match verdict_after_rejection(environments.len()) {
+                RejectionVerdict::Widen => {
+                    tracing::warn!(
+                        user_hash = %user_id_hash,
+                        push_environment = %token_row.push_environment,
+                        push_provider = %token_row.push_provider,
+                        "APNs: token rejected by its only declared environment — widening to both \
+                         rather than deleting; the declaration is the likelier error"
+                    );
+                    if let Err(db_err) = sqlx::query(
+                        "UPDATE device_tokens SET push_environment = $1 \
+                         WHERE device_token_encrypted = $2",
+                    )
+                    .bind(ApnsEnvironments::both().to_string())
                     .bind(&token_row.device_token_encrypted)
                     .execute(&*context.db_pool)
                     .await
-            {
-                tracing::error!(
-                    error = %db_err,
-                    user_hash = %user_id_hash,
-                    "Failed to delete invalid device token from DB"
-                );
+                    {
+                        tracing::error!(
+                            error = %db_err,
+                            user_hash = %user_id_hash,
+                            "Failed to widen device token environment in DB"
+                        );
+                    }
+                    continue;
+                }
+                RejectionVerdict::Delete => {
+                    tracing::warn!(
+                        user_hash = %user_id_hash,
+                        push_environment = %token_row.push_environment,
+                        push_provider = %token_row.push_provider,
+                        "APNs: token rejected by every declared environment — deleting from DB"
+                    );
+                    if let Err(db_err) =
+                        sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                            .bind(&token_row.device_token_encrypted)
+                            .execute(&*context.db_pool)
+                            .await
+                    {
+                        tracing::error!(
+                            error = %db_err,
+                            user_hash = %user_id_hash,
+                            "Failed to delete invalid device token from DB"
+                        );
+                    }
+                    continue;
+                }
             }
-            continue;
         }
         let Some(environment) = succeeded_on else {
             continue;
@@ -1126,4 +1187,31 @@ pub async fn send_voip_incoming_call(
         success: true,
         sent_count,
     })
+}
+
+#[cfg(test)]
+mod rejection_verdict_tests {
+    use super::*;
+
+    /// The 2026-08-18 loop: client named one environment, that one rejected, row deleted,
+    /// client re-registered the same wrong label. Widening breaks the cycle without an app
+    /// update.
+    #[test]
+    fn single_declared_environment_widens_instead_of_deleting() {
+        assert_eq!(verdict_after_rejection(1), RejectionVerdict::Widen);
+    }
+
+    /// Both endpoints tried and both said no — nothing left to be wrong about but the token.
+    #[test]
+    fn both_environments_rejecting_deletes() {
+        assert_eq!(verdict_after_rejection(2), RejectionVerdict::Delete);
+    }
+
+    /// `ApnsEnvironments::parse_or_both` cannot produce an empty set, but a zero here would
+    /// mean "no endpoint was ever asked", which is the one state where deletion is certainly
+    /// unjustified.
+    #[test]
+    fn no_environment_tried_never_deletes() {
+        assert_eq!(verdict_after_rejection(0), RejectionVerdict::Widen);
+    }
 }
