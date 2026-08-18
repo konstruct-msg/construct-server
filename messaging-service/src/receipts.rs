@@ -107,13 +107,17 @@ pub(crate) async fn relay_delivery_receipt(
             msg_ids,
             status,
         );
+        // Fan-out to user + per-device streams so dual-read (step 3) and
+        // device-only readers (step 4) both see receipts.
+        let device_ids =
+            core::fetch_recipient_device_ids_for_user(&context.db_pool, &sender_id).await;
         if let Err(e) = queue
-            .write_message_to_user_stream(&sender_id, &receipt_envelope)
+            .write_message_to_device_streams(&sender_id, &device_ids, &receipt_envelope)
             .await
         {
-            tracing::warn!(error = %e, sender_id = %sender_id, "Failed to relay receipt to sender stream (non-critical)");
+            tracing::warn!(error = %e, sender_id = %sender_id, "Failed to relay receipt to sender streams (non-critical)");
         } else {
-            tracing::info!(sender_id = %sender_id, status, msg_count = receipt_envelope.encrypted_payload.len(), "Relayed delivery receipt to sender stream");
+            tracing::info!(sender_id = %sender_id, status, msg_count = receipt_envelope.encrypted_payload.len(), devices = device_ids.len(), "Relayed delivery receipt to sender streams");
         }
     }
 

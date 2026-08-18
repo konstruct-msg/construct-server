@@ -72,8 +72,11 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<tonic::Streaming<proto::MessageStreamRequest>>,
     ) -> Result<Response<Self::MessageStreamStream>, Status> {
-        let auth_user_id: Option<uuid::Uuid> =
-            extract_authed_user_id(request.metadata(), &self.context).await;
+        let (auth_user_id, auth_device_id) =
+            match extract_authed_identity(request.metadata(), &self.context).await {
+                Some((uid, did)) => (Some(uid), did),
+                None => (None, None),
+            };
 
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
@@ -88,6 +91,9 @@ impl MessagingService for MessagingGrpcService {
 
             // Initialise from auth metadata (Bearer); envelope.sender is never trusted.
             let mut user_id: Option<uuid::Uuid> = auth_user_id;
+            // Token device_id selects the per-device mailbox (dual-read with user stream
+            // during minimal-server-delivery step 3). None → legacy user-stream only.
+            let device_id: Option<String> = auth_device_id;
             // last_stream_id stays None until Subscribe applies since_cursor (or
             // subscribe-grace expires) so the first XREAD does not replay the
             // whole offline retention window. Wakeup/interval polls stay gated
@@ -183,6 +189,7 @@ impl MessagingService for MessagingGrpcService {
                                     &context,
                                     &tx,
                                     &mut user_id,
+                                    device_id.as_deref(),
                                     &mut stream_queue,
                                     &mut catchup,
                                 ).await {
@@ -237,6 +244,7 @@ impl MessagingService for MessagingGrpcService {
                                 &mut stream_queue,
                                 &context.config.messaging,
                                 uid,
+                                device_id.as_deref(),
                                 &mut catchup.last_stream_id,
                                 &tx,
                                 catchup.subscribe_with_cursor_seen,
@@ -256,6 +264,7 @@ impl MessagingService for MessagingGrpcService {
                                 &mut stream_queue,
                                 &context.config.messaging,
                                 uid,
+                                device_id.as_deref(),
                                 &mut catchup.last_stream_id,
                                 &tx,
                                 false, // routine wakeup, not a resume catch-up
@@ -272,6 +281,7 @@ impl MessagingService for MessagingGrpcService {
                                 &mut stream_queue,
                                 &context.config.messaging,
                                 uid,
+                                device_id.as_deref(),
                                 &mut catchup.last_stream_id,
                                 &tx,
                                 false, // fallback tick, not a resume catch-up
@@ -778,10 +788,10 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::GetPendingMessagesRequest>,
     ) -> Result<Response<proto::GetPendingMessagesResponse>, Status> {
-        let user_id = extract_authed_user_id(request.metadata(), &self.context)
+        let (user_uuid, device_id) = extract_authed_identity(request.metadata(), &self.context)
             .await
-            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?
-            .to_string();
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
+        let user_id = user_uuid.to_string();
 
         let req = request.into_inner();
         let limit = req.limit.unwrap_or(50).min(100) as usize;
@@ -790,13 +800,8 @@ impl MessagingService for MessagingGrpcService {
         // Hold the lock only for XREAD — release immediately after so other handlers
         // are not blocked during the message-building loop below.
         //
-        // since_cursor is a *read offset only* on this path. Do NOT trim here.
-        // GetPendingMessages is cancelled/re-paged aggressively (MessageStreamManager
-        // reconnect, BackgroundFetch one-shot). Treating since_cursor as an ACK and
-        // calling trim_offline_stream deleted page N while it still sat unpersisted
-        // in the client — silent offline loss. Deletion stays on MessageStream
-        // Subscribe (for now) and on MAXLEN / age sweep. See construct-docs
-        // decisions/minimal-server-delivery.md § шаг 1.
+        // since_cursor is a *read offset only* (no XTRIM). With device_id, dual-read
+        // merges device + user streams (minimal-server-delivery step 3).
         if let Some(cursor) = since
             && !cursor.is_empty()
             && !is_valid_redis_stream_cursor(cursor)
@@ -811,7 +816,7 @@ impl MessagingService for MessagingGrpcService {
         let stream_messages = {
             let mut queue = self.context.queue.lock().await;
             queue
-                .read_user_messages_from_stream(&user_id, None, since, limit)
+                .read_mailbox_messages(&user_id, device_id.as_deref(), since, limit)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };
@@ -992,14 +997,15 @@ fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Resu
 /// Optional `x-user-id` must match `claims.sub` when present (spoof guard).
 /// Always checks the Redis revocation blocklist (fail-closed on Redis error).
 ///
-/// Returns `None` when auth is missing, invalid, revoked, or Redis is down.
+/// Returns `(user_id, device_id_from_claims)` or `None` when auth is missing,
+/// invalid, revoked, or Redis is down. `device_id` selects the per-device mailbox.
 ///
 /// **Not trusted:** client-supplied `x-user-id` alone (Caddy does not inject
 /// or strip this header — treating it as identity was an auth bypass).
-async fn extract_authed_user_id(
+async fn extract_authed_identity(
     metadata: &tonic::metadata::MetadataMap,
     context: &MessagingServiceContext,
-) -> Option<uuid::Uuid> {
+) -> Option<(uuid::Uuid, Option<String>)> {
     let claims =
         construct_server_shared::auth_utils::verify_access_token(&context.auth_manager, metadata)
             .ok()?;
@@ -1038,7 +1044,16 @@ async fn extract_authed_user_id(
         }
     }
 
-    Some(user_id)
+    Some((user_id, claims.device_id.clone()))
+}
+
+async fn extract_authed_user_id(
+    metadata: &tonic::metadata::MetadataMap,
+    context: &MessagingServiceContext,
+) -> Option<uuid::Uuid> {
+    extract_authed_identity(metadata, context)
+        .await
+        .map(|(uid, _)| uid)
 }
 
 // ============================================================================
