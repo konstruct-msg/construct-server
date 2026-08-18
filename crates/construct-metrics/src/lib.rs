@@ -339,18 +339,9 @@ pub static MSG_PUSH_SKIPPED_ONLINE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     .expect("Failed to register MSG_PUSH_SKIPPED_ONLINE_TOTAL metric")
 });
 
-/// Offline stream XTRIM driven by client `since_cursor` (durable ACK).
-/// Label `path`: "subscribe" (historically also "get_pending"; that path no longer trims)
-pub static MSG_OFFLINE_TRIM_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_msg_offline_trim_total",
-            "Offline delivery stream trims driven by client since_cursor ACK"
-        ),
-        &["path"]
-    )
-    .expect("Failed to register MSG_OFFLINE_TRIM_TOTAL metric")
-});
+// construct_msg_offline_trim_total removed with minimal-server-delivery step 2:
+// client-cursor XTRIM is retired. Retention is MAXLEN + age sweep; a counter that
+// only counted forbidden deletes would be a permanent zero and a false dashboard.
 
 // ============================================================================
 // Security / Key Transparency Metrics
@@ -508,9 +499,8 @@ pub fn record_auth_security_fail_open(control: &'static str) {
 /// incremented does not exist as far as Prometheus is concerned — and a missing
 /// series is not zero, it is *nothing*. Grafana prints "No data" over a red
 /// background, which is what an outage looks like, for the ordinary state of an
-/// idle server. Worse, it resets on restart: `construct_msg_offline_trim_total`
-/// had series three hours before this was written and none afterwards, purely
-/// because messaging-service was redeployed in between.
+/// idle server. Worse, it resets on restart: a counter that only appears after
+/// the first write vanishes again after redeploy until something increments it.
 ///
 /// Called once from the shared `/metrics` handler, so every service gets it
 /// without eight separate places to forget it.
@@ -551,7 +541,6 @@ pub fn init_registry() {
     Lazy::force(&LEGACY_EDIT_USAGE_TOTAL);
     Lazy::force(&CALLS_INITIATED_TOTAL);
     Lazy::force(&SIGNALING_ERRORS_TOTAL);
-    Lazy::force(&MSG_OFFLINE_TRIM_TOTAL);
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);

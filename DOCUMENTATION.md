@@ -174,8 +174,8 @@ Client → MessagingService::MessageStream
               └─► spawn_inbox_wakeup(...)  (subscribes Redis pub/sub for real-time push)
                   channel: inbox:wakeup:{user_id}
 
-  Subscribe(since_cursor) → handle_stream_request → MessageQueue::trim_offline_stream
-    (deletes ≤ since_cursor only — the client's durable ACK; see Offline delivery)
+  Subscribe(since_cursor) → handle_stream_request → apply_since_cursor (read offset only;
+    no XTRIM — see Offline delivery / minimal-server-delivery)
 ```
 
 ### 6. Delivery Receipt
@@ -247,33 +247,29 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                           Alice stream receives receipt ──────► ✅ delivered
 ```
 
-**Offline delivery (ACK-driven).** If Bob is offline, messages accumulate in his Redis
-stream `delivery:offline:{user_id}` (7-day TTL). On reconnect his client subscribes with
-`since_cursor` — the Redis stream ID of the last message it *durably persisted*. The server:
+**Offline delivery (retention-bounded, cursor = read offset).** If Bob is offline, messages
+accumulate in Redis `delivery:offline:{user_id}` (and per-device fan-out keys). On reconnect
+his client subscribes with `since_cursor` — the Redis stream ID of the last message it
+*durably persisted*. The server:
 
-1. reads **forward** from that cursor and streams the backlog to the client
-   (`read_user_messages_from_stream` — side-effect-free, no deletion);
-2. deletes (`XTRIM MINID ack+1`) only messages **≤ `since_cursor`** — i.e. only what the
-   client has acknowledged — in `MessageQueue::trim_offline_stream`, invoked from
-   MessageStream `Subscribe` only. Unary `GetPendingMessages` treats `since_cursor` as a
-   **read offset** and does not trim: that RPC is cancelled/re-paged before durable
-   persist, and trimming there caused silent offline loss (construct-docs
-   `decisions/minimal-server-delivery.md` step 1).
+1. reads **forward** from that cursor (`read_user_messages_from_stream` — side-effect-free);
+2. does **not** delete from the client cursor. Client-asserted `XTRIM` caused silent loss
+   (paging/cancel races; multi-device shared mailbox). See construct-docs
+   `decisions/minimal-server-delivery.md` (Accepted).
 
-Deletion on Subscribe is driven by the client's durable acknowledgement, **never** by the
-server's send position. A short or broken session re-delivers (the client dedups by
-`message_id`) but never loses an un-acknowledged message. `MAXLEN ~ 10000` and
-`trim_streams_by_age` are the backstop for streams that are never acknowledged; step 2 of
-the decision above removes Subscribe trim as well.
+Capacity backstops: `MAXLEN ~` on XADD (100 new / 10_000 standard) and hourly age sweep
+(~30 days — not the stale “7-day TTL” wording). A short session re-delivers; the client
+dedups by `message_id`. Worst case is redelivery, not unrecoverable drop from a bad cursor.
 
 **Wake push:** `dispatch_envelope` sends APNs silent `new_message` only when the recipient
 has **no** active MessageStream (`user:{id}:server_instance_id` absent). Online recipients
 are woken via Redis `inbox:wakeup` only — silent push while online caused client reconnect
 storms and full offline-stream redelivery.
 
-> **History:** before 2026-06, `read_stream_messages` trimmed the stream by the server's *read
-> position* on every poll. A message buffered into the gRPC channel but not yet received by a
-> short-lived client was deleted on the next poll → silent loss. The trim is now ACK-driven.
+> **History:** before 2026-06, `read_stream_messages` trimmed by the server's *read position*
+> → silent loss on short sessions. 2026-08 briefly used client `since_cursor` as ACK-trim
+> (Subscribe + GetPendingMessages) — same loss class via paging/cancel and multi-device.
+> Retention-only deletion is the accepted model (`minimal-server-delivery`).
 
 ---
 

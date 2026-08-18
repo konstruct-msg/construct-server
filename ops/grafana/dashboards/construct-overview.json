@@ -746,8 +746,8 @@
           "sort": "desc"
         }
       },
-      "title": "Оборот очереди и канарейка повторов",
-      "description": "Подрезки — то, что удерживает память Redis: очередь режется только после ACK клиента. Ноль подрезок при идущем трафике означает, что память вот-вот станет проблемой. Вторая линия — канарейка расследования про повторную доставку: сервер отматывал поток ниже присланного курсора, 3–8 повторов на сообщение. Любое значение выше нуля означает подписку без пригодного курсора.",
+      "title": "Канарейка: подписка без курсора",
+      "description": "Канарейка повторной доставки: сервер отматывал поток ниже присланного курсора. Любое значение выше нуля означает подписку без пригодного курсора. Удержание очереди — MAXLEN + age sweep (client-cursor XTRIM retired).",
       "type": "timeseries",
       "targets": [
         {
@@ -755,17 +755,8 @@
             "type": "prometheus",
             "uid": "construct-prometheus"
           },
-          "expr": "sum(rate(construct_msg_offline_trim_total[5m]))",
-          "refId": "A",
-          "legendFormat": "ACK-driven trims/sec"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "construct-prometheus"
-          },
           "expr": "sum(increase(construct_msg_poll_missing_cursor_after_subscribe_total[1h]))",
-          "refId": "B",
+          "refId": "A",
           "legendFormat": "subscribes with no cursor (1h)"
         }
       ]
@@ -974,62 +965,6 @@
           "expr": "histogram_quantile(0.99, sum by (le) (rate(construct_message_delivery_time_seconds_bucket[5m])))",
           "legendFormat": "p99",
           "refId": "C",
-          "instant": false,
-          "format": "time_series"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "construct-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 8,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 111
-      },
-      "id": 107,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "Очередь офлайн: подрезки",
-      "description": "Очередь режется только после ACK клиента. Ноль подрезок при идущем трафике означает, что Redis растёт и не убывает — предвестник упора в maxmemory, а он с noeviction останавливает доставку.",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "construct-prometheus"
-          },
-          "expr": "sum(rate(construct_msg_offline_trim_total[5m]))",
-          "legendFormat": "XTRIM после ACK/с",
-          "refId": "A",
           "instant": false,
           "format": "time_series"
         }
