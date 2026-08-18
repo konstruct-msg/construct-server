@@ -76,13 +76,15 @@ Client ──gRPC──► messaging-service
 messaging-service (stream loop per connected device)
     │
     ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}
-    └─► Redis XREAD delivery:offline:{user_id}  (user stream today; device streams are write-only orphans)
+    └─► Redis XREAD mailbox: device stream + user stream (dual-read merge when
+            claims.device_id present; user-only for legacy tokens)
             │
             └─► gRPC ServerStreamingResponse → client
 ```
 
-Fan-out writes both user and per-device streams; **reads still use the user stream only**
-until `minimal-server-delivery` steps 3–4. Device keys are not consumed yet.
+Fan-out writes both user and per-device streams. **Reads (step 3):** with token
+`device_id`, merge device+user (dedupe by `message_id`, prefer device); without —
+user stream only. Step 4 will stop writing the user stream.
 
 **Wake push:** APNs silent `new_message` is skipped when `user:{user_id}:server_instance_id`
 is set (active MessageStream). Online delivery uses `inbox:wakeup` only — silent push

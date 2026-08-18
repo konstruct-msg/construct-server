@@ -779,6 +779,41 @@ impl MessageQueue {
         .await
     }
 
+    /// Read the recipient mailbox for delivery.
+    ///
+    /// - No `device_id`: legacy user stream only.
+    /// - With `device_id` (step 3 transitional dual-read): merge device stream + user
+    ///   stream, dedupe by `message_id` (prefer device copy), order by Redis stream id
+    ///   as a time watermark, return at most `count` entries.
+    ///
+    /// Stream ids from the two keys are not the same sequence, but both are
+    /// millisecond-based; a client cursor from either works as a shared watermark.
+    /// See construct-docs `decisions/minimal-server-delivery.md` step 3.
+    pub async fn read_mailbox_messages(
+        &mut self,
+        user_id: &str,
+        device_id: Option<&str>,
+        since_id: Option<&str>,
+        count: usize,
+    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
+        let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
+            return self
+                .read_user_messages_from_stream(user_id, None, since_id, count)
+                .await;
+        };
+
+        // Oversample each source so the merge can still fill `count` after dedupe.
+        let per_source = count.saturating_mul(2).max(count);
+        let device_msgs = self
+            .read_device_messages_from_stream(user_id, device_id, since_id, per_source)
+            .await?;
+        let user_msgs = self
+            .read_user_messages_from_stream(user_id, None, since_id, per_source)
+            .await?;
+
+        Ok(merge_mailbox_pages(device_msgs, user_msgs, count))
+    }
+
     /// Store the sender_id of a message for receipt routing.
     /// Called when dispatching a message so receipts can be relayed back to the sender.
     pub async fn store_message_sender(&mut self, message_id: &str, sender_id: &str) -> Result<()> {
@@ -865,5 +900,121 @@ impl MessageQueue {
         )
         .purge_messages_from_sender(recipient_id, sender_id)
         .await
+    }
+}
+
+/// Merge device + user mailbox pages for transitional dual-read.
+///
+/// Prefer the device copy when `message_id` collides. Order by Redis stream id
+/// (millisecond watermark). Corrupt/`None` envelopes keep their stream ids for
+/// cursor advance and never collide on message_id.
+fn merge_mailbox_pages(
+    device_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
+    user_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
+    count: usize,
+) -> Vec<(String, Option<construct_message::types::MessageEnvelope>)> {
+    use std::collections::HashMap;
+
+    let mut by_message_id: HashMap<String, (String, construct_message::types::MessageEnvelope)> =
+        HashMap::new();
+    let mut orphans: Vec<(String, Option<construct_message::types::MessageEnvelope>)> = Vec::new();
+
+    // User first, then device overwrites — device wins on collision.
+    for (stream_id, envelope) in user_msgs.into_iter().chain(device_msgs) {
+        match envelope {
+            Some(env) => {
+                by_message_id.insert(env.message_id.clone(), (stream_id, env));
+            }
+            None => orphans.push((stream_id, None)),
+        }
+    }
+
+    let mut merged: Vec<(String, Option<construct_message::types::MessageEnvelope>)> =
+        by_message_id
+            .into_values()
+            .map(|(stream_id, env)| (stream_id, Some(env)))
+            .chain(orphans)
+            .collect();
+
+    merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
+    merged.truncate(count);
+    merged
+}
+
+fn compare_stream_id_watermarks(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parse(id: &str) -> Option<(u64, u64)> {
+        if let Some((ts, seq)) = id.split_once('-') {
+            Some((ts.parse().ok()?, seq.parse().ok()?))
+        } else {
+            id.parse::<u64>().ok().map(|ts| (ts, 0))
+        }
+    }
+    match (parse(a), parse(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
+}
+
+#[cfg(test)]
+mod mailbox_merge_tests {
+    use super::*;
+    use construct_message::types::{MessageEnvelope, MessageType};
+
+    fn env(id: &str) -> MessageEnvelope {
+        MessageEnvelope {
+            message_id: id.to_string(),
+            sender_id: "alice".to_string(),
+            recipient_id: "bob".to_string(),
+            timestamp: 1,
+            message_type: MessageType::DirectMessage,
+            ephemeral_public_key: None,
+            message_number: None,
+            mls_payload: None,
+            group_id: None,
+            encrypted_payload: b"x".to_vec(),
+            content_hash: "h".to_string(),
+            crypto_suite_id: 0,
+            origin_server: None,
+            federated: false,
+            server_signature: None,
+            is_sealed_sender: false,
+            sealed_inner: None,
+            max_queue_len: None,
+            proto_content_type: None,
+        }
+    }
+
+    #[test]
+    fn merge_prefers_device_copy_and_orders_by_stream_id() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("m1"))),
+            ("300-0".to_string(), Some(env("m2"))),
+        ];
+        // Same m1 on device with a different stream id — device wins.
+        let device = vec![
+            ("150-0".to_string(), Some(env("m1"))),
+            ("200-0".to_string(), Some(env("m3"))),
+        ];
+        let merged = merge_mailbox_pages(device, user, 10);
+        let ids: Vec<_> = merged
+            .iter()
+            .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["m1", "m3", "m2"]);
+        // m1 kept the device stream id
+        assert_eq!(merged[0].0, "150-0");
+    }
+
+    #[test]
+    fn merge_respects_count_cap() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("a"))),
+            ("200-0".to_string(), Some(env("b"))),
+            ("300-0".to_string(), Some(env("c"))),
+        ];
+        let merged = merge_mailbox_pages(vec![], user, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].1.as_ref().unwrap().message_id, "a");
+        assert_eq!(merged[1].1.as_ref().unwrap().message_id, "b");
     }
 }

@@ -30,20 +30,27 @@ pub(crate) fn should_send_wake_push(recipient_online: bool) -> bool {
 
 /// Look up active device IDs for a recipient.
 /// Returns an empty Vec on error so callers fall back to the user-level stream.
-async fn fetch_recipient_device_ids(
-    app_context: &Arc<AppContext>,
+pub(crate) async fn fetch_recipient_device_ids_for_user(
+    db_pool: &construct_db::DbPool,
     recipient_id: &str,
 ) -> Vec<String> {
     let Ok(uid) = Uuid::parse_str(recipient_id) else {
         return vec![];
     };
-    match construct_db::get_devices_by_user_id(&app_context.db_pool, &uid).await {
+    match construct_db::get_devices_by_user_id(db_pool, &uid).await {
         Ok(devices) => devices.into_iter().map(|d| d.device_id).collect(),
         Err(e) => {
             tracing::warn!(error = %e, recipient = %recipient_id, "Failed to fetch recipient devices for fan-out");
             vec![]
         }
     }
+}
+
+async fn fetch_recipient_device_ids(
+    app_context: &Arc<AppContext>,
+    recipient_id: &str,
+) -> Vec<String> {
+    fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
 }
 
 /// Dispatch a pre-built MessageEnvelope to the recipient's Redis offline stream.

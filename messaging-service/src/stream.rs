@@ -41,6 +41,7 @@ pub(crate) async fn handle_stream_request(
     context: &Arc<MessagingServiceContext>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     user_id: &mut Option<uuid::Uuid>,
+    device_id: Option<&str>,
     stream_queue: &mut construct_queue::MessageQueue,
     catchup: &mut StreamCatchupState,
 ) -> anyhow::Result<()> {
@@ -433,6 +434,7 @@ pub(crate) async fn handle_stream_request(
                     stream_queue,
                     &context.config.messaging,
                     uid,
+                    device_id,
                     &mut catchup.last_stream_id,
                     tx,
                     catchup.subscribe_with_cursor_seen,
@@ -616,6 +618,7 @@ pub(crate) async fn poll_messages(
     queue: &mut construct_queue::MessageQueue,
     config: &construct_config::MessagingConfig,
     user_id: uuid::Uuid,
+    device_id: Option<&str>,
     last_stream_id: &mut Option<String>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     // True only for the catch-up poll that follows a resume. The wakeup and fallback-tick
@@ -636,7 +639,7 @@ pub(crate) async fn poll_messages(
 
     let t_xread = std::time::Instant::now();
     let messages = queue
-        .read_user_messages_from_stream(&user_id_str, None, last_stream_id.as_deref(), limit)
+        .read_mailbox_messages(&user_id_str, device_id, last_stream_id.as_deref(), limit)
         .await?;
     let xread_ms = t_xread.elapsed().as_millis();
 
@@ -644,10 +647,11 @@ pub(crate) async fn poll_messages(
     if msg_count > 0 {
         tracing::info!(
             user_id = %user_id_str,
+            device_id = device_id.unwrap_or(""),
             msg_count,
             xread_ms,
             last_stream_id = ?last_stream_id,
-            "poll_messages: read messages from Redis offline stream"
+            "poll_messages: read messages from Redis offline mailbox"
         );
     } else if empty_poll_is_a_finding(msg_count, is_resume_catchup) {
         tracing::info!(
