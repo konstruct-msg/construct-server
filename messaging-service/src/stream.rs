@@ -417,9 +417,11 @@ pub(crate) async fn handle_stream_request(
 
                     // ACK-driven deletion: the client's since_cursor is the last message it
                     // has durably received AND persisted. Only now is it safe to delete
-                    // everything ≤ cursor from the offline stream. Trim also runs from
-                    // GetPendingMessages with the same cursor contract — never by the
-                    // server's read/send position (that caused silent loss on short sessions).
+                    // everything ≤ cursor from the offline stream.
+                    // GetPendingMessages no longer trims (minimal-server-delivery.md §1) —
+                    // that path is cancelled/re-paged before the client can persist.
+                    // Never trim by the server's read/send position (silent loss on short
+                    // sessions, 2026-06-08).
                     if let Some(uid) = user_id.as_ref() {
                         match stream_queue
                             .trim_offline_stream(&uid.to_string(), cursor)

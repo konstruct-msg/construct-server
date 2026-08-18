@@ -86,8 +86,9 @@ Fan-out is backwards-compatible: `delivery:offline:{user_id}` is always written,
 **Wake push:** APNs silent `new_message` is skipped when `user:{user_id}:server_instance_id`
 is set (active MessageStream). Online delivery uses `inbox:wakeup` only — silent push
 while online caused client reconnect storms + full offline redelivery. Offline-stream
-trim is ACK-driven via `since_cursor` on both MessageStream `Subscribe` and
-`GetPendingMessages`.
+trim via `since_cursor` remains only on MessageStream `Subscribe`. `GetPendingMessages`
+uses `since_cursor` as a read offset only (no `XTRIM`) — see construct-docs
+`decisions/minimal-server-delivery.md` step 1.
 
 **Critical channel name**: `inbox:wakeup:{user_id}`.
 
