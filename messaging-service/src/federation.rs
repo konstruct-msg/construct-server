@@ -371,19 +371,24 @@ pub(crate) async fn handle_inbound_message(
     use construct_server_shared::message::types::MessageEnvelope;
     use construct_server_shared::message::types::MessageType;
 
+    // S2S JSON still carries ciphertext as base64; normalize to raw bytes for Redis.
+    let encrypted_payload = base64::engine::general_purpose::STANDARD
+        .decode(&req.ciphertext)
+        .unwrap_or_else(|_| req.ciphertext.clone().into_bytes());
+
     let envelope = MessageEnvelope {
         message_id: req.message_id.clone(),
         sender_id: req.from.clone(),
         recipient_id: req.to.clone(),
         timestamp: req.timestamp as i64,
         message_type: MessageType::DirectMessage,
-        encrypted_payload: req.ciphertext.clone(),
+        encrypted_payload,
         content_hash: req.payload_hash.clone(),
         origin_server: Some(req.origin_server.clone()),
         federated: true,
         server_signature: req.server_signature.clone(),
         is_sealed_sender: false,
-        sealed_inner_b64: None,
+        sealed_inner: None,
         ephemeral_public_key: None,
         message_number: None,
         mls_payload: None,
