@@ -727,16 +727,29 @@ impl MessageQueue {
         device_ids: &[String],
         envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<()> {
-        // Always write to the legacy user stream for backward compatibility.
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .write_message_to_user_stream(user_id, envelope)
-        .await?;
+        let write_user = self.config.messaging.mailbox_user_write;
 
-        // Additionally write to each per-device stream.
+        if write_user {
+            // Legacy user stream (cutover: MSG_MAILBOX_USER_WRITE=0 skips this).
+            delivery::DeliveryManager::new(
+                &mut self.client,
+                &self.config,
+                self.delivery_queue_prefix.clone(),
+            )
+            .write_message_to_user_stream(user_id, envelope)
+            .await?;
+        } else {
+            // User XADD skipped — still wake MessageStream subscribers (pub/sub).
+            use redis::AsyncCommands;
+            let wakeup_channel = format!("inbox:wakeup:{}", user_id);
+            let _: std::result::Result<i64, _> = self
+                .client
+                .connection_mut()
+                .publish(&wakeup_channel, "1")
+                .await;
+        }
+
+        // Per-device streams (always).
         for device_id in device_ids {
             if let Err(e) = delivery::DeliveryManager::new(
                 &mut self.client,
@@ -757,6 +770,11 @@ impl MessageQueue {
         }
 
         Ok(())
+    }
+
+    /// Whether legacy user-stream XADD is enabled (`MSG_MAILBOX_USER_WRITE`).
+    pub fn mailbox_user_write_enabled(&self) -> bool {
+        self.config.messaging.mailbox_user_write
     }
 
     /// Read messages from a per-device Redis stream.

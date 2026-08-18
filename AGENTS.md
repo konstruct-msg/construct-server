@@ -95,6 +95,10 @@ Server must not `XTRIM` from a client-asserted cursor — silent-loss class.
 Capacity = `MAXLEN ~` on XADD + age sweep (~30d). See construct-docs
 `decisions/minimal-server-delivery.md` (Accepted).
 
+**Step 4 cutover flag:** `MSG_MAILBOX_USER_WRITE` (default `1`). Set `0` only after
+7d gates on `construct_msg_mailbox_read_total{mode=…}` /
+`construct_msg_mailbox_write_total{target=…}` — see ADR cutover section.
+
 **Critical channel name**: `inbox:wakeup:{user_id}`.
 
 **Serialization**: envelopes must use `rmp_serde::encode::to_vec_named` on write and `rmp_serde::from_slice` on read.
