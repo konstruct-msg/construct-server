@@ -258,7 +258,7 @@ impl MessagingService for MessagingGrpcService {
                                 uid,
                                 &mut catchup.last_stream_id,
                                 &tx,
-                                catchup.subscribe_with_cursor_seen,
+                                false, // routine wakeup, not a resume catch-up
                             )
                             .await
                         {
@@ -274,7 +274,7 @@ impl MessagingService for MessagingGrpcService {
                                 uid,
                                 &mut catchup.last_stream_id,
                                 &tx,
-                                catchup.subscribe_with_cursor_seen,
+                                false, // fallback tick, not a resume catch-up
                             ).await {
                                 tracing::warn!("Error polling messages: {}", e);
                             }
