@@ -9,7 +9,7 @@
 
 ## What is Konstruct?
 
-Konstruct is an open, federated, end-to-end encrypted messenger built on the principle that **privacy is a technical guarantee, not a policy statement**.
+Konstruct is an open, federation-capable, end-to-end encrypted messenger built on the principle that **privacy is a technical guarantee, not a policy statement**. Production runs a single node today — see [Federation](#federation) for what exists and what does not.
 
 We don't ask you to trust us. The cryptography makes trust unnecessary.
 
@@ -33,7 +33,7 @@ Signal's Security  +  Email's Openness  +  Minimal Attack Surface
 
 **Passwordless authentication** — Your device *is* your identity. A device-local Ed25519 key pair is your credential. The server never sees a password.
 
-**No metadata collection** — The server does not log IP addresses, does not track who messages whom, does not store timestamps of activity.
+**Minimal metadata** — The server does not log IP addresses and does not store an activity history. Sealed sender is always on, so a delivered message carries no sender the server can read. What it does hold: an opaque account id, public keys, a push token, and — from the moment you add someone — a contact edge stored as `HMAC-SHA256(secret, user_id)` for both sides (`shared/migrations/037_contact_links.sql`). That keeps plaintext social-graph edges out of the database. It does not hide the graph from whoever holds the HMAC secret, which is this server.
 
 ---
 
@@ -91,7 +91,13 @@ The server verifies all signatures on upload (RFC 8032 strict). A forged or tamp
 
 ## Federation
 
-Your identity is not owned by any company.
+**Status: implemented, not in production.** The S2S path exists and is tested
+(`crates/construct-federation/tests/s2s_sealed_sender_blind_test.rs`, plus a two-node harness in
+`ops/federation-smoke/`), but the deployment is a single node, and a second one has to be
+cross-pinned by SPKI with a peer that agrees to pin you back — there are no public seed nodes and
+no client-side server picker. Running your own instance today gives you an island, not a network.
+
+The design it is built toward:
 
 ```
 alice@your-server.com  ←─ E2E encrypted ─→  bob@another-server.org
