@@ -504,6 +504,26 @@ pub(crate) fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
 /// Apply a client `since_cursor` as the resume position: only advance, never rewind.
 /// Returns whether the cursor was applied (advanced or equal — position is at least
 /// the client bookmark).
+/// Whether an empty poll is worth a line in the log.
+///
+/// `poll_messages` reported only what it found, so a poll that returned nothing left no trace at
+/// all. That is fine for the idle case — a wakeup tick on a user with an empty stream is noise.
+/// It is not fine after the client resumed from a cursor: there the client has explicitly said
+/// "I am missing everything after this point", and zero is the answer, not the absence of one.
+///
+/// The distinction cost a working day on 2026-08-18. Two messages were dispatched to an offline
+/// recipient at 14:28:16 and 14:28:43; the client reconnected at 14:28:27 and 14:28:53 carrying a
+/// cursor below both, and the log showed `Resuming stream from client since_cursor` with nothing
+/// after it. That read as "catch-up never ran", and hours went into the branch that decides
+/// whether it runs — when in fact it ran twice and found an empty stream, which points somewhere
+/// else entirely.
+///
+/// A log line that appears only on success cannot distinguish "did not happen" from "happened and
+/// found nothing", and those have different causes.
+fn empty_poll_is_a_finding(msg_count: usize, subscribe_with_cursor_seen: bool) -> bool {
+    msg_count == 0 && subscribe_with_cursor_seen
+}
+
 fn apply_since_cursor(cursor: &str, last_stream_id: &mut Option<String>) -> bool {
     let advance = match last_stream_id {
         None => true,
@@ -645,6 +665,14 @@ pub(crate) async fn poll_messages(
             last_stream_id = ?last_stream_id,
             "poll_messages: read messages from Redis offline stream"
         );
+    } else if empty_poll_is_a_finding(msg_count, subscribe_with_cursor_seen) {
+        tracing::info!(
+            user_id = %user_id_str,
+            msg_count,
+            xread_ms,
+            last_stream_id = ?last_stream_id,
+            "poll_messages: nothing after the client's resume cursor"
+        );
     } else if xread_ms > config.stream_xread_slow_ms {
         tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
     }
@@ -773,6 +801,29 @@ mod tests {
             after_subscribe.is_empty(),
             "cursor cannot undo the open-time replay"
         );
+    }
+
+    /// After a resume the client has named a position and asked what is past it. Zero is the
+    /// answer to that question, and it has to be visible — otherwise "ran and found nothing" is
+    /// indistinguishable from "never ran", which is exactly the wrong turn taken on 2026-08-18.
+    #[test]
+    fn empty_poll_after_a_resume_cursor_is_logged() {
+        assert!(empty_poll_is_a_finding(0, true));
+    }
+
+    /// An idle wakeup on a user with an empty stream is noise, and this runs on every tick for
+    /// every connected user.
+    #[test]
+    fn empty_poll_without_a_resume_cursor_stays_quiet() {
+        assert!(!empty_poll_is_a_finding(0, false));
+    }
+
+    /// A poll that found something already logs on the success path; reporting it twice would
+    /// make the new line meaningless.
+    #[test]
+    fn a_non_empty_poll_is_never_reported_as_empty() {
+        assert!(!empty_poll_is_a_finding(1, true));
+        assert!(!empty_poll_is_a_finding(50, true));
     }
 
     #[test]

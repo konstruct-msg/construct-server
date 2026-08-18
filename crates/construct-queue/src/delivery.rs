@@ -521,11 +521,19 @@ impl<'a> DeliveryManager<'a> {
             .await
             .context("Failed to write message to Redis stream")?;
 
-        tracing::debug!(
+        // INFO, not DEBUG, and not "(test mode)" — this is the production write path for every
+        // offline message. The stream id it returns is the only thing that ties a dispatched
+        // message to a position a later read can be checked against.
+        //
+        // On 2026-08-18 two messages were dispatched to an offline recipient, "Message
+        // dispatched" was logged, and a poll from a cursor below them found nothing eleven
+        // seconds later. Deciding whether they had ever been written took hours of reading code,
+        // because the one line that knew was filtered out in production.
+        tracing::info!(
             stream_key = %stream_key,
             message_id = %envelope.message_id,
             stream_id = %stream_id,
-            "Wrote message directly to user stream (test mode)"
+            "Wrote message to offline stream"
         );
 
         // Wake up any active MessageStream for this user so it delivers immediately
