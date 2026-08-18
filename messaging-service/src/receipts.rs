@@ -133,7 +133,7 @@ pub(crate) fn build_receipt_response(
         timestamp: i64,
     }
 
-    let payload: ReceiptPayload = serde_json::from_str(&envelope.encrypted_payload)
+    let payload: ReceiptPayload = serde_json::from_slice(&envelope.encrypted_payload)
         .map_err(|e| anyhow::anyhow!("Invalid receipt payload: {}", e))?;
 
     let status = match payload.status.as_str() {

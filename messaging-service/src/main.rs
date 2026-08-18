@@ -411,13 +411,12 @@ async fn main() -> Result<()> {
 mod tests {
     use crate::envelope::convert_envelope_to_proto;
     use crate::receipts::build_receipt_response;
-    use base64::Engine as _;
     use construct_server_shared::message::types::{MessageEnvelope, MessageType};
     use construct_server_shared::shared::proto::services::v1 as proto;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn make_direct_envelope(sender: &str, recipient: &str, payload_b64: &str) -> MessageEnvelope {
+    fn make_direct_envelope(sender: &str, recipient: &str, payload: &[u8]) -> MessageEnvelope {
         MessageEnvelope {
             message_id: "msg-001".to_string(),
             sender_id: sender.to_string(),
@@ -428,14 +427,14 @@ mod tests {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: payload_b64.to_string(),
+            encrypted_payload: payload.to_vec(),
             content_hash: "abc123".to_string(),
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -452,20 +451,20 @@ mod tests {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: msg_type_str.to_string(),
+            encrypted_payload: msg_type_str.as_bytes().to_vec(),
             content_hash: "ctrl-hash".to_string(),
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
     }
 
-    fn make_sealed_envelope(recipient: &str, sealed_b64: &str) -> MessageEnvelope {
+    fn make_sealed_envelope(recipient: &str, sealed_inner: &[u8]) -> MessageEnvelope {
         MessageEnvelope {
             message_id: "sealed-001".to_string(),
             sender_id: String::new(), // intentionally empty
@@ -476,14 +475,14 @@ mod tests {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: sealed_b64.to_string(),
+            encrypted_payload: Vec::new(),
             content_hash: "sealed-hash".to_string(),
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: true,
-            sealed_inner_b64: Some(sealed_b64.to_string()),
+            sealed_inner: Some(sealed_inner.to_vec()),
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -494,16 +493,13 @@ mod tests {
     #[test]
     fn test_convert_direct_message_sets_sender_recipient() {
         use construct_server_shared::shared::proto::core::v1 as core;
-        let env = make_direct_envelope("alice", "bob", "dGVzdA=="); // "test" in base64
+        let env = make_direct_envelope("alice", "bob", b"test");
         let proto = convert_envelope_to_proto(env).unwrap();
 
         assert_eq!(proto.sender.as_ref().unwrap().user_id, "alice");
         assert_eq!(proto.recipient.as_ref().unwrap().user_id, "bob");
         assert_eq!(proto.content_type, i32::from(core::ContentType::E2eeSignal));
-        assert!(
-            !proto.encrypted_payload.is_empty(),
-            "payload should be decoded"
-        );
+        assert_eq!(proto.encrypted_payload, b"test");
     }
 
     #[test]
@@ -549,8 +545,7 @@ mod tests {
     #[test]
     fn test_convert_sealed_sender_hides_sender_identity() {
         let sealed_bytes = b"fake-sealed-inner-bytes";
-        let b64 = base64::engine::general_purpose::STANDARD.encode(sealed_bytes);
-        let env = make_sealed_envelope("bob", &b64);
+        let env = make_sealed_envelope("bob", sealed_bytes);
         let proto = convert_envelope_to_proto(env).unwrap();
 
         assert!(proto.sender.is_none(), "sealed sender must hide sender");
@@ -575,8 +570,7 @@ mod tests {
     fn test_convert_session_reset_init_preserves_content_type() {
         use construct_server_shared::shared::proto::core::v1 as core;
 
-        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(b"x3dh-init-ciphertext");
-        let mut env = make_direct_envelope("alice", "bob", &payload_b64);
+        let mut env = make_direct_envelope("alice", "bob", b"x3dh-init-ciphertext");
         env.proto_content_type = Some(i32::from(core::ContentType::SessionResetInit));
 
         let proto = convert_envelope_to_proto(env).unwrap();
@@ -586,10 +580,7 @@ mod tests {
             i32::from(core::ContentType::SessionResetInit),
             "SESSION_RESET_INIT content_type must be preserved through envelope round-trip"
         );
-        assert!(
-            !proto.encrypted_payload.is_empty(),
-            "SESSION_RESET_INIT must carry encrypted payload (X3DH init)"
-        );
+        assert_eq!(proto.encrypted_payload, b"x3dh-init-ciphertext");
     }
 
     #[test]
@@ -597,7 +588,7 @@ mod tests {
         use construct_server_shared::shared::proto::core::v1 as core;
 
         // Simulate a legacy envelope (proto_content_type = None)
-        let env = make_direct_envelope("alice", "bob", "dGVzdA==");
+        let env = make_direct_envelope("alice", "bob", b"test");
         assert!(env.proto_content_type.is_none());
 
         let proto = convert_envelope_to_proto(env).unwrap();
@@ -662,9 +653,9 @@ mod tests {
 
     #[test]
     fn test_build_receipt_response_invalid_json_returns_error() {
-        let mut env = make_direct_envelope("alice", "bob", "");
+        let mut env = make_direct_envelope("alice", "bob", b"");
         env.message_type = MessageType::Receipt;
-        env.encrypted_payload = "not-valid-json".to_string();
+        env.encrypted_payload = b"not-valid-json".to_vec();
 
         let result = build_receipt_response(&env);
         assert!(result.is_err(), "invalid JSON must return error");

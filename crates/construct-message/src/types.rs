@@ -2,6 +2,159 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Dual-format bytes for Redis MessagePack envelopes.
+///
+/// **Write:** MessagePack `bin` via `serde_bytes` (no base64).
+/// **Read:** accept `bin` (new) or `str` (legacy). Legacy strings are base64-decoded
+/// when valid; otherwise kept as UTF-8 bytes (control labels / receipt JSON).
+/// See construct-docs `backend/SEALED_INNER_BINARY_STORAGE_SPEC.md`.
+mod payload_bytes {
+    use base64::Engine;
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub(super) fn decode_legacy_str(v: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(v)
+            .unwrap_or_else(|_| v.as_bytes().to_vec())
+    }
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::serialize(value, serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DualVisitor;
+
+        impl<'de> Visitor<'de> for DualVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("MessagePack bin, byte array, or legacy base64/UTF-8 string")
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(v.to_vec())
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(v)
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<u8>, E> {
+                Ok(decode_legacy_str(v))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<u8>, E> {
+                Ok(decode_legacy_str(&v))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Vec<u8>, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(b) = seq.next_element::<u8>()? {
+                    out.push(b);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_any(DualVisitor)
+    }
+}
+
+mod optional_payload_bytes {
+    use super::payload_bytes;
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => payload_bytes::serialize(bytes, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OptVisitor;
+
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<Vec<u8>>;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("optional MessagePack bin or legacy base64 string")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Option<Vec<u8>>, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Option<Vec<u8>>, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(
+                self,
+                deserializer: D2,
+            ) -> Result<Option<Vec<u8>>, D2::Error> {
+                payload_bytes::deserialize(deserializer).map(Some)
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Option<Vec<u8>>, E> {
+                Ok(Some(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Option<Vec<u8>>, E> {
+                Ok(Some(v))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Option<Vec<u8>>, E> {
+                Ok(Some(payload_bytes::decode_legacy_str(v)))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Option<Vec<u8>>, E> {
+                Ok(Some(payload_bytes::decode_legacy_str(&v)))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Option<Vec<u8>>, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                // Delegate to required dual visitor via deserialize_any on a seq —
+                // reconstruct by re-using payload_bytes through a tiny adapter.
+                let bytes = payload_bytes_seq(seq)?;
+                Ok(Some(bytes))
+            }
+        }
+
+        fn payload_bytes_seq<'de, A: de::SeqAccess<'de>>(mut seq: A) -> Result<Vec<u8>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(b) = seq.next_element::<u8>()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+
+        deserializer.deserialize_any(OptVisitor)
+    }
+}
+
 /// Type of message being sent
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -101,11 +254,15 @@ pub struct MessageEnvelope {
     pub group_id: Option<String>,
 
     // ===== Common Fields =====
-    /// Base64-encoded encrypted content
-    /// For DirectMessage: ChaCha20-Poly1305 sealed box
-    /// For MLS: MLS-encrypted application data
-    /// For SealedSender: empty — payload lives only in `sealed_inner_b64`
-    pub encrypted_payload: String,
+    /// Encrypted / control payload bytes (MessagePack `bin`).
+    /// For DirectMessage: raw ciphertext (not base64).
+    /// For ControlMessage: UTF-8 label (`SESSION_RESET`, `KEY_SYNC`, `END_SESSION`).
+    /// For Receipt: UTF-8 JSON.
+    /// For SealedSender: empty — payload lives only in `sealed_inner`.
+    /// Legacy Redis entries may still carry a base64/UTF-8 string; dual-deser
+    /// normalizes them to bytes (`payload_bytes`).
+    #[serde(with = "payload_bytes")]
+    pub encrypted_payload: Vec<u8>,
 
     /// SHA-256 hash for deduplication (message_id + encrypted_payload + ephemeral_key)
     pub content_hash: String,
@@ -136,10 +293,17 @@ pub struct MessageEnvelope {
     #[serde(default)]
     pub is_sealed_sender: bool,
 
-    /// Base64-encoded serialized `SealedInner` protobuf — opaque to server.
+    /// Serialized `SealedInner` protobuf bytes — opaque to server.
     /// Contains recipient_user_id (plaintext for routing) + E2EE payload (opaque).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sealed_inner_b64: Option<String>,
+    /// Written as MessagePack `bin`. Legacy field name `sealedInnerB64` (base64
+    /// string) is still accepted by the dual-format deserializer.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "sealedInnerB64",
+        with = "optional_payload_bytes"
+    )]
+    pub sealed_inner: Option<Vec<u8>>,
 
     // ===== Anti-Spam Fields =====
     /// Override MAXLEN for recipient's offline queue.
@@ -165,7 +329,7 @@ impl MessageEnvelope {
         recipient_id: String,
         ephemeral_public_key: Vec<u8>,
         message_number: u32,
-        encrypted_payload: String,
+        encrypted_payload: Vec<u8>,
         content_hash: String,
     ) -> Self {
         Self {
@@ -188,7 +352,7 @@ impl MessageEnvelope {
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -201,17 +365,13 @@ impl MessageEnvelope {
     /// The full `sealed_inner` bytes are stored opaquely for delivery to the client.
     ///
     /// `encrypted_payload` is left empty on purpose: egress already zeros it for
-    /// sealed messages, and duplicating `sealed_inner` as base64 here only
-    /// bloated the Redis delivery stream (~×2). See
-    /// construct-docs `backend/SEALED_INNER_BINARY_STORAGE_SPEC.md`.
+    /// sealed messages, and duplicating `sealed_inner` only bloated Redis.
+    /// See construct-docs `backend/SEALED_INNER_BINARY_STORAGE_SPEC.md`.
     pub fn from_sealed_sender(
         message_id: String,
         recipient_id: String,
         sealed_inner: Vec<u8>,
     ) -> Self {
-        use base64::Engine;
-        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&sealed_inner);
-
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
         hasher.update(&sealed_inner);
@@ -227,15 +387,15 @@ impl MessageEnvelope {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            // Unused on the sealed path (payload lives in sealed_inner_b64).
-            encrypted_payload: String::new(),
+            // Unused on the sealed path (payload lives in sealed_inner).
+            encrypted_payload: Vec::new(),
             content_hash,
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: true,
-            sealed_inner_b64: Some(sealed_b64),
+            sealed_inner: Some(sealed_inner),
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -250,11 +410,11 @@ impl MessageEnvelope {
     /// `recipient_id` — who receives this SESSION_RESET signal (original sender).
     pub fn new_session_reset(trigger_user_id: String, recipient_id: String) -> Self {
         let message_id = uuid::Uuid::new_v4().to_string();
-        let payload = "SESSION_RESET";
+        let payload = b"SESSION_RESET".to_vec();
 
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
-        hasher.update(payload.as_bytes());
+        hasher.update(&payload);
         let content_hash = hex::encode(hasher.finalize());
 
         Self {
@@ -267,14 +427,14 @@ impl MessageEnvelope {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: payload.to_string(),
+            encrypted_payload: payload,
             content_hash,
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -284,11 +444,11 @@ impl MessageEnvelope {
     /// Recipient will perform a full X3DH re-init with `sender_user_id`.
     pub fn new_key_sync(sender_user_id: String, recipient_id: String) -> Self {
         let message_id = uuid::Uuid::new_v4().to_string();
-        let payload = "KEY_SYNC";
+        let payload = b"KEY_SYNC".to_vec();
 
         let mut hasher = Sha256::new();
         hasher.update(message_id.as_bytes());
-        hasher.update(payload.as_bytes());
+        hasher.update(&payload);
         let content_hash = hex::encode(hasher.finalize());
 
         Self {
@@ -301,14 +461,14 @@ impl MessageEnvelope {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: payload.to_string(),
+            encrypted_payload: payload,
             content_hash,
             crypto_suite_id: 0,
             origin_server: None,
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -327,8 +487,8 @@ impl MessageEnvelope {
         if self.recipient_id.is_empty() {
             anyhow::bail!("recipient_id is required");
         }
-        // Sealed sender carries its payload only in `sealed_inner_b64`;
-        // `encrypted_payload` is intentionally empty (no dual base64 copy).
+        // Sealed sender carries its payload only in `sealed_inner`;
+        // `encrypted_payload` is intentionally empty (no dual copy).
         if !self.is_sealed_sender
             && self.message_type != MessageType::SealedSender
             && self.encrypted_payload.is_empty()
@@ -370,8 +530,8 @@ impl MessageEnvelope {
                 }
             }
             MessageType::SealedSender => {
-                if self.sealed_inner_b64.is_none() {
-                    anyhow::bail!("sealed_inner_b64 required for SealedSender");
+                if self.sealed_inner.is_none() {
+                    anyhow::bail!("sealed_inner required for SealedSender");
                 }
             }
             MessageType::Receipt => {
@@ -403,11 +563,12 @@ impl MessageEnvelope {
             "status": status,
             "timestamp": chrono::Utc::now().timestamp_millis(),
         })
-        .to_string();
+        .to_string()
+        .into_bytes();
 
         let mut hasher = Sha256::new();
         hasher.update(receipt_id.as_bytes());
-        hasher.update(payload.as_bytes());
+        hasher.update(&payload);
         let content_hash = hex::encode(hasher.finalize());
 
         Self {
@@ -431,7 +592,7 @@ impl MessageEnvelope {
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
         }
@@ -448,7 +609,13 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
 
         match msg.message_type {
             ConstructMessageType::Regular => {
-                // Calculate content hash for deduplication
+                // ChatMessage.content is historically a base64 string; normalize to
+                // raw bytes for Redis storage (same dual-read rule as legacy streams).
+                let payload = payload_bytes::decode_legacy_str(
+                    msg.content
+                        .as_ref()
+                        .expect("Regular message must have content"),
+                );
                 let mut hasher = Sha256::new();
                 hasher.update(msg.id.as_bytes());
                 hasher.update(
@@ -456,11 +623,7 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                         .as_ref()
                         .expect("Regular message must have ephemeral_public_key"),
                 );
-                hasher.update(
-                    msg.content
-                        .as_ref()
-                        .expect("Regular message must have content"),
-                );
+                hasher.update(&payload);
                 let content_hash = hex::encode(hasher.finalize());
 
                 Self {
@@ -476,14 +639,14 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     message_number: msg.message_number,
                     mls_payload: None,
                     group_id: None,
-                    encrypted_payload: msg.content.as_ref().unwrap().clone(),
+                    encrypted_payload: payload,
                     content_hash,
                     crypto_suite_id: 0, // ChaCha20-Poly1305 (classic Double Ratchet)
                     origin_server: None,
                     federated: false,
                     server_signature: None,
                     is_sealed_sender: false,
-                    sealed_inner_b64: None,
+                    sealed_inner: None,
                     max_queue_len: None,
                     proto_content_type: None,
                 }
@@ -507,14 +670,14 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     mls_payload: None,
                     group_id: None,
                     // Use encrypted_payload to store control message type
-                    encrypted_payload: "END_SESSION".to_string(),
+                    encrypted_payload: b"END_SESSION".to_vec(),
                     content_hash,
                     crypto_suite_id: 0,
                     origin_server: None,
                     federated: false,
                     server_signature: None,
                     is_sealed_sender: false,
-                    sealed_inner_b64: None,
+                    sealed_inner: None,
                     max_queue_len: None,
                     proto_content_type: None,
                 }
@@ -552,26 +715,19 @@ pub struct ProtoEnvelopeContext {
 impl MessageEnvelope {
     /// Create a MessageEnvelope from a proto Envelope.
     ///
-    /// The server stores `encrypted_payload` verbatim (as base64) and routes the
-    /// message to the recipient. It never inspects the payload contents.
+    /// The server stores `encrypted_payload` as raw bytes (MessagePack bin) and
+    /// routes the message to the recipient. It never inspects the payload contents.
     pub fn from_proto_envelope(ctx: &ProtoEnvelopeContext) -> Self {
-        use base64::Engine;
-
-        // Map proto ContentType to Kafka MessageType + payload representation.
+        // Map proto ContentType to MessageType + payload representation.
         // SESSION_RESET=21 and KEY_SYNC=22 are control messages — store their type
-        // as the payload string so convert_envelope_to_proto can recover it.
+        // as UTF-8 bytes so convert_envelope_to_proto can recover it.
         const CONTENT_TYPE_SESSION_RESET: i32 = 21;
         const CONTENT_TYPE_KEY_SYNC: i32 = 22;
 
         let (message_type, encoded_payload) = match ctx.content_type {
-            CONTENT_TYPE_SESSION_RESET => {
-                (MessageType::ControlMessage, "SESSION_RESET".to_string())
-            }
-            CONTENT_TYPE_KEY_SYNC => (MessageType::ControlMessage, "KEY_SYNC".to_string()),
-            _ => {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&ctx.encrypted_payload);
-                (MessageType::DirectMessage, b64)
-            }
+            CONTENT_TYPE_SESSION_RESET => (MessageType::ControlMessage, b"SESSION_RESET".to_vec()),
+            CONTENT_TYPE_KEY_SYNC => (MessageType::ControlMessage, b"KEY_SYNC".to_vec()),
+            _ => (MessageType::DirectMessage, ctx.encrypted_payload.clone()),
         };
 
         let mut hasher = Sha256::new();
@@ -596,7 +752,7 @@ impl MessageEnvelope {
             federated: false,
             server_signature: None,
             is_sealed_sender: false,
-            sealed_inner_b64: None,
+            sealed_inner: None,
             max_queue_len: None,
             proto_content_type: Some(ctx.content_type),
         }
@@ -716,7 +872,7 @@ mod tests {
             "user-789".to_string(),
             vec![0u8; 32], // 32-byte ephemeral key
             42,            // message number
-            "encrypted".to_string(),
+            b"encrypted".to_vec(),
             "hash123".to_string(),
         );
 
@@ -728,8 +884,8 @@ mod tests {
 
     #[test]
     fn test_from_proto_envelope_e2ee_opaque() {
-        // Verify that from_proto_envelope stores encrypted_payload as opaque base64
-        // without deserializing it — server never reads crypto params from the payload.
+        // Verify that from_proto_envelope stores encrypted_payload as raw bytes
+        // without parsing — server never reads crypto params from the payload.
         let fake_ciphertext = b"this_is_not_json_it_is_opaque_bytes";
         let ctx = ProtoEnvelopeContext {
             sender_id: "sender-uuid".to_string(),
@@ -757,14 +913,9 @@ mod tests {
             "crypto_suite_id must not be known to server"
         );
 
-        // The payload must be the base64 of the raw ciphertext bytes
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&envelope.encrypted_payload)
-            .expect("MessageEnvelope.encrypted_payload must be valid base64");
         assert_eq!(
-            decoded, fake_ciphertext,
-            "encrypted_payload must be stored verbatim (base64), not parsed"
+            envelope.encrypted_payload, fake_ciphertext,
+            "encrypted_payload must be stored as raw bytes, not base64"
         );
     }
 
@@ -787,12 +938,7 @@ mod tests {
             Some(24),
             "proto_content_type must preserve the original content_type=24"
         );
-        // Payload must be base64-encoded ciphertext (not an ASCII control string)
-        use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(&env.encrypted_payload)
-            .expect("payload must be valid base64");
-        assert_eq!(decoded, b"x3dh-init-payload");
+        assert_eq!(env.encrypted_payload, b"x3dh-init-payload");
     }
 
     #[test]
@@ -804,7 +950,7 @@ mod tests {
             "bob".to_string(),
             vec![0u8; 32],
             0,
-            "payload".to_string(),
+            b"payload".to_vec(),
             "hash".to_string(),
         );
 
@@ -843,7 +989,7 @@ mod tests {
             "bob".to_string(),
             vec![0xABu8; 32],
             7,
-            "encrypted-payload".to_string(),
+            b"encrypted-payload".to_vec(),
             "content-hash".to_string(),
         );
 
@@ -855,12 +1001,14 @@ mod tests {
         assert_eq!(restored.recipient_id, env.recipient_id);
         assert_eq!(restored.message_type, env.message_type);
         assert_eq!(restored.message_number, env.message_number);
+        assert_eq!(restored.encrypted_payload, env.encrypted_payload);
     }
 
     #[test]
     fn test_serde_old_message_without_unknown_fields_deserializes() {
         // Simulate a JSON payload from an older server. Deserialization must succeed
         // even if the local struct no longer contains legacy fields.
+        // Legacy encryptedPayload is a base64 string → dual-deser yields raw bytes.
         let json = r#"{
             "messageId": "old-msg",
             "senderId": "alice",
@@ -877,6 +1025,7 @@ mod tests {
         let env: MessageEnvelope = serde_json::from_str(json)
             .expect("old message JSON must deserialize without legacy fields");
         assert_eq!(env.message_id, "old-msg");
+        assert_eq!(env.encrypted_payload, b"payload");
     }
 
     #[test]
@@ -898,11 +1047,74 @@ mod tests {
         assert_eq!(restored.recipient_id, "alice");
 
         // The payload must be valid JSON containing message_ids and status
-        let payload: serde_json::Value = serde_json::from_str(&restored.encrypted_payload)
+        let payload: serde_json::Value = serde_json::from_slice(&restored.encrypted_payload)
             .expect("receipt payload must be JSON");
         assert_eq!(payload["status"], "delivered");
         let ids = payload["message_ids"].as_array().unwrap();
         assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_msgpack_sealed_inner_bin_round_trip() {
+        let env = MessageEnvelope::from_sealed_sender(
+            "mid-bin".to_string(),
+            "bob".to_string(),
+            b"\x00\xffsealed-bytes".to_vec(),
+        );
+        let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
+        let back: MessageEnvelope = rmp_serde::from_slice(&bytes).expect("from_slice");
+        assert_eq!(
+            back.sealed_inner.as_deref(),
+            Some(&b"\x00\xffsealed-bytes"[..])
+        );
+        assert!(back.encrypted_payload.is_empty());
+    }
+
+    #[test]
+    fn test_dual_read_legacy_sealed_inner_b64_string() {
+        // Legacy Redis/JSON form: sealedInnerB64 as base64 string, encryptedPayload as
+        // a duplicate base64 string (pre-p.1). Reader must accept both.
+        use base64::Engine;
+        let sealed = b"opaque-sealed-inner";
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(sealed);
+        let json = format!(
+            r#"{{
+            "messageId": "legacy-sealed",
+            "senderId": "",
+            "recipientId": "bob",
+            "timestamp": 1700000000,
+            "messageType": "sealedSender",
+            "encryptedPayload": "{sealed_b64}",
+            "contentHash": "abc",
+            "cryptoSuiteId": 0,
+            "federated": false,
+            "isSealedSender": true,
+            "sealedInnerB64": "{sealed_b64}"
+        }}"#
+        );
+        let env: MessageEnvelope =
+            serde_json::from_str(&json).expect("legacy sealed form must dual-read");
+        assert_eq!(env.sealed_inner.as_deref(), Some(sealed.as_slice()));
+        assert!(env.is_sealed_sender);
+    }
+
+    #[test]
+    fn test_dual_read_legacy_control_payload_string() {
+        let json = r#"{
+            "messageId": "ctrl-1",
+            "senderId": "alice",
+            "recipientId": "bob",
+            "timestamp": 1700000000,
+            "messageType": "controlMessage",
+            "encryptedPayload": "SESSION_RESET",
+            "contentHash": "abc",
+            "cryptoSuiteId": 0,
+            "federated": false,
+            "isSealedSender": false
+        }"#;
+        let env: MessageEnvelope =
+            serde_json::from_str(json).expect("legacy control string must dual-read");
+        assert_eq!(env.encrypted_payload, b"SESSION_RESET");
     }
 
     // ── validate() ───────────────────────────────────────────────────────────
@@ -944,9 +1156,10 @@ mod tests {
         assert!(env.is_sealed_sender);
         assert_eq!(env.message_type, MessageType::SealedSender);
         assert_eq!(env.recipient_id, "recipient-uuid");
-        assert!(
-            env.sealed_inner_b64.is_some(),
-            "sealed_inner must be retained for delivery to the recipient"
+        assert_eq!(
+            env.sealed_inner.as_deref(),
+            Some(b"opaque-sealed-inner".as_slice()),
+            "sealed_inner must be retained as raw bytes for delivery"
         );
         assert!(
             env.encrypted_payload.is_empty(),

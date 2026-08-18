@@ -11,6 +11,7 @@ construct-types = { path = "../construct-types" }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_bytes = "0.11"
 
 # Async
 tokio = { version = "1.40", features = ["full"] }
@@ -28,3 +29,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Metrics
 prometheus = { version = "0.14", features = ["process"] }
+
+[dev-dependencies]
+rmp-serde = { workspace = true }

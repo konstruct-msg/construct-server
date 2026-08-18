@@ -31,17 +31,12 @@ impl std::error::Error for TokenRejected {}
 pub(crate) fn convert_envelope_to_proto(
     envelope: construct_server_shared::message::types::MessageEnvelope,
 ) -> anyhow::Result<construct_server_shared::shared::proto::core::v1::Envelope> {
-    use base64::Engine;
     use construct_server_shared::message::types::MessageType;
     use construct_server_shared::shared::proto::core::v1 as core;
 
     // Sealed sender — reconstruct SealedSenderEnvelope, hide sender from proto.
     if envelope.is_sealed_sender {
-        let sealed_inner_bytes = envelope
-            .sealed_inner_b64
-            .as_deref()
-            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-            .unwrap_or_default();
+        let sealed_inner_bytes = envelope.sealed_inner.unwrap_or_default();
 
         return Ok(core::Envelope {
             sender: None, // anonymous — server does not know sender
@@ -76,7 +71,7 @@ pub(crate) fn convert_envelope_to_proto(
         });
     }
 
-    // Map Kafka MessageType → proto ContentType so clients can detect control messages
+    // Map MessageType → proto ContentType so clients can detect control messages
     // (SESSION_RESET, END_SESSION, KEY_SYNC) without trying to decrypt them.
     // If proto_content_type is set (new path), use it directly — preserves the exact
     // content_type the sender specified (e.g. SESSION_RESET_INIT=24, SENDER_SYNC=23).
@@ -85,22 +80,24 @@ pub(crate) fn convert_envelope_to_proto(
     } else {
         // Legacy fallback for envelopes without proto_content_type
         match envelope.message_type {
-            MessageType::ControlMessage => match envelope.encrypted_payload.as_str() {
-                "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
-                "KEY_SYNC" => core::ContentType::KeySync,
-                _ => core::ContentType::E2eeSignal,
-            },
+            MessageType::ControlMessage => {
+                match std::str::from_utf8(&envelope.encrypted_payload).unwrap_or("") {
+                    "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
+                    "KEY_SYNC" => core::ContentType::KeySync,
+                    _ => core::ContentType::E2eeSignal,
+                }
+            }
             _ => core::ContentType::E2eeSignal,
         }
     };
 
-    // For control messages, send empty payload — the ASCII type string ("END_SESSION",
-    // "SESSION_RESET") is NOT ciphertext and must not be passed to the decryption layer.
+    // For control messages, send empty payload — the ASCII type label is NOT
+    // ciphertext and must not be passed to the decryption layer.
+    // E2EE path: encrypted_payload is already raw ciphertext bytes (dual-deser
+    // normalized legacy base64 strings on read).
     let payload_bytes = match content_type {
         core::ContentType::SessionReset | core::ContentType::KeySync => vec![],
-        _ => base64::engine::general_purpose::STANDARD
-            .decode(&envelope.encrypted_payload)
-            .unwrap_or_else(|_| envelope.encrypted_payload.into_bytes()),
+        _ => envelope.encrypted_payload,
     };
 
     Ok(core::Envelope {

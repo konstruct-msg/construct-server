@@ -841,7 +841,6 @@ impl MessagingService for MessagingGrpcService {
                 last_stream_id = Some(stream_id);
 
                 let env = env?; // skip corrupt / wrong-recipient entries
-                use base64::Engine;
                 use construct_server_shared::message::types::MessageType;
                 use construct_server_shared::shared::proto::core::v1 as core;
 
@@ -855,23 +854,22 @@ impl MessagingService for MessagingGrpcService {
                     core::ContentType::try_from(ct).unwrap_or(core::ContentType::E2eeSignal)
                 } else {
                     match env.message_type {
-                        MessageType::ControlMessage => match env.encrypted_payload.as_str() {
-                            "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
-                            "KEY_SYNC" => core::ContentType::KeySync,
-                            _ => core::ContentType::E2eeSignal,
-                        },
+                        MessageType::ControlMessage => {
+                            match std::str::from_utf8(&env.encrypted_payload).unwrap_or("") {
+                                "SESSION_RESET" | "END_SESSION" => core::ContentType::SessionReset,
+                                "KEY_SYNC" => core::ContentType::KeySync,
+                                _ => core::ContentType::E2eeSignal,
+                            }
+                        }
                         _ => core::ContentType::E2eeSignal,
                     }
                 };
 
-                // For control messages (SESSION_RESET / END_SESSION / KEY_SYNC), the payload
-                // is the ASCII control-type string — send empty bytes to the client so it
-                // cannot mistake this for encrypted ciphertext it needs to decrypt.
+                // Control labels are not ciphertext — send empty bytes to the client.
+                // E2EE path: encrypted_payload is already raw bytes after dual-deser.
                 let payload_bytes = match content_type {
                     core::ContentType::SessionReset | core::ContentType::KeySync => vec![],
-                    _ => base64::engine::general_purpose::STANDARD
-                        .decode(&env.encrypted_payload)
-                        .unwrap_or_else(|_| env.encrypted_payload.clone().into_bytes()),
+                    _ => env.encrypted_payload,
                 };
 
                 Some(proto::PendingMessage {
@@ -888,12 +886,11 @@ impl MessagingService for MessagingGrpcService {
                     },
                     timestamp: env.timestamp,
                     content_type: content_type.into(),
-                    sealed_inner_data: env
-                        .sealed_inner_b64
-                        .as_deref()
-                        .filter(|_| env.is_sealed_sender)
-                        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-                        .unwrap_or_default(),
+                    sealed_inner_data: if env.is_sealed_sender {
+                        env.sealed_inner.unwrap_or_default()
+                    } else {
+                        vec![]
+                    },
                 })
             })
             .collect();
