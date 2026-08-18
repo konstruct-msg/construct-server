@@ -520,8 +520,8 @@ pub(crate) fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
 ///
 /// A log line that appears only on success cannot distinguish "did not happen" from "happened and
 /// found nothing", and those have different causes.
-fn empty_poll_is_a_finding(msg_count: usize, subscribe_with_cursor_seen: bool) -> bool {
-    msg_count == 0 && subscribe_with_cursor_seen
+fn empty_poll_is_a_finding(msg_count: usize, is_resume_catchup: bool) -> bool {
+    msg_count == 0 && is_resume_catchup
 }
 
 fn apply_since_cursor(cursor: &str, last_stream_id: &mut Option<String>) -> bool {
@@ -637,12 +637,15 @@ pub(crate) async fn poll_messages(
     user_id: uuid::Uuid,
     last_stream_id: &mut Option<String>,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
-    subscribe_with_cursor_seen: bool,
+    // True only for the catch-up poll that follows a resume. The wakeup and fallback-tick
+    // callers pass false: an empty read there is the normal idle case, and reporting it turned
+    // the log into one line per second per connected user.
+    is_resume_catchup: bool,
 ) -> anyhow::Result<()> {
     let user_id_str = user_id.to_string();
     let limit = 50;
 
-    if last_stream_id.is_none() && subscribe_with_cursor_seen {
+    if last_stream_id.is_none() && is_resume_catchup {
         tracing::warn!(
             user_id = %user_id_str,
             "poll_messages started with no stream cursor after Subscribe carried since_cursor — possible catch-up race regression"
@@ -665,7 +668,7 @@ pub(crate) async fn poll_messages(
             last_stream_id = ?last_stream_id,
             "poll_messages: read messages from Redis offline stream"
         );
-    } else if empty_poll_is_a_finding(msg_count, subscribe_with_cursor_seen) {
+    } else if empty_poll_is_a_finding(msg_count, is_resume_catchup) {
         tracing::info!(
             user_id = %user_id_str,
             msg_count,
