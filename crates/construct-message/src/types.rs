@@ -104,6 +104,7 @@ pub struct MessageEnvelope {
     /// Base64-encoded encrypted content
     /// For DirectMessage: ChaCha20-Poly1305 sealed box
     /// For MLS: MLS-encrypted application data
+    /// For SealedSender: empty — payload lives only in `sealed_inner_b64`
     pub encrypted_payload: String,
 
     /// SHA-256 hash for deduplication (message_id + encrypted_payload + ephemeral_key)
@@ -198,6 +199,11 @@ impl MessageEnvelope {
     /// The server does NOT know the sender. `recipient_id` is extracted from the
     /// plaintext `SealedInner.recipient_user_id` field before calling this.
     /// The full `sealed_inner` bytes are stored opaquely for delivery to the client.
+    ///
+    /// `encrypted_payload` is left empty on purpose: egress already zeros it for
+    /// sealed messages, and duplicating `sealed_inner` as base64 here only
+    /// bloated the Redis delivery stream (~×2). See
+    /// construct-docs `backend/SEALED_INNER_BINARY_STORAGE_SPEC.md`.
     pub fn from_sealed_sender(
         message_id: String,
         recipient_id: String,
@@ -221,7 +227,8 @@ impl MessageEnvelope {
             message_number: None,
             mls_payload: None,
             group_id: None,
-            encrypted_payload: sealed_b64.clone(),
+            // Unused on the sealed path (payload lives in sealed_inner_b64).
+            encrypted_payload: String::new(),
             content_hash,
             crypto_suite_id: 0,
             origin_server: None,
@@ -320,7 +327,12 @@ impl MessageEnvelope {
         if self.recipient_id.is_empty() {
             anyhow::bail!("recipient_id is required");
         }
-        if self.encrypted_payload.is_empty() {
+        // Sealed sender carries its payload only in `sealed_inner_b64`;
+        // `encrypted_payload` is intentionally empty (no dual base64 copy).
+        if !self.is_sealed_sender
+            && self.message_type != MessageType::SealedSender
+            && self.encrypted_payload.is_empty()
+        {
             anyhow::bail!("encrypted_payload is required");
         }
         if self.content_hash.is_empty() {
@@ -935,6 +947,10 @@ mod tests {
         assert!(
             env.sealed_inner_b64.is_some(),
             "sealed_inner must be retained for delivery to the recipient"
+        );
+        assert!(
+            env.encrypted_payload.is_empty(),
+            "sealed path must not duplicate sealed_inner into encrypted_payload (Redis bloat)"
         );
         assert!(
             env.proto_content_type.is_none(),
