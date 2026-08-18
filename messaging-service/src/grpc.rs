@@ -787,40 +787,29 @@ impl MessagingService for MessagingGrpcService {
         let limit = req.limit.unwrap_or(50).min(100) as usize;
         let since = req.since_cursor.as_deref();
 
-        // Hold the lock only for trim + XREAD — release immediately after so other
-        // handlers (other getPendingMessages calls, send_message) are not blocked during
-        // the message-building loop below.
+        // Hold the lock only for XREAD — release immediately after so other handlers
+        // are not blocked during the message-building loop below.
         //
-        // ACK-driven deletion (same contract as MessageStream Subscribe): when the
-        // client passes since_cursor it asserts durable receipt of everything ≤ that
-        // Redis stream id. Without this trim, BackgroundFetch re-read the full offline
-        // window on every silent-push cycle while Subscribe was the only trim path.
+        // since_cursor is a *read offset only* on this path. Do NOT trim here.
+        // GetPendingMessages is cancelled/re-paged aggressively (MessageStreamManager
+        // reconnect, BackgroundFetch one-shot). Treating since_cursor as an ACK and
+        // calling trim_offline_stream deleted page N while it still sat unpersisted
+        // in the client — silent offline loss. Deletion stays on MessageStream
+        // Subscribe (for now) and on MAXLEN / age sweep. See construct-docs
+        // decisions/minimal-server-delivery.md § шаг 1.
+        if let Some(cursor) = since
+            && !cursor.is_empty()
+            && !is_valid_redis_stream_cursor(cursor)
+        {
+            tracing::warn!(
+                cursor = %cursor,
+                "Ignoring invalid since_cursor on GetPendingMessages (expected Redis stream ID)"
+            );
+        }
+        let since = since.filter(|c| !c.is_empty() && is_valid_redis_stream_cursor(c));
+
         let stream_messages = {
             let mut queue = self.context.queue.lock().await;
-            if let Some(cursor) = since
-                && !cursor.is_empty()
-            {
-                if !is_valid_redis_stream_cursor(cursor) {
-                    tracing::warn!(
-                        cursor = %cursor,
-                        "Ignoring invalid since_cursor on GetPendingMessages (expected Redis stream ID)"
-                    );
-                } else {
-                    match queue.trim_offline_stream(&user_id, cursor).await {
-                        Ok(()) => {
-                            construct_metrics::MSG_OFFLINE_TRIM_TOTAL
-                                .with_label_values(&["get_pending"])
-                                .inc();
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to trim offline stream on GetPendingMessages (non-fatal)"
-                            );
-                        }
-                    }
-                }
-            }
             queue
                 .read_user_messages_from_stream(&user_id, None, since, limit)
                 .await

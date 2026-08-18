@@ -340,7 +340,7 @@ pub static MSG_PUSH_SKIPPED_ONLINE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
 });
 
 /// Offline stream XTRIM driven by client `since_cursor` (durable ACK).
-/// Label `path`: "subscribe" | "get_pending"
+/// Label `path`: "subscribe" (historically also "get_pending"; that path no longer trims)
 pub static MSG_OFFLINE_TRIM_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         opts!(

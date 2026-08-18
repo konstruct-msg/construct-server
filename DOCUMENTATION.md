@@ -255,12 +255,16 @@ stream `delivery:offline:{user_id}` (7-day TTL). On reconnect his client subscri
    (`read_user_messages_from_stream` — side-effect-free, no deletion);
 2. deletes (`XTRIM MINID ack+1`) only messages **≤ `since_cursor`** — i.e. only what the
    client has acknowledged — in `MessageQueue::trim_offline_stream`, invoked from
-   MessageStream `Subscribe` **and** unary `GetPendingMessages` (BackgroundFetch path).
+   MessageStream `Subscribe` only. Unary `GetPendingMessages` treats `since_cursor` as a
+   **read offset** and does not trim: that RPC is cancelled/re-paged before durable
+   persist, and trimming there caused silent offline loss (construct-docs
+   `decisions/minimal-server-delivery.md` step 1).
 
-Deletion is driven by the client's durable acknowledgement, **never** by the server's send
-position. A short or broken session re-delivers (the client dedups by `message_id`) but never
-loses an un-acknowledged message. The 7-day TTL and `trim_streams_by_age` are the backstop for
-streams that are never acknowledged.
+Deletion on Subscribe is driven by the client's durable acknowledgement, **never** by the
+server's send position. A short or broken session re-delivers (the client dedups by
+`message_id`) but never loses an un-acknowledged message. `MAXLEN ~ 10000` and
+`trim_streams_by_age` are the backstop for streams that are never acknowledged; step 2 of
+the decision above removes Subscribe trim as well.
 
 **Wake push:** `dispatch_envelope` sends APNs silent `new_message` only when the recipient
 has **no** active MessageStream (`user:{id}:server_instance_id` absent). Online recipients
