@@ -168,7 +168,9 @@ Client → MessagingService::MessageStream
       async fn message_stream(...)
         └─► messaging-service/src/stream.rs
             pub(crate) async fn poll_messages(...)
-              ├─ read_user_messages_from_stream → XREAD delivery:offline:{user_id} (no delete)
+              ├─ read_mailbox_messages (dual-read when token has device_id:
+              │     device stream + user stream, dedupe by message_id, prefer device;
+              │     legacy tokens without device_id → user stream only; no delete)
               ├─► messaging-service/src/envelope.rs
                │   pub(crate) fn convert_envelope_to_proto(...)
               └─► spawn_inbox_wakeup(...)  (subscribes Redis pub/sub for real-time push)
@@ -233,8 +235,8 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                │
                     └──────────────────────────────────► stream.rs::poll_messages
                                                               │
-                                                    read_user_messages_from_stream
-                                                    (XREAD delivery:offline:{bob_user})
+                                                    read_mailbox_messages (dual-read:
+                                                    device + user when device_id present)
                                                               │
                                                      convert_envelope_to_proto
                                                               │
@@ -243,6 +245,7 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                                         relay_delivery_receipt ◄───────┘
                                                               │
                                                     XADD delivery:offline:{alice_user}
+                                                    (+ per-device fan-out)
                                                               │
                                           Alice stream receives receipt ──────► ✅ delivered
 ```
@@ -252,7 +255,7 @@ accumulate in Redis `delivery:offline:{user_id}` (and per-device fan-out keys). 
 his client subscribes with `since_cursor` — the Redis stream ID of the last message it
 *durably persisted*. The server:
 
-1. reads **forward** from that cursor (`read_user_messages_from_stream` — side-effect-free);
+1. reads **forward** from that cursor (`read_mailbox_messages` — side-effect-free dual-read);
 2. does **not** delete from the client cursor. Client-asserted `XTRIM` caused silent loss
    (paging/cancel races; multi-device shared mailbox). See construct-docs
    `decisions/minimal-server-delivery.md` (Accepted).
@@ -260,6 +263,11 @@ his client subscribes with `since_cursor` — the Redis stream ID of the last me
 Capacity backstops: `MAXLEN ~` on XADD (100 new / 10_000 standard) and hourly age sweep
 (~30 days — not the stale “7-day TTL” wording). A short session re-delivers; the client
 dedups by `message_id`. Worst case is redelivery, not unrecoverable drop from a bad cursor.
+
+**Step 4 cutover:** `MSG_MAILBOX_USER_WRITE` (default `1`) still writes the legacy user
+stream alongside per-device. Flip to `0` only after
+`construct_msg_mailbox_user_only_entries_total` is flat zero for 7 days (see AGENTS.md /
+minimal-server-delivery). Rollback = set the flag back to `1`.
 
 **Wake push:** `dispatch_envelope` sends APNs silent `new_message` only when the recipient
 has **no** active MessageStream (`user:{id}:server_instance_id` absent). Online recipients
@@ -543,7 +551,8 @@ docker logs construct-caddy --tail 50
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
 - Idempotency via Redis SETNX
-- Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`, **ACK-driven** trim, 7-day TTL)
+- Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`; `since_cursor` = read offset only — **no client XTRIM**; retention via `MAXLEN ~` + age sweep ~30d)
+- Dual-read mailbox (device + user merge when token has `device_id`; cutover flag `MSG_MAILBOX_USER_WRITE`)
 - Delivery receipts routed back to sender
 - EditMessage RPC
 - **Multi-device fan-out** (per-device streams `delivery:offline:{user_id}:{device_id}`)
