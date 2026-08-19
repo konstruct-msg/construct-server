@@ -77,10 +77,15 @@ jobs:
           # Retries and a real timeout: apt's default patience with a stalled mirror is
           # far longer than a CI job should live, and the Azure mirrors do stall.
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15
+          # libprotobuf-dev is named explicitly, not left to Recommends: it ships the
+          # well-known types (/usr/include/google/protobuf/*.proto) that every .proto here
+          # imports, and `--no-install-recommends` drops it. Naming it is the point —
+          # relying on a Recommends for a hard build input is how it went missing.
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
-            protobuf-compiler
+            protobuf-compiler libprotobuf-dev
           protoc --version
+          test -f /usr/include/google/protobuf/timestamp.proto
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -156,10 +161,15 @@ jobs:
           # Retries and a real timeout: apt's default patience with a stalled mirror is
           # far longer than a CI job should live, and the Azure mirrors do stall.
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15
+          # libprotobuf-dev is named explicitly, not left to Recommends: it ships the
+          # well-known types (/usr/include/google/protobuf/*.proto) that every .proto here
+          # imports, and `--no-install-recommends` drops it. Naming it is the point —
+          # relying on a Recommends for a hard build input is how it went missing.
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
-            protobuf-compiler
+            protobuf-compiler libprotobuf-dev
           protoc --version
+          test -f /usr/include/google/protobuf/timestamp.proto
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
