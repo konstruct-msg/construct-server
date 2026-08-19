@@ -95,9 +95,16 @@ Server must not `XTRIM` from a client-asserted cursor — silent-loss class.
 Capacity = `MAXLEN ~` on XADD + age sweep (~30d). See construct-docs
 `decisions/minimal-server-delivery.md` (Accepted).
 
-**Step 4 cutover flag:** `MSG_MAILBOX_USER_WRITE` (default `1`). Set `0` only after
-7d gates on `construct_msg_mailbox_read_total{mode=…}` /
-`construct_msg_mailbox_write_total{target=…}` — see ADR cutover section.
+**Step 4 cutover flag:** `MSG_MAILBOX_USER_WRITE` (default `1`). The gate is
+`construct_msg_mailbox_user_only_entries_total` — **flat zero for 7 days**. It counts
+delivered entries the per-device stream did not have; every one of them is a message the
+cutover would drop. `construct_msg_mailbox_read_total{mode=…}` is *not* the gate: it says
+clients send a `device_id`, not that the device streams are complete, and completeness is
+the whole question. Rollback is setting the flag back to `1`.
+
+With the flag off, a message that reaches no stream is a **hard error**, never a silent
+`Ok` — `device_ids` comes back empty on a DB failure just as it does for a user with no
+devices, and the two are indistinguishable at the call site.
 
 **Critical channel name**: `inbox:wakeup:{user_id}`.
 

@@ -356,6 +356,25 @@ pub static MSG_MAILBOX_READ_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_MAILBOX_READ_TOTAL metric")
 });
 
+/// Delivered mailbox entries that the **device** stream did not have — they survived
+/// only because the legacy user stream is still written and still read.
+///
+/// This is the gate for `MSG_MAILBOX_USER_WRITE=0`, and `MSG_MAILBOX_READ_TOTAL` is not:
+/// counting reads that *used* dual-read says clients send a `device_id`, and says nothing
+/// about whether the device streams are complete. Completeness is the entire question,
+/// because every message counted here is one the cutover would drop. Flip the flag only
+/// after this has been flat zero for the gate window.
+pub static MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_mailbox_user_only_entries_total",
+            "Delivered mailbox entries missing from the per-device stream (cutover blocker)"
+        ),
+        &["path"]
+    )
+    .expect("Failed to register MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL metric")
+});
+
 /// Mailbox writes for cutover gates.
 /// Label: `target` = `user` | `device`.
 pub static MSG_MAILBOX_WRITE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -568,6 +587,7 @@ pub fn init_registry() {
     Lazy::force(&CALLS_INITIATED_TOTAL);
     Lazy::force(&SIGNALING_ERRORS_TOTAL);
     Lazy::force(&MSG_MAILBOX_READ_TOTAL);
+    Lazy::force(&MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL);
     Lazy::force(&MSG_MAILBOX_WRITE_TOTAL);
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
