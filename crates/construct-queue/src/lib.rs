@@ -726,13 +726,11 @@ impl MessageQueue {
     ) -> Result<()> {
         let write_user = self.config.messaging.mailbox_user_write;
 
-        if !write_user && device_ids.is_empty() {
-            anyhow::bail!(
-                "No mailbox to write: user-stream writes are disabled (MSG_MAILBOX_USER_WRITE=0) \
-                 and recipient {user_id} has no known devices"
-            );
-        }
-
+        // The "nowhere to land" check is at the bottom, after the writes, and there is
+        // deliberately only one: an empty `device_ids` already produces zero successful
+        // device writes, so an early guard on it would be a second spelling of the same
+        // condition — and a mutation test proved it, surviving the removal of one guard
+        // because the other still fired.
         if write_user {
             // Legacy user stream (cutover: MSG_MAILBOX_USER_WRITE=0 skips this).
             delivery::DeliveryManager::new(
@@ -778,10 +776,12 @@ impl MessageQueue {
             }
         }
 
+        // Nowhere to land. Covers both shapes at once: no devices known (a failed lookup
+        // and a user with none are indistinguishable here) and every device write failed.
         if !write_user && device_writes_ok == 0 {
             anyhow::bail!(
-                "No mailbox to write: user-stream writes are disabled and all {} device \
-                 stream writes failed for recipient {user_id}",
+                "No mailbox to write: user-stream writes are disabled (MSG_MAILBOX_USER_WRITE=0) \
+                 and none of the {} device stream writes for recipient {user_id} landed",
                 device_ids.len()
             );
         }
@@ -1125,6 +1125,9 @@ mod mailbox_merge_tests {
         let device = vec![("100-0".to_string(), Some(env("a")))];
         let page = merge_mailbox_pages(device, user, 3);
         assert_eq!(page.entries.len(), 3);
-        assert_eq!(page.user_only, 2, "delivered `b` and `c` count, `d` does not");
+        assert_eq!(
+            page.user_only, 2,
+            "delivered `b` and `c` count, `d` does not"
+        );
     }
 }

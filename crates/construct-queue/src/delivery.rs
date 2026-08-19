@@ -147,7 +147,6 @@ impl<'a> DeliveryManager<'a> {
     // loaded gun that the next reader will assume is safe because it compiles. Mailbox
     // deletion is retention only — `MAXLEN ~` on XADD plus `trim_streams_by_age`.
 
-
     /// Validate Redis Stream ID format: {timestamp}-{sequence}
     /// Examples: "0", "1707584371151-0", "1707584371151-42"
     fn is_valid_stream_id(id: &str) -> bool {
