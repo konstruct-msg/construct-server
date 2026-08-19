@@ -141,80 +141,12 @@ impl<'a> DeliveryManager<'a> {
         Ok(messages)
     }
 
-    /// Trim a user's offline stream up to and INCLUDING `ack_id`.
-    ///
-    /// **Retired from the hot path.** Client-asserted cursor trim is forbidden
-    /// (`minimal-server-delivery`). Kept for emergency/ops or tests; production
-    /// deletion is `MAXLEN` on XADD + `trim_streams_by_age`. Never trim by the
-    /// server's read/send position — that caused silent loss on short sessions.
-    #[allow(dead_code)] // retained API; no messaging-service caller after step 2
-    pub(crate) async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
-        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+    // `trim_offline_stream` (XTRIM MINID from a client-asserted cursor) was deleted with
+    // minimal-server-delivery step 2. It is not "kept for ops": it is the exact operation
+    // that produced the 2026-08-18 offline loss, and an unreachable copy of it is a
+    // loaded gun that the next reader will assume is safe because it compiles. Mailbox
+    // deletion is retention only — `MAXLEN ~` on XADD plus `trim_streams_by_age`.
 
-        // Normalize ack_id: bare timestamps like "1772726016" → "1772726016-0"
-        let ack_id_normalized;
-        let ack_id = if ack_id.contains('-') {
-            ack_id
-        } else if let Ok(ts) = ack_id.parse::<u64>() {
-            ack_id_normalized = format!("{}-0", ts);
-            ack_id_normalized.as_str()
-        } else {
-            tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor (no dash) — skipping trim");
-            return Ok(());
-        };
-
-        // XTRIM MINID = ack_id + 1 deletes everything with ID ≤ ack_id (inclusive),
-        // i.e. exactly the messages the client confirmed it has. Redis orders IDs as
-        // (timestamp, sequence) tuples, so seq overflow rolls over to (ts+1)-0.
-        let next_id_after_ack = if let Some((ts_str, seq_str)) = ack_id.split_once('-') {
-            if let (Ok(ts), Ok(seq)) = (ts_str.parse::<u64>(), seq_str.parse::<u64>()) {
-                if let Some(next_seq) = seq.checked_add(1) {
-                    format!("{}-{}", ts, next_seq)
-                } else if let Some(next_ts) = ts.checked_add(1) {
-                    format!("{}-0", next_ts)
-                } else {
-                    tracing::warn!(stream_key = %stream_key, "Stream ID at u64::MAX, skipping trim");
-                    return Ok(());
-                }
-            } else {
-                tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor format — skipping trim");
-                return Ok(());
-            }
-        } else {
-            tracing::warn!(stream_key = %stream_key, ack_id = %ack_id, "Invalid ack cursor (no dash) — skipping trim");
-            return Ok(());
-        };
-
-        let trim_result: Result<i64, redis::RedisError> = redis::cmd("XTRIM")
-            .arg(&stream_key)
-            .arg("MINID")
-            .arg(&next_id_after_ack)
-            .query_async(self.client.connection_mut())
-            .await;
-
-        match trim_result {
-            Ok(deleted_count) => {
-                if deleted_count > 0 {
-                    tracing::debug!(
-                        stream_key = %stream_key,
-                        ack_id = %ack_id,
-                        min_id_kept = %next_id_after_ack,
-                        deleted_count,
-                        "Trimmed acknowledged messages from Redis stream (ack-driven)"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    stream_key = %stream_key,
-                    ack_id = %ack_id,
-                    "Failed to trim acknowledged messages (non-fatal)"
-                );
-            }
-        }
-        Ok(())
-    }
 
     /// Validate Redis Stream ID format: {timestamp}-{sequence}
     /// Examples: "0", "1707584371151-0", "1707584371151-42"

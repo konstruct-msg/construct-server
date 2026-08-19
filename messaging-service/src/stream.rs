@@ -643,12 +643,18 @@ pub(crate) async fn poll_messages(
     } else {
         "user_only"
     };
-    let messages = queue
+    let page = queue
         .read_mailbox_messages(&user_id_str, device_id, last_stream_id.as_deref(), limit)
         .await?;
+    let messages = page.entries;
     construct_metrics::MSG_MAILBOX_READ_TOTAL
         .with_label_values(&["stream", mode])
         .inc();
+    if page.user_only > 0 {
+        construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
+            .with_label_values(&["stream"])
+            .inc_by(page.user_only as u64);
+    }
     let xread_ms = t_xread.elapsed().as_millis();
 
     let msg_count = messages.len();
@@ -658,6 +664,7 @@ pub(crate) async fn poll_messages(
             device_id = device_id.unwrap_or(""),
             mailbox_mode = mode,
             msg_count,
+            user_only = page.user_only,
             xread_ms,
             last_stream_id = ?last_stream_id,
             "poll_messages: read messages from Redis offline mailbox"

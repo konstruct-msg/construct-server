@@ -818,16 +818,22 @@ impl MessagingService for MessagingGrpcService {
         } else {
             "user_only"
         };
-        let stream_messages = {
+        let page = {
             let mut queue = self.context.queue.lock().await;
             queue
                 .read_mailbox_messages(&user_id, device_id.as_deref(), since, limit)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };
+        let stream_messages = page.entries;
         construct_metrics::MSG_MAILBOX_READ_TOTAL
             .with_label_values(&["pending", mode])
             .inc();
+        if page.user_only > 0 {
+            construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
+                .with_label_values(&["pending"])
+                .inc_by(page.user_only as u64);
+        }
 
         // encrypted_payload is opaque — server never reads crypto params from it.
         // Sort is by server timestamp (already chronological from Redis stream).
@@ -925,15 +931,24 @@ impl MessagingService for MessagingGrpcService {
         let envelope =
             MessageEnvelope::new_key_sync(sender_id.to_string(), recipient_user_id.clone());
 
+        // Fan out like every other delivery. Writing the user stream directly was the last
+        // path that bypassed the mailbox: it survives today only because dual-read still
+        // reads that stream, and `MSG_MAILBOX_USER_WRITE=0` would make KEY_SYNC undeliverable
+        // without a single error — the flag exists to be flipped by ops, so this cannot
+        // depend on it staying on.
+        let device_ids =
+            core::fetch_recipient_device_ids_for_user(&self.context.db_pool, &recipient_user_id)
+                .await;
         let mut queue = self.context.queue.lock().await;
         queue
-            .write_message_to_user_stream(&recipient_user_id, &envelope)
+            .write_message_to_device_streams(&recipient_user_id, &device_ids, &envelope)
             .await
             .map_err(|e| Status::internal(format!("Failed to queue KEY_SYNC: {e}")))?;
 
         tracing::info!(
             sender = %sender_id,
             recipient = %recipient_user_id,
+            devices = device_ids.len(),
             "KEY_SYNC queued"
         );
 

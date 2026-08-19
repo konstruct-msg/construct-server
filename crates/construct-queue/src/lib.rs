@@ -595,20 +595,9 @@ impl MessageQueue {
         .await
     }
 
-    /// Trim a user's offline stream up to and including `ack_id`.
-    ///
-    /// **Retired from the hot path** — see `minimal-server-delivery`. Prefer age
-    /// sweep + MAXLEN. Never trim by the server's send position.
-    #[allow(dead_code)] // retained for ops/tests; messaging-service no longer calls
-    pub async fn trim_offline_stream(&mut self, user_id: &str, ack_id: &str) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .trim_offline_stream(user_id, ack_id)
-        .await
-    }
+    // `trim_offline_stream` was removed with minimal-server-delivery step 2 — see the
+    // note at its old site in delivery.rs. Nothing may delete a user's mail from a
+    // cursor the user's client supplied.
 
     pub async fn wait_for_message_notification(
         &self,
@@ -721,6 +710,14 @@ impl MessageQueue {
     ///
     /// The single `inbox:wakeup:{user_id}` wakeup publish is sufficient — all connected
     /// devices for a user subscribe to the same channel and wake up together.
+    ///
+    /// **Errors when the message reached no stream at all.** After the step-4 cutover
+    /// (`MSG_MAILBOX_USER_WRITE=0`) the device streams are the only mailbox, and
+    /// `device_ids` is empty whenever the device lookup failed — `fetch_recipient_device_ids`
+    /// returns `vec![]` on a DB error and on an unparseable user id alike. Returning `Ok`
+    /// there would let `dispatch_envelope` report a delivered message that was never
+    /// written: the same silent loss the cursor trim was removed to prevent, re-entered
+    /// from the write side. A hard error surfaces it to the sender instead.
     pub async fn write_message_to_device_streams(
         &mut self,
         user_id: &str,
@@ -728,6 +725,13 @@ impl MessageQueue {
         envelope: &construct_message::types::MessageEnvelope,
     ) -> Result<()> {
         let write_user = self.config.messaging.mailbox_user_write;
+
+        if !write_user && device_ids.is_empty() {
+            anyhow::bail!(
+                "No mailbox to write: user-stream writes are disabled (MSG_MAILBOX_USER_WRITE=0) \
+                 and recipient {user_id} has no known devices"
+            );
+        }
 
         if write_user {
             // Legacy user stream (cutover: MSG_MAILBOX_USER_WRITE=0 skips this).
@@ -750,8 +754,9 @@ impl MessageQueue {
         }
 
         // Per-device streams (always).
+        let mut device_writes_ok = 0usize;
         for device_id in device_ids {
-            if let Err(e) = delivery::DeliveryManager::new(
+            match delivery::DeliveryManager::new(
                 &mut self.client,
                 &self.config,
                 self.delivery_queue_prefix.clone(),
@@ -759,14 +764,26 @@ impl MessageQueue {
             .write_message_to_device_stream(user_id, device_id, envelope)
             .await
             {
-                // Non-fatal: log and continue for remaining devices.
-                tracing::warn!(
-                    user_id = %user_id,
-                    device_id = %device_id,
-                    error = %e,
-                    "Failed to write to per-device stream (non-fatal)"
-                );
+                Ok(()) => device_writes_ok += 1,
+                Err(e) => {
+                    // One failing device must not stop the others — but see the check below:
+                    // "every device failed" is only tolerable while the user stream holds a copy.
+                    tracing::warn!(
+                        user_id = %user_id,
+                        device_id = %device_id,
+                        error = %e,
+                        "Failed to write to per-device stream (non-fatal)"
+                    );
+                }
             }
+        }
+
+        if !write_user && device_writes_ok == 0 {
+            anyhow::bail!(
+                "No mailbox to write: user-stream writes are disabled and all {} device \
+                 stream writes failed for recipient {user_id}",
+                device_ids.len()
+            );
         }
 
         Ok(())
@@ -813,15 +830,21 @@ impl MessageQueue {
         device_id: Option<&str>,
         since_id: Option<&str>,
         count: usize,
-    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
+    ) -> Result<MailboxPage> {
         let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
-            return self
+            let entries = self
                 .read_user_messages_from_stream(user_id, None, since_id, count)
-                .await;
+                .await?;
+            // Not a coverage signal: without a device_id there is no device stream to
+            // compare against, so nothing here says anything about cutover readiness.
+            return Ok(MailboxPage {
+                entries,
+                user_only: 0,
+            });
         };
 
         // Oversample each source so the merge can still fill `count` after dedupe.
-        let per_source = count.saturating_mul(2).max(count);
+        let per_source = count.saturating_mul(2);
         let device_msgs = self
             .read_device_messages_from_stream(user_id, device_id, since_id, per_source)
             .await?;
@@ -921,6 +944,20 @@ impl MessageQueue {
     }
 }
 
+/// One mailbox read, plus the one number the step-4 cutover turns on.
+pub struct MailboxPage {
+    pub entries: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
+    /// Entries in this page that the **device** stream did not have — they exist only
+    /// because the legacy user stream is still written and still read.
+    ///
+    /// This is the cutover gate. Counting how many reads *used* dual-read says only that
+    /// clients send a `device_id`; it cannot tell whether the device streams are complete,
+    /// and completeness is the whole question before `MSG_MAILBOX_USER_WRITE=0` turns the
+    /// user stream off. While this stays above zero, flipping the flag drops exactly these
+    /// messages.
+    pub user_only: usize,
+}
+
 /// Merge device + user mailbox pages for transitional dual-read.
 ///
 /// Prefer the device copy when `message_id` collides. Order by Redis stream id
@@ -930,8 +967,13 @@ fn merge_mailbox_pages(
     device_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     user_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     count: usize,
-) -> Vec<(String, Option<construct_message::types::MessageEnvelope>)> {
-    use std::collections::HashMap;
+) -> MailboxPage {
+    use std::collections::{HashMap, HashSet};
+
+    let device_ids: HashSet<String> = device_msgs
+        .iter()
+        .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
+        .collect();
 
     let mut by_message_id: HashMap<String, (String, construct_message::types::MessageEnvelope)> =
         HashMap::new();
@@ -956,7 +998,18 @@ fn merge_mailbox_pages(
 
     merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
     merged.truncate(count);
-    merged
+
+    // Counted after truncation: only entries actually handed to the client are evidence.
+    let user_only = merged
+        .iter()
+        .filter_map(|(_, e)| e.as_ref())
+        .filter(|e| !device_ids.contains(&e.message_id))
+        .count();
+
+    MailboxPage {
+        entries: merged,
+        user_only,
+    }
 }
 
 fn compare_stream_id_watermarks(a: &str, b: &str) -> std::cmp::Ordering {
@@ -1013,14 +1066,17 @@ mod mailbox_merge_tests {
             ("150-0".to_string(), Some(env("m1"))),
             ("200-0".to_string(), Some(env("m3"))),
         ];
-        let merged = merge_mailbox_pages(device, user, 10);
-        let ids: Vec<_> = merged
+        let page = merge_mailbox_pages(device, user, 10);
+        let ids: Vec<_> = page
+            .entries
             .iter()
             .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.as_str()))
             .collect();
         assert_eq!(ids, vec!["m1", "m3", "m2"]);
         // m1 kept the device stream id
-        assert_eq!(merged[0].0, "150-0");
+        assert_eq!(page.entries[0].0, "150-0");
+        // m2 exists only in the user stream — the device fan-out missed it.
+        assert_eq!(page.user_only, 1);
     }
 
     #[test]
@@ -1030,9 +1086,45 @@ mod mailbox_merge_tests {
             ("200-0".to_string(), Some(env("b"))),
             ("300-0".to_string(), Some(env("c"))),
         ];
-        let merged = merge_mailbox_pages(vec![], user, 2);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].1.as_ref().unwrap().message_id, "a");
-        assert_eq!(merged[1].1.as_ref().unwrap().message_id, "b");
+        let page = merge_mailbox_pages(vec![], user, 2);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].1.as_ref().unwrap().message_id, "a");
+        assert_eq!(page.entries[1].1.as_ref().unwrap().message_id, "b");
+    }
+
+    /// The gate the cutover reads. Zero means every delivered entry was on the device
+    /// stream, so switching the user stream off would have changed nothing — which is
+    /// the only evidence that makes `MSG_MAILBOX_USER_WRITE=0` safe.
+    #[test]
+    fn full_device_coverage_reports_no_user_only_entries() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("a"))),
+            ("200-0".to_string(), Some(env("b"))),
+        ];
+        let device = vec![
+            ("100-0".to_string(), Some(env("a"))),
+            ("200-0".to_string(), Some(env("b"))),
+        ];
+        assert_eq!(merge_mailbox_pages(device, user, 10).user_only, 0);
+    }
+
+    /// Entries dropped by the count cap are re-read on the next poll, so counting them
+    /// as a coverage failure now would keep the gate permanently red on a deep backlog.
+    ///
+    /// Three delivered entries, one of them covered: the covered and uncovered counts
+    /// differ, so the assertion distinguishes "missing from the device stream" from its
+    /// inverse. With two entries they coincide and the test passes either way.
+    #[test]
+    fn user_only_counts_delivered_entries_not_the_truncated_tail() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("a"))),
+            ("200-0".to_string(), Some(env("b"))),
+            ("300-0".to_string(), Some(env("c"))),
+            ("400-0".to_string(), Some(env("d"))),
+        ];
+        let device = vec![("100-0".to_string(), Some(env("a")))];
+        let page = merge_mailbox_pages(device, user, 3);
+        assert_eq!(page.entries.len(), 3);
+        assert_eq!(page.user_only, 2, "delivered `b` and `c` count, `d` does not");
     }
 }
