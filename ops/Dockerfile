@@ -3,16 +3,27 @@ FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /app
 
-# Install dependencies
+# Build dependencies. Each one is here because something in the graph needs it:
+#   build-essential   linking
+#   cmake             aws-lc-sys (via aws-lc-rs → apns-h2 → construct-apns)
+#   pkg-config        finding libssl
+#   libssl-dev        openssl-sys (via native-tls); no `vendored` feature anywhere
+#   protobuf-compiler + libprotobuf-dev
+#                     shared/build.rs runs protoc, and the well-known types
+#                     (/usr/include/google/protobuf/*.proto) live in the -dev package.
+#                     Named rather than left to `protobuf-compiler`'s Recommends, which
+#                     is how it vanished from CI on 2026-08-19.
+#
+# libsasl2-dev, libsasl2-modules and libcurl4-openssl-dev were removed: they were
+# rdkafka's, and Kafka left the delivery path. Verified, not assumed — `cargo tree
+# --all-features` for linux has zero matches for sasl, rdkafka or curl-sys.
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     pkg-config \
     libssl-dev \
-    libsasl2-dev \
-    libsasl2-modules \
-    libcurl4-openssl-dev \
     protobuf-compiler \
+    libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # sqlx offline mode — no DATABASE_URL needed at build time
@@ -56,11 +67,10 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Runtime dependencies. libsasl2-2 went with rdkafka — nothing links against it now.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    libsasl2-2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Ensure /usr/local/bin is in PATH (where binaries are installed)
