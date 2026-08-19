@@ -63,15 +63,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # Only `protoc`. The other four were cargo-culted:
+      #   pkg-config, libssl-dev  — already in the runner image (Ubuntu2404-Readme)
+      #   libsasl2-dev            — nothing in the graph needs it; there is no rdkafka
+      #   libcurl4-openssl-dev    — likewise, no curl-sys anywhere
+      # Dropping libssl-dev also removes the trigger for the hang: it is present, so apt
+      # was *upgrading* it, and a libssl upgrade is what wakes `needrestart`.
+      # protoc stays: prost-build 0.14 does not bundle it (it resolves `protoc` from PATH
+      # or $PROTOC — src/config.rs::protoc_from_env), and shared/build.rs runs it.
+      - name: Install protoc
         timeout-minutes: 5
         run: |
-          # Retries and a real timeout: apt's default is to wait on a stalled mirror far
-          # longer than a CI job should live, and the Azure mirrors do stall.
+          # Retries and a real timeout: apt's default patience with a stalled mirror is
+          # far longer than a CI job should live, and the Azure mirrors do stall.
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
-            libsasl2-dev libssl-dev libcurl4-openssl-dev pkg-config protobuf-compiler
+            protobuf-compiler
+          protoc --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -133,15 +142,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # Only `protoc`. The other four were cargo-culted:
+      #   pkg-config, libssl-dev  — already in the runner image (Ubuntu2404-Readme)
+      #   libsasl2-dev            — nothing in the graph needs it; there is no rdkafka
+      #   libcurl4-openssl-dev    — likewise, no curl-sys anywhere
+      # Dropping libssl-dev also removes the trigger for the hang: it is present, so apt
+      # was *upgrading* it, and a libssl upgrade is what wakes `needrestart`.
+      # protoc stays: prost-build 0.14 does not bundle it (it resolves `protoc` from PATH
+      # or $PROTOC — src/config.rs::protoc_from_env), and shared/build.rs runs it.
+      - name: Install protoc
         timeout-minutes: 5
         run: |
-          # Retries and a real timeout: apt's default is to wait on a stalled mirror far
-          # longer than a CI job should live, and the Azure mirrors do stall.
+          # Retries and a real timeout: apt's default patience with a stalled mirror is
+          # far longer than a CI job should live, and the Azure mirrors do stall.
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15
           sudo apt-get install -y --no-install-recommends \
             -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
-            libsasl2-dev libssl-dev libcurl4-openssl-dev pkg-config protobuf-compiler
+            protobuf-compiler
+          protoc --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
