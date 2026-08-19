@@ -189,6 +189,28 @@ When device A references data on device B, apply construct-docs
 
 ---
 
+## Git workflow (branch + PR only)
+
+**Never commit or push to `main` / `master`.** Landing on `main` is allowed
+**only via a GitHub Pull Request** (prefer squash-merge). A topic branch alone
+is not enough — opening the PR is mandatory whenever the user asked to commit
+and/or push.
+
+1. `git checkout -b feat|fix|chore|docs/<short-topic>` from up-to-date `main`
+2. Commit on that branch only (never on `main`)
+3. `git push -u origin HEAD` and **`gh pr create`** (or update the existing PR)
+4. Land by merging the PR on GitHub — not by local merge + push of `main`,
+   and not via `git push origin HEAD:main`
+
+**Forbidden:** commit/push while checked out on `main`; force-push to `main`;
+updating `origin/main` outside a PR merge.
+
+If already on `main` with local changes: create/switch to a branch **before**
+`git commit`. No agent exceptions for “tiny” / docs-only work.
+See `.grok/rules/no-direct-main.md`.
+
+---
+
 ## Build, Lint, Test
 
 ```bash
