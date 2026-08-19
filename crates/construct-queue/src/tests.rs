@@ -430,3 +430,248 @@ fn test_msg_envelope_msgpack_roundtrip() {
         "to_vec must remain incompatible — use to_vec_named for Redis streams"
     );
 }
+
+// ============================================================================
+// Mailbox: the 2026-08-18 offline-loss incident, and the step-4 cutover
+// ============================================================================
+//
+// These run against a real Redis because the thing that failed on 2026-08-18 was not
+// a formula — every formula checked out. Two messages were written to an offline
+// recipient, a client resumed from a cursor *below* both, and the read returned
+// nothing. Deciding whether the entries had ever existed took hours, because no test
+// ever put a message into Redis and asked for it back.
+//
+//   docker exec construct-redis-local redis-cli ping   # PONG
+//   cargo test -p construct-queue --lib -- --ignored mailbox
+
+/// A queue whose config is built in-process, so `mailbox_user_write` can be flipped
+/// without touching `MSG_MAILBOX_USER_WRITE` — an env var is global to the test binary
+/// and would race every other test running in parallel.
+async fn mailbox_queue(user_write: bool) -> MessageQueue {
+    let mut config = get_test_config();
+    config.messaging.mailbox_user_write = user_write;
+    MessageQueue::new(&config)
+        .await
+        .expect("Failed to build MessageQueue")
+}
+
+async fn clear_mailbox(queue: &mut MessageQueue, user_id: &str, device_ids: &[&str]) {
+    let prefix = queue.delivery_queue_prefix.clone();
+    let mut keys = vec![format!("{prefix}:offline:{user_id}")];
+    keys.extend(
+        device_ids
+            .iter()
+            .map(|d| format!("{prefix}:offline:{user_id}:{d}")),
+    );
+    for key in keys {
+        let _: std::result::Result<i64, _> = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(queue.client.connection_mut())
+            .await;
+    }
+}
+
+async fn stream_len(queue: &mut MessageQueue, key: &str) -> i64 {
+    redis::cmd("XLEN")
+        .arg(key)
+        .query_async(queue.client.connection_mut())
+        .await
+        .expect("XLEN failed")
+}
+
+/// The incident, replayed. Recipient offline, two messages dispatched, client resumes
+/// from a cursor below both.
+///
+/// Two assertions, and the second is the one that was missing. It is not enough that
+/// the read returns both messages: a read that *also* deleted them would pass that,
+/// and deleting them is precisely what the server used to do. So the stream is
+/// measured afterwards. Reads are side-effect free or this test is red.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_offline_backlog_survives_a_read_from_a_lower_cursor() {
+    let user = "test_mailbox_incident_recipient";
+    let device = "test_mailbox_incident_device";
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+
+    let devices = vec![device.to_string()];
+    let first =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    let second =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    queue
+        .write_message_to_device_streams(user, &devices, &first)
+        .await
+        .expect("first dispatch");
+    queue
+        .write_message_to_device_streams(user, &devices, &second)
+        .await
+        .expect("second dispatch");
+
+    // "0" is every cursor below the two entries at once — the resume position of a
+    // client that has persisted nothing.
+    let page = queue
+        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .await
+        .expect("read after resume");
+
+    let ids: Vec<String> = page
+        .entries
+        .iter()
+        .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
+        .collect();
+    assert!(
+        ids.contains(&first.message_id) && ids.contains(&second.message_id),
+        "resume from a lower cursor must return both messages, got {ids:?}"
+    );
+
+    let device_key = format!(
+        "{}:offline:{}:{}",
+        queue.delivery_queue_prefix, user, device
+    );
+    let user_key = format!("{}:offline:{}", queue.delivery_queue_prefix, user);
+    assert_eq!(
+        stream_len(&mut queue, &device_key).await,
+        2,
+        "reading the mailbox must not delete from it"
+    );
+    assert_eq!(stream_len(&mut queue, &user_key).await, 2);
+
+    clear_mailbox(&mut queue, user, &[device]).await;
+}
+
+/// Every device gets its own copy, and neither read empties the other's box — the
+/// shared-mailbox loss that the per-device streams exist to remove.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_two_devices_each_receive_every_message() {
+    let user = "test_mailbox_two_devices_user";
+    let (d1, d2) = ("test_mbx_dev_a", "test_mbx_dev_b");
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[d1, d2]).await;
+
+    let devices = vec![d1.to_string(), d2.to_string()];
+    let mut sent = Vec::new();
+    for _ in 0..3 {
+        let env =
+            construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+        queue
+            .write_message_to_device_streams(user, &devices, &env)
+            .await
+            .expect("dispatch");
+        sent.push(env.message_id);
+    }
+
+    for device in [d1, d2] {
+        let page = queue
+            .read_mailbox_messages(user, Some(device), Some("0"), 50)
+            .await
+            .expect("read");
+        let ids: Vec<String> = page
+            .entries
+            .iter()
+            .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
+            .collect();
+        for id in &sent {
+            assert!(ids.contains(id), "{device} missing {id}");
+        }
+        assert_eq!(
+            page.user_only, 0,
+            "{device}: full fan-out must leave nothing that only the user stream had"
+        );
+    }
+
+    clear_mailbox(&mut queue, user, &[d1, d2]).await;
+}
+
+/// The cutover gate, shown failing. A message written while the device list was empty
+/// reaches only the user stream; `user_only` is what makes that visible, and it is the
+/// number that must be zero before `MSG_MAILBOX_USER_WRITE=0`.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
+    let user = "test_mailbox_gate_user";
+    let device = "test_mbx_gate_dev";
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+
+    // Device list empty — the shape of a failed `fetch_recipient_device_ids`, or of a
+    // device that registered after this message was sent.
+    let missed =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    queue
+        .write_message_to_device_streams(user, &[], &missed)
+        .await
+        .expect("dispatch with no devices still lands in the user stream");
+
+    let page = queue
+        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .await
+        .expect("read");
+
+    assert_eq!(
+        page.user_only, 1,
+        "the gate must see a delivered entry the device stream did not have"
+    );
+
+    clear_mailbox(&mut queue, user, &[device]).await;
+}
+
+/// After the cutover there is no user stream to fall back on, so a message with nowhere
+/// to go must fail loudly. Returning `Ok` here is the silent loss the whole decision
+/// exists to remove, arriving from the write side instead of the read side.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_cutover_refuses_a_message_with_nowhere_to_land() {
+    let user = "test_mailbox_cutover_user";
+    let mut queue = mailbox_queue(false).await;
+    clear_mailbox(&mut queue, user, &[]).await;
+
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    let result = queue.write_message_to_device_streams(user, &[], &env).await;
+
+    assert!(
+        result.is_err(),
+        "no user stream and no devices must be an error, not a delivered message"
+    );
+
+    let user_key = format!("{}:offline:{}", queue.delivery_queue_prefix, user);
+    assert_eq!(
+        stream_len(&mut queue, &user_key).await,
+        0,
+        "cutover must not write the user stream"
+    );
+}
+
+/// With the flag off the device streams are the whole mailbox, and they must still work.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_cutover_delivers_through_device_streams_only() {
+    let user = "test_mailbox_cutover_ok_user";
+    let device = "test_mbx_cutover_dev";
+    let mut queue = mailbox_queue(false).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    queue
+        .write_message_to_device_streams(user, &[device.to_string()], &env)
+        .await
+        .expect("dispatch to a known device");
+
+    let page = queue
+        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .await
+        .expect("read");
+    let ids: Vec<String> = page
+        .entries
+        .iter()
+        .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
+        .collect();
+    assert!(ids.contains(&env.message_id), "device-only delivery failed");
+    assert_eq!(page.user_only, 0);
+
+    let user_key = format!("{}:offline:{}", queue.delivery_queue_prefix, user);
+    assert_eq!(stream_len(&mut queue, &user_key).await, 0);
+
+    clear_mailbox(&mut queue, user, &[device]).await;
+}

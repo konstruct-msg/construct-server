@@ -261,6 +261,22 @@ cargo fmt                    # format (required before commit — pre-commit hoo
 cargo clippy                 # lint (pre-commit hook enforces)
 ```
 
+**`cargo test` does not touch the offline mailbox.** Every test that puts a message into
+Redis and asks for it back is `#[ignore]`d, so a green `cargo test` says nothing about
+delivery — which is how the 2026-08-18 loss went undetected: no test had ever written a
+message to Redis and read it back. Run them:
+
+```bash
+docker exec construct-redis-local redis-cli ping        # PONG, else: docker compose up -d redis
+cargo test -p construct-queue --lib -- --ignored mailbox
+```
+
+Five checks: the incident replayed (resume from a cursor below the backlog returns
+everything **and leaves the stream intact** — a read that deleted would pass the first
+assertion alone), per-device isolation, the `user_only` cutover gate seeing a message the
+fan-out missed, and both cutover behaviours with `mailbox_user_write=false`. Required
+before touching delivery, and before any `MSG_MAILBOX_USER_WRITE` flip.
+
 Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git add -A && git commit` to avoid the hook re-formatting and failing your commit.
 
 ---
