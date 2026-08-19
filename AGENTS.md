@@ -189,6 +189,22 @@ When device A references data on device B, apply construct-docs
 
 ---
 
+## Git workflow (no direct main)
+
+**Never commit or push to `main` (or `master`).** All work goes through a branch:
+
+1. `git checkout -b feat|fix|chore|docs/<short-topic>` from up-to-date `main`
+2. Commit on that branch only
+3. `git push -u origin HEAD` and open a PR into `main`
+4. Merge via PR (prefer squash). Do not push the feature branch to `main` locally
+   (`git push origin HEAD:main` is forbidden)
+
+If already on `main` with local changes: create/switch to a branch **before**
+`git commit`. Exception: none for agents — even one-line docs go through a branch+PR.
+See also `.grok/rules/no-direct-main.md`.
+
+---
+
 ## Build, Lint, Test
 
 ```bash
