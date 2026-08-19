@@ -1,450 +1,229 @@
 # construct-server — Agent Guide
 
-> Quick-start reference for AI agents (and developers) working on this codebase.
-> Read this before investigating any service to avoid re-discovering the architecture.
+> Invariants and footguns for agents. Details live in `DOCUMENTATION.md` and
+> `~/Code/construct-docs`. Prefer a link over restating a tutorial here.
 
 ---
 
 ## Service Map
 
-Deployable services (see `ops/docker-compose.prod.yml`):
+See `ops/docker-compose.prod.yml`. Ports / roles:
 
-| Service | Binary | gRPC Port | Role |
+| Service | Binary | Port | Role |
 |---|---|---|---|
-| `caddy` | external | 443 / 8080 | Edge TLS (Let's Encrypt), gRPC routing by proto path prefix |
-| `quic` | external | 443/UDP | Plain QUIC → caddy:8080 (construct-transport; Salamander obfuscation is DEBUG-only since 2026-06) |
-| `gateway` | `gateway` | HTTP 3000 / 9443 | /health, /.well-known, /federation S2S; veil/obfs4 proxy → caddy:8080 |
-| `identity` | `identity-service` | 50051 | Merged Auth + Device + DeviceLink + User + Invite; PoW; Privacy Pass token issuance; sender certificates |
-| `messaging` | `messaging-service` | 50053 | MessageStream, send, sealed sender + Privacy Pass redemption, Redis direct delivery, APNs push (prod + sandbox), Sentinel anti-spam (in-process) |
-| `media` | `media-service` | 50056 | Encrypted upload/download (gRPC only); storage on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`), 7d retention (`MEDIA_FILE_TTL_SECONDS`) |
-| `veil` | `veil-service` | 50056 (separate deployment) | VEIL obfuscation ticket provisioning |
-| `key` | `key-service` | 50057 | X3DH pre-key management, ML-KEM prekeys |
-| `group` | `group-service` | 50058 | MLS groups (RFC 9420) + Broadcast channels, Sender Key encryption |
-| `signaling` | `signaling-service` | 50060 | WebRTC SDP/ICE signaling |
-| `masque` | `masque-service` | WS 9200 | MASQUE-lite QUIC datagram relay (not behind Caddy) |
+| `caddy` | external | 443 / 8080 | Edge TLS; gRPC route by proto path |
+| `quic` | external | 443/UDP | Plain QUIC → caddy:8080 |
+| `gateway` | `gateway` | HTTP 3000 / 9443 | health, well-known, federation S2S; veil/obfs4 → caddy:8080 |
+| `identity` | `identity-service` | 50051 | Auth + Device + DeviceLink + User + Invite; PoW; PP issuance; sender certs |
+| `messaging` | `messaging-service` | 50053 | send/stream, sealed+PP redeem, Redis mailbox, APNs, Sentinel (in-process) |
+| `media` | `media-service` | 50056 | Encrypted media gRPC; volume `media-data`; 7d TTL |
+| `veil` | `veil-service` | 50056 | VEIL capability issuance (separate deploy) |
+| `key` | `key-service` | 50057 | X3DH + ML-KEM prekeys |
+| `group` | `group-service` | 50058 | MLS + broadcast channels |
+| `signaling` | `signaling-service` | 50060 | WebRTC signaling |
+| `masque` | `masque-service` | WS 9200 | MASQUE-lite (not behind Caddy) |
 
-> `auth-service` / `user-service` as separate deployables are GONE — merged into
-> `identity-service`. Notification + Sentinel are merged into `messaging-service`.
+`auth-service` / `user-service` / notification / sentinel as separate deployables are
+**gone** — merged into identity or messaging.
 
----
+**Layout:** `identity-service` wraps `construct-auth-service` / `construct-user-service`.
+Notification lives in `messaging-service` (`notification_core.rs`). Product APIs are gRPC.
+`shared/src/construct_server/messaging_service/core.rs` mirrors
+`messaging-service/src/core.rs` for integration tests only — keep in sync.
 
-## Code Structure
-
-### Thin-wrapper pattern
-`identity-service` is a wrapper over business-logic crates
-(`crates/construct-auth-service`, `crates/construct-user-service`); notification logic
-lives in `messaging-service` (`notification_core.rs`).
-Shared re-exports live in `shared/src/construct_server/<service>/` (core/proto adapters only —
-client REST handlers removed; product APIs are gRPC).
-
-### Shared crate
-`shared/` (`construct-server-shared`) contains:
-- `src/construct_server/auth_service/` — auth business logic
-- `src/construct_server/messaging_service/core.rs` — `dispatch_envelope` + `confirm_pending_message` used **only** by `shared/tests/test_utils.rs` integration tests. Mirrors `messaging-service/src/core.rs` — keep both in sync.
-- `src/clients/notification.rs` — `NotificationClient` wrapper (lazy gRPC connect)
-
-### Crates under `crates/` (25 total; key ones)
-| Crate | Purpose |
-|---|---|
-| `construct-config` | All config structs + env var parsing + `secret_hygiene` (fail-fast boot check on malformed secrets; see also `scripts/preflight-secrets.sh`) |
-| `construct-queue` | Redis stream read/write for messaging + Privacy Pass issuance counter |
-| `construct-message` | Message envelope types (`MessageEnvelope` — no Kafka transport) |
-| `construct-auth` | Token signing/verification — PASETO v4.public (Ed25519) primary + legacy RS256 JWT (dispatch by `v4.public.` prefix) |
-| `construct-auth-service` / `construct-user-service` | Business logic wrapped by `identity-service` |
-| `construct-pow` | Proof-of-Work challenge/verify |
-| `construct-rate-limit` | Redis-backed sliding window rate limiter |
-| `construct-apns` | APNs HTTP/2 client (`apns-h2`; JWT auto-renewed every 55 min) |
-| `construct-redis` | Redis connection pool + retry helpers |
-| `construct-context` | `AppContext` adapter (bridges old context to shared services) |
-| `construct-federation` | Server signing keys (Ed25519), S2S forwarding |
-| `construct-metrics` | Prometheus metrics helpers |
-| `construct-db` | Postgres ORM: `User`, `BlockedUser`, `Device` etc + all CRUD queries |
-| `construct-types` | Domain types: `UserId`, `RouteId`, timestamp parsing, hex/UUID helpers |
-| `crypto-agility` | Crypto suite negotiation helpers |
+Key crates: `construct-config` (+ `secret_hygiene`), `construct-queue`,
+`construct-message`, `construct-auth` (PASETO v4.public + legacy JWT),
+`construct-db`, `construct-types` (`UserId`, `RouteId`), `construct-federation`,
+`construct-apns`. Full crate list → `DOCUMENTATION.md`.
 
 ---
 
-## Message Delivery Flow (Redis direct — production, multi-device)
+## Message Delivery (Redis mailbox)
 
 ```
-Client ──gRPC──► messaging-service
-                    │
-                    ├─► Redis XADD delivery:offline:{user_id}          (legacy user stream)
-                    ├─► Redis XADD delivery:offline:{user_id}:{device} (per-device fan-out)
-                    └─► Redis PUBLISH inbox:wakeup:{user_id}           (pub/sub wakeup)
+send → XADD delivery:offline:{user}           (legacy; gated by MSG_MAILBOX_USER_WRITE)
+     → XADD delivery:offline:{user}:{device}  (per-device fan-out)
+     → PUBLISH inbox:wakeup:{user}
 
-messaging-service (stream loop per connected device)
-    │
-    ├─► Redis SUBSCRIBE inbox:wakeup:{user_id}
-    └─► Redis XREAD mailbox: device stream + user stream (dual-read merge when
-            claims.device_id present; user-only for legacy tokens)
-            │
-            └─► gRPC ServerStreamingResponse → client
+stream → SUBSCRIBE inbox:wakeup:{user}
+       → read_mailbox_messages (dual-read: device+user when claims.device_id present;
+         user-only for legacy tokens; dedupe by message_id, prefer device)
 ```
 
-Fan-out writes both user and per-device streams. **Reads (step 3):** with token
-`device_id`, merge device+user (dedupe by `message_id`, prefer device); without —
-user stream only. Step 4 will stop writing the user stream.
+**Invariants (do not regress):**
 
-**Wake push:** APNs silent `new_message` is skipped when `user:{user_id}:server_instance_id`
-is set (active MessageStream). Online delivery uses `inbox:wakeup` only — silent push
-while online caused client reconnect storms + full offline redelivery.
-
-**Retention:** `since_cursor` is a **read offset only** (Subscribe + GetPendingMessages).
-Server must not `XTRIM` from a client-asserted cursor — silent-loss class.
-Capacity = `MAXLEN ~` on XADD + age sweep (~30d). See construct-docs
-`decisions/minimal-server-delivery.md` (Accepted).
-
-**Step 4 cutover flag:** `MSG_MAILBOX_USER_WRITE` (default `1`). The gate is
-`construct_msg_mailbox_user_only_entries_total` — **flat zero for 7 days**. It counts
-delivered entries the per-device stream did not have; every one of them is a message the
-cutover would drop. `construct_msg_mailbox_read_total{mode=…}` is *not* the gate: it says
-clients send a `device_id`, not that the device streams are complete, and completeness is
-the whole question. Rollback is setting the flag back to `1`.
-
-With the flag off, a message that reaches no stream is a **hard error**, never a silent
-`Ok` — `device_ids` comes back empty on a DB failure just as it does for a user with no
-devices, and the two are indistinguishable at the call site.
-
-**Critical channel name**: `inbox:wakeup:{user_id}`.
-
-**Serialization**: envelopes must use `rmp_serde::encode::to_vec_named` on write and `rmp_serde::from_slice` on read.
+1. **`since_cursor` = read offset only** (Subscribe + GetPendingMessages). Never `XTRIM`
+   from a client-asserted cursor — silent-loss class (paging/cancel + multi-device).
+2. **Retention** = `MAXLEN ~` on XADD + hourly age sweep (~30d). ADR:
+   construct-docs `decisions/minimal-server-delivery.md` (Accepted).
+3. **Wake push:** skip APNs silent `new_message` when
+   `user:{user_id}:server_instance_id` is set. Online = `inbox:wakeup` only
+   (silent push while online → reconnect storms).
+4. **Step 4 cutover:** `MSG_MAILBOX_USER_WRITE` (default `1`). Gate =
+   `construct_msg_mailbox_user_only_entries_total` **flat zero for 7 days**
+   (not `mailbox_read_total{mode=…}` — that only proves clients send `device_id`).
+   Rollback = set flag back to `1`. With flag off, reaching no stream is a **hard
+   error**, never silent `Ok`.
+5. **Serialization:** `rmp_serde::encode::to_vec_named` write /
+   `rmp_serde::from_slice` read.
+6. **No Kafka** as the user offline queue without a new ADR
+   (`decisions/redis-direct-delivery-not-kafka.md`, `architecture/scaling.md`).
 
 ---
 
 ## Redis Key Namespace
 
-| Key pattern | Type | Owner | Purpose |
-|---|---|---|---|
-| `delivery:offline:{user_id}` | Stream (XADD) | messaging-service | Message inbox per user (legacy) |
-| `delivery:offline:{user_id}:{device_id}` | Stream (XADD) | messaging-service | Per-device message inbox |
-| `inbox:wakeup:{user_id}` | Pub/Sub | messaging-service | Real-time wakeup signal |
-| `dispatched_msg:{message_id}` | String (SETEX) | messaging-service | Send-path idempotency dedup |
-| `user:{user_id}:server_instance_id` | String (SET) | messaging-service | Which server holds connection |
-| `delivery_queue:{server_instance_id}` | List/key (TTL) | messaging-service | Server heartbeat registry |
-| `rate_limit:{scope}:{id}` | String | construct-rate-limit | Sliding window counters |
-| `pow_challenge:{token}` | String (SETEX) | identity-service | PoW challenge storage |
-| `rate:pp_tokens:{user_id}:{hour}` | Counter (INCRBY+EXPIRE) | identity-service | Privacy Pass hourly issuance counter |
-| `spent:{sha256(nonce)}` | String (SET NX EX 30d) | messaging-service | Privacy Pass double-spend guard |
-| `pp:unit:{sha256(spend_id\|recipient)}` | String (INCR, TTL 2h) | messaging-service | Paid logical-message unit (multi-chunk cover; bound to recipient) |
-| `sealed:exact:{sha256(tag)}` / `sealed:seen:{sha256(tag)}` | String (5 min / 24 h) | messaging-service | `SealedInner.delivery_tag` replay guard |
-| `invalidated_token:{jti}` | String (TTL) | identity/messaging | Revoked access-token blocklist |
-
-> Note: `KEYS delivery_queue:*` appears in old comments but is **not used** in runtime code.
-> Server discovery uses O(1) `GET user:{user_id}:server_instance_id`.
-
----
-
-## gRPC Service Dependencies
-
-```
-messaging-service
-    └── → key-service (via HTTP for key bundles, rare)
-
-auth-service
-    └── → user-service (internal gRPC for profile lookup during auth)
-```
-
-`sentinel-service` **merged** into messaging-service.
-- Sentinel business logic: `construct_server_shared::sentinel_service::core::SentinelCore`
-- Sentinel gRPC service (`SentinelService` proto) is registered on messaging's gRPC port (50053)
-  — external clients (mobile apps, admin tools) hit the same proto on `messaging:50053`,
-  Caddy routes `/shared.proto.sentinel.v1.SentinelService/*` → `messaging:50053`.
-- In-process send-path enforcement: `messaging-service/src/grpc.rs` + `stream.rs` call
-  `SentinelCore::check_send_permission()` directly (no gRPC hop). Fail-open on Redis/internal
-  errors so a sentinel outage never blocks messaging.
-- Checks `sender_device_id` / `recipient_device_id` (32-char hex, NOT user UUID)
-- `SentinelCore` shares `PgPool` + Redis `ConnectionManager` with messaging-service
-
----
-
-## Sealed Sender + Privacy Pass (stealth)
-
-Every sealed envelope carries a per-message Privacy Pass token (VOPRF, ristretto255) —
-the anti-abuse replacement for a sender identity the server no longer sees.
-Full context: construct-docs `decisions/sealed-sender-anti-abuse-economics.md` and
-`deployment/stealth-token-keys-runbook.md`.
-
-**Issuance** (identity-service, authed `IssueTokens`):
-- `TOKEN_ISSUER_KEY` — 32-byte hex VOPRF secret. Unset ⇒ issuance disabled (fail-quiet);
-  present-but-malformed ⇒ boot error (`secret_hygiene`). NOT the same key as
-  `SERVER_SIGNING_KEY` (different key, different encoding — see runbook §6).
-- Hourly caps: `TOKEN_ISSUANCE_MAX_PER_HOUR` (default 120); young accounts
-  (< `TOKEN_ISSUANCE_MATURITY_HOURS`, default 24 h, age = MIN(devices.registered_at))
-  get `TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR` (default 30). Age-lookup failure ⇒ young cap
-  (fail-safe). Cap hit ⇒ `RESOURCE_EXHAUSTED` (client backs off one hour).
-- Token **encryption** key (X25519 pub, seals the token to the server) is delivered in
-  `GetSenderCertificateResponse.token_encryption_key` — the HTTP well-known fetch was
-  unreliable on iOS (ATS vs self-signed cert) and is legacy.
-
-**Redemption** (messaging-service, `dispatch_sealed_sender` → `token_redeem.rs`):
-- `MSG_STEALTH_TOKEN_POLICY` = `off` | `warn` (default/launch: log + metrics, deliver anyway) | `enforce`.
-- Under `enforce`, rejection = typed `FAILED_PRECONDITION` with message
-  `privacy_pass:{label}`; labels from `TokenRedeemResult::as_label`:
-  `missing_token` / `invalid_token` / `double_spent` / `decrypt_failed` /
-  `redis_error` / `not_configured` / `unit_exhausted`. Accept labels:
-  `ok` / `unit_covered`. The iOS client does a one-shot replenish-and-retry
-  and NEVER downgrades to identified send (anonymity invariant).
-- **Logical-message unit**: multi-chunk bodies (albums) share
-  `SealedInner.token_spend_id` (32 bytes). First wire envelope redeems a
-  token and opens `pp:unit:{sha256(spend_id || "|" || recipient_user_id)}`;
-  further envelopes with the same spend_id **and** same recipient are
-  `unit_covered` without a new token (cap 256). Recipient binding is
-  required: spend_id is client-chosen and must not cover other users
-  (see construct-docs `backend/TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC.md`).
-  Empty spend_id = legacy per-envelope spend. One album → one token.
-- Rollout state and warn-metric validation live in the runbook — check it before
-  flipping `enforce`.
-
-**Invariant**: an empty token wallet may degrade anti-abuse, never delivery or anonymity.
-Never add a server code path that reveals sender identity on token failure.
-
----
-
-## APNs Push Architecture
-
-**Notification-service merged into messaging-service:**
-- `messaging-service` calls APNs directly via `notification_core::send_blind_notification()`
-- APNs clients (prod + sandbox) are initialized in `messaging-service/main.rs`; sends are
-  routed per-token by `device_tokens.push_environment` (sandbox token → sandbox endpoint)
-- `NotificationServiceServer` runs on messaging's gRPC port (50053) for other services (key, signaling, mls, user)
-- Env var: `NOTIFICATION_SERVICE_URL` is no longer used by messaging-service; other services point to `messaging:50053`
-- Circuit-breaker `NotificationClient` removed — direct APNs call replaces gRPC round-trip
-
-**Error semantics (do not regress — see 938f395):**
-- Only explicit `BadDeviceToken` / `Unregistered` reasons condemn a device token
-  (→ delete from DB). **403 is a provider-auth verdict** (.p8 key / key_id / team_id /
-  clock) — never delete tokens on it; it logs a loud provider-auth error instead.
-- Device-token registration accepts up to 512 chars (APNs = 64 hex; FCM tokens routinely
-  exceed 128). Rejection logs `token_len`.
-- Silent pushes (`content-available`, low priority) are best-effort by design — Apple
-  throttles them per-device; do not treat sporadic non-delivery as a server bug.
-
----
-
-## Connection & Stream Config (key defaults)
-
-| Env Var | Default | Effect |
+| Key | Type | Purpose |
 |---|---|---|
-| `MSG_STREAM_HEARTBEAT_INTERVAL_SECS` | 10 | HeartbeatAck sent to client |
-| `MSG_STREAM_POLL_FALLBACK_SECS` | 1 | XREAD fallback if no pub/sub wakeup |
-| `GRPC_KEEPALIVE_INTERVAL_SECS` | 30 | H2 PING interval on gRPC servers |
-| `MSG_POW_LEVEL_LOW` | 16 | PoW difficulty bits (low-trust new device) |
-| `MSG_POW_LEVEL_MID` | 22 | PoW difficulty bits (mid-trust) |
-| `MSG_POW_LEVEL_HIGH` | 24 | PoW difficulty bits (high-trust established) |
-| `MESSAGE_TTL_DAYS` | 7 | Redis offline stream retention |
+| `delivery:offline:{user}` | Stream | Legacy user inbox |
+| `delivery:offline:{user}:{device}` | Stream | Per-device inbox |
+| `inbox:wakeup:{user}` | Pub/Sub | Real-time wakeup |
+| `dispatched_msg:{message_id}` | String | Send idempotency |
+| `user:{user}:server_instance_id` | String | Active MessageStream owner (O(1) routing) |
+| `delivery_queue:{instance}` | List/key | Heartbeat registry (written; not used for routing) |
+| `rate_limit:{scope}:{id}` | String | Sliding window |
+| `pow_challenge:{token}` | String | PoW challenge |
+| `rate:pp_tokens:{user}:{hour}` | Counter | PP issuance cap |
+| `spent:{sha256(nonce)}` | String | PP double-spend (30d) |
+| `pp:unit:{sha256(spend_id\|recipient)}` | String | Paid multi-chunk unit (2h; recipient-bound) |
+| `sealed:exact:{sha256(tag)}` / `sealed:seen:…` | String | `delivery_tag` replay (5m / 24h) |
+| `invalidated_token:{jti}` | String | Access-token blocklist |
 
-> Note: tonic version is **0.14.5** — no `http2_keepalive_while_idle` support.
-> Application-level HeartbeatAck is the keepalive workaround.
+Do not use `KEYS delivery_queue:*` for discovery — use
+`GET user:{user}:server_instance_id`.
 
 ---
 
-## Rate Limiting Defaults
+## Auth & Edge
 
-| Env Var | Default | Scope |
-|---|---|---|
-| `IP_RATE_LIMIT_PER_HOUR` | 1000 | Anonymous requests per IP/hour |
-| `COMBINED_RATE_LIMIT_PER_HOUR` | 500 | Authenticated requests per user+IP/hour |
-| `RATE_LIMIT_BLOCK_SECONDS` | 30 | Block duration after violation |
-| `POW_CHALLENGES_PER_HOUR` | 10 | PoW challenge issuance limit |
-| `LONG_POLL_RATE_LIMIT_WINDOW_SECS` | 60 | Long-poll rate limit window |
+- **PASETO v4.public** primary; legacy RS256 JWT still verified (`v4.public.` prefix).
+  Non-standard framing `nonce(32) || message || sig(64)` — client offsets are NOT a bug
+  (construct-docs PASETO framing note). TTL default 24h (`ACCESS_TOKEN_TTL_HOURS`).
+- **Blocklist:** `invalidated_token:{jti}` on logout/revoke. Logout requires
+  `access_token` in body; empty → `INVALID_ARGUMENT`.
+- **messaging gRPC:** `extract_authed_user_id()` — Bearer required; verify + blocklist
+  (fail-closed on Redis error). Optional `x-user-id` / `x-device-id` must match claims;
+  headers alone are never trusted.
+- **Caddy does not inject `x-user-id`.** Gateway `:9443` is veil/obfs4 proxy only, not JWT.
+  Each service validates via `construct-auth::AuthManager`. File: `ops/Caddyfile`.
+- Refresh reverse index: `user_tokens:{user}` → `RevokeAll` is O(n_tokens), not O(all keys).
+
+---
+
+## Sealed Sender + Privacy Pass
+
+Full economics + rollout: construct-docs
+`decisions/sealed-sender-anti-abuse-economics.md`,
+`deployment/stealth-token-keys-runbook.md`,
+`backend/TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC.md`.
+
+**Must not regress:**
+
+- Issuance: identity `IssueTokens`; `TOKEN_ISSUER_KEY` = **32-byte hex** (≠
+  `SERVER_SIGNING_KEY` base64). Unset ⇒ fail-quiet; malformed ⇒ boot fail.
+- Redemption: messaging `token_redeem.rs`; `MSG_STEALTH_TOKEN_POLICY` =
+  `off` | `warn` | `enforce`. Enforce → `FAILED_PRECONDITION` `privacy_pass:{label}`.
+  Client may replenish-and-retry; **never** downgrade to identified send.
+- Multi-chunk unit: `SealedInner.token_spend_id` + recipient binding
+  (`pp:unit:…`); empty spend_id = per-envelope. Cap 256.
+- **Invariant:** empty token wallet may degrade anti-abuse, never delivery or anonymity.
+  No server path that reveals sender identity on token failure.
+
+Envelope bytes: `sealed_inner` / `encrypted_payload` are `Vec<u8>` with dual-read of
+legacy base64/string MessagePack (see `construct-message`). Sealed path keeps
+`encrypted_payload` empty (no Redis dual-copy). Federation hashes the wire form as today.
+
+---
+
+## APNs (in messaging)
+
+Merged into messaging (`notification_core`); other services call messaging `:50053`.
+Prod + sandbox by `device_tokens.push_environment`.
+
+- Delete tokens only on `BadDeviceToken` / `Unregistered`. **403 = provider auth —
+  never delete** (commit `938f395`).
+- Registration accepts ≤512 chars (FCM >128 is normal). Silent push is best-effort.
+- Low prekeys: key-service may fire `activity_type=replenish_prekeys` when OTP < 5
+  or empty (`NOTIFICATION_SERVICE_URL` on key-service).
+
+---
+
+## Sentinel
+
+In-process in messaging (`SentinelCore`); same gRPC port 50053. Fail-open on
+Redis/internal errors. IDs are **32-char hex device ids**, not user UUIDs.
+
+---
+
+## Config gotchas
+
+- **`INSTANCE_DOMAIN` required** on every Rust service (no default). Domain mismatch
+  breaks federation.
+- Never re-declare an `app.env` secret as bare `${VAR}` under compose `environment:` —
+  unset shell var blanks it ("Seed must be 32 bytes, got 0"). Rotate with
+  `up -d --force-recreate`, not `restart`.
+- `SERVER_SIGNING_KEY` = **base64**; `TOKEN_ISSUER_KEY` = **hex**.
+- `secret_hygiene` fails boot on present-but-malformed secrets;
+  `scripts/preflight-secrets.sh` before deploy.
+- Stream knobs / rate limits / PoW tiers: `construct-config` + env
+  (`MSG_STREAM_*`, `MSG_POW_*`, `IP_RATE_LIMIT_*`, …). tonic **0.14.x** has no
+  `http2_keepalive_while_idle` — app HeartbeatAck is the keepalive.
+
+---
+
+## Identity (Epic E) — short
+
+Additive: `identity_public_key` + `identity_key_type` + `route_id`
+(`SHA-256(type || key)`, hex) alongside UUID. E.1/E.2 done; **E.3 pending**
+(`UserId::parse` dual addressing + `dispatch_sealed_sender` route_id resolution —
+still UUID-only). Details: migration 064, `construct-types` / `construct-db`.
+
+---
+
+## Server-influence minimization
+
+When device A references data on device B, apply construct-docs
+`decisions/server-influence-minimization.md`. Outer envelope fields
+(`message_id`, `timestamp`, `conversation_id`, `edits_message_id`) are
+**transport-only** — E2E semantics live in `MessageContent` / `SealedInner`.
 
 ---
 
 ## Build, Lint, Test
 
 ```bash
-cargo build                  # build all
-cargo build -p messaging-service  # build one service
-cargo test                   # all tests
-cargo fmt                    # format (required before commit — pre-commit hook enforces)
-cargo clippy                 # lint (pre-commit hook enforces)
+cargo build                     # or: cargo build -p messaging-service
+cargo test
+cargo fmt && cargo clippy       # pre-commit enforces both
 ```
 
-**`cargo test` does not touch the offline mailbox.** Every test that puts a message into
-Redis and asks for it back is `#[ignore]`d, so a green `cargo test` says nothing about
-delivery — which is how the 2026-08-18 loss went undetected: no test had ever written a
-message to Redis and read it back. Run them:
+Commit tip: `cargo fmt && git add -A && git commit` so the hook does not reformat
+and fail the commit.
+
+**`cargo test` does not exercise the offline mailbox.** Redis round-trip tests are
+`#[ignore]` — a green suite says nothing about delivery (how 2026-08-18 loss shipped).
+Before touching delivery or flipping `MSG_MAILBOX_USER_WRITE`:
 
 ```bash
-docker exec construct-redis-local redis-cli ping        # PONG, else: docker compose up -d redis
+docker exec construct-redis-local redis-cli ping   # or: docker compose up -d redis
 cargo test -p construct-queue --lib -- --ignored mailbox
 ```
 
-Five checks: the incident replayed (resume from a cursor below the backlog returns
-everything **and leaves the stream intact** — a read that deleted would pass the first
-assertion alone), per-device isolation, the `user_only` cutover gate seeing a message the
-fan-out missed, and both cutover behaviours with `mailbox_user_write=false`. Required
-before touching delivery, and before any `MSG_MAILBOX_USER_WRITE` flip.
+---
 
-Pre-commit hook runs `cargo fmt` + `cargo clippy`. Always run `cargo fmt && git add -A && git commit` to avoid the hook re-formatting and failing your commit.
+## Known debt (skim)
+
+- `to_app_context()` leaves APNs / token_encryption `None` outside messaging.
+- `delivery_queue:{instance}` still written, unused for routing.
+- Signaling: Redis call state OK; in-memory `user_channels` empty after restart
+  (clients reconnect — acceptable).
+- Epic E.3 pending (above).
 
 ---
 
-## Caddy Configuration
+## Docs
 
-- File: `ops/Caddyfile`
-- TLS termination (Let's Encrypt) via vanilla `caddy:alpine` — no JWT plugin
-- Internal listener on `:8080` for gateway proxy (plain h2c)
-- Routes by gRPC service path prefix to upstream h2c services
-- Each service validates JWT itself via `construct-auth::AuthManager`
-
-## Gateway (veil/obfs4 proxy)
-
-- Listens on `0.0.0.0:9443` (obfuscated port for censorship-resistant clients)
-- Plain gRPC clients connect via Caddy directly (port 443)
-- veil/obfs4 clients connect via gateway:9443 → caddy:8080
-- `gateway/src/` — cleaned up, contains only veil proxy logic (no dead code as of checkpoint 004)
-
----
-
-## Message Delivery Latency Analysis
-
-```
-Client gRPC send
-  → messaging-service receive
-  → Redis XADD + dedup (Mutex on queue)                  ~1-5 ms
-  → Redis PUBLISH inbox:wakeup (implicit in write_message_to_user_stream)
-  → messaging-service sub wakeup → XREAD                 ~1-5 ms
-  → gRPC stream deliver to client
-
-Total: ~5-15 ms
-
----
-
-## Security Architecture
-
-### Token Lifecycle (access tokens)
-
-- **Format**: PASETO v4.public (Ed25519) primary; legacy RS256 JWT still verified
-  (dispatch by `v4.public.` prefix in `construct-auth`). Note the non-standard PASETO
-  payload framing `nonce(32) || message || sig(64)` — documented in construct-docs
-  (`reference: PASETO token framing`); the client slice offsets are NOT a bug.
-- **TTL**: 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, default 24). Was 168h — reduced to limit exposure window.
-- **Blocklist key**: `invalidated_token:{jti}` — Redis `SET` with TTL = remaining token lifetime. Written on explicit logout/revocation.
-- **Check on gRPC logout** (`AuthService.Logout`): server requires `access_token` in request body (`field 1`). Extracts JTI → adds to blocklist. Client **must populate** `request.accessToken` from Keychain; if empty, server returns `INVALID_ARGUMENT` (client should treat this as a non-fatal warning and continue session cleanup).
-- **Check on token verify** (`AuthService.VerifyToken`): crypto verify + `EXISTS invalidated_token:{jti}`.
-- **Check in messaging-service gRPC**: `extract_authed_user_id()` in `grpc.rs` — **Bearer required**; crypto verify + blocklist (fail-closed on Redis error). Optional client `x-user-id` / `x-device-id` must match claims (spoof guard); headers alone are never trusted.
-- **Edge path**: vanilla Caddy → h2c services — **does not** inject `x-user-id`. Gateway (`:9443`) is veil/obfs4 proxy only, not JWT auth.
-
-### Refresh Token Reverse Index
-
-- On login: `SADD user_tokens:{user_id} {jti}` + `EXPIRE` to track all active refresh tokens.
-- `RevokeAll`: `SMEMBERS user_tokens:{user_id}` → delete each `refresh_token:{jti}` → delete index. O(n_tokens), not O(all_keys).
-
-### Low-Prekey Replenishment
-
-- After `GetPreKeyBundle` / `GetPreKeyBundles` consumes an OTP, key-service fires a **fire-and-forget** `SendBlindNotification` with `activity_type = "replenish_prekeys"` to the device owner if:
-  - Remaining OTP count < 5 (`LOW_PREKEY_THRESHOLD`), OR
-  - OTP store was already empty (has_one_time_key = false).
-- Requires `NOTIFICATION_SERVICE_URL` env var to be set on key-service.
-- Client must handle `activity_type = "replenish_prekeys"` by calling `KeyService.UploadPreKeys` in the background (upload `max(0, recommended_minimum - current_count)` keys; recommended_minimum = 20).
-
----
-
-## Identity & Routing (Epic E — pubkey-as-identity)
-
-Additive identity model: `identity_public_key` + `identity_key_type` alongside UUID (not replacement).
-
-### Users table columns (added via migration 064)
-
-| Column | Type | Purpose |
-|---|---|---|
-| `identity_public_key` | `BYTEA` | Public key (32 bytes Ed25519, 1952 ML-DSA-65, 1984 hybrid) |
-| `identity_key_type` | `SMALLINT NOT NULL DEFAULT 1` | Algorithm: 1=Ed25519, 2=ML-DSA-65, 3=Hybrid |
-| `route_id` | `VARCHAR(64) UNIQUE` | `SHA-256(identity_key_type \|\| identity_public_key)`, hex-encoded |
-
-- `recovery_public_key` values are copied into `identity_public_key` for existing users (migration backfill)
-- Route_id `NULL` for legacy rows until they next register
-
-### RouteId type (`construct-types/src/user_id.rs`)
-
-```rust
-RouteId::compute(public_key: &[u8], key_type: i16) -> RouteId
-```
-
-- `SHA-256(type || key)` prevents algorithm confusion attacks
-- Output: 64-char hex string (32 bytes)
-
-### Lookup functions (`construct-db`)
-
-| Function | SQL | Returns |
-|---|---|---|
-| `get_user_by_identity_pubkey(pool, &[u8])` | `WHERE identity_public_key = $1` | `Option<User>` |
-| `get_user_by_route_id(pool, &str)` | `WHERE route_id = $1` | `Option<User>` |
-| `get_user_home_relays(pool, &Uuid)` | `SELECT DISTINCT server_hostname FROM devices WHERE user_id = $1 AND server_hostname IS NOT NULL` | `Vec<String>` |
-
-### Registration flow
-
-In `construct-auth-service/src/devices.rs`:
-1. Client sends `identity_public_key` (proto field 5) + `identity_key_type` (proto field 6) in `RegisterDeviceRequest`
-2. Server validates key length by type: Ed25519 expects 32 bytes, ML-DSA-65 expects 1952, hybrid expects 1984
-3. Computes `route_id` via `RouteId::compute(key, type)`
-4. Stores all three in `users` table via `create_user_with_first_device()`
-
-### E.3 (next)
-
-- Dual addressing: `UserId::parse()` to accept `ed25519:<hex>` format
-- `dispatch_sealed_sender` route_id → UUID → relay resolution
-
----
-
-## Server-influence minimization
-
-When reviewing any feature where device A references data on device B, apply the
-checklist from `construct-docs/decisions/server-influence-minimization.md`:
-
-1. **Identity** — reference uses a sender-generated id from the encrypted payload.
-2. **Tamper surface** — lookup scoped to `(id, fromUserId)`, never bare global id.
-3. **Silent failure** — unresolved references log an error.
-4. **Envelope fields** — no outer-envelope field is load-bearing.
-5. **Both delivery paths** — live stream and background fetch behave identically.
-6. **Old-peer compat** — graceful degradation + metric/log + documented removal trigger.
-
-Server-visible fields (`Envelope.message_id`, `Envelope.timestamp`,
-`Envelope.conversation_id`, `Envelope.edits_message_id`) are transport-only and
-must not enter E2E semantics. Edits, replies, reactions, deletes, pins MUST use
-`MessageContent` / `SealedInner` fields.
-
----
-
-## Config gotchas (learned the hard way)
-
-- **`INSTANCE_DOMAIN` is required** on every Rust service (no default since 2026-07-13;
-  removed the `eu.konstruct.cc` hardcode). Identity/messaging domain mismatch breaks
-  federation addressing.
-- **Never re-declare an `app.env` secret as a bare `${VAR}` under `environment:`** in
-  compose — an unset shell var silently blanks it (classic symptom:
-  "Seed must be 32 bytes, got 0"). Rotate secrets with `up -d --force-recreate`,
-  not `restart`.
-- `SERVER_SIGNING_KEY` is **base64**, `TOKEN_ISSUER_KEY` is **hex** — different keys,
-  different encodings, different rotation procedures (runbook §6).
-- Secret sanity: `construct-config::secret_hygiene` fails boot on present-but-malformed
-  secrets; run `scripts/preflight-secrets.sh` before deploys.
-
----
-
-## Known Issues / Tech Debt
-
-1. **`to_app_context()` adapter** — `AppContext::apns_client` / `token_encryption` are `Option`; auth/identity adapters leave them `None` when unused. Messaging builds a separate `NotificationServiceContext` for push.
-
-2. **`delivery_queue:{server_instance_id}` heartbeat keys** — still written by messaging-service heartbeat but never read (routing is user-based via `user:{user_id}:server_instance_id`). Harmless but wasteful writes.
-
-3. **Signaling call state** — call state IS persisted in Redis hashes (`call:{call_id}`, TTL 300s) and `user:{user_id}:active_call` keys. Cross-instance signal forwarding uses Redis pub/sub (`signaling:instance:{instance_id}` channels). Stale in-memory cache bug after `accept_call`/`note_ringing`/`note_keepalive` mutations was fixed (commit `0ec9aac`). Remaining limitation: on restart the in-memory `user_channels` broadcast map is empty, so connected clients lose their gRPC stream and must reconnect — this is acceptable since gRPC streams break on restart anyway.
-
-4. **Identity & Routing (Epic E)** — E.1 (identity_public_key + registration) and E.2 (RouteId + lookup functions) are complete. E.3 (dual addressing in `UserId::parse` + `dispatch_sealed_sender` route resolution) is pending. `dispatch_sealed_sender` in `messaging-service/src/envelope.rs` still routes by UUID only — no route_id/DHT integration exists.
-
----
-
-## Documentation
-
-All project documentation: `~/Code/construct-docs` (Obsidian vault).
-See `~/Code/construct-docs/AGENTS.md` for writing rules and vault layout.
-
-**Scale / Kafka:** delivery is Redis-direct mailbox, not Kafka. Do not reintroduce
-Kafka as the user offline queue without a new ADR. Growth order, messaging LB
-(no user sticky), and Redis shard-by-user: `construct-docs/architecture/scaling.md`
-and `construct-docs/decisions/redis-direct-delivery-not-kafka.md`.
-
-Session notes: `sessions/YYYY-MM-DD-<topic>.md` with sections `# Context`, `# What Changed`,
-`# Why`, `# Intended Outcome`, `# Decisions`, `# Open Questions`.
+- Repo handbook: `DOCUMENTATION.md`
+- Vault: `~/Code/construct-docs` (see its `AGENTS.md` for session/ADR rules)
+- Sessions: `sessions/YYYY-MM-DD-<topic>.md` — Context / What Changed / Why /
+  Decisions / Open Questions
