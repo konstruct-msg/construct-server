@@ -42,7 +42,11 @@ message MessageContent {
     // Album of one or more media items (images/videos) sent as a single message.
     MediaAlbumMessage media_album = 10;
 
-    // Future content types: 11-20
+    // StickerRef (pack_id + sticker_id) — assigned 11. See STICKER_CLIENT_SPEC.
+    // Do not reuse MediaType.STICKER (pixels-on-wire, rejected).
+    // StickerRef sticker = 11;
+
+    // Future content types: 12-20
   }
 
   // Formatting metadata (applies to all types)
@@ -208,8 +212,13 @@ message ReactionMessage {
   // Action (add or remove reaction)
   ReactionAction action = 3;
 
+  // Client last-write-wins clock, milliseconds since Unix epoch, set at tap.
+  // Must not be the server envelope timestamp (sealed-sender redelivery disagrees).
+  // 0 = pre-field peer; any timed update beats it. See MESSAGE_REACTIONS_SPEC.
+  int64 timestamp_ms = 4;
+
   // Reserved for future features
-  reserved 4 to 10;
+  reserved 5 to 10;
 }
 
 // ReactionAction - Add or remove reaction
