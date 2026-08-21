@@ -115,9 +115,23 @@ message IceCandidate {
   // SDP MID (media stream identification)
   string sdp_mid = 2;
 
-  // Candidate SDP string
-  // Example: "candidate:1 1 UDP 2130706431 192.168.1.5 54321 typ host"
-  string candidate = 3;
+  // Candidate, E2EE-encrypted by the sender with the peer's Double Ratchet session.
+  //
+  // `bytes`, not `string`, since 2026-08-21. It carries a binary frame
+  // ([1B version][2B suiteId LE][4B msgNum LE][4B pqEpoch LE][4B pqLen LE][pqField]
+  // [32B epk][ciphertext]) and a `string` field forced the client to base64 it — which
+  // is what this repo's own rule forbids: "All `bytes` fields that carry crypto material
+  // must be `bytes`, not `string`". The plaintext it protects looks like
+  // "candidate:1 1 UDP 2130706431 192.168.1.5 54321 typ host" — an IP and port.
+  //
+  // Field number and wire type are unchanged (both length-delimited), so this is not a
+  // renumbering. What changed is the interpretation: a client predating the change wrote
+  // UTF-8 of "ENC:v3:<base64>" here and its bytes will not parse as a frame. Acceptable
+  // during alpha with a forced update; there is no dual-read.
+  //
+  // The server never reads this field — signaling-service forwards IceCandidate as an
+  // opaque signal.
+  bytes candidate = 3;
 
   // Username fragment (authentication)
   optional string username_fragment = 4;
