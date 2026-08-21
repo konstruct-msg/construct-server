@@ -182,7 +182,10 @@ impl CallRegistry {
             .unwrap_or_default();
 
         let mut out = Vec::new();
-        for chunk in results.chunks_exact(2) {
+        // `as_chunks::<2>()` rather than `chunks_exact(2)`: the pair is a fixed shape, so the
+        // type says so and the indexing below cannot go out of bounds. Clippy started requiring
+        // this in 1.98 (`chunks_exact_to_as_chunks`).
+        for chunk in results.as_chunks::<2>().0 {
             let key = &chunk[0];
             let instance = &chunk[1];
             let device_id = key
