@@ -39,6 +39,27 @@ jobs:
       - name: Run cargo audit
         run: cargo audit --deny warnings
 
+  # shared/proto is vendored from construct-protos, not authored here. This is what makes that
+  # true rather than aspirational: it re-vendors the commit recorded in shared/proto/.upstream and
+  # fails on any difference, in either direction.
+  #
+  # It pins to the recorded commit rather than to construct-protos main on purpose — comparing
+  # against a moving HEAD would redden this repo for a commit made in another repository, which is
+  # a failure nobody here can act on. Advancing the pin is a deliberate edit: scripts/sync-protos.sh <sha>.
+  #
+  # Measured before this existed (2026-08-21): the two copies had drifted in *both* directions —
+  # core/envelope.proto held an anti-abuse rule only the server knew, messaging/content.proto still
+  # reserved a field the client had been writing for a day.
+  proto-sync:
+    name: Proto Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify shared/proto matches its upstream
+        run: ./scripts/sync-protos.sh --check
+
   # Check formatting
   fmt:
     name: Format Check
@@ -344,7 +365,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [security-audit, fmt, clippy, test]
+    needs: [security-audit, proto-sync, fmt, clippy, test]
     permissions:
       contents: read
       packages: write
