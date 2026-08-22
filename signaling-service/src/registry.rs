@@ -744,44 +744,6 @@ impl CallRegistry {
         calls.insert(call_id.to_string(), state);
     }
 
-    pub(crate) async fn accept_call(
-        &self,
-        call_id: &str,
-        callee_device_id: &str,
-    ) -> Option<(CallState, bool)> {
-        let mut state = self.load_call_state(call_id).await?;
-        if state.accepted_callee_device_id.is_some() {
-            return Some((state.clone(), false));
-        }
-        state.accepted_callee_device_id = Some(callee_device_id.to_string());
-        state.answered_at_ms = Some(unix_millis());
-
-        {
-            let mut conn = self.redis.clone();
-            let key = Self::call_key(call_id);
-            let answered_at_ms = state.answered_at_ms.unwrap_or_else(unix_millis);
-            let _: Result<(), _> = redis::pipe()
-                .cmd("HSET")
-                .arg(&key)
-                .arg("accepted_callee_device_id")
-                .arg(callee_device_id)
-                .arg("answered_at_ms")
-                .arg(answered_at_ms.to_string())
-                .cmd("EXPIRE")
-                .arg(&key)
-                .arg(300)
-                .query_async(&mut conn)
-                .await;
-        }
-
-        {
-            let mut calls = self.calls.write().await;
-            calls.insert(call_id.to_string(), state.clone());
-        }
-
-        Some((state, true))
-    }
-
     pub(crate) async fn is_user_busy(&self, user_id: &str) -> bool {
         self.get_user_call(user_id).await.is_some()
     }
@@ -1172,7 +1134,7 @@ mod tests {
             )
             .await;
 
-        registry.accept_call("call-1", "callee-device-1").await;
+        registry.note_connected("call-1", "callee-device-1").await;
 
         registry
             .register_user("callee-user", "callee-device-1")
@@ -1209,7 +1171,7 @@ mod tests {
             )
             .await;
 
-        registry.accept_call("call-1", "callee-device-1").await;
+        registry.note_connected("call-1", "callee-device-1").await;
 
         registry
             .register_user("callee-user", "callee-device-1")
