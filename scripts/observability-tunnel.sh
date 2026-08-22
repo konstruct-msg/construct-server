@@ -14,7 +14,7 @@
 #
 # Usage:
 #   scripts/observability-tunnel.sh              # bring up, verify, print URLs
-#   scripts/observability-tunnel.sh --open       # …and open Prometheus in a browser
+#   scripts/observability-tunnel.sh --open       # …and open Grafana in a browser
 #   scripts/observability-tunnel.sh status       # is it up, and does each service answer
 #   scripts/observability-tunnel.sh down         # close it
 #
@@ -138,6 +138,9 @@ case "${1:-up}" in
     up|--open) cmd_up "${1:-}" ;;
     status)    cmd_status ;;
     down|stop|--stop) cmd_down ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
+    # The header block is the help text, so it cannot drift from it. Bounded by where the comments
+    # stop rather than by a line number — a hardcoded range printed `set -euo pipefail` and the
+    # config lines the moment the header grew.
+    -h|--help) awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
     *) c_red "unknown command: $1"; echo "try: up | status | down"; exit 2 ;;
 esac
