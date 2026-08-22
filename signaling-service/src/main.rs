@@ -1,7 +1,6 @@
 mod forwarded;
 mod rate_limiter;
 mod registry;
-mod routing;
 mod service;
 mod time;
 mod turn;
