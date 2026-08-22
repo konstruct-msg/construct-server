@@ -167,6 +167,28 @@ pub static SIGNALING_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register SIGNALING_ERRORS_TOTAL metric")
 });
 
+/// SDP refused on the signaling stream, labelled by which signal carried it.
+///
+/// The `Offer` and `Answer` arms of `handle_outbound_signal` used to accept SDP and only emit a
+/// `tracing::warn!` about the deprecated path. That made "does any client still send SDP here"
+/// answerable only by grepping logs across every replica — asked on 2026-08-21, it could not be
+/// answered at all, which is the same shape as `construct_auth_token_verify_format_total` counting
+/// prefix-misses instead of the thing it is named for. A counter answers it; a log line does not.
+///
+/// Expected to stay at zero: no shipped client sends SDP on this stream. A non-zero value means
+/// either a client older than the E2EE call path, or something writing to the stream that is not a
+/// client at all — both worth knowing, and neither visible before.
+pub static SIGNALING_SDP_REFUSED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_signaling_sdp_refused_total",
+            "SDP signals refused on the signaling stream (offers/answers travel E2EE only)"
+        ),
+        &["signal"]
+    )
+    .expect("Failed to register SIGNALING_SDP_REFUSED_TOTAL metric")
+});
+
 /// Call setup duration (seconds) from offer receipt to answer.
 pub static CALL_SETUP_DURATION_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
@@ -586,6 +608,7 @@ pub fn init_registry() {
     Lazy::force(&LEGACY_EDIT_USAGE_TOTAL);
     Lazy::force(&CALLS_INITIATED_TOTAL);
     Lazy::force(&SIGNALING_ERRORS_TOTAL);
+    Lazy::force(&SIGNALING_SDP_REFUSED_TOTAL);
     Lazy::force(&MSG_MAILBOX_READ_TOTAL);
     Lazy::force(&MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL);
     Lazy::force(&MSG_MAILBOX_WRITE_TOTAL);
