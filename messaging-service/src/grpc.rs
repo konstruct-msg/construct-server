@@ -349,6 +349,12 @@ impl MessagingService for MessagingGrpcService {
         // ── Sealed Sender path ──────────────────────────────────────────────
         if let Some(sealed) = &envelope.sealed_sender {
             require_legacy_sealed_sender_auth(authed_user_id)?;
+            // The cutover gate (55.1a). Both doors lead to `dispatch_sealed_sender`, so the
+            // distinction exists only here — counting inside the dispatch would answer a
+            // different question than the one the flip turns on.
+            construct_metrics::MSG_SEALED_INGRESS_TOTAL
+                .with_label_values(&["legacy_send_message"])
+                .inc();
             let resp = dispatch_sealed_sender(&self.context, sealed)
                 .await
                 .map_err(map_sealed_dispatch_error)?;
@@ -729,6 +735,13 @@ impl MessagingService for MessagingGrpcService {
         let sealed = req
             .sealed_sender
             .ok_or_else(|| Status::invalid_argument("sealed_sender is required"))?;
+
+        // Counted at the same point as the legacy door above — payload in hand, before
+        // dispatch — so the two labels are comparable. A request refused by the per-IP limit
+        // above never reaches here, and it is not a sealed send that arrived.
+        construct_metrics::MSG_SEALED_INGRESS_TOTAL
+            .with_label_values(&["sealed_rpc"])
+            .inc();
 
         let mut resp = dispatch_sealed_sender(&self.context, &sealed)
             .await

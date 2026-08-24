@@ -397,6 +397,33 @@ pub static MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL: Lazy<IntCounterVec> = Lazy::new(
     .expect("Failed to register MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL metric")
 });
 
+/// Sealed sends accepted for dispatch, by the door they came in through.
+/// Labels: `ingress` = `sealed_rpc` (`SendSealedMessage`, unauthenticated) |
+/// `legacy_send_message` (a sealed payload on the authenticated `SendMessage`).
+///
+/// This is the gate for flipping `sealedSenderUnauthenticatedTransport`
+/// (`harden-in-place-execution-plan`, rung A/55.1). That flip is what stops the operator
+/// seeing `(sender, recipient, time)` live, and its exit criterion is "the share moved" —
+/// which nothing could answer, because both doors led to the same `dispatch_sealed_sender`
+/// and neither was counted. The flag is compile-time, so the flip is a release and cannot be
+/// rolled back by config; going in without the baseline means finding out from user reports.
+///
+/// Counted where the sealed payload is in hand and before dispatch, identically on both
+/// paths, so the two labels mean the same thing. Deliberately not counted on success:
+/// success would fold a rise in rejections into a fall in traffic, and rejections have their
+/// own counters. A per-IP rate-limited `SendSealedMessage` is refused before this point and
+/// is not a sealed send that arrived — it is one that was never accepted.
+pub static MSG_SEALED_INGRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_sealed_ingress_total",
+            "Sealed sends accepted for dispatch, by ingress RPC (unauthenticated-transport cutover gate)"
+        ),
+        &["ingress"]
+    )
+    .expect("Failed to register MSG_SEALED_INGRESS_TOTAL metric")
+});
+
 /// Mailbox writes for cutover gates.
 /// Label: `target` = `user` | `device`.
 pub static MSG_MAILBOX_WRITE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -612,6 +639,14 @@ pub fn init_registry() {
     Lazy::force(&MSG_MAILBOX_READ_TOTAL);
     Lazy::force(&MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL);
     Lazy::force(&MSG_MAILBOX_WRITE_TOTAL);
+    // Both children, not just the family. This label set is closed — a sealed send arrives by
+    // one of exactly two doors — and the whole point of the counter is the *ratio* between them.
+    // Left to appear on first use, the gate reads `absent / present` before the flip and
+    // `present / absent` long after it, and neither is a number: the same "missing is not zero"
+    // trap this function exists for, one level down at the child.
+    for ingress in ["sealed_rpc", "legacy_send_message"] {
+        MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
+    }
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);
@@ -711,6 +746,31 @@ mod tests {
                  no producer at all, or has one in a single service — and this \
                  function runs in all seven. Both cases put a zero on the \
                  dashboard that nothing stands behind."
+            );
+        }
+    }
+
+    /// The cutover gate must be a ratio from the first scrape, which means **both** children
+    /// exist at zero — not just the family.
+    ///
+    /// The flip it gates (`sealedSenderUnauthenticatedTransport`) is compile-time, so it ships
+    /// as a release and cannot be undone by config. Its exit criterion is "the share moved".
+    /// With children created on first use, the reading before the flip is `absent / present`
+    /// and long after it `present / absent`, and neither is a number — the same "missing is not
+    /// zero" trap `init_registry` exists for, one level down.
+    #[test]
+    fn test_sealed_ingress_gate_has_both_doors_at_zero() {
+        init_registry();
+        let text = gather_metrics().unwrap();
+        for ingress in ["sealed_rpc", "legacy_send_message"] {
+            let series = format!("construct_msg_sealed_ingress_total{{ingress=\"{ingress}\"}} 0");
+            assert!(
+                text.contains(&series),
+                "expected `{series}`, got:\n{}",
+                text.lines()
+                    .filter(|l| l.contains("sealed_ingress"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         }
     }
