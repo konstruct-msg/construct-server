@@ -29,6 +29,27 @@ groups:
             Messaging sends continue (the sentinel limiter degrades to per-instance
             counters), but queued offline delivery is stalled.
 
+      # Not an incident — a planning trigger, and the only observer the hardening
+      # ladder's rung 55.5 has. That rung ("split the mailbox off this instance, then
+      # replicate") is deliberately gated on a number rather than a date, because the
+      # mailbox and the rate-limit keys share one memory budget while having opposite
+      # loss policies. But a threshold nobody watches for is a date with extra steps:
+      # written down at 12.3% usage, the next reading would have been whenever someone
+      # thought to look, and the alerts that do exist start at 75% — sixty points past
+      # the moment the work was supposed to begin, and by then it is an incident.
+      - alert: RedisMailboxSplitTrigger
+        expr: redis_memory_max_bytes > 0 and redis_memory_used_bytes / redis_memory_max_bytes > 0.60
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Redis above 60% of maxmemory — start the mailbox split (ladder 55.5)"
+          description: >
+            Offline mailbox and rate-limit keys share this instance's memory and have
+            different loss policies. Plan of record: decisions/harden-in-place-execution-plan.md
+            rung 55.5. This is the trigger to begin, not an outage — RedisMemoryPressure
+            at 75% is where it becomes urgent.
+
       # Leading indicator. With noeviction, hitting 100% means writes start failing —
       # including offline-queue writes — so this must be acted on before it gets there.
       - alert: RedisMemoryPressure
@@ -112,6 +133,33 @@ groups:
             5 minutes. Either the service is down or the target is wrong — check the
             port it actually serves /metrics on. PORT for most services, METRICS_PORT
             for group and signalling.
+
+  # ── Cutover gates: the conditions the hardening ladder flips on ─────────────
+  #
+  # Each rung of decisions/harden-in-place-execution-plan.md is gated on a number,
+  # and every one of those numbers was until now something a person had to remember
+  # to go and read. A gate with no observer is not a gate; and these particular
+  # flips are one-way (55.1 is compile-time, so it ships as a release and cannot be
+  # rolled back by config), which is exactly when finding out late is expensive.
+  - name: cutover_gates
+    rules:
+      # The blocker for MSG_MAILBOX_USER_WRITE=0 (rung 55.3). Every entry counted here
+      # is a message the cutover would have dropped: it was delivered only because the
+      # legacy per-user stream is still written and still read, so the per-device
+      # stream is not yet complete. The exit criterion is a flat zero across the gate
+      # window — which means a single tick has to be visible when it happens, not at
+      # the end of seven days when someone graphs it.
+      - alert: MailboxCutoverBlocked
+        expr: increase(construct_msg_mailbox_user_only_entries_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Per-device mailbox is incomplete — 55.3 gate window restarts"
+          description: >
+            A delivered entry ({{ $labels.path }}) was missing from the per-device stream.
+            MSG_MAILBOX_USER_WRITE=0 would have dropped it. The seven-day zero window
+            starts again from now.
 
   # ── Capacity: the triggers for scaling, so the answer is not a guess ────────
   - name: capacity
