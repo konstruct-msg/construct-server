@@ -1,0 +1,80 @@
+# Temporary diagnostic listener: a second QUIC gateway on UDP/8443.
+#
+# WHAT IT ANSWERS. The RU path kills our QUIC flow to UDP/443 a few seconds after the handshake
+# (`udpcheck --hold 45`: control survives 45s, ours dies at 35.6s; under a VPN ours survives 45s,
+# so the gateway is healthy — see construct-docs decisions/masque-and-quic-obfuscation-evaluated).
+# The key is neither SNI (a substitute name proven clean on that network died at 35.634s against
+# 35.638s without it) nor the address (TCP/443 to the same IP carries all the app's H2 traffic).
+# Two candidates are left, and they need a port that is not 443:
+#
+#   (a) any sustained UDP to this hosting IP is killed  → obfuscation cannot help;
+#   (b) QUIC itself is recognised                        → Salamander is a viable RU transport.
+#
+# Run this listener PLAIN first, then with a PSK, on the SAME port, so the payload is the only
+# variable. Plain survives and Salamander survives ⇒ the port mattered, start over. Plain dies and
+# Salamander survives ⇒ (b). Both die ⇒ (a), and QUIC obfuscation is closed for good.
+#
+# WHY A SEPARATE FILE. `ops/docker-compose.prod.yml` is what CI brings up right after
+# `git reset --hard origin/main`. A diagnostic that can start on an ordinary deploy is a
+# diagnostic that will still be listening in six months. `profiles:` would not be enough — see
+# the note above the exporters in that file. A file nobody passes with `-f` is not parsed.
+#
+# WHY network_mode: host, AND WHY IT IS NOT OPTIONAL HERE. Docker UDP publishing puts
+# docker-proxy plus nf_conntrack in front of the socket, and its 30s UDP timeout kills the
+# server→client return path a few seconds after the handshake — which is the 2026-07-20 defect
+# (sessions/2026-07-20-quic-docker-nat) and produces, to the millisecond, the same 35s death this
+# experiment is trying to explain. Published through Docker, the PLAIN control would die of our own
+# NAT and "confirm" a block that was never there.
+#
+# USE. The file is standalone — it defines one service and references nothing in the prod file, so
+# it is passed with `-f` on its own and gets its own compose project. Nothing about the running
+# stack is touched.
+#
+#   sudo ufw allow 8443/udp
+#
+#   # 1. plain control on 8443
+#   docker compose -f docker-compose.quicprobe.yml up -d quic-probe
+#   docker logs construct-quic-probe | grep obfuscated   # must say obfuscated=false
+#   #   → from the RU network: cargo run --bin udpcheck -- quic.konstruct.cc 8443 --hold 45
+#
+#   # 2. same port, Salamander
+#   export QUIC_PROBE_PSK=$(openssl rand -hex 32)
+#   docker compose -f docker-compose.quicprobe.yml up -d --force-recreate quic-probe
+#   docker logs construct-quic-probe | grep obfuscated   # must say obfuscated=true
+#   #   → from the RU network: cargo run --bin udpcheck -- --psk $QUIC_PROBE_PSK \
+#   #                                                       quic.konstruct.cc 8443 --hold 45
+#
+#   # 3. TEAR DOWN — both of these, not just the container
+#   docker compose -f docker-compose.quicprobe.yml down
+#   sudo ufw delete allow 8443/udp
+#
+# The PSK is generated per run and thrown away. It is not a secret worth keeping and must never
+# reach app.env: the app has no reader for it, and a bundled PSK is the thing
+# decisions/quic-plain-vs-obfuscated refused to ship.
+
+services:
+  quic-probe:
+    image: ghcr.io/konstruct-msg/construct-transport:latest
+    container_name: construct-quic-probe
+    # Not `unless-stopped`. An experiment that survives a reboot is a second public QUIC endpoint
+    # nobody remembers deploying.
+    restart: "no"
+    network_mode: host
+    # Deliberately NO env_file. The probe needs no secrets, and app.env already carries a
+    # QUIC_OBF_PSK slot — declaring the same name under `environment:` would blank whichever one
+    # lost, which is how a gateway ends up serving a mode nobody selected.
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      QUIC_SAN: quic.konstruct.cc
+      QUIC_BIND: "0.0.0.0:8443"
+      QUIC_UPSTREAM: "127.0.0.1:8080"
+      QUIC_CERT_PATH: /certs/server-cert.der
+      QUIC_KEY_PATH: /certs/server-key.der
+      # Empty = plain listener (the gateway filters blank). Set it for step 2.
+      QUIC_OBF_PSK: ${QUIC_PROBE_PSK:-}
+    volumes:
+      # The same cert pair the 443 listener serves, so the probe is our endpoint by every measure
+      # a client can check — one fewer difference between the two ports. Read-only: the gateway
+      # writes here only when the pair is missing, and the pair that production pins is not a file
+      # a temporary experiment should be able to replace.
+      - /opt/construct/quic-certs:/certs:ro
