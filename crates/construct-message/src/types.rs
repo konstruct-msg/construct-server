@@ -388,9 +388,15 @@ impl MessageEnvelope {
     /// `encrypted_payload` is left empty on purpose: egress already zeros it for
     /// sealed messages, and duplicating `sealed_inner` only bloated Redis.
     /// See construct-docs `backend/SEALED_INNER_BINARY_STORAGE_SPEC.md`.
+    ///
+    /// `recipient_device` comes from `SealedInner.recipient_device`, which the caller has
+    /// already decoded to read `recipient_user_id`. Passing it separately rather than
+    /// re-decoding here keeps this constructor's contract — "the routing fields, plus the
+    /// opaque blob" — and keeps the decode in the one place that is allowed to do it.
     pub fn from_sealed_sender(
         message_id: String,
         recipient_id: String,
+        recipient_device: Option<String>,
         sealed_inner: Vec<u8>,
     ) -> Self {
         let mut hasher = Sha256::new();
@@ -419,7 +425,7 @@ impl MessageEnvelope {
             sealed_inner: Some(sealed_inner),
             max_queue_len: None,
             proto_content_type: None,
-            recipient_device: None,
+            recipient_device,
         }
     }
 
@@ -1093,6 +1099,7 @@ mod tests {
         let env = MessageEnvelope::from_sealed_sender(
             "mid-bin".to_string(),
             "bob".to_string(),
+            None,
             b"\x00\xffsealed-bytes".to_vec(),
         );
         let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
@@ -1268,9 +1275,71 @@ mod tests {
         let env = MessageEnvelope::from_sealed_sender(
             "msg-s".to_string(),
             "bob".to_string(),
+            None,
             b"sealed-inner-bytes".to_vec(),
         );
         assert!(env.validate().is_ok());
+    }
+
+    #[test]
+    fn sealed_envelope_carries_the_device_it_was_encrypted_for() {
+        let env = MessageEnvelope::from_sealed_sender(
+            "mid-dev".to_string(),
+            "recipient-uuid".to_string(),
+            Some("6f5e37ac9b1d4e2f8a0c3b5d7e9f1a2b".to_string()),
+            b"opaque".to_vec(),
+        );
+        assert_eq!(
+            env.recipient_device.as_deref(),
+            Some("6f5e37ac9b1d4e2f8a0c3b5d7e9f1a2b")
+        );
+    }
+
+    #[test]
+    fn sealed_device_survives_the_msgpack_round_trip() {
+        // The envelope is serialized into the Redis mailbox between dispatch and delivery.
+        // A field that is set on the way in and gone on the way out routes to every device
+        // while every log line says it was targeted.
+        let env = MessageEnvelope::from_sealed_sender(
+            "mid-rt".to_string(),
+            "bob".to_string(),
+            Some("dev-abc".to_string()),
+            b"opaque".to_vec(),
+        );
+        let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
+        let back: MessageEnvelope = rmp_serde::from_slice(&bytes).expect("from_slice");
+        assert_eq!(back.recipient_device.as_deref(), Some("dev-abc"));
+    }
+
+    #[test]
+    fn an_envelope_written_before_this_field_existed_still_deserializes() {
+        // Mailbox entries outlive a deploy: a queued envelope was serialized by the previous
+        // version, which had no such key at all. `skip_serializing_if` means an envelope with
+        // no device named produces exactly those bytes, so this *is* the legacy shape.
+        //
+        // What actually carries the read-back is serde's own handling of `Option`, not the
+        // `#[serde(default)]` on the field: a mutation removing `default` left this test green.
+        // The attribute is kept for consistency with its neighbours, but nothing here proves it
+        // is load-bearing, and a comment claiming otherwise would be the kind of reassurance
+        // this repository keeps paying for. Removing `skip_serializing_if` *does* redden the
+        // precondition below, which is the half this test really pins.
+        let env = MessageEnvelope::from_sealed_sender(
+            "mid-old".to_string(),
+            "bob".to_string(),
+            None,
+            b"opaque".to_vec(),
+        );
+        let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
+        assert!(
+            !bytes
+                .windows(b"recipientDevice".len())
+                .any(|w| w == b"recipientDevice"),
+            "precondition: an unnamed device must not write the key at all, \
+             otherwise this test is not exercising the legacy shape"
+        );
+        let back: MessageEnvelope =
+            rmp_serde::from_slice(&bytes).expect("legacy entry must decode");
+        assert_eq!(back.recipient_device, None);
     }
 
     /// U1 — sealed envelope must never carry a server-visible sender id.
@@ -1279,6 +1348,7 @@ mod tests {
         let env = MessageEnvelope::from_sealed_sender(
             "mid-1".to_string(),
             "recipient-uuid".to_string(),
+            None,
             b"opaque-sealed-inner".to_vec(),
         );
         assert!(

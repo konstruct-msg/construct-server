@@ -443,6 +443,29 @@ message SealedInner {
   // Server-visible anti-abuse metadata only; not identity.
   bytes token_spend_id = 18;
 
+  // The recipient DEVICE this envelope is encrypted for (32-char hex
+  // CryptoDeviceId), or empty for "every active device of recipient_user_id".
+  //
+  // Routing only, in the same server-allowed set as recipient_user_id. The
+  // destination server must already read the recipient to deliver at all; this
+  // narrows that recipient from an account to one of its devices, and tells the
+  // server nothing it does not already hold: it stores the account's device
+  // list, it already sees which device reads which mailbox (the mailbox is
+  // selected by the device_id in the caller's token), and the sender's view of
+  // the device set came from this server's own GetPreKeyBundles answer.
+  //
+  // WHY THIS FIELD EXISTS: a sealed message is encrypted in a Double Ratchet
+  // session with ONE device, but without this field it is written to every
+  // mailbox of the account, so the recipient's other devices each receive a
+  // ciphertext they cannot decrypt and a certificate they cannot unseal. The
+  // outer Envelope.recipient_device (field 4) cannot serve here — the sealed
+  // path never builds an outer envelope, it builds this message.
+  //
+  // THERE IS NO SENDER-SIDE COUNTERPART AND THERE MUST NOT BE. A sealed
+  // envelope naming the sending device would undo sealing entirely. The server
+  // blanks Envelope.sender_device on delivery for the same reason.
+  string recipient_device = 19;
+
   // Reserved for future sealed fields
   reserved 8 to 15;
 }
