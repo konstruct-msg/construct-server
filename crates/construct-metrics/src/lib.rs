@@ -437,6 +437,28 @@ pub static MSG_MAILBOX_WRITE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_MAILBOX_WRITE_TOTAL metric")
 });
 
+/// How `dispatch_envelope` chose the mailboxes for one envelope.
+///
+/// Label `routing`:
+/// - `named` — the envelope named a device, and that device is active for the
+///   recipient; one device stream written instead of all of them.
+/// - `unnamed` — no device named; every active device written, as before.
+/// - `unknown_device` — a device was named and it is **not** in the recipient's
+///   active set, so the write fell back to every device rather than dropping the
+///   message. This is the sender's device view disagreeing with the server's, and
+///   it is the number that says whether a device-set mismatch has to be answered
+///   to the sender rather than absorbed here.
+pub static MSG_DELIVERY_ROUTING_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_delivery_routing_total",
+            "Envelope deliveries by how the target device set was chosen"
+        ),
+        &["routing"]
+    )
+    .expect("Failed to register MSG_DELIVERY_ROUTING_TOTAL metric")
+});
+
 // ============================================================================
 // Security / Key Transparency Metrics
 // ============================================================================
@@ -646,6 +668,13 @@ pub fn init_registry() {
     // trap this function exists for, one level down at the child.
     for ingress in ["sealed_rpc", "legacy_send_message"] {
         MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
+    }
+    // All three children up front, same reason as the two above: the label set is
+    // closed, and every question asked of this counter is a ratio. `unknown_device`
+    // in particular is expected to be zero for long stretches, and a zero that is
+    // absent instead of zero cannot be told from a counter nobody wired up.
+    for routing in ["named", "unnamed", "unknown_device"] {
+        MSG_DELIVERY_ROUTING_TOTAL.with_label_values(&[routing]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);

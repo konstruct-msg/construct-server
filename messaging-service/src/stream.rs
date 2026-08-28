@@ -295,6 +295,7 @@ pub(crate) async fn handle_stream_request(
                         message_id: message_id.clone(),
                         encrypted_payload: envelope.encrypted_payload.to_vec(),
                         content_type: envelope.content_type,
+                        recipient_device: core::named_recipient_device(envelope.recipient_device.as_ref()),
                     });
 
                 let app_context = Arc::new(context.to_app_context());

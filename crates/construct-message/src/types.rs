@@ -319,6 +319,26 @@ pub struct MessageEnvelope {
     /// falls back to inferring content_type from message_type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proto_content_type: Option<i32>,
+
+    // ===== Delivery Addressing =====
+    /// The one device this envelope is for, from `Envelope.recipient_device`.
+    ///
+    /// `None` means "every active device of `recipient_id`", which is what the
+    /// server did for every envelope before this field existed and still does
+    /// for every envelope that does not carry one. A sender that knows which
+    /// device it encrypted for says so here, and `dispatch_envelope` writes one
+    /// mailbox instead of all of them.
+    ///
+    /// **Every server-generated envelope leaves this `None` on purpose.**
+    /// Receipts, KEY_SYNC and federation ingress address a person, not a device:
+    /// the server has no session with anyone and cannot have encrypted for one
+    /// device rather than another. The `None`s in the constructors below are
+    /// that decision, not an oversight.
+    ///
+    /// Never delivered onward — `convert_envelope_to_proto` blanks it, like
+    /// `sender_device`. It is delivery addressing, not end-to-end meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_device: Option<String>,
 }
 
 impl MessageEnvelope {
@@ -355,6 +375,7 @@ impl MessageEnvelope {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -398,6 +419,7 @@ impl MessageEnvelope {
             sealed_inner: Some(sealed_inner),
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -437,6 +459,7 @@ impl MessageEnvelope {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -471,6 +494,7 @@ impl MessageEnvelope {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -595,6 +619,7 @@ impl MessageEnvelope {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 }
@@ -649,6 +674,7 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     sealed_inner: None,
                     max_queue_len: None,
                     proto_content_type: None,
+                    recipient_device: None,
                 }
             }
             ConstructMessageType::EndSession => {
@@ -680,6 +706,7 @@ impl From<&construct_types::ChatMessage> for MessageEnvelope {
                     sealed_inner: None,
                     max_queue_len: None,
                     proto_content_type: None,
+                    recipient_device: None,
                 }
             }
         }
@@ -710,6 +737,9 @@ pub struct ProtoEnvelopeContext {
     /// Proto ContentType value (from Envelope.content_type).
     /// Used to classify control messages (SESSION_RESET=21, KEY_SYNC=22).
     pub content_type: i32,
+    /// `Envelope.recipient_device`, when the sender named one. Routing only —
+    /// see `MessageEnvelope::recipient_device`.
+    pub recipient_device: Option<String>,
 }
 
 impl MessageEnvelope {
@@ -755,6 +785,7 @@ impl MessageEnvelope {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: Some(ctx.content_type),
+            recipient_device: ctx.recipient_device.clone(),
         }
     }
 }
@@ -893,6 +924,7 @@ mod tests {
             message_id: "msg-uuid".to_string(),
             encrypted_payload: fake_ciphertext.to_vec(),
             content_type: 0,
+            recipient_device: None,
         };
 
         let envelope = MessageEnvelope::from_proto_envelope(&ctx);
@@ -927,6 +959,7 @@ mod tests {
             message_id: "reset-init-1".to_string(),
             encrypted_payload: b"x3dh-init-payload".to_vec(),
             content_type: 24, // SESSION_RESET_INIT
+            recipient_device: None,
         };
 
         let env = MessageEnvelope::from_proto_envelope(&ctx);
@@ -969,6 +1002,7 @@ mod tests {
             message_id: "msg-rt".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 24,
+            recipient_device: None,
         };
         let env = MessageEnvelope::from_proto_envelope(&ctx);
 
@@ -1224,6 +1258,7 @@ mod tests {
             message_id: "msg-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
+            recipient_device: None,
         });
         assert!(env.validate().is_ok());
     }
@@ -1276,6 +1311,7 @@ mod tests {
             message_id: "mls-1".to_string(),
             encrypted_payload: b"mls-ciphertext".to_vec(),
             content_type: 0,
+            recipient_device: None,
         });
         env.message_type = MessageType::MLSMessage;
         env.mls_payload = None; // missing required field
@@ -1294,6 +1330,7 @@ mod tests {
             message_id: "fed-1".to_string(),
             encrypted_payload: b"payload".to_vec(),
             content_type: 0,
+            recipient_device: None,
         });
         env.message_type = MessageType::FederatedMessage;
         env.server_signature = Some("sig".to_string());

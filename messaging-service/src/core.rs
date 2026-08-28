@@ -7,8 +7,8 @@ use construct_context::AppContext;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
 use construct_metrics::{
-    MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, MSG_MAILBOX_WRITE_TOTAL,
-    MSG_PUSH_SKIPPED_ONLINE_TOTAL, record_abuse_fail_open,
+    MESSAGE_DELIVERY_TIME, MESSAGES_SENT_TOTAL, MSG_DELIVERY_ROUTING_TOTAL,
+    MSG_MAILBOX_WRITE_TOTAL, MSG_PUSH_SKIPPED_ONLINE_TOTAL, record_abuse_fail_open,
 };
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_utils::log_safe_id;
@@ -51,6 +51,52 @@ async fn fetch_recipient_device_ids(
     recipient_id: &str,
 ) -> Vec<String> {
     fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
+}
+
+/// The device a proto envelope names, or `None` when it names none.
+///
+/// An empty `device_id` is the same as no device: the field is `optional` on the
+/// wire and clients that fill it always fill it with something, so an empty
+/// string is a malformed sender, not a request to deliver nowhere.
+/// Takes the field rather than the envelope: by this point in `send_message` the
+/// envelope is partially moved, and a whole-struct borrow does not compile.
+pub(crate) fn named_recipient_device(
+    recipient_device: Option<&construct_server_shared::shared::proto::core::v1::DeviceId>,
+) -> Option<String> {
+    recipient_device
+        .map(|d| d.device_id.clone())
+        .filter(|d| !d.is_empty())
+}
+
+/// Which mailboxes an envelope is written to, and under which label.
+///
+/// The whole of §A's first step is this function. Before it, `recipient_device`
+/// had exactly one reader — the Sentinel block in `grpc.rs` — so a sender that
+/// had encrypted for one device was answered by a copy in every device's mailbox,
+/// and every *other* device then tried to decrypt ciphertext that was never for
+/// it. See `construct-docs/decisions/multidevice-gate-three-asymmetries.md`.
+///
+/// **An unknown device falls back to every device; it is never dropped.** A named
+/// device can be absent from the active set for reasons that are none of the
+/// sender's fault — the device was revoked or re-registered between the bundle
+/// fetch and the send, or the lookup itself failed and returned an empty list,
+/// which is indistinguishable here from an account with no devices. Dropping on
+/// that would be a silent loss of ciphertext decided by a stale cache, which is
+/// the failure this whole line of work exists to remove. The disagreement is
+/// counted instead, and that count is the evidence for whether the sender has to
+/// be *told* (the 409/410-shaped answer in §A.3) rather than quietly corrected.
+pub(crate) fn select_target_devices(
+    active_devices: &[String],
+    named_device: Option<&str>,
+) -> (Vec<String>, &'static str) {
+    let Some(named) = named_device.filter(|d| !d.is_empty()) else {
+        return (active_devices.to_vec(), "unnamed");
+    };
+    if active_devices.iter().any(|d| d == named) {
+        (vec![named.to_string()], "named")
+    } else {
+        (active_devices.to_vec(), "unknown_device")
+    }
 }
 
 /// Dispatch a pre-built MessageEnvelope to the recipient's Redis offline stream.
@@ -129,7 +175,19 @@ pub async fn dispatch_envelope(
     // drop(queue) before the blocking DB call to minimize lock contention.
     drop(queue);
 
-    let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
+    let active_devices = fetch_recipient_device_ids(app_context, recipient_id).await;
+    let (device_ids, routing) =
+        select_target_devices(&active_devices, envelope.recipient_device.as_deref());
+    MSG_DELIVERY_ROUTING_TOTAL
+        .with_label_values(&[routing])
+        .inc();
+    if routing == "unknown_device" {
+        tracing::warn!(
+            recipient_hash = %log_safe_id(recipient_id, salt),
+            active_devices = active_devices.len(),
+            "Envelope named a device that is not active for its recipient — delivering to all              devices rather than dropping it"
+        );
+    }
     let mut queue = app_context.queue.lock().await;
     let write_user = queue.mailbox_user_write_enabled();
     queue
@@ -323,7 +381,70 @@ pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{receipt_routing_hash, should_send_wake_push};
+    use super::{receipt_routing_hash, select_target_devices, should_send_wake_push};
+
+    fn devices(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unnamed_envelope_goes_to_every_active_device() {
+        let all = devices(&["dev-a", "dev-b", "dev-c"]);
+        let (targets, routing) = select_target_devices(&all, None);
+        assert_eq!(targets, all);
+        assert_eq!(routing, "unnamed");
+    }
+
+    #[test]
+    fn named_active_device_gets_the_only_copy() {
+        let all = devices(&["dev-a", "dev-b", "dev-c"]);
+        let (targets, routing) = select_target_devices(&all, Some("dev-b"));
+        assert_eq!(targets, devices(&["dev-b"]));
+        assert_eq!(routing, "named");
+    }
+
+    #[test]
+    fn empty_device_name_is_the_same_as_naming_none() {
+        // The field is optional on the wire; an empty string is a malformed sender,
+        // and reading it as "deliver nowhere" would drop the message.
+        let all = devices(&["dev-a", "dev-b"]);
+        let (targets, routing) = select_target_devices(&all, Some(""));
+        assert_eq!(targets, all);
+        assert_eq!(routing, "unnamed");
+    }
+
+    #[test]
+    fn unknown_device_falls_back_to_every_device_and_is_counted() {
+        // The named device was revoked or re-registered between the sender's bundle
+        // fetch and this send. Dropping here would be a silent loss of ciphertext
+        // decided by a stale cache — deliver to all, and record the disagreement.
+        let all = devices(&["dev-a", "dev-b"]);
+        let (targets, routing) = select_target_devices(&all, Some("dev-gone"));
+        assert_eq!(targets, all);
+        assert_eq!(routing, "unknown_device");
+    }
+
+    #[test]
+    fn a_named_device_never_shrinks_an_empty_active_set_into_a_delivery() {
+        // `fetch_recipient_device_ids` returns an empty vec both for a DB error and
+        // for a user with no devices, and the two are indistinguishable here. Neither
+        // may become "deliver to the device the sender named" on the sender's word:
+        // that would let a lookup failure invent a mailbox. Empty stays empty, and
+        // the "nowhere to land" check downstream decides what that means.
+        let (targets, routing) = select_target_devices(&[], Some("dev-a"));
+        assert!(targets.is_empty());
+        assert_eq!(routing, "unknown_device");
+    }
+
+    #[test]
+    fn naming_the_only_device_is_still_a_narrowing_not_a_no_op() {
+        // Single-device accounts are the common case and must take the `named` label,
+        // otherwise the ratio the counter exists for reads as "nobody targets anything".
+        let all = devices(&["dev-only"]);
+        let (targets, routing) = select_target_devices(&all, Some("dev-only"));
+        assert_eq!(targets, all);
+        assert_eq!(routing, "named");
+    }
 
     #[test]
     fn wake_push_skipped_when_recipient_online() {

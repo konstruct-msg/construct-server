@@ -437,6 +437,7 @@ mod tests {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -461,6 +462,7 @@ mod tests {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
@@ -485,6 +487,7 @@ mod tests {
             sealed_inner: Some(sealed_inner.to_vec()),
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 
