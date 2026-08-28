@@ -53,19 +53,33 @@ async fn fetch_recipient_device_ids(
     fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
 }
 
+/// Turn a wire device id into the internal `Option<String>`, in one place.
+///
+/// **An empty id is the same as no id.** Both wire spellings of "no device" —
+/// an absent `Envelope.recipient_device` message and a present-but-empty
+/// `SealedInner.recipient_device` string — become `None` here, so the internal
+/// envelope only ever holds "a device" or "no device". `Some("")` would be a
+/// third state that every later reader would have to know about, and the two
+/// sealed and unsealed ingress paths would each have had to invent the same
+/// rule; the second copy of one rule is where they stop agreeing.
+///
+/// Callers below this do not re-normalise. `select_target_devices` still guards
+/// its own input because it is a total function over whatever it is handed, but
+/// it is not where the decision is made.
+pub(crate) fn normalize_device_id(device_id: &str) -> Option<String> {
+    Some(device_id)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+}
+
 /// The device a proto envelope names, or `None` when it names none.
 ///
-/// An empty `device_id` is the same as no device: the field is `optional` on the
-/// wire and clients that fill it always fill it with something, so an empty
-/// string is a malformed sender, not a request to deliver nowhere.
 /// Takes the field rather than the envelope: by this point in `send_message` the
 /// envelope is partially moved, and a whole-struct borrow does not compile.
 pub(crate) fn named_recipient_device(
     recipient_device: Option<&construct_server_shared::shared::proto::core::v1::DeviceId>,
 ) -> Option<String> {
-    recipient_device
-        .map(|d| d.device_id.clone())
-        .filter(|d| !d.is_empty())
+    recipient_device.and_then(|d| normalize_device_id(&d.device_id))
 }
 
 /// Which mailboxes an envelope is written to, and under which label.
@@ -381,7 +395,25 @@ pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{receipt_routing_hash, select_target_devices, should_send_wake_push};
+    use super::{
+        normalize_device_id, receipt_routing_hash, select_target_devices, should_send_wake_push,
+    };
+
+    #[test]
+    fn an_empty_wire_device_id_is_no_device() {
+        // Both wire spellings of "no device" must land on the same internal value. If an
+        // empty string survived as Some(""), the envelope would carry a third state and
+        // every later reader would need to know about it.
+        assert_eq!(normalize_device_id(""), None);
+    }
+
+    #[test]
+    fn a_present_wire_device_id_is_carried_verbatim() {
+        assert_eq!(
+            normalize_device_id("6f5e37ac9b1d4e2f8a0c3b5d7e9f1a2b").as_deref(),
+            Some("6f5e37ac9b1d4e2f8a0c3b5d7e9f1a2b")
+        );
+    }
 
     fn devices(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|s| s.to_string()).collect()

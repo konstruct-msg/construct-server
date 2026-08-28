@@ -293,9 +293,17 @@ pub(crate) async fn dispatch_sealed_sender(
         }
     }
 
+    // The one device this envelope was encrypted for, when the sender named it.
+    // Empty means "every active device of the recipient", which is what every sealed
+    // envelope meant before the field existed — and why a second device in one account
+    // received ciphertext it could not decrypt and a certificate it could not unseal.
+    // Same normaliser as the unsealed ingress path — one rule, one place.
+    let recipient_device = core::normalize_device_id(&sealed_inner.recipient_device);
+
     let msg_envelope = MessageEnvelope::from_sealed_sender(
         message_id.clone(),
         recipient_id,
+        recipient_device,
         sealed.sealed_inner.to_vec(),
     );
 
