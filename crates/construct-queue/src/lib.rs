@@ -1052,6 +1052,7 @@ mod mailbox_merge_tests {
             sealed_inner: None,
             max_queue_len: None,
             proto_content_type: None,
+            recipient_device: None,
         }
     }
 

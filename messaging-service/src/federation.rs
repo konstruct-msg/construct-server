@@ -396,6 +396,7 @@ pub(crate) async fn handle_inbound_message(
         crypto_suite_id: 0,
         max_queue_len: None,
         proto_content_type: None,
+        recipient_device: None,
     };
 
     let app_context = Arc::new(context.to_app_context());

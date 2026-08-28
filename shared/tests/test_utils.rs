@@ -593,6 +593,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
             content_type: envelope.content_type,
+            recipient_device: None,
         });
         let app_context = self.context.clone();
         dispatch_envelope_for_test(&app_context, msg_envelope)

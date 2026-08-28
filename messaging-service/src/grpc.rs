@@ -666,6 +666,10 @@ impl MessagingService for MessagingGrpcService {
             message_id: message_id.clone(),
             encrypted_payload: envelope.encrypted_payload.to_vec(),
             content_type: envelope.content_type,
+            // Carried across the boundary rather than dropped: until now the only
+            // reader of this field was the Sentinel check above, so a sender that
+            // named a device was answered by a write to every device of the account.
+            recipient_device: core::named_recipient_device(envelope.recipient_device.as_ref()),
         });
         msg_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
 
