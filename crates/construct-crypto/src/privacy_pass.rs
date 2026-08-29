@@ -16,8 +16,8 @@
 //! `ephemeral_pub(32) ‖ nonce(12) ‖ ciphertext ‖ tag(16)`.
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
 };
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT,
@@ -68,7 +68,7 @@ impl std::error::Error for PrivacyPassError {}
 /// Returns `None` if `seed_b64` is not valid base64 or does not decode to exactly
 /// 32 bytes (matches the federation signer's invariant).
 pub fn derive_token_enc_static_secret(seed_b64: &str) -> Option<X25519StaticSecret> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let seed_bytes = STANDARD.decode(seed_b64.trim()).ok()?;
     // Require a full 32-byte seed. HKDF will happily expand an empty or short IKM into
@@ -90,7 +90,7 @@ pub fn derive_token_enc_static_secret(seed_b64: &str) -> Option<X25519StaticSecr
 ///
 /// Returns `None` if `seed_b64` is not valid base64.
 pub fn derive_token_enc_public_key_base64(seed_b64: &str) -> Option<String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let static_secret = derive_token_enc_static_secret(seed_b64)?;
     let public_key = X25519PublicKey::from(&static_secret);
@@ -130,10 +130,10 @@ pub fn open_sealed_token_bytes(
     hk.expand(TOKEN_SEAL_INFO, &mut sym_key)
         .map_err(|_| PrivacyPassError::DecryptFailed)?;
 
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(&Key::from(sym_key));
+    let nonce = Nonce::try_from(nonce_bytes).map_err(|_| PrivacyPassError::DecryptFailed)?;
     cipher
-        .decrypt(nonce, ciphertext_and_tag)
+        .decrypt(&nonce, ciphertext_and_tag)
         .map_err(|_| PrivacyPassError::DecryptFailed)
 }
 
@@ -417,7 +417,7 @@ mod tests {
     /// interpolation) silently masquerades as a working token_encryption_key.
     #[test]
     fn token_enc_derivation_rejects_empty_and_short_seed() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         assert!(derive_token_enc_static_secret("").is_none(), "empty seed");
         // 16 bytes base64-encoded — decodes fine but is too short.
         let short = STANDARD.encode([0u8; 16]);
@@ -480,11 +480,11 @@ mod tests {
         let mut sym_key = [0u8; 32];
         hk.expand(TOKEN_SEAL_INFO, &mut sym_key).unwrap();
 
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+        let cipher = ChaCha20Poly1305::new(&Key::from(sym_key));
         let nonce_bytes = random_bytes32();
-        let nonce = Nonce::from_slice(&nonce_bytes[..12]);
+        let nonce = Nonce::try_from(&nonce_bytes[..12]).unwrap();
         let plaintext = b"a 32 byte finalized token value";
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_slice()).unwrap();
+        let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).unwrap();
 
         let mut sealed = Vec::new();
         sealed.extend_from_slice(ephemeral_pub.as_bytes());
@@ -518,10 +518,10 @@ mod tests {
         let mut sym_key = [0u8; 32];
         hk.expand(TOKEN_SEAL_INFO, &mut sym_key).unwrap();
 
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+        let cipher = ChaCha20Poly1305::new(&Key::from(sym_key));
         let nonce_bytes = random_bytes32();
-        let nonce = Nonce::from_slice(&nonce_bytes[..12]);
-        let ciphertext = cipher.encrypt(nonce, b"secret".as_slice()).unwrap();
+        let nonce = Nonce::try_from(&nonce_bytes[..12]).unwrap();
+        let ciphertext = cipher.encrypt(&nonce, b"secret".as_slice()).unwrap();
 
         let mut sealed = Vec::new();
         sealed.extend_from_slice(ephemeral_pub.as_bytes());
