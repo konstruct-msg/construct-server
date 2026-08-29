@@ -68,8 +68,12 @@ impl TrustLevel {
         }
     }
 
-    /// MAXLEN applied to the recipient's offline queue when this sender writes.
-    /// New senders get a smaller queue cap to prevent queue-flooding attacks.
+    /// Historical per-sender mailbox cap. Must **not** drive Redis `XADD MAXLEN`:
+    /// that trims the recipient's whole inbox, not this sender's entries.
+    /// New-account volume is `hourly_limit_*`. Mailbox retention is
+    /// `queue_maxlen_standard` for every writer. Kept for tests until Wave 4
+    /// drops `MSG_QUEUE_MAXLEN_NEW`.
+    #[allow(dead_code)]
     pub fn queue_maxlen(self, config: &MessagingConfig) -> i64 {
         match self {
             Self::New => config.queue_maxlen_new,

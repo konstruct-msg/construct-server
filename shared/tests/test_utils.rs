@@ -1196,37 +1196,35 @@ async fn dispatch_envelope_for_test(
                 tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
                 return Ok(());
             }
-            Ok(false) => {
-                let _ = queue.mark_message_dispatched(message_id).await;
-            }
+            Ok(false) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
-            }
-        }
-
-        if let (Ok(sender_uuid), Ok(recipient_uuid)) =
-            (Uuid::parse_str(sender_id), Uuid::parse_str(recipient_id))
-        {
-            match construct_db::is_blocked_by(&app_context.db_pool, &recipient_uuid, &sender_uuid)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(
-                        sender_hash = %log_safe_id(sender_id, salt),
-                        recipient_hash = %log_safe_id(recipient_id, salt),
-                        "Message silently dropped — sender is blocked by recipient"
-                    );
-                    return Ok(());
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to check user_blocks — proceeding with delivery");
-                }
             }
         }
     }
 
     drop(queue);
+
+    if is_user_message
+        && let (Ok(sender_uuid), Ok(recipient_uuid)) =
+            (Uuid::parse_str(sender_id), Uuid::parse_str(recipient_id))
+    {
+        match construct_db::is_blocked_by(&app_context.db_pool, &recipient_uuid, &sender_uuid).await
+        {
+            Ok(true) => {
+                tracing::debug!(
+                    sender_hash = %log_safe_id(sender_id, salt),
+                    recipient_hash = %log_safe_id(recipient_id, salt),
+                    "Message silently dropped — sender is blocked by recipient"
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to check user_blocks — proceeding with delivery");
+            }
+        }
+    }
 
     let device_ids = fetch_recipient_device_ids(app_context, recipient_id).await;
     let mut queue = app_context.queue.lock().await;
@@ -1234,6 +1232,13 @@ async fn dispatch_envelope_for_test(
         .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+    if is_user_message && let Err(e) = queue.mark_message_dispatched(message_id).await {
+        tracing::warn!(
+            error = %e,
+            message_id = %message_id,
+            "Failed to mark message dispatched after mailbox write — retry may duplicate"
+        );
+    }
 
     if !sender_id.is_empty()
         && let Err(e) = queue.store_message_sender(message_id, sender_id).await
