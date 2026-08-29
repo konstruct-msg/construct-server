@@ -21,6 +21,7 @@ So a green dashboard proves nothing, and this script exists to prove the rest.
 Run `--live` on the server, or through the SSH tunnel described in construct-docs
 manuals&instructions/Grafana_Prometheus_Access.md.
 """
+
 from __future__ import annotations
 
 import argparse
