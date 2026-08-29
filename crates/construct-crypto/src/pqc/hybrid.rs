@@ -21,8 +21,8 @@ use super::types::key_sizes;
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use ml_dsa::{
-    EncodedSignature, EncodedVerifyingKey, MlDsa65, Signature as MlDsaSignature,
-    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey, B32,
+    B32, EncodedSignature, EncodedVerifyingKey, MlDsa65, Signature as MlDsaSignature,
+    SigningKey as MlDsaSigningKey, VerifyingKey as MlDsaVerifyingKey,
 };
 // Trait methods only — aliased `as _` so they don't clash with the
 // ed25519-dalek Signer/Verifier/Keypair names imported above.

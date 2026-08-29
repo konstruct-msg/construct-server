@@ -1,5 +1,5 @@
 use hex;
-use hmac::{digest::KeyInit, Hmac, Mac};
+use hmac::{Hmac, Mac, digest::KeyInit};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
