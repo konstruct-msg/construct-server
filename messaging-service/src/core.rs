@@ -136,58 +136,51 @@ pub async fn dispatch_envelope(
         MessageType::DirectMessage | MessageType::MLSMessage | MessageType::SenderSync
     );
 
-    // All Redis operations are batched inside ONE lock acquisition to avoid
-    // releasing and re-acquiring the mutex between the dedup check, the
-    // stream write, and the receipt-sender mapping.
-    let t_lock = std::time::Instant::now();
-    let mut queue = app_context.queue.lock().await;
-    tracing::debug!(
-        wait_ms = t_lock.elapsed().as_millis(),
-        "queue lock acquired (dispatch)"
-    );
-
+    // Dedup EXISTS is a fast path only. The SETEX that makes a retry a no-op
+    // happens *after* the mailbox XADD — marking first turned a write failure
+    // into an idempotent success (ACK without a stream entry).
     if is_user_message {
+        let t_lock = std::time::Instant::now();
+        let mut queue = app_context.queue.lock().await;
+        tracing::debug!(
+            wait_ms = t_lock.elapsed().as_millis(),
+            "queue lock acquired (dedup)"
+        );
         match queue.is_message_duplicate(message_id).await {
             Ok(true) => {
                 tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
                 return Ok(());
             }
-            Ok(false) => {
-                let _ = queue.mark_message_dispatched(message_id).await;
-            }
+            Ok(false) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to check dedup key — proceeding anyway");
                 record_abuse_fail_open("dispatch_dedup");
             }
         }
+        drop(queue);
+    }
 
-        // Block enforcement: silently drop if recipient has blocked sender.
-        // Returns Ok(()) to avoid leaking block status to the sender.
-        if let (Ok(sender_uuid), Ok(recipient_uuid)) =
+    // Block check is Postgres — do not hold the Redis queue Mutex across it.
+    if is_user_message
+        && let (Ok(sender_uuid), Ok(recipient_uuid)) =
             (Uuid::parse_str(sender_id), Uuid::parse_str(recipient_id))
+    {
+        match construct_db::is_blocked_by(&app_context.db_pool, &recipient_uuid, &sender_uuid).await
         {
-            match construct_db::is_blocked_by(&app_context.db_pool, &recipient_uuid, &sender_uuid)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(
-                        sender_hash = %log_safe_id(sender_id, salt),
-                        recipient_hash = %log_safe_id(recipient_id, salt),
-                        "Message silently dropped — sender is blocked by recipient"
-                    );
-                    return Ok(());
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to check user_blocks — proceeding with delivery");
-                }
+            Ok(true) => {
+                tracing::debug!(
+                    sender_hash = %log_safe_id(sender_id, salt),
+                    recipient_hash = %log_safe_id(recipient_id, salt),
+                    "Message silently dropped — sender is blocked by recipient"
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to check user_blocks — proceeding with delivery");
             }
         }
     }
-
-    // Fan-out to per-device streams (multi-device support) + legacy user stream.
-    // drop(queue) before the blocking DB call to minimize lock contention.
-    drop(queue);
 
     let active_devices = fetch_recipient_device_ids(app_context, recipient_id).await;
     let (device_ids, routing) =
@@ -202,12 +195,26 @@ pub async fn dispatch_envelope(
             "Envelope named a device that is not active for its recipient — delivering to all              devices rather than dropping it"
         );
     }
+    let t_lock = std::time::Instant::now();
     let mut queue = app_context.queue.lock().await;
     let write_user = queue.mailbox_user_write_enabled();
     queue
         .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
+    if is_user_message {
+        // Commit the idempotency key only after the stream entry exists. A
+        // SETEX failure here can double-deliver on retry — better than
+        // ACK-without-write. Log and proceed: the mailbox is the source of
+        // truth.
+        if let Err(e) = queue.mark_message_dispatched(message_id).await {
+            tracing::warn!(
+                error = %e,
+                message_id = %message_id,
+                "Failed to mark message dispatched after mailbox write — retry may duplicate"
+            );
+        }
+    }
     if write_user {
         MSG_MAILBOX_WRITE_TOTAL.with_label_values(&["user"]).inc();
     }

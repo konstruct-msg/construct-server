@@ -119,6 +119,27 @@ async fn claim_federation_message_id(
     Ok(result.is_some())
 }
 
+/// Drop a federation claim after dispatch failed so the origin's retry is
+/// not an idempotent "duplicate" with nothing in the mailbox.
+async fn release_federation_message_id(
+    context: &MessagingServiceContext,
+    origin_server: &str,
+    message_id: &str,
+) {
+    let key = format!("fed:msg:{origin_server}:{message_id}");
+    let mut conn = context.redis_conn.clone();
+    let result: std::result::Result<i64, _> =
+        redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
+    if let Err(e) = result {
+        tracing::error!(
+            error = %e,
+            message_id = %message_id,
+            origin = %origin_server,
+            "federation claim release after dispatch failure failed — retry may no-op"
+        );
+    }
+}
+
 /// Check per-origin sliding window rate limit.
 /// Returns `Ok(())` if allowed, `Err(429)` if exceeded.
 async fn check_origin_rate_limit(
@@ -276,6 +297,7 @@ pub(crate) async fn handle_inbound_sealed(
                 origin = %req.origin_server,
                 "Inbound sealed sender dispatch failed"
             );
+            release_federation_message_id(&context, &req.origin_server, &req.message_id).await;
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("delivery failed: {}", e)})),
@@ -429,6 +451,7 @@ pub(crate) async fn handle_inbound_message(
                 message_id = %req.message_id,
                 "Inbound federated message dispatch failed"
             );
+            release_federation_message_id(&context, &req.origin_server, &req.message_id).await;
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("delivery failed: {}", e)})),

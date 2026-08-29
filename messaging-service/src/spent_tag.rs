@@ -98,6 +98,26 @@ return 0
     })
 }
 
+/// Undo `check_and_mark_delivery_tag` after a mailbox write failed.
+///
+/// The check-and-mark Lua SETEXs *before* XADD so a replay during the write
+/// window is still rejected. If dispatch then fails, the keys must go, or the
+/// client's retry is an idempotent success with nothing in the stream.
+pub async fn unmark_delivery_tag(
+    conn: &mut redis::aio::ConnectionManager,
+    delivery_tag: &[u8],
+) -> anyhow::Result<()> {
+    let tag_hex = hex::encode(Sha256::digest(delivery_tag));
+    let exact_key = format!("sealed:exact:{}", tag_hex);
+    let seen_key = format!("sealed:seen:{}", tag_hex);
+    let _: i64 = redis::cmd("DEL")
+        .arg(&exact_key)
+        .arg(&seen_key)
+        .query_async(conn)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

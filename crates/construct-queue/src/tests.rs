@@ -676,3 +676,48 @@ async fn mailbox_cutover_delivers_through_device_streams_only() {
 
     clear_mailbox(&mut queue, user, &[device]).await;
 }
+
+/// Sender-supplied `max_queue_len` (historically TrustLevel::New = 100) must not
+/// trim the recipient's mailbox. Redis MAXLEN is whole-stream retention.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_xadd_ignores_sender_envelope_maxlen() {
+    let user = "test_mailbox_maxlen_user";
+    let device = "test_mailbox_maxlen_dev";
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+
+    let devices = vec![device.to_string()];
+    for _ in 0..5 {
+        let env =
+            construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+        queue
+            .write_message_to_device_streams(user, &devices, &env)
+            .await
+            .expect("fill");
+    }
+
+    let mut tiny =
+        construct_message::types::MessageEnvelope::new_key_sync("mallory".into(), user.into());
+    tiny.max_queue_len = Some(1);
+    queue
+        .write_message_to_device_streams(user, &devices, &tiny)
+        .await
+        .expect("write with attacker maxlen");
+
+    let device_key = format!(
+        "{}:offline:{}:{}",
+        queue.delivery_queue_prefix, user, device
+    );
+    let user_key = format!("{}:offline:{}", queue.delivery_queue_prefix, user);
+    assert!(
+        stream_len(&mut queue, &device_key).await >= 6,
+        "sender MAXLEN=1 must not trim the recipient device stream"
+    );
+    assert!(
+        stream_len(&mut queue, &user_key).await >= 6,
+        "sender MAXLEN=1 must not trim the recipient user stream"
+    );
+
+    clear_mailbox(&mut queue, user, &[device]).await;
+}
