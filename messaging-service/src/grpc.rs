@@ -10,6 +10,7 @@ use tonic::{Request, Response, Status};
 use crate::context::MessagingServiceContext;
 use crate::core;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
+use crate::sealed_ip::{SealedIpDecision, check_sealed_ip_limit, extract_client_ip};
 use crate::stream::{
     SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request,
     is_valid_redis_stream_cursor, poll_messages, spawn_inbox_wakeup,
@@ -77,6 +78,10 @@ impl MessagingService for MessagingGrpcService {
                 Some((uid, did)) => (Some(uid), did),
                 None => (None, None),
             };
+        // Capture once at accept. Sealed frames on this stream share the window
+        // with SendSealedMessage (`sealed_ip:{ip}`); rotating X-Forwarded-For
+        // mid-stream is impossible without a new RPC.
+        let client_ip = extract_client_ip(request.metadata());
 
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
@@ -192,6 +197,7 @@ impl MessagingService for MessagingGrpcService {
                                     device_id.as_deref(),
                                     &mut stream_queue,
                                     &mut catchup,
+                                    &client_ip,
                                 ).await {
                                     tracing::warn!(error = %e, "Error handling stream request");
                                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
@@ -711,27 +717,10 @@ impl MessagingService for MessagingGrpcService {
         request: Request<proto::SendSealedMessageRequest>,
     ) -> Result<Response<proto::SendMessageResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
-        let mut conn = self.context.redis_conn.clone();
-        match construct_rate_limit::sliding_window_check_and_record(
-            &mut conn,
-            &format!("sealed_ip:{client_ip}"),
-            self.context.config.messaging.sealed_ip_rate_limit_per_min,
-            60,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(Status::resource_exhausted(
-                    "sealed-sender rate limit exceeded for this IP",
-                ));
-            }
-            Err(e) => {
-                // Fail-open: Redis unavailable shouldn't block delivery — consistent
-                // with this service's other Redis fail-open paths (delivery-tag cache).
-                tracing::error!(error = %e, "sealed_ip rate limit check unavailable — proceeding");
-                construct_metrics::record_abuse_fail_open("sealed_ip");
-            }
+        if check_sealed_ip_limit(&self.context, &client_ip).await == SealedIpDecision::Limited {
+            return Err(Status::resource_exhausted(
+                "sealed-sender rate limit exceeded for this IP",
+            ));
         }
 
         let req = request.into_inner();
@@ -843,6 +832,7 @@ impl MessagingService for MessagingGrpcService {
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };
         let stream_messages = page.entries;
+        let raw_page_len = stream_messages.len();
         construct_metrics::MSG_MAILBOX_READ_TOTAL
             .with_label_values(&["pending", mode])
             .inc();
@@ -922,7 +912,10 @@ impl MessagingService for MessagingGrpcService {
 
         let next_cursor = last_stream_id.unwrap_or_else(|| since.unwrap_or("0-0").to_string());
 
-        let has_more = messages.len() == limit;
+        // Receipts are dropped above. has_more must follow the *Redis page*,
+        // not the filtered vec: a full page of mixed receipts + chat used to
+        // report has_more=false and stall offline catch-up.
+        let has_more = mailbox_page_has_more(raw_page_len, limit);
 
         Ok(Response::new(proto::GetPendingMessagesResponse {
             messages,
@@ -977,6 +970,15 @@ impl MessagingService for MessagingGrpcService {
 // Pure helpers
 // ============================================================================
 
+/// Whether another GetPendingMessages page may exist.
+///
+/// Uses the Redis page length, not the filtered chat-message count. Receipts
+/// are dropped from the response but still occupy stream entries; comparing
+/// against the filtered vec stalled catch-up when a full page was mixed.
+pub(crate) fn mailbox_page_has_more(raw_page_len: usize, limit: usize) -> bool {
+    raw_page_len == limit
+}
+
 /// Validates that `payload` is non-empty and within the 64 KiB size limit.
 pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() {
@@ -996,30 +998,6 @@ pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
 // ============================================================================
 // Auth Helpers
 // ============================================================================
-
-/// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
-/// Caddy's `reverse_proxy`). Used only for the unauthenticated `SendSealedMessage`
-/// rate limit.
-///
-/// SECURITY: take the **rightmost** `X-Forwarded-For` entry, not the leftmost.
-/// Caddy *appends* the real connecting peer after any client-supplied values, so
-/// the leftmost hop is attacker-controlled and can rotate to dodge rate limits.
-/// Matches `key-service` bundle rate-limit IP extraction.
-fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> String {
-    if let Some(forwarded) = metadata
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        let ip = forwarded.split(',').next_back().unwrap_or("").trim();
-        if !ip.is_empty() {
-            return ip.to_string();
-        }
-    }
-    if let Some(real_ip) = metadata.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        return real_ip.trim().to_string();
-    }
-    "unknown".to_string()
-}
 
 fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Result<(), Status> {
     if authed_user_id.is_some() {
@@ -1153,6 +1131,14 @@ mod tests {
     fn test_legacy_sealed_sender_accepts_authenticated_user() {
         require_legacy_sealed_sender_auth(Some(uuid::Uuid::new_v4()))
             .expect("authenticated legacy sealed sender must be allowed");
+    }
+
+    #[test]
+    fn pending_has_more_follows_redis_page_not_filtered_len() {
+        // Full Redis page, even if every entry is later dropped as a receipt.
+        assert!(mailbox_page_has_more(50, 50));
+        assert!(!mailbox_page_has_more(10, 50));
+        assert!(!mailbox_page_has_more(0, 50));
     }
 }
 
