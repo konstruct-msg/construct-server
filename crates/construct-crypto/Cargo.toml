@@ -1,7 +1,7 @@
 [package]
 name = "construct-crypto"
 version = "0.6.0"
-edition = "2021"
+edition.workspace = true
 authors = ["Construct Server Team"]
 description = "Cryptographic primitives for Construct secure messaging server"
 license = "AGPL-3.0-only"
@@ -22,7 +22,10 @@ post-quantum = [
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
+# 0.10.0/0.10.1 are yanked (`cargo audit --deny warnings`). chacha20poly1305 0.11
+# still declares `chacha20 = "0.10"`, so pin the patched release explicitly.
+chacha20 = "0.10.2"
 sha2 = "0.11"
 # curve25519-dalek's `RistrettoPoint::from_hash` needs `digest` 0.10's `Digest` trait,
 # which sha2 0.11 (used elsewhere in this crate) no longer implements. Pin a second,

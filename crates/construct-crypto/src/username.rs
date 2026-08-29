@@ -14,7 +14,7 @@
 //! Input is trimmed and lowercased before hashing so that `Alice`, `alice`, and
 //! ` alice ` all map to the same hash.
 
-use hmac::{digest::KeyInit, Hmac, Mac};
+use hmac::{Hmac, Mac, digest::KeyInit};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
