@@ -1149,7 +1149,7 @@ pub async fn send_test_message(
         .expect("Failed to parse send response")
 }
 
-// ── Dispatch helpers (inlined from messaging_service/core.rs to avoid duplicate module) ──
+// ── Dispatch helpers for integration tests (not a twin of messaging-service/src/core.rs) ──
 
 async fn fetch_recipient_device_ids(
     app_context: &Arc<AppContext>,

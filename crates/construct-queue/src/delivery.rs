@@ -249,10 +249,9 @@ impl<'a> DeliveryManager<'a> {
         Ok(false)
     }
 
-    /// Publishes a notification that a user has come online
-    /// This triggers the Delivery Worker to process offline messages
-    /// Phase 5: Track which server instance a user is connected to
-    /// This allows delivery-worker to route messages directly to the correct server
+    /// Record which messaging instance owns this user's live MessageStream.
+    /// Read back via `GET user:{user}:server_instance_id` (wake-push skip, not
+    /// a delivery-worker hop — that worker is gone).
     pub(crate) async fn track_user_online(
         &mut self,
         user_id: &str,
@@ -336,8 +335,7 @@ impl<'a> DeliveryManager<'a> {
         Ok(())
     }
 
-    /// Polls the delivery queue for this server instance
-    /// Returns a list of message payloads (as bytes) that should be delivered
+    /// Leftover delivery-worker drain of `delivery_queue:{instance}`. Tests only.
     pub(crate) async fn poll_delivery_queue(
         &mut self,
         server_instance_id: &str,
@@ -376,9 +374,9 @@ impl<'a> DeliveryManager<'a> {
         Ok(filtered_messages)
     }
 
-    /// Register this server instance in Redis
-    /// Creates a delivery queue key with TTL to signal that this server is active
-    /// delivery-worker uses KEYS delivery_queue:* to discover active servers
+    /// Leftover delivery-worker instance list key. Tests only.
+    /// Production must not KEYS `delivery_queue:*` — routing is
+    /// `GET user:{user}:server_instance_id`.
     pub(crate) async fn register_server_instance(
         &mut self,
         queue_key: &str,
@@ -445,7 +443,7 @@ impl<'a> DeliveryManager<'a> {
     ) -> Result<String> {
         let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
 
-        // Serialize envelope to MessagePack (must match delivery-worker: to_vec_named).
+        // Serialize envelope to MessagePack (must match the XREAD path: to_vec_named).
         // rmp_serde::to_vec uses a legacy serializer that from_slice cannot read back
         // ("wrong msgpack marker Str8") — messages would be written but never delivered.
         let payload = rmp_serde::encode::to_vec_named(envelope)
