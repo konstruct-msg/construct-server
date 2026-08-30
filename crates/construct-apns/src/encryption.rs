@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
-    aead::{Aead, KeyInit, OsRng},
+    ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
 };
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,8 +41,7 @@ const MIN_ENCRYPTED_SIZE: usize = VERSION_SIZE + NONCE_SIZE + 16; // version + n
 impl DeviceTokenEncryption {
     /// Create new encryption instance from single key (backward compatibility)
     pub fn new(key: &[u8; 32]) -> Result<Self> {
-        let cipher = ChaCha20Poly1305::new_from_slice(key)
-            .map_err(|e| anyhow::anyhow!("Failed to create cipher from key: {}", e))?;
+        let cipher = ChaCha20Poly1305::new(&Key::from(*key));
         let encryption_key = Arc::new(EncryptionKey { version: 1, cipher });
 
         let mut keys = HashMap::new();
@@ -117,9 +115,7 @@ impl DeviceTokenEncryption {
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("Key version {} must be exactly 32 bytes", version))?;
 
-            let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| {
-                anyhow::anyhow!("Failed to create cipher for key version {}: {}", version, e)
-            })?;
+            let cipher = ChaCha20Poly1305::new(&Key::from(key));
             encryption_keys.insert(version, Arc::new(EncryptionKey { version, cipher }));
         }
 
@@ -150,15 +146,13 @@ impl DeviceTokenEncryption {
             )
         })?;
 
-        // Generate random nonce
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce_bytes: [u8; NONCE_SIZE] = rand::random();
+        let nonce = Nonce::from(nonce_bytes);
 
         // Encrypt using current key
         let ciphertext = encryption_key
             .cipher
-            .encrypt(nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         // Format: version (1 byte) || nonce (12 bytes) || ciphertext || tag (16 bytes)
@@ -190,7 +184,8 @@ impl DeviceTokenEncryption {
 
         // Extract nonce and ciphertext
         let (nonce_bytes, ciphertext) = encrypted_data.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| anyhow::anyhow!("Encrypted data has an invalid nonce"))?;
 
         // Get encryption key for this version
         let encryption_key = self.keys.get(&version).ok_or_else(|| {
@@ -204,7 +199,7 @@ impl DeviceTokenEncryption {
         // Decrypt using version-specific key
         let plaintext = encryption_key
             .cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|e| anyhow::anyhow!("Decryption failed for version {}: {}", version, e))?;
 
         String::from_utf8(plaintext).context("Decrypted data is not valid UTF-8")

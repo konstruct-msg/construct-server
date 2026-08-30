@@ -10,10 +10,10 @@ mod suites;
 pub use capabilities::UserCapabilities;
 pub use error::{CryptoAgilityError, Result};
 pub use invites::{
-    InviteToken, InviteTokenRecord, InviteValidationError, INVITE_BURN_RETENTION_SECONDS,
-    INVITE_TTL_MIN_SECONDS, INVITE_TTL_SECONDS,
+    INVITE_BURN_RETENTION_SECONDS, INVITE_TTL_MIN_SECONDS, INVITE_TTL_SECONDS, InviteToken,
+    InviteTokenRecord, InviteValidationError,
 };
-pub use negotiation::{negotiate_protocol, NegotiatedCapabilities};
+pub use negotiation::{NegotiatedCapabilities, negotiate_protocol};
 pub use protocol::ProtocolVersion;
 pub use suites::CryptoSuite;
 

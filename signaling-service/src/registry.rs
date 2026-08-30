@@ -1,21 +1,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use redis::aio::ConnectionManager;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio_stream::StreamExt;
 use tonic::Status;
 use tracing::{error, info, warn};
 
 use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::signaling::v1::{
-    web_rtc_signal, CallHangup, HangupReason, SignalErrorCode, WebRtcSignal,
+    CallHangup, HangupReason, SignalErrorCode, WebRtcSignal, web_rtc_signal,
 };
 
 use crate::forwarded::{
-    decode_signal_response_base64, encode_signal_response_base64, forwarded_from_signal_response,
-    signal_response_from_forwarded, ForwardedSignal, InstanceEnvelope, SignalErrorInfo,
+    ForwardedSignal, InstanceEnvelope, SignalErrorInfo, decode_signal_response_base64,
+    encode_signal_response_base64, forwarded_from_signal_response, signal_response_from_forwarded,
 };
 use crate::time::{unix_millis, unix_seconds};
 
@@ -239,10 +239,10 @@ impl CallRegistry {
         let targets = self.get_user_senders(user_id).await;
         let mut sent = 0usize;
         for (device_id, tx) in targets {
-            if let Some(target_device_id) = target_device_id {
-                if device_id != target_device_id {
-                    continue;
-                }
+            if let Some(target_device_id) = target_device_id
+                && device_id != target_device_id
+            {
+                continue;
             }
             // Cap fanout to MAX_DESTINATIONS devices to prevent amplification attacks.
             if sent >= MAX_SIGNAL_DESTINATIONS {

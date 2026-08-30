@@ -3,7 +3,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use construct_server_shared::shared::proto::signaling::v1::{
-    signal_response, IncomingCallNotification, SignalError, SignalResponse, WebRtcSignal,
+    IncomingCallNotification, SignalError, SignalResponse, WebRtcSignal, signal_response,
 };
 
 #[derive(Clone, Debug)]
