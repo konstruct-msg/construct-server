@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use serde_json::{Value, json};
 use uuid::Uuid;
 
 use construct_context::AppContext;
@@ -324,62 +323,6 @@ pub async fn dispatch_envelope(
     }
 
     Ok(())
-}
-
-/// Confirm a pending message by temp_id (internal / test helper).
-/// Client REST path was removed — prefer gRPC delivery ack when wired.
-#[allow(dead_code)]
-pub async fn confirm_pending_message(
-    app_context: Arc<AppContext>,
-    sender_id: Uuid,
-    temp_id: &str,
-) -> Result<Value, AppError> {
-    let sender_id_str = sender_id.to_string();
-
-    let Some(pending_storage) = &app_context.pending_message_storage else {
-        return Ok(json!({
-            "status": "confirmed",
-            "message": "2-phase commit not enabled"
-        }));
-    };
-
-    match pending_storage.confirm_pending(temp_id).await {
-        Ok(true) => {
-            tracing::debug!(
-                temp_id = %temp_id,
-                sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
-                "Message confirmed (Phase 2)"
-            );
-            Ok(json!({
-                "status": "confirmed",
-                "tempId": temp_id
-            }))
-        }
-        Ok(false) => {
-            tracing::warn!(
-                temp_id = %temp_id,
-                sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
-                "Attempted to confirm non-existent pending message"
-            );
-            Ok(json!({
-                "status": "confirmed",
-                "tempId": temp_id,
-                "message": "Already confirmed or expired"
-            }))
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                temp_id = %temp_id,
-                "Failed to confirm pending message"
-            );
-            Ok(json!({
-                "status": "confirmed",
-                "tempId": temp_id,
-                "message": "Confirmation queued"
-            }))
-        }
-    }
 }
 
 /// Compute HMAC-SHA256(message_id, salt) as a hex string for delivery_pending lookups.

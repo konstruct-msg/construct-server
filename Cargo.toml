@@ -35,14 +35,10 @@ members = [
 
     # infrastructure crates
     "crates/construct-utils",
-    "crates/construct-audit",
     "crates/construct-rate-limit",
     "crates/construct-pow",
     "crates/construct-federation",
-    "crates/construct-delivery-ack",
-    "crates/construct-pending",
     "crates/construct-context",
-    "crates/construct-user-service",
 ]
 
 # One version for all packages

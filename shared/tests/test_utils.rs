@@ -35,7 +35,6 @@ use construct_server_shared::{
             MessagingService as GrpcMessagingService, MessagingServiceServer,
         },
     },
-    user_service::UserServiceContext,
 };
 use construct_utils::log_safe_id;
 use ed25519_dalek::{Signer, SigningKey};
@@ -59,7 +58,6 @@ pub struct TestApp {
     pub auth_address: String,
     /// gRPC AuthService (GetPowChallenge / RegisterDevice) for client registration
     pub grpc_auth_address: String,
-    pub user_address: String,
     pub messaging_address: String,
     pub grpc_messaging_address: String,
     pub notification_address: String,
@@ -500,45 +498,6 @@ async fn spawn_auth_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> (Strin
     (address, grpc_address)
 }
 
-/// Spawn user service
-async fn spawn_user_service(config: Arc<Config>, db_pool: Arc<PgPool>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let address = format!("127.0.0.1:{}", port);
-
-    let queue = Arc::new(Mutex::new(
-        MessageQueue::new(&config)
-            .await
-            .expect("Failed to create queue"),
-    ));
-    let auth_manager = Arc::new(AuthManager::new(&config).expect("Failed to create auth manager"));
-
-    let context = Arc::new(UserServiceContext {
-        db_pool,
-        queue,
-        auth_manager,
-        config: config.clone(),
-    });
-
-    let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .route(
-            "/health/ready",
-            get(|State(ctx): State<Arc<UserServiceContext>>| async move {
-                let app_ctx = Arc::new(ctx.to_app_context());
-                health::readiness_check_handler(axum::extract::State(app_ctx)).await
-            }),
-        )
-        .route("/health/live", get(health::liveness_check_handler))
-        .with_state(context);
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    address
-}
-
 /// Minimal gRPC MessagingService for integration tests.
 /// Only `send_message` is functional; all other RPCs return Unimplemented.
 #[derive(Clone)]
@@ -786,7 +745,6 @@ pub async fn spawn_app() -> TestApp {
 
     let (auth_address, grpc_auth_address) =
         spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
-    let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
     let (messaging_address, grpc_messaging_address) =
         spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
     let notification_address =
@@ -799,7 +757,6 @@ pub async fn spawn_app() -> TestApp {
         address: auth_address.clone(), // Legacy compatibility
         auth_address,
         grpc_auth_address,
-        user_address,
         messaging_address,
         grpc_messaging_address,
         notification_address,
@@ -826,7 +783,6 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
 
     let (auth_address, grpc_auth_address) =
         spawn_auth_service(config.clone(), db_pool_arc.clone()).await;
-    let user_address = spawn_user_service(config.clone(), db_pool_arc.clone()).await;
     let (messaging_address, grpc_messaging_address) =
         spawn_messaging_service(config.clone(), db_pool_arc.clone()).await;
     let notification_address =
@@ -845,7 +801,6 @@ pub async fn spawn_app_with_rate_limiting() -> TestApp {
         address: auth_address.clone(), // Legacy compatibility
         auth_address,
         grpc_auth_address,
-        user_address,
         messaging_address,
         grpc_messaging_address,
         notification_address,
@@ -875,36 +830,10 @@ pub async fn spawn_auth_app() -> SingleServiceApp {
     }
 }
 
-/// Spawn only user service (for user-focused tests)
-pub async fn spawn_user_app() -> SingleServiceApp {
-    let db_name = format!(
-        "construct_test_{}",
-        Uuid::new_v4().to_string().replace("-", "_")
-    );
-    let db_pool = setup_test_database(&db_name).await;
-    let config = Arc::new(create_test_config(&db_name).await);
-    let db_pool_arc = Arc::new(db_pool.clone());
-
-    let address = spawn_user_service(config.clone(), db_pool_arc).await;
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    SingleServiceApp {
-        address,
-        db_pool,
-        config,
-    }
-}
-
 impl TestApp {
     /// Get base URL for auth service
     pub fn auth_url(&self) -> String {
         format!("http://{}", self.auth_address)
-    }
-
-    /// Get base URL for user service
-    pub fn user_url(&self) -> String {
-        format!("http://{}", self.user_address)
     }
 
     /// Get base URL for messaging service
@@ -1279,59 +1208,6 @@ async fn dispatch_envelope_for_test(
     }
 
     Ok(())
-}
-
-async fn confirm_pending_message_for_test(
-    app_context: Arc<AppContext>,
-    sender_id: Uuid,
-    temp_id: &str,
-) -> Result<serde_json::Value, AppError> {
-    let sender_id_str = sender_id.to_string();
-
-    let Some(pending_storage) = &app_context.pending_message_storage else {
-        return Ok(serde_json::json!({
-            "status": "confirmed",
-            "message": "2-phase commit not enabled"
-        }));
-    };
-
-    match pending_storage.confirm_pending(temp_id).await {
-        Ok(true) => {
-            tracing::debug!(
-                temp_id = %temp_id,
-                sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
-                "Message confirmed (Phase 2)"
-            );
-            Ok(serde_json::json!({
-                "status": "confirmed",
-                "tempId": temp_id
-            }))
-        }
-        Ok(false) => {
-            tracing::warn!(
-                temp_id = %temp_id,
-                sender_hash = %log_safe_id(&sender_id_str, &app_context.config.logging.hash_salt),
-                "Attempted to confirm non-existent pending message"
-            );
-            Ok(serde_json::json!({
-                "status": "confirmed",
-                "tempId": temp_id,
-                "message": "Already confirmed or expired"
-            }))
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                temp_id = %temp_id,
-                "Failed to confirm pending message"
-            );
-            Ok(serde_json::json!({
-                "status": "confirmed",
-                "tempId": temp_id,
-                "message": "Confirmation queued"
-            }))
-        }
-    }
 }
 
 fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
