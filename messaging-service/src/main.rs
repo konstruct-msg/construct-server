@@ -7,6 +7,7 @@ mod grpc;
 mod notification_core;
 mod notification_grpc;
 mod receipts;
+mod sealed_ip;
 mod sentinel;
 mod spent_tag;
 mod stream;

@@ -8,6 +8,7 @@ use crate::context::MessagingServiceContext;
 use crate::core;
 use crate::envelope::{convert_envelope_to_proto, dispatch_sealed_sender};
 use crate::receipts::{build_receipt_response, relay_delivery_receipt};
+use crate::sealed_ip::{SealedIpDecision, check_sealed_ip_limit};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
 /// How long to wait for the client's first `Subscribe` (with optional
@@ -36,6 +37,7 @@ pub(crate) struct StreamCatchupState {
 /// On `Subscribe`, applies `since_cursor` (trim + resume position) and then runs
 /// the offline catch-up poll. The open path must **not** poll before that —
 /// doing so re-delivers the entire offline stream and races the cursor.
+#[allow(clippy::too_many_arguments)] // sealed IP is the 8th; bundling would hide the gate
 pub(crate) async fn handle_stream_request(
     req: proto::MessageStreamRequest,
     context: &Arc<MessagingServiceContext>,
@@ -44,6 +46,7 @@ pub(crate) async fn handle_stream_request(
     device_id: Option<&str>,
     stream_queue: &mut construct_queue::MessageQueue,
     catchup: &mut StreamCatchupState,
+    client_ip: &str,
 ) -> anyhow::Result<()> {
     use proto::message_stream_request::Request as StreamReq;
 
@@ -70,6 +73,29 @@ pub(crate) async fn handle_stream_request(
 
             // ── Sealed Sender path ──────────────────────────────────────────
             if let Some(sealed) = &envelope.sealed_sender {
+                // Same per-IP window as SendSealedMessage. Unauthenticated stream
+                // sealed used to skip this gate entirely.
+                if check_sealed_ip_limit(context, client_ip).await == SealedIpDecision::Limited {
+                    let error = proto::MessageError {
+                        message_id: String::new(),
+                        error_code: proto::ErrorCode::RateLimit.into(),
+                        error_message: "sealed-sender rate limit exceeded for this IP".to_string(),
+                        retryable: true,
+                        retry_after_ms: Some(60_000),
+                    };
+                    let response = proto::MessageStreamResponse {
+                        response: Some(proto::message_stream_response::Response::Error(error)),
+                        response_id: Some(req.request_id.clone()),
+                        stream_cursor: None,
+                        rate_limit_challenge: None,
+                        attempt_id,
+                    };
+                    tx.send(Ok(response)).await?;
+                    return Ok(());
+                }
+                construct_metrics::MSG_SEALED_INGRESS_TOTAL
+                    .with_label_values(&["stream"])
+                    .inc();
                 let message_id = match dispatch_sealed_sender(context, sealed).await {
                     Ok(resp) => resp.message_id,
                     Err(e) => {
