@@ -685,9 +685,10 @@ impl MessageQueue {
         .await
     }
 
-    /// Write a message directly to user's Redis stream (test mode only)
+    /// Write a message to the legacy user mailbox stream.
     ///
-    /// This bypasses Kafka and writes directly to Redis. Used when Kafka is disabled.
+    /// Prefer `write_message_to_device_streams`, which also fans out to device
+    /// streams and publishes wakeup after the XADDs land.
     pub async fn write_message_to_user_stream(
         &mut self,
         user_id: &str,
@@ -740,15 +741,6 @@ impl MessageQueue {
             )
             .write_message_to_user_stream(user_id, envelope)
             .await?;
-        } else {
-            // User XADD skipped — still wake MessageStream subscribers (pub/sub).
-            use redis::AsyncCommands;
-            let wakeup_channel = format!("inbox:wakeup:{}", user_id);
-            let _: std::result::Result<i64, _> = self
-                .client
-                .connection_mut()
-                .publish(&wakeup_channel, "1")
-                .await;
         }
 
         // Per-device streams (always).
@@ -785,6 +777,17 @@ impl MessageQueue {
                 device_ids.len()
             );
         }
+
+        // Wake only after at least one XADD has landed. Publishing first (the old
+        // MSG_MAILBOX_USER_WRITE=0 branch) let a live MessageStream poll an empty
+        // device stream and miss the message until the fallback tick.
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .publish_inbox_wakeup(user_id)
+        .await;
 
         Ok(())
     }

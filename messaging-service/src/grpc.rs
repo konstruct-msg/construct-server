@@ -557,7 +557,6 @@ impl MessagingService for MessagingGrpcService {
         // Fail-open: if Redis is unavailable we skip rate checks and default to
         // TrustLevel::Trusted so no messages are lost due to a Redis hiccup.
         let t_rate = std::time::Instant::now();
-        let mut trust_level = crate::trust::TrustLevel::Trusted;
         if let Ok(mut redis_conn) = self.context.redis_conn().await {
             let trust = crate::trust::get_trust_level(
                 &mut redis_conn,
@@ -566,7 +565,6 @@ impl MessagingService for MessagingGrpcService {
                 &self.context.config.messaging,
             )
             .await;
-            trust_level = trust;
 
             // Hourly message rate check
             let hourly_result = crate::trust::check_hourly_rate(
@@ -660,7 +658,7 @@ impl MessagingService for MessagingGrpcService {
 
         let t_dispatch = std::time::Instant::now();
         let rate_ms = t_dispatch.duration_since(t_rate).as_millis();
-        let mut msg_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+        let msg_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
             sender_id: sender_id.to_string(),
             recipient_id: recipient.user_id.clone(),
             message_id: message_id.clone(),
@@ -671,7 +669,8 @@ impl MessagingService for MessagingGrpcService {
             // named a device was answered by a write to every device of the account.
             recipient_device: core::named_recipient_device(envelope.recipient_device.as_ref()),
         });
-        msg_envelope.max_queue_len = Some(trust_level.queue_maxlen(&self.context.config.messaging));
+        // Do not set max_queue_len from sender trust. Redis MAXLEN trims the
+        // recipient's whole inbox; new-account volume is hourly_limit_*.
 
         let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(

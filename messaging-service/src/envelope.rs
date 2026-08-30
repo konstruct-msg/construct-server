@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::context::MessagingServiceContext;
 use crate::core;
-use crate::spent_tag::{DeliveryTagStatus, check_and_mark_delivery_tag};
+use crate::spent_tag::{DeliveryTagStatus, check_and_mark_delivery_tag, unmark_delivery_tag};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
 /// Privacy Pass redemption rejected under `enforce` mode.
@@ -308,13 +308,26 @@ pub(crate) async fn dispatch_sealed_sender(
     );
 
     let app_context = Arc::new(context.to_app_context());
-    core::dispatch_envelope(
+    if let Err(e) = core::dispatch_envelope(
         &app_context,
         msg_envelope,
         context.notification_context.clone(),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    {
+        if !sealed_inner.delivery_tag.is_empty() {
+            let mut conn = context.redis_conn.clone();
+            if let Err(unmark_err) =
+                unmark_delivery_tag(&mut conn, &sealed_inner.delivery_tag).await
+            {
+                tracing::error!(
+                    error = %unmark_err,
+                    "delivery_tag unmark after dispatch failure failed — retry may no-op"
+                );
+            }
+        }
+        return Err(anyhow::anyhow!("{}", e));
+    }
 
     Ok(proto::SendMessageResponse {
         message_id,
