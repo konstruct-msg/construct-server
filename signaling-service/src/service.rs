@@ -10,10 +10,10 @@ use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::metrics;
 use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
-    signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
     CallHangup, GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason,
     IncomingCallNotification, InitiateCallRequest, InitiateCallResponse, RoutedWebRtcSignal,
     SignalError, SignalErrorCode, SignalPong, SignalRequest, SignalResponse, WebRtcSignal,
+    signal_request, signal_response, signaling_service_server::SignalingService, web_rtc_signal,
 };
 
 use crate::forwarded::{ForwardedSignal, IncomingCall};
@@ -617,17 +617,15 @@ async fn handle_outbound_signal(
             registry.remove_call(&call_id).await;
         }
         Some(web_rtc_signal::Signal::Hangup(_)) => {
-            if let Some(web_rtc_signal::Signal::Hangup(hangup)) = &signal.signal {
-                if hangup.reason == HangupReason::Declined as i32 {
-                    if let Some(state) = registry.load_call_state(&call_id).await {
-                        if state.callee_user_id == user_id {
-                            metrics::CALLS_DECLINED_TOTAL.inc();
-                            let _ = rate_limiter
-                                .set_decline_cooldown(&state.caller_user_id, &state.callee_user_id)
-                                .await;
-                        }
-                    }
-                }
+            if let Some(web_rtc_signal::Signal::Hangup(hangup)) = &signal.signal
+                && hangup.reason == HangupReason::Declined as i32
+                && let Some(state) = registry.load_call_state(&call_id).await
+                && state.callee_user_id == user_id
+            {
+                metrics::CALLS_DECLINED_TOTAL.inc();
+                let _ = rate_limiter
+                    .set_decline_cooldown(&state.caller_user_id, &state.callee_user_id)
+                    .await;
             }
 
             let _ = registry

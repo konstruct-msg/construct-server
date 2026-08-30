@@ -28,7 +28,7 @@
 mod test_utils;
 
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
+    ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
 };
 use construct_server_shared::shared::proto::{
@@ -104,17 +104,13 @@ fn derive_message_key(chain_key: &[u8; 32]) -> [u8; 32] {
 
 /// Encrypt plaintext using ChaCha20Poly1305
 fn encrypt_message(plaintext: &str, message_key: &[u8; 32]) -> (Vec<u8>, [u8; 12]) {
-    let cipher = ChaCha20Poly1305::new(message_key.into());
+    let cipher = ChaCha20Poly1305::new(&Key::from(*message_key));
 
-    // Generate random nonce (96 bits)
-    let mut nonce_bytes = [0u8; 12];
-    use rand_core::RngCore;
-    OsRng.fill_bytes(&mut nonce_bytes);
-
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce_bytes: [u8; 12] = rand::random();
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext.as_bytes())
         .expect("Encryption should not fail");
 
     (ciphertext, nonce_bytes)
@@ -126,11 +122,11 @@ fn decrypt_message(
     nonce_bytes: &[u8; 12],
     message_key: &[u8; 32],
 ) -> Result<String, &'static str> {
-    let cipher = ChaCha20Poly1305::new(message_key.into());
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(&Key::from(*message_key));
+    let nonce = Nonce::from(*nonce_bytes);
 
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| "InvalidCiphertext")?;
 
     String::from_utf8(plaintext).map_err(|_| "Invalid UTF-8")

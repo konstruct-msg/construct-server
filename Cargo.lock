@@ -444,17 +444,6 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
-dependencies = [
- "cfg-if",
- "cipher 0.4.4",
- "cpufeatures 0.2.17",
-]
-
-[[package]]
-name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
@@ -467,25 +456,12 @@ dependencies = [
 
 [[package]]
 name = "chacha20poly1305"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
-dependencies = [
- "aead 0.5.2",
- "chacha20 0.9.1",
- "cipher 0.4.4",
- "poly1305 0.8.0",
- "zeroize",
-]
-
-[[package]]
-name = "chacha20poly1305"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
 dependencies = [
  "aead 0.6.1",
- "chacha20 0.10.2",
+ "chacha20",
  "cipher 0.5.2",
  "poly1305 0.9.1",
 ]
@@ -585,11 +561,11 @@ version = "0.18.4"
 dependencies = [
  "anyhow",
  "apns-h2",
- "chacha20poly1305 0.10.1",
+ "chacha20",
+ "chacha20poly1305",
  "construct-config",
  "hex",
  "rand 0.8.6",
- "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -701,8 +677,8 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
- "chacha20 0.10.2",
- "chacha20poly1305 0.11.0",
+ "chacha20",
+ "chacha20poly1305",
  "chrono",
  "curve25519-dalek",
  "ed25519-dalek",
@@ -948,7 +924,8 @@ dependencies = [
  "bb8-tonic",
  "bcrypt",
  "bytes",
- "chacha20poly1305 0.10.1",
+ "chacha20",
+ "chacha20poly1305",
  "chrono",
  "construct-apns",
  "construct-audit",
@@ -2620,7 +2597,8 @@ dependencies = [
  "axum",
  "base64",
  "bcrypt",
- "chacha20poly1305 0.10.1",
+ "chacha20",
+ "chacha20poly1305",
  "chrono",
  "construct-apns",
  "construct-auth",
@@ -3422,7 +3400,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
 dependencies = [
- "chacha20 0.10.2",
+ "chacha20",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]

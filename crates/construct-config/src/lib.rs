@@ -33,8 +33,8 @@ pub use messaging::{MessagingConfig, StealthTokenPolicy};
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use secret_hygiene::{
-    allow_insecure_secrets, is_production_environment, INSECURE_CONTACT_HMAC,
-    INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
+    INSECURE_CONTACT_HMAC, INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
+    allow_insecure_secrets, is_production_environment,
 };
 pub use security::{CsrfConfig, SecurityConfig};
 

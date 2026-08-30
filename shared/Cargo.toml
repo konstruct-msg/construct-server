@@ -69,7 +69,10 @@ hmac = "0.13"
 sha2 = "0.11"
 hkdf = "0.13"
 subtle = "2.6"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
+# 0.10.0/0.10.1 are yanked (`cargo audit --deny warnings`). chacha20poly1305 0.11
+# still declares `chacha20 = "0.10"`, so pin the patched release explicitly.
+chacha20 = "0.10.2"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 

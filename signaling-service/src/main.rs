@@ -21,11 +21,11 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::rate_limiter::{RateLimitConfig, RateLimiter};
 use crate::registry::CallRegistry;
-use crate::service::{make_default_peer_salt, make_instance_id, SignalingServiceImpl};
+use crate::service::{SignalingServiceImpl, make_default_peer_salt, make_instance_id};
 
 fn load_turn_secret() -> anyhow::Result<String> {
     use construct_config::{
-        allow_insecure_secrets, is_production_environment, INSECURE_TURN_SECRET,
+        INSECURE_TURN_SECRET, allow_insecure_secrets, is_production_environment,
     };
     match env::var("TURN_SECRET") {
         Ok(s) if !s.is_empty() && s != INSECURE_TURN_SECRET => Ok(s),
@@ -61,7 +61,7 @@ fn load_turn_secret() -> anyhow::Result<String> {
 
 fn load_contact_hmac_secret() -> anyhow::Result<Vec<u8>> {
     use construct_config::{
-        allow_insecure_secrets, is_production_environment, INSECURE_CONTACT_HMAC,
+        INSECURE_CONTACT_HMAC, allow_insecure_secrets, is_production_environment,
     };
     match env::var("CONTACT_HMAC_SECRET") {
         Ok(hex) if !hex.trim().is_empty() => {

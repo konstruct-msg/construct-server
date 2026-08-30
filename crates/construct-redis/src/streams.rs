@@ -1,7 +1,7 @@
 //! Redis Streams support
 
 use crate::{RedisClient, Result};
-use redis::{streams::StreamReadReply, AsyncCommands, Value};
+use redis::{AsyncCommands, Value, streams::StreamReadReply};
 use std::collections::HashMap;
 
 /// Entry in a Redis Stream (string values)
