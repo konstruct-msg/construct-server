@@ -313,7 +313,7 @@ pub struct MessageEnvelope {
     pub max_queue_len: Option<i64>,
 
     /// Original proto ContentType value (from Envelope.content_type).
-    /// Preserved through Kafka so egress paths can reconstruct the exact
+    /// Preserved on the envelope so egress paths can reconstruct the exact
     /// content_type the client sent (e.g. SESSION_RESET_INIT=24, SENDER_SYNC=23).
     /// None for legacy envelopes created before this field existed — egress
     /// falls back to inferring content_type from message_type.
@@ -800,27 +800,11 @@ impl MessageEnvelope {
 // Delivery ACK Event (Solution 1D - Privacy-Preserving)
 // ============================================================================
 
-/// Delivery ACK event for Kafka-based tracking (Phase 5+)
+/// Hashed delivery-ACK record (privacy-preserving routing).
 ///
-/// **SECURITY**: This event uses hashed IDs to prevent correlation attacks.
-/// - Kafka logs contain ONLY hashes, not plaintext user IDs
-/// - Requires SECRET_KEY + Kafka + Redis to reconstruct sender information
-/// - Ephemeral Redis mappings (TTL 7 days) enable ACK routing
-///
-/// Flow:
-/// 1. Message queued → Producer writes DeliveryAckEvent to Kafka
-///    - All IDs are HMAC-SHA256 hashed
-///    - Redis stores temporary mapping: message_hash → {sender_id, recipient_id}
-/// 2. Recipient acknowledges → Consumer reads Kafka event
-///    - Looks up sender_id in Redis using message_hash
-///    - Sends "delivered" ACK via WebSocket
-///    - Deletes Redis mapping (one-time use)
-///
-/// Privacy properties:
-/// - ✅ Kafka logs reveal nothing about who sent what to whom
-/// - ✅ Requires both Kafka access AND Redis access AND SECRET_KEY to correlate
-/// - ✅ Ephemeral Redis data auto-expires (7 days TTL)
-/// - ✅ Batching prevents timing correlation (5-second buffer)
+/// IDs are HMAC-SHA256 hashed so a dump of these records does not name
+/// sender or recipient. Live routing uses Redis `receipt:sender:{id}` and
+/// Postgres `delivery_pending` — there is no Kafka hop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryAckEvent {
@@ -828,14 +812,10 @@ pub struct DeliveryAckEvent {
     /// Used as key in Redis for ephemeral lookup
     pub message_hash: String,
 
-    /// HMAC-SHA256 hash of sender_id
-    /// NEVER store plaintext sender_id in Kafka
-    /// This prevents correlation attacks on Kafka logs
+    /// HMAC-SHA256 hash of sender_id (never store plaintext here)
     pub sender_id_hash: String,
 
-    /// HMAC-SHA256 hash of recipient_id
-    /// NEVER store plaintext recipient_id in Kafka
-    /// This prevents correlation attacks on Kafka logs
+    /// HMAC-SHA256 hash of recipient_id (never store plaintext here)
     pub recipient_id_hash: String,
 
     /// Unix timestamp when message was delivered (seconds)

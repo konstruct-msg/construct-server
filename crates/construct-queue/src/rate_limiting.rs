@@ -5,7 +5,7 @@
 // Phase 4.6: Migrated to construct-redis
 
 use anyhow::Result;
-use construct_config::{SECONDS_PER_DAY, SECONDS_PER_HOUR};
+use construct_config::SECONDS_PER_HOUR;
 use construct_redis::RedisClient;
 use redis::AsyncCommands;
 
@@ -111,40 +111,6 @@ impl<'a> RateLimiter<'a> {
         Ok(count)
     }
 
-    pub(crate) async fn increment_key_update_count(&mut self, user_id: &str) -> Result<u32> {
-        let key = format!("rate:key:{}", user_id);
-
-        let count: u32 = self.client.incr(&key).await? as u32;
-
-        if count == 1 {
-            let _: bool = self
-                .client
-                .connection_mut()
-                .expire(&key, SECONDS_PER_DAY)
-                .await?;
-        }
-
-        Ok(count)
-    }
-
-    /// Increments password change attempt counter for rate limiting
-    /// Returns the total count of password changes in the last 24 hours
-    pub(crate) async fn increment_password_change_count(&mut self, user_id: &str) -> Result<u32> {
-        let key = format!("rate:pwd:{}", user_id);
-
-        let count: u32 = self.client.incr(&key).await? as u32;
-
-        if count == 1 {
-            let _: bool = self
-                .client
-                .connection_mut()
-                .expire(&key, SECONDS_PER_DAY)
-                .await?;
-        }
-
-        Ok(count)
-    }
-
     /// Generic rate limiter: increments counter for a given key with specified TTL
     /// Returns the current count
     /// OPTIMIZED: Uses Lua script to combine INCR + EXPIRE in single atomic operation
@@ -206,13 +172,6 @@ impl<'a> RateLimiter<'a> {
     #[allow(dead_code)]
     pub(crate) async fn get_message_count_last_hour(&mut self, user_id: &str) -> Result<u32> {
         let key = format!("rate:msg:{}", user_id);
-        let count: Option<u32> = self.client.get(&key).await?;
-        Ok(count.unwrap_or(0))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn get_key_update_count_last_day(&mut self, user_id: &str) -> Result<u32> {
-        let key = format!("rate:key:{}", user_id);
         let count: Option<u32> = self.client.get(&key).await?;
         Ok(count.unwrap_or(0))
     }

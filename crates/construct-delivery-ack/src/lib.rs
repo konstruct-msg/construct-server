@@ -20,7 +20,6 @@
 // 3. **Configurable Backend**
 //    - PostgreSQL (default) - simple, reliable
 //    - Redis (optional) - better performance, automatic TTL
-//    - Kafka (future) - event sourcing, auto-expiry
 //
 // ## Flow
 //

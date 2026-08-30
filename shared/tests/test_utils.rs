@@ -76,15 +76,6 @@ pub struct SingleServiceApp {
 
 /// Create test config from .env.test
 async fn create_test_config(db_name: &str) -> Config {
-    // CRITICAL: Remove Kafka SASL credentials BEFORE loading any .env file
-    // dotenvy::dotenv() in Config::from_env() won't override existing env vars
-    // SAFETY: Tests run single-threaded (--test-threads=1) so this is safe
-    unsafe {
-        std::env::remove_var("KAFKA_SASL_MECHANISM");
-        std::env::remove_var("KAFKA_SASL_USERNAME");
-        std::env::remove_var("KAFKA_SASL_PASSWORD");
-    }
-
     // Load .env.test as defaults — CI env vars take precedence (not overridden)
     // Try multiple paths since tests may run from different directories
     let _ = dotenvy::from_filename(".env.test")

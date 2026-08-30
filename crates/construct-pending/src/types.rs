@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MessageStatus {
-    /// Phase 1 complete: Message written to Kafka, awaiting client confirmation
+    /// Phase 1 complete: Message written to the mailbox, awaiting client confirmation
     Pending,
 
     /// Phase 2 complete: Client confirmed receipt, or auto-confirmed by worker
@@ -47,7 +47,7 @@ pub struct PendingMessageData {
     /// Temporary ID provided by client (for idempotency)
     pub temp_id: String,
 
-    /// Actual message ID assigned by server (written to Kafka)
+    /// Actual message ID assigned by server
     pub message_id: String,
 
     /// Sender user ID

@@ -8,7 +8,6 @@ edition.workspace = true
 construct-config = { path = "../construct-config" }
 construct-redis  = { path = "../construct-redis" }
 construct-message = { path = "../construct-message" }
-construct-crypto = { path = "../construct-crypto", features = ["full"] }
 
 # Serialization
 serde        = { version = "1.0", features = ["derive"] }
@@ -21,8 +20,6 @@ anyhow = "1.0"
 tracing = "0.1"
 
 # Utils
-sha2      = "0.10"
-hex       = { workspace = true }
 redis     = { version = "1.0", features = ["tokio-comp", "connection-manager", "streams", "tokio-native-tls-comp"] }
 chrono    = { version = "0.4", features = ["serde"] }
 
