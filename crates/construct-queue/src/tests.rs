@@ -418,7 +418,7 @@ fn test_msg_envelope_msgpack_roundtrip() {
 
     // rmp_serde::to_vec uses the legacy serializer and cannot be read back by
     // from_slice for MessageEnvelope (wrong msgpack marker Str8).
-    // delivery-worker and the read path both require encode::to_vec_named.
+    // write and read paths both require encode::to_vec_named.
     let bytes = rmp_serde::encode::to_vec_named(&env).expect("to_vec_named");
     let back: MessageEnvelope = rmp_serde::from_slice(&bytes).expect("to_vec_named deserialize");
     assert_eq!(back.message_id, env.message_id);
