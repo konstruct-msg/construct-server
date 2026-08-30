@@ -70,8 +70,7 @@ pub fn verify_message_hash(message_id: &str, message_hash: &str, secret_key: &[u
 
 /// Computes HMAC-SHA256 hash of user ID for anonymous ACK routing
 ///
-/// This is used in Kafka-based Delivery ACK (Solution 1D) to hash
-/// sender_id and recipient_id before storing in Kafka events.
+/// Hash sender_id / recipient_id for anonymous ACK routing.
 ///
 /// # Security Properties
 /// - One-way function: cannot reverse hash to get user_id

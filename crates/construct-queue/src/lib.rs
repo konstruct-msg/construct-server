@@ -2,23 +2,15 @@
 // Message Queue Module - Phase 2.8 Refactoring
 // ============================================================================
 //
-// Phase 2.8: Split large queue.rs (1203 lines) into logical modules:
-// - redis.rs: Redis connection and basic operations
-// - sessions.rs: Session management
-// - replay.rs: Replay protection
-// - rate_limiting.rs: Rate limiting operations
-// - cache.rs: Cache operations (key bundles, federation keys)
-// - tokens.rs: Token management (refresh tokens, access tokens)
-// - delivery.rs: Message delivery operations
+// Sessions, rate limits, tokens, and Redis Streams mailbox delivery.
+// Kafka / delivery-worker are gone — production write path is
+// `write_message_to_device_streams`.
 //
 // ============================================================================
 
-mod cache;
-mod connection;
 mod delivery;
 mod pow;
 mod rate_limiting;
-mod replay;
 mod sessions;
 mod tokens;
 
@@ -58,7 +50,6 @@ pub struct MessageQueue {
     /// After this period, undelivered messages are automatically deleted by Redis
     #[allow(dead_code)]
     message_ttl_seconds: i64,
-    offline_queue_prefix: String,
     delivery_queue_prefix: String,
     /// Reference to config for Redis key prefixes (needed for key generation)
     config: Config,
@@ -90,25 +81,9 @@ impl MessageQueue {
         Ok(Self {
             client,
             message_ttl_seconds,
-            offline_queue_prefix: config.offline_queue_prefix.clone(),
             delivery_queue_prefix: config.delivery_queue_prefix.clone(),
             config: config.clone(),
         })
-    }
-
-    // ============================================================================
-    // Legacy list-mailbox helpers (unused)
-    // ============================================================================
-    //
-    // Kafka / delivery-worker is gone. Production delivery is Redis Streams
-    // (`write_message_to_device_streams`). `has_messages` still looks at the
-    // old list prefix and has no callers.
-
-    #[allow(dead_code)]
-    pub async fn has_messages(&mut self, user_id: &str) -> Result<bool> {
-        let key = format!("{}{}", self.offline_queue_prefix, user_id);
-        let count: i64 = self.client.llen(&key).await?;
-        Ok(count > 0)
     }
 
     // ============================================================================
@@ -146,40 +121,6 @@ impl MessageQueue {
     }
 
     // ============================================================================
-    // Replay Protection (delegated to replay module)
-    // ============================================================================
-
-    pub async fn check_message_replay(
-        &mut self,
-        message_id: &str,
-        content: &str,
-        nonce: &str,
-    ) -> Result<bool> {
-        replay::ReplayProtection::new(
-            &mut self.client,
-            self.config.redis_key_prefixes.msg_hash.clone(),
-        )
-        .check_message_replay(message_id, content, nonce)
-        .await
-    }
-
-    pub async fn check_replay_with_timestamp(
-        &mut self,
-        message_id: &str,
-        content: &str,
-        nonce: &str,
-        timestamp: i64,
-        max_age_seconds: i64,
-    ) -> Result<bool> {
-        replay::ReplayProtection::new(
-            &mut self.client,
-            self.config.redis_key_prefixes.msg_hash.clone(),
-        )
-        .check_replay_with_timestamp(message_id, content, nonce, timestamp, max_age_seconds)
-        .await
-    }
-
-    // ============================================================================
     // Rate Limiting (delegated to rate_limiting module)
     // ============================================================================
 
@@ -206,22 +147,10 @@ impl MessageQueue {
             .await
     }
 
-    pub async fn increment_key_update_count(&mut self, user_id: &str) -> Result<u32> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .increment_key_update_count(user_id)
-            .await
-    }
-
     /// Increment Privacy Pass token issuance count for hourly rate limiting.
     pub async fn increment_token_issuance_count(&mut self, user_id: &str, n: u64) -> Result<u32> {
         rate_limiting::RateLimiter::new(&mut self.client)
             .increment_token_issuance_count(user_id, n)
-            .await
-    }
-
-    pub async fn increment_password_change_count(&mut self, user_id: &str) -> Result<u32> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .increment_password_change_count(user_id)
             .await
     }
 
@@ -247,13 +176,6 @@ impl MessageQueue {
     pub async fn get_message_count_last_hour(&mut self, user_id: &str) -> Result<u32> {
         rate_limiting::RateLimiter::new(&mut self.client)
             .get_message_count_last_hour(user_id)
-            .await
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_key_update_count_last_day(&mut self, user_id: &str) -> Result<u32> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .get_key_update_count_last_day(user_id)
             .await
     }
 
@@ -438,103 +360,6 @@ impl MessageQueue {
     }
 
     // ============================================================================
-    // Cache Operations (delegated to cache module)
-    // ============================================================================
-
-    pub async fn cache_key_bundle(
-        &mut self,
-        user_id: &str,
-        bundle: &construct_crypto::UploadableKeyBundle,
-        ttl_hours: i64,
-    ) -> Result<()> {
-        cache::CacheManager::new(&mut self.client)
-            .cache_key_bundle(user_id, bundle, ttl_hours)
-            .await
-    }
-
-    pub async fn get_cached_key_bundle(
-        &mut self,
-        user_id: &str,
-    ) -> Result<Option<construct_crypto::UploadableKeyBundle>> {
-        cache::CacheManager::new(&mut self.client)
-            .get_cached_key_bundle(user_id)
-            .await
-    }
-
-    pub async fn invalidate_key_bundle_cache(&mut self, user_id: &str) -> Result<()> {
-        cache::CacheManager::new(&mut self.client)
-            .invalidate_key_bundle_cache(user_id)
-            .await
-    }
-
-    pub async fn cache_federation_key_bundle(
-        &mut self,
-        user_id: &str,
-        response_json: &str,
-        ttl_seconds: i64,
-    ) -> Result<()> {
-        cache::CacheManager::new(&mut self.client)
-            .cache_federation_key_bundle(user_id, response_json, ttl_seconds)
-            .await
-    }
-
-    pub async fn get_cached_federation_key_bundle(
-        &mut self,
-        user_id: &str,
-    ) -> Result<Option<String>> {
-        cache::CacheManager::new(&mut self.client)
-            .get_cached_federation_key_bundle(user_id)
-            .await
-    }
-
-    // ============================================================================
-    // Connection Tracking
-    // ============================================================================
-
-    #[allow(dead_code)]
-    pub async fn track_connection(&mut self, user_id: &str, connection_id: &str) -> Result<u32> {
-        use construct_config::SECONDS_PER_HOUR;
-        use redis::AsyncCommands;
-
-        let key = format!("connections:{}", user_id);
-        let _: i64 = self
-            .client
-            .connection_mut()
-            .sadd(&key, connection_id)
-            .await?;
-        let _: bool = self
-            .client
-            .connection_mut()
-            .expire(&key, SECONDS_PER_HOUR)
-            .await?;
-
-        let count: u32 = self.client.connection_mut().scard(&key).await?;
-        Ok(count)
-    }
-
-    #[allow(dead_code)]
-    pub async fn untrack_connection(&mut self, user_id: &str, connection_id: &str) -> Result<()> {
-        use redis::AsyncCommands;
-
-        let key = format!("connections:{}", user_id);
-        let _: i64 = self
-            .client
-            .connection_mut()
-            .srem(&key, connection_id)
-            .await?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_active_connections(&mut self, user_id: &str) -> Result<u32> {
-        use redis::AsyncCommands;
-
-        let key = format!("connections:{}", user_id);
-        let count: u32 = self.client.connection_mut().scard(&key).await?;
-        Ok(count)
-    }
-
-    // ============================================================================
     // Basic Operations
     // ============================================================================
 
@@ -599,19 +424,6 @@ impl MessageQueue {
     // note at its old site in delivery.rs. Nothing may delete a user's mail from a
     // cursor the user's client supplied.
 
-    pub async fn wait_for_message_notification(
-        &self,
-        _user_id: &str,
-        timeout_ms: u64,
-    ) -> Result<bool> {
-        // Note: This method doesn't need mutable access, but DeliveryManager requires it
-        // We'll create a temporary mutable reference
-        // Actually, wait_for_message_notification doesn't use client, so we can make it simpler
-        use tokio::time::Duration;
-        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-        Ok(false)
-    }
-
     pub async fn track_user_online(
         &mut self,
         user_id: &str,
@@ -643,48 +455,6 @@ impl MessageQueue {
             self.delivery_queue_prefix.clone(),
         )
         .get_user_server_instance(user_id)
-        .await
-    }
-
-    pub async fn publish_user_online(
-        &mut self,
-        user_id: &str,
-        server_instance_id: &str,
-        online_channel: &str,
-    ) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .publish_user_online(user_id, server_instance_id, online_channel)
-        .await
-    }
-
-    /// Leftover delivery-worker poll of `delivery_queue:{instance}`. Tests only.
-    pub async fn poll_delivery_queue(&mut self, server_instance_id: &str) -> Result<Vec<Vec<u8>>> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .poll_delivery_queue(server_instance_id)
-        .await
-    }
-
-    /// Leftover delivery-worker instance registry. Tests only — production
-    /// routing is `GET user:{user}:server_instance_id`.
-    pub async fn register_server_instance(
-        &mut self,
-        queue_key: &str,
-        ttl_seconds: i64,
-    ) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .register_server_instance(queue_key, ttl_seconds)
         .await
     }
 

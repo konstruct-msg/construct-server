@@ -4,7 +4,7 @@
 //
 // These tests verify the security guarantees of the Delivery ACK system:
 // 1. Hashing prevents plaintext ID leakage
-// 2. Kafka logs contain ONLY hashes (no correlation possible)
+// 2. Stored records contain ONLY hashes (no correlation from a dump)
 // 3. Redis mappings expire automatically
 // 4. Batching prevents timing correlation
 // 5. Secret key requirement enforced
@@ -138,7 +138,7 @@ fn test_delivery_ack_event_validation() {
         message_id: "msg-123".to_string(),
     };
     // Note: validate() only checks length, not hex format
-    // This is acceptable as Kafka deserialization will fail on invalid JSON
+    // This is acceptable as JSON deserialization will fail on invalid hex elsewhere
     assert!(
         invalid_event2.validate().is_ok(),
         "Hex validation happens at serialization layer"

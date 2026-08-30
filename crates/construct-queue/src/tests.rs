@@ -85,37 +85,6 @@ async fn test_delivery_track_user_online() {
     assert_eq!(instance_after, None);
 }
 
-#[tokio::test]
-#[ignore] // Requires Redis
-async fn test_delivery_register_server_instance() {
-    let mut client = get_test_redis_client().await;
-    let config = get_test_config();
-
-    let queue_key = "test:server:instance:001";
-
-    let mut manager =
-        delivery::DeliveryManager::new(&mut client, &config, "test:delivery:".to_string());
-
-    // Register server instance
-    manager
-        .register_server_instance(queue_key, 60)
-        .await
-        .expect("Failed to register server instance");
-
-    // Verify key exists with TTL
-    use redis::AsyncCommands; // Needed for exists() method
-    let exists: bool = client
-        .connection_mut()
-        .exists(queue_key)
-        .await
-        .expect("Failed to check key existence");
-
-    assert!(exists);
-
-    // Cleanup
-    client.del(queue_key).await.ok();
-}
-
 // ============================================================================
 // SessionManager Tests
 // ============================================================================
