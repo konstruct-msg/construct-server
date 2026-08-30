@@ -270,7 +270,7 @@ impl InviteToken {
             return Err(InviteValidationError::InvalidServer);
         }
 
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
 
         // Ephemeral key: required (32B) for v1–v3; must be empty for v4+
         if self.v <= 3 {
@@ -341,7 +341,7 @@ pub struct InviteTokenRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     fn sample_v4(ts: i64) -> InviteToken {
         InviteToken {
