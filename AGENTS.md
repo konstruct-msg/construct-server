@@ -28,8 +28,9 @@ See `ops/docker-compose.prod.yml`. Ports / roles:
 
 **Layout:** `identity-service` wraps `construct-auth-service` / `construct-user-service`.
 Notification lives in `messaging-service` (`notification_core.rs`). Product APIs are gRPC.
-`shared/src/construct_server/messaging_service/core.rs` mirrors
-`messaging-service/src/core.rs` for integration tests only — keep in sync.
+There is **no** `shared/.../messaging_service/core.rs`. Shared tests inline a
+partial dispatcher in `shared/tests/test_utils.rs` — it is not a twin to keep
+in sync; production delivery lives only in `messaging-service/src/core.rs`.
 
 Key crates: `construct-config` (+ `secret_hygiene`), `construct-queue`,
 `construct-message`, `construct-auth` (PASETO v4.public + legacy JWT),
@@ -78,9 +79,9 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 | `delivery:offline:{user}` | Stream | Legacy user inbox |
 | `delivery:offline:{user}:{device}` | Stream | Per-device inbox |
 | `inbox:wakeup:{user}` | Pub/Sub | Real-time wakeup |
-| `dispatched_msg:{message_id}` | String | Send idempotency |
+| `msg:dedup:{message_id}` | String | Send idempotency (set **after** mailbox XADD) |
 | `user:{user}:server_instance_id` | String | Active MessageStream owner (O(1) routing) |
-| `delivery_queue:{instance}` | List/key | Heartbeat registry (written; not used for routing) |
+| `delivery_queue:{instance}` | List | Leftover delivery-worker registry. **Tests only** — prod never writes or polls it |
 | `rate_limit:{scope}:{id}` | String | Sliding window |
 | `pow_challenge:{token}` | String | PoW challenge |
 | `rate:pp_tokens:{user}:{hour}` | Counter | PP issuance cap |
@@ -89,8 +90,8 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 | `sealed:exact:{sha256(tag)}` / `sealed:seen:…` | String | `delivery_tag` replay (5m / 24h) |
 | `invalidated_token:{jti}` | String | Access-token blocklist |
 
-Do not use `KEYS delivery_queue:*` for discovery — use
-`GET user:{user}:server_instance_id`.
+Do not use `KEYS delivery_queue:*` for discovery (and do not revive that
+list). Routing is `GET user:{user}:server_instance_id`.
 
 ---
 
@@ -236,7 +237,8 @@ cargo test -p construct-queue --lib -- --ignored mailbox
 ## Known debt (skim)
 
 - `to_app_context()` leaves APNs / token_encryption `None` outside messaging.
-- `delivery_queue:{instance}` still written, unused for routing.
+- `delivery_queue:{instance}` / `register_server_instance` / `poll_delivery_queue`
+  are leftover from delivery-worker; not called in production.
 - Signaling: Redis call state OK; in-memory `user_channels` empty after restart
   (clients reconnect — acceptable).
 - Epic E.3 pending (above).

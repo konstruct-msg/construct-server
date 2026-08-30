@@ -52,13 +52,12 @@ pub struct AppContext {
     /// Device token encryption for privacy
     /// Optional: only required for services that register/decrypt device tokens.
     pub token_encryption: Option<Arc<DeviceTokenEncryption>>,
-    /// Unique identifier for this server instance (for delivery worker coordination)
+    /// Unique identifier for this server instance (`user:{id}:server_instance_id`)
     pub server_instance_id: String,
     /// Message Gateway client for delegating message processing (Phase 2+)
     /// When None: process messages locally (legacy mode)
     /// When Some: forward to Message Gateway service via gRPC
-    // gateway_client removed - was only used for WebSocket message processing via message-gateway
-    // REST API routes send directly to Kafka
+    // gateway_client removed — WebSocket/message-gateway is gone; product APIs are gRPC.
     /// Delivery ACK manager for privacy-preserving message delivery confirmations
     /// When None: delivery ACK system is disabled
     /// When Some: track and route delivery acknowledgments

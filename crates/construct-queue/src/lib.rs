@@ -97,12 +97,12 @@ impl MessageQueue {
     }
 
     // ============================================================================
-    // Deprecated Methods (Phase 5+: Use Kafka instead)
+    // Legacy list-mailbox helpers (unused)
     // ============================================================================
-
-    // REMOVED: enqueue_message, enqueue_message_raw, dequeue_messages
-    // These deprecated methods were never used after Kafka migration (Phase 4.5)
-    // All message delivery now goes through Kafka → delivery-worker → Redis Streams
+    //
+    // Kafka / delivery-worker is gone. Production delivery is Redis Streams
+    // (`write_message_to_device_streams`). `has_messages` still looks at the
+    // old list prefix and has no callers.
 
     #[allow(dead_code)]
     pub async fn has_messages(&mut self, user_id: &str) -> Result<bool> {
@@ -661,6 +661,7 @@ impl MessageQueue {
         .await
     }
 
+    /// Leftover delivery-worker poll of `delivery_queue:{instance}`. Tests only.
     pub async fn poll_delivery_queue(&mut self, server_instance_id: &str) -> Result<Vec<Vec<u8>>> {
         delivery::DeliveryManager::new(
             &mut self.client,
@@ -671,6 +672,8 @@ impl MessageQueue {
         .await
     }
 
+    /// Leftover delivery-worker instance registry. Tests only — production
+    /// routing is `GET user:{user}:server_instance_id`.
     pub async fn register_server_instance(
         &mut self,
         queue_key: &str,

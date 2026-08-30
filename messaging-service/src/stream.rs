@@ -34,9 +34,10 @@ pub(crate) struct StreamCatchupState {
 
 /// Handle incoming MessageStreamRequest from client.
 ///
-/// On `Subscribe`, applies `since_cursor` (trim + resume position) and then runs
-/// the offline catch-up poll. The open path must **not** poll before that —
-/// doing so re-delivers the entire offline stream and races the cursor.
+/// On `Subscribe`, applies `since_cursor` as a **read offset only** (never XTRIM)
+/// and then runs the offline catch-up poll. The open path must **not** poll
+/// before that — doing so re-delivers the entire offline stream and races the
+/// cursor.
 #[allow(clippy::too_many_arguments)] // sealed IP is the 8th; bundling would hide the gate
 pub(crate) async fn handle_stream_request(
     req: proto::MessageStreamRequest,
