@@ -599,16 +599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "construct-audit"
-version = "0.18.4"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "construct-auth"
 version = "0.18.4"
 dependencies = [
@@ -686,10 +676,8 @@ dependencies = [
  "construct-auth",
  "construct-config",
  "construct-db",
- "construct-delivery-ack",
  "construct-federation",
  "construct-message",
- "construct-pending",
  "construct-queue",
  "tokio",
  "tracing",
@@ -738,29 +726,6 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "construct-delivery-ack"
-version = "0.18.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "construct-config",
- "construct-crypto",
- "construct-message",
- "construct-utils",
- "hex",
- "rand 0.10.1",
- "redis",
- "serde",
- "serde_json",
- "serial_test",
  "sqlx",
  "tokio",
  "tracing",
@@ -855,19 +820,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "construct-pending"
-version = "0.18.4"
-dependencies = [
- "anyhow",
- "chrono",
- "redis",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "construct-pow"
 version = "0.18.4"
 dependencies = [
@@ -951,27 +903,23 @@ dependencies = [
  "chacha20poly1305 0.10.1",
  "chrono",
  "construct-apns",
- "construct-audit",
  "construct-auth",
  "construct-auth-service",
  "construct-config",
  "construct-context",
  "construct-crypto",
  "construct-db",
- "construct-delivery-ack",
  "construct-error",
  "construct-federation",
  "construct-message",
  "construct-metrics",
  "construct-notification-service",
- "construct-pending",
  "construct-pow",
  "construct-queue",
  "construct-rate-limit",
  "construct-redis",
  "construct-sentinel-service",
  "construct-types",
- "construct-user-service",
  "construct-utils",
  "crypto-agility",
  "dotenvy",
@@ -1034,26 +982,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2 0.11.0",
- "uuid",
-]
-
-[[package]]
-name = "construct-user-service"
-version = "0.18.4"
-dependencies = [
- "anyhow",
- "construct-apns",
- "construct-auth",
- "construct-config",
- "construct-context",
- "construct-crypto",
- "construct-db",
- "construct-error",
- "construct-queue",
- "construct-utils",
- "serde",
- "tokio",
- "tracing",
  "uuid",
 ]
 
