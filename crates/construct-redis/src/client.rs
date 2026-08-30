@@ -1,7 +1,7 @@
 //! Redis client implementation with connection management
 
 use crate::Result;
-use redis::{aio::ConnectionManager, AsyncCommands};
+use redis::{AsyncCommands, aio::ConnectionManager};
 
 /// Redis client with automatic reconnection
 #[derive(Clone)]

@@ -24,8 +24,8 @@
 // See construct-docs decisions/key-rotation-and-secret-hygiene.md and
 // deployment/stealth-token-keys-runbook.md §6.
 
-use anyhow::{bail, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use anyhow::{Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 /// Env var names whose PRESENT value must never carry surrounding quotes/whitespace.
 /// (env_file passes quotes literally, so `KEY="abc"` becomes the 5-char string `"abc"`.)

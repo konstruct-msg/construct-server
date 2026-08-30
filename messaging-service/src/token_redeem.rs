@@ -381,10 +381,10 @@ mod tests {
         let mut sym_key = [0u8; 32];
         hk.expand(b"construct-token-seal-v1", &mut sym_key).unwrap();
 
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&sym_key));
+        let cipher = ChaCha20Poly1305::new(&Key::from(sym_key));
         let nonce_bytes = random_bytes32();
-        let aead_nonce = Nonce::from_slice(&nonce_bytes[..12]);
-        let ciphertext = cipher.encrypt(aead_nonce, token.as_slice()).unwrap();
+        let aead_nonce = Nonce::try_from(&nonce_bytes[..12]).expect("12-byte nonce");
+        let ciphertext = cipher.encrypt(&aead_nonce, token.as_slice()).unwrap();
 
         let mut sealed = Vec::with_capacity(32 + 12 + ciphertext.len());
         sealed.extend_from_slice(ephemeral_pub.as_bytes());
