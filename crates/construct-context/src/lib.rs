@@ -16,9 +16,7 @@ use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_db::DbPool;
-use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
-use construct_pending::PendingMessageStorage;
 
 // MessageGatewayClient removed - was only used for WebSocket message processing
 use construct_queue::MessageQueue;
@@ -33,7 +31,6 @@ use tokio::sync::Mutex;
 /// - AuthContext (auth_manager, clients)
 /// - NotificationContext (apns_client, token_encryption)
 /// - FederationContext (server_signer, public_key_cache)
-/// - DeliveryContext (delivery_ack_manager)
 /// - ConfigContext (config, server_instance_id)
 ///
 /// For now, we keep the flat structure for backward compatibility.
@@ -58,21 +55,12 @@ pub struct AppContext {
     /// When None: process messages locally (legacy mode)
     /// When Some: forward to Message Gateway service via gRPC
     // gateway_client removed — WebSocket/message-gateway is gone; product APIs are gRPC.
-    /// Delivery ACK manager for privacy-preserving message delivery confirmations
-    /// When None: delivery ACK system is disabled
-    /// When Some: track and route delivery acknowledgments
-    pub delivery_ack_manager: Option<Arc<DeliveryAckManager<PostgresDeliveryStorage>>>,
     /// Server signer for S2S federation authentication
     /// When None: federation signing is disabled (messages sent unsigned)
     /// When Some: sign outgoing S2S messages with Ed25519
     pub server_signer: Option<Arc<ServerSigner>>,
     /// Cache for remote server public keys (for signature verification)
     pub public_key_cache: Arc<PublicKeyCache>,
-    /// Key management system for automatic key rotation (optional)
-    /// Pending message storage for 2-phase commit protocol
-    /// When None: 2-phase commit is disabled (legacy mode)
-    /// When Some: idempotent message delivery with network failure recovery
-    pub pending_message_storage: Option<Arc<PendingMessageStorage>>,
 }
 
 impl AppContext {
@@ -101,29 +89,12 @@ impl AppContext {
             token_encryption,
             server_instance_id,
             // gateway_client removed
-            delivery_ack_manager: None, // Disabled by default
             server_signer,
             public_key_cache: Arc::new(PublicKeyCache::new()),
-            pending_message_storage: None, // Disabled by default
         }
     }
 
     // new_with_gateway removed - message gateway was only used for WebSocket
-
-    /// Set delivery ACK manager (builder pattern)
-    pub fn with_delivery_ack_manager(
-        mut self,
-        manager: Arc<DeliveryAckManager<PostgresDeliveryStorage>>,
-    ) -> Self {
-        self.delivery_ack_manager = Some(manager);
-        self
-    }
-
-    /// Set pending message storage (builder pattern)
-    pub fn with_pending_message_storage(mut self, storage: Arc<PendingMessageStorage>) -> Self {
-        self.pending_message_storage = Some(storage);
-        self
-    }
 
     /// Create a new AppContext using builder pattern (Phase 2.7)
     pub fn builder() -> AppContextBuilder {
@@ -200,13 +171,6 @@ impl AppContext {
         }
     }
 
-    /// Get delivery context (Phase 2.7)
-    pub fn delivery(&self) -> DeliveryContextRef<'_> {
-        DeliveryContextRef {
-            manager: self.delivery_ack_manager.as_ref(),
-        }
-    }
-
     /// Get config context (Phase 2.7)
     pub fn config_ctx(&self) -> ConfigContextRef<'_> {
         ConfigContextRef {
@@ -249,11 +213,6 @@ pub struct FederationContextRef<'a> {
     pub public_key_cache: &'a Arc<PublicKeyCache>,
 }
 
-/// Delivery context reference (Phase 2.7)
-pub struct DeliveryContextRef<'a> {
-    pub manager: Option<&'a Arc<DeliveryAckManager<PostgresDeliveryStorage>>>,
-}
-
 /// Config context reference (Phase 2.7)
 pub struct ConfigContextRef<'a> {
     pub config: &'a Arc<Config>,
@@ -275,8 +234,6 @@ pub struct AppContextBuilder {
     token_encryption: Option<Arc<DeviceTokenEncryption>>,
     server_instance_id: Option<String>,
     // gateway_client removed
-    delivery_ack_manager: Option<Arc<DeliveryAckManager<PostgresDeliveryStorage>>>,
-    pending_message_storage: Option<Arc<PendingMessageStorage>>,
     server_signer_override: Option<Arc<ServerSigner>>,
 }
 
@@ -292,8 +249,6 @@ impl AppContextBuilder {
             token_encryption: None,
             server_instance_id: None,
             // gateway_client removed
-            delivery_ack_manager: None,
-            pending_message_storage: None,
             server_signer_override: None,
         }
     }
@@ -340,21 +295,8 @@ impl AppContextBuilder {
 
     // with_gateway_client removed - message gateway was only used for WebSocket
 
-    pub fn with_delivery_ack_manager(
-        mut self,
-        manager: Arc<DeliveryAckManager<PostgresDeliveryStorage>>,
-    ) -> Self {
-        self.delivery_ack_manager = Some(manager);
-        self
-    }
-
     pub fn with_server_signer(mut self, signer: Arc<ServerSigner>) -> Self {
         self.server_signer_override = Some(signer);
-        self
-    }
-
-    pub fn with_pending_message_storage(mut self, storage: Arc<PendingMessageStorage>) -> Self {
-        self.pending_message_storage = Some(storage);
         self
     }
 
@@ -387,10 +329,8 @@ impl AppContextBuilder {
                 .server_instance_id
                 .ok_or_else(|| "server_instance_id is required".to_string())?,
             // gateway_client removed
-            delivery_ack_manager: self.delivery_ack_manager,
             server_signer,
             public_key_cache: Arc::new(PublicKeyCache::new()),
-            pending_message_storage: self.pending_message_storage,
         })
     }
 }

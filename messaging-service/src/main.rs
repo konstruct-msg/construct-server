@@ -323,11 +323,8 @@ async fn main() -> Result<()> {
     // the oldest due to go on 2026-04-15 — four months of receipt-routing hashes
     // kept because the expiry was written down and never enforced.
     //
-    // construct-delivery-ack ships a DeliveryCleanupTask that does exactly this,
-    // and no service ever spawns it: it appears only inside its own doc-example.
     // The rows are written here with raw SQL, so they are swept here with raw
-    // SQL rather than taking a crate dependency to reach one DELETE. If that
-    // crate's task is ever wired up, this block is the one to remove.
+    // SQL rather than a separate crate for one DELETE.
     {
         let pool = Arc::clone(&context.db_pool);
         tokio::spawn(async move {

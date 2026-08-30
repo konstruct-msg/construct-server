@@ -26,8 +26,10 @@ See `ops/docker-compose.prod.yml`. Ports / roles:
 `auth-service` / `user-service` / notification / sentinel as separate deployables are
 **gone** — merged into identity or messaging.
 
-**Layout:** `identity-service` wraps `construct-auth-service` / `construct-user-service`.
-Notification lives in `messaging-service` (`notification_core.rs`). Product APIs are gRPC.
+**Layout:** `identity-service` wraps `construct-auth-service`. User gRPC
+(`UserService` / `InviteService` / account) is inline in identity, not a
+library crate. Notification lives in `messaging-service` (`notification_core.rs`).
+Product APIs are gRPC.
 There is **no** `shared/.../messaging_service/core.rs`. Shared tests inline a
 partial dispatcher in `shared/tests/test_utils.rs` — it is not a twin to keep
 in sync; production delivery lives only in `messaging-service/src/core.rs`.
