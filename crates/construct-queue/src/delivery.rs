@@ -29,6 +29,22 @@ impl<'a> DeliveryManager<'a> {
         }
     }
 
+    /// Approximate MAXLEN for every mailbox XADD. Server retention, not a
+    /// per-sender quota — Redis cannot trim "this sender's entries".
+    fn mailbox_maxlen(&self) -> i64 {
+        self.config.messaging.queue_maxlen_standard.max(1)
+    }
+
+    /// Wake MessageStream subscribers after at least one XADD has landed.
+    pub(crate) async fn publish_inbox_wakeup(&mut self, user_id: &str) {
+        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
+        let _: std::result::Result<i64, _> = self
+            .client
+            .connection_mut()
+            .publish(&wakeup_channel, "1")
+            .await;
+    }
+
     /// Read messages from Redis Stream for a user
     ///
     /// Reads from user-based stream: {delivery_queue_prefix}:offline:{user_id}
@@ -414,10 +430,11 @@ impl<'a> DeliveryManager<'a> {
         Ok(())
     }
 
-    /// Write a message directly to user's Redis stream (test mode only)
+    /// Write a message to the legacy user mailbox stream.
     ///
-    /// This bypasses Kafka and writes directly to Redis, similar to what
-    /// the delivery worker would do. Used only when Kafka is disabled.
+    /// Production path when `MSG_MAILBOX_USER_WRITE` is on. Caller
+    /// (`write_message_to_device_streams`) publishes `inbox:wakeup` after this
+    /// XADD (and any device writes) have landed.
     ///
     /// Stream format: {delivery_queue_prefix}:offline:{user_id}
     /// Fields: message_id (string), payload (MessagePack serialized envelope)
@@ -434,8 +451,11 @@ impl<'a> DeliveryManager<'a> {
         let payload = rmp_serde::encode::to_vec_named(envelope)
             .context("Failed to serialize MessageEnvelope to MessagePack")?;
 
-        // Use XADD with MAXLEN for automatic trimming
-        let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
+        // Recipient-stream retention — one cap for every writer. Sender trust
+        // must never feed MAXLEN: Redis trims the whole inbox, not "this
+        // sender's entries". New-account volume is hourly_limit_*, not a
+        // smaller MAXLEN on someone else's mailbox.
+        let max_len = self.mailbox_maxlen();
 
         let stream_id: String = redis::cmd("XADD")
             .arg(&stream_key)
@@ -466,16 +486,6 @@ impl<'a> DeliveryManager<'a> {
             "Wrote message to offline stream"
         );
 
-        // Wake up any active MessageStream for this user so it delivers immediately
-        // instead of waiting for the next poll tick.  Fire-and-forget: a PUBLISH
-        // failure is non-critical — the poll loop is the fallback.
-        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
-        let _: std::result::Result<i64, _> = self
-            .client
-            .connection_mut()
-            .publish(&wakeup_channel, "1")
-            .await;
-
         Ok(stream_id)
     }
 
@@ -498,7 +508,7 @@ impl<'a> DeliveryManager<'a> {
         let payload = rmp_serde::encode::to_vec_named(envelope)
             .context("Failed to serialize MessageEnvelope to MessagePack")?;
 
-        let max_len = envelope.max_queue_len.unwrap_or(10_000_i64);
+        let max_len = self.mailbox_maxlen();
         let stream_id: String = redis::cmd("XADD")
             .arg(&stream_key)
             .arg("MAXLEN")
