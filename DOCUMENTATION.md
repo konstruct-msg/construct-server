@@ -399,7 +399,6 @@ export DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test
 export REDIS_URL=redis://localhost:6379
 
 cargo test -p construct-server-shared                         # all shared integration tests
-cargo test -p construct-server-shared --test delivery_ack_test
 cargo test -p construct-server-shared --test e2e_crypto_test
 ```
 

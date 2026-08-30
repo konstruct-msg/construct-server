@@ -28,7 +28,6 @@ use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_db::DbPool;
-use construct_delivery_ack::{DeliveryAckManager, PostgresDeliveryStorage};
 use construct_federation::{PublicKeyCache, ServerSigner};
 
 // MessageGatewayClient removed - was only used for WebSocket
@@ -67,12 +66,6 @@ pub trait FederationProvider: Send + Sync {
     fn public_key_cache(&self) -> &Arc<PublicKeyCache>;
 }
 
-/// Trait for delivery operations (for testing and dependency injection)
-#[allow(dead_code)]
-pub trait DeliveryProvider: Send + Sync {
-    fn delivery_ack_manager(&self) -> Option<&Arc<DeliveryAckManager<PostgresDeliveryStorage>>>;
-}
-
 /// Trait for configuration (for testing and dependency injection)
 #[allow(dead_code)]
 pub trait ConfigProvider: Send + Sync {
@@ -90,7 +83,6 @@ pub trait AppContextProvider:
     + MessageProvider
     + NotificationProvider
     + FederationProvider
-    + DeliveryProvider
     + ConfigProvider
     + Send
     + Sync
@@ -129,12 +121,6 @@ impl FederationProvider for crate::AppContext {
 
     fn public_key_cache(&self) -> &Arc<PublicKeyCache> {
         &self.public_key_cache
-    }
-}
-
-impl DeliveryProvider for crate::AppContext {
-    fn delivery_ack_manager(&self) -> Option<&Arc<DeliveryAckManager<PostgresDeliveryStorage>>> {
-        self.delivery_ack_manager.as_ref()
     }
 }
 
