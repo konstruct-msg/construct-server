@@ -212,8 +212,6 @@ services:
       # APNS_KEY_ID actually changed. The two must always name the same key.
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
-      DELIVERY_ACK_MODE: ${DELIVERY_ACK_MODE:-at_least_once}
-      DELIVERY_EXPIRY_DAYS: ${DELIVERY_EXPIRY_DAYS:-7}
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
       OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
       ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}

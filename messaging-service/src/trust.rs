@@ -67,19 +67,6 @@ impl TrustLevel {
             Self::Trusted => None,
         }
     }
-
-    /// Historical per-sender mailbox cap. Must **not** drive Redis `XADD MAXLEN`:
-    /// that trims the recipient's whole inbox, not this sender's entries.
-    /// New-account volume is `hourly_limit_*`. Mailbox retention is
-    /// `queue_maxlen_standard` for every writer. Kept for tests until Wave 4
-    /// drops `MSG_QUEUE_MAXLEN_NEW`.
-    #[allow(dead_code)]
-    pub fn queue_maxlen(self, config: &MessagingConfig) -> i64 {
-        match self {
-            Self::New => config.queue_maxlen_new,
-            Self::Warming | Self::Trusted => config.queue_maxlen_standard,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,14 +302,6 @@ mod tests {
         assert_eq!(TrustLevel::New.fanout_limit(&c), Some(10));
         assert_eq!(TrustLevel::Warming.fanout_limit(&c), Some(50));
         assert_eq!(TrustLevel::Trusted.fanout_limit(&c), None);
-    }
-
-    #[test]
-    fn test_queue_maxlen_values() {
-        let c = cfg();
-        assert_eq!(TrustLevel::New.queue_maxlen(&c), 100);
-        assert_eq!(TrustLevel::Warming.queue_maxlen(&c), 10_000);
-        assert_eq!(TrustLevel::Trusted.queue_maxlen(&c), 10_000);
     }
 
     #[test]

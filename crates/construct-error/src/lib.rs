@@ -48,13 +48,6 @@ pub enum AppError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    // ===== Message Queue & Kafka Errors =====
-    #[error("Kafka error: {0}")]
-    Kafka(String),
-
-    #[error("Message queue error: {0}")]
-    MessageQueue(String),
-
     // ===== Authentication & Authorization Errors =====
     #[error("Authentication error: {0}")]
     Auth(String),
@@ -150,7 +143,6 @@ impl AppError {
             AppError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             #[cfg(feature = "redis")]
             AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Kafka(_) | AppError::MessageQueue(_) => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -179,8 +171,6 @@ impl AppError {
             AppError::Database(_) => "Database error".to_string(),
             #[cfg(feature = "redis")]
             AppError::Redis(_) => "Cache error".to_string(),
-            AppError::Kafka(_) => "Message queue error".to_string(),
-            AppError::MessageQueue(_) => "Message queue error".to_string(),
             #[cfg(feature = "http")]
             AppError::Reqwest(_) => "External service error".to_string(),
             AppError::Federation(_) => "Federation error".to_string(),
@@ -211,8 +201,6 @@ impl AppError {
             AppError::Database(_) => "DATABASE_ERROR",
             #[cfg(feature = "redis")]
             AppError::Redis(_) => "REDIS_ERROR",
-            AppError::Kafka(_) => "KAFKA_ERROR",
-            AppError::MessageQueue(_) => "MESSAGE_QUEUE_ERROR",
             #[cfg(feature = "http")]
             AppError::Reqwest(_) => "EXTERNAL_SERVICE_ERROR",
             AppError::Federation(_) => "FEDERATION_ERROR",
@@ -352,17 +340,6 @@ impl AppError {
     /// Create a configuration error
     pub fn config(msg: impl Into<String>) -> Self {
         AppError::Config(msg.into())
-    }
-
-    /// Create a Kafka error
-    pub fn kafka(msg: impl Into<String>) -> Self {
-        AppError::Kafka(msg.into())
-    }
-
-    /// Create a WebSocket error
-    /// Create a message queue error
-    pub fn message_queue(msg: impl Into<String>) -> Self {
-        AppError::MessageQueue(msg.into())
     }
 
     /// Convert AppError to hyper::Response for use in non-Axum handlers

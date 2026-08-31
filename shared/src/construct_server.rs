@@ -1,6 +1,6 @@
 pub use construct_crypto::{
     BundleData, EncryptedMessage, MessageType, ServerCryptoValidator, StoredEncryptedMessage,
-    UploadableKeyBundle, compute_message_hash,
+    UploadableKeyBundle,
 };
 pub use construct_error::AppError;
 pub use construct_types::{ChatMessage, ClientMessage, ServerMessage, UserId};

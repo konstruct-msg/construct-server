@@ -25,7 +25,6 @@ Optional args to override default hosts:
 ```bash
 ./scripts/generate_test_keys.sh     # Generate keys for local/CI testing
 ./scripts/cleanup_test_keys.sh      # Remove generated test keys
-./scripts/generate_delivery_key.sh  # Generate delivery HMAC key
 ./scripts/rotate-secret.sh          # Rotate a single secret on the VPS
 ./scripts/emergency-rotate-all.sh   # Rotate all secrets (emergency use)
 ./scripts/check-secret-expiry.sh    # Check when secrets were last rotated

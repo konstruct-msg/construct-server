@@ -313,7 +313,7 @@ pub struct MessageEnvelope {
     pub max_queue_len: Option<i64>,
 
     /// Original proto ContentType value (from Envelope.content_type).
-    /// Preserved through Kafka so egress paths can reconstruct the exact
+    /// Preserved on the Redis stream so egress paths can reconstruct the exact
     /// content_type the client sent (e.g. SESSION_RESET_INIT=24, SENDER_SYNC=23).
     /// None for legacy envelopes created before this field existed — egress
     /// falls back to inferring content_type from message_type.
@@ -793,107 +793,6 @@ impl MessageEnvelope {
             proto_content_type: Some(ctx.content_type),
             recipient_device: ctx.recipient_device.clone(),
         }
-    }
-}
-
-// ============================================================================
-// Delivery ACK Event (Solution 1D - Privacy-Preserving)
-// ============================================================================
-
-/// Delivery ACK event for Kafka-based tracking (Phase 5+)
-///
-/// **SECURITY**: This event uses hashed IDs to prevent correlation attacks.
-/// - Kafka logs contain ONLY hashes, not plaintext user IDs
-/// - Requires SECRET_KEY + Kafka + Redis to reconstruct sender information
-/// - Ephemeral Redis mappings (TTL 7 days) enable ACK routing
-///
-/// Flow:
-/// 1. Message queued → Producer writes DeliveryAckEvent to Kafka
-///    - All IDs are HMAC-SHA256 hashed
-///    - Redis stores temporary mapping: message_hash → {sender_id, recipient_id}
-/// 2. Recipient acknowledges → Consumer reads Kafka event
-///    - Looks up sender_id in Redis using message_hash
-///    - Sends "delivered" ACK via WebSocket
-///    - Deletes Redis mapping (one-time use)
-///
-/// Privacy properties:
-/// - ✅ Kafka logs reveal nothing about who sent what to whom
-/// - ✅ Requires both Kafka access AND Redis access AND SECRET_KEY to correlate
-/// - ✅ Ephemeral Redis data auto-expires (7 days TTL)
-/// - ✅ Batching prevents timing correlation (5-second buffer)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeliveryAckEvent {
-    /// HMAC-SHA256 hash of message_id
-    /// Used as key in Redis for ephemeral lookup
-    pub message_hash: String,
-
-    /// HMAC-SHA256 hash of sender_id
-    /// NEVER store plaintext sender_id in Kafka
-    /// This prevents correlation attacks on Kafka logs
-    pub sender_id_hash: String,
-
-    /// HMAC-SHA256 hash of recipient_id
-    /// NEVER store plaintext recipient_id in Kafka
-    /// This prevents correlation attacks on Kafka logs
-    pub recipient_id_hash: String,
-
-    /// Unix timestamp when message was delivered (seconds)
-    pub delivered_at: i64,
-
-    /// Original message_id (for deduplication by consumer)
-    /// NOTE: This is the ONLY unhashed field, used to prevent duplicate ACKs
-    /// Consumer uses this to check if ACK was already processed
-    pub message_id: String,
-}
-
-impl DeliveryAckEvent {
-    /// Create a new DeliveryAckEvent with hashed IDs
-    ///
-    /// # Arguments
-    /// * `message_id` - Original message ID (UUID)
-    /// * `message_hash` - HMAC-SHA256(message_id, SECRET_KEY)
-    /// * `sender_id_hash` - HMAC-SHA256(sender_id, SECRET_KEY)
-    /// * `recipient_id_hash` - HMAC-SHA256(recipient_id, SECRET_KEY)
-    pub fn new(
-        message_id: String,
-        message_hash: String,
-        sender_id_hash: String,
-        recipient_id_hash: String,
-    ) -> Self {
-        Self {
-            message_hash,
-            sender_id_hash,
-            recipient_id_hash,
-            delivered_at: chrono::Utc::now().timestamp(),
-            message_id,
-        }
-    }
-
-    /// Validate the event structure
-    pub fn validate(&self) -> Result<()> {
-        if self.message_hash.is_empty() {
-            anyhow::bail!("message_hash is required");
-        }
-        if self.message_hash.len() != 64 {
-            anyhow::bail!("message_hash must be 64 hex characters (SHA256)");
-        }
-        if self.sender_id_hash.is_empty() {
-            anyhow::bail!("sender_id_hash is required");
-        }
-        if self.sender_id_hash.len() != 64 {
-            anyhow::bail!("sender_id_hash must be 64 hex characters (SHA256)");
-        }
-        if self.recipient_id_hash.is_empty() {
-            anyhow::bail!("recipient_id_hash is required");
-        }
-        if self.recipient_id_hash.len() != 64 {
-            anyhow::bail!("recipient_id_hash must be 64 hex characters (SHA256)");
-        }
-        if self.message_id.is_empty() {
-            anyhow::bail!("message_id is required");
-        }
-        Ok(())
     }
 }
 
@@ -1409,33 +1308,6 @@ mod tests {
         assert!(
             env.validate().is_err(),
             "FederatedMessage without origin_server must fail validation"
-        );
-    }
-
-    // ── DeliveryAckEvent.validate() ───────────────────────────────────────────
-
-    #[test]
-    fn test_delivery_ack_validate_requires_64_char_hashes() {
-        let good_hash = "a".repeat(64);
-        let short_hash = "a".repeat(32);
-
-        let good = DeliveryAckEvent::new(
-            "msg-id".to_string(),
-            good_hash.clone(),
-            good_hash.clone(),
-            good_hash.clone(),
-        );
-        assert!(good.validate().is_ok());
-
-        let bad = DeliveryAckEvent::new(
-            "msg-id".to_string(),
-            short_hash.clone(),
-            good_hash.clone(),
-            good_hash.clone(),
-        );
-        assert!(
-            bad.validate().is_err(),
-            "hash shorter than 64 chars must fail validation"
         );
     }
 }
