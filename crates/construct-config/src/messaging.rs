@@ -70,10 +70,9 @@ pub struct MessagingConfig {
     // Trusted accounts have no fanout limit.
 
     // ── Offline queue depth limits ─────────────────────────────────────────
-    /// Redis stream MAXLEN applied when a New account writes to a recipient queue.
-    /// Caps queue-flooding attacks from freshly-created senders. Default: 100
-    pub queue_maxlen_new: i64,
-    /// Redis stream MAXLEN for Warming and Trusted senders. Default: 10_000
+    /// Redis stream `XADD MAXLEN ~` for every mailbox writer. Recipient
+    /// retention, not a per-sender quota — Redis cannot trim "this sender's
+    /// entries". Default: 10_000
     pub queue_maxlen_standard: i64,
 
     // ── PoW challenge difficulty tiers ─────────────────────────────────────
@@ -172,11 +171,6 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50),
-
-            queue_maxlen_new: std::env::var("MSG_QUEUE_MAXLEN_NEW")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(100),
 
             queue_maxlen_standard: std::env::var("MSG_QUEUE_MAXLEN_STANDARD")
                 .ok()

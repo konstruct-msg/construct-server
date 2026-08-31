@@ -32,7 +32,7 @@ pub fn compute_message_hash(message_id: &str, secret_key: &[u8]) -> String {
     if secret_key.len() != 32 {
         tracing::warn!(
             key_size = secret_key.len(),
-            "DELIVERY_SECRET_KEY should be exactly 32 bytes for optimal security"
+            "HMAC secret_key should be exactly 32 bytes for optimal security"
         );
     }
 
@@ -68,10 +68,7 @@ pub fn verify_message_hash(message_id: &str, message_hash: &str, secret_key: &[u
         .into()
 }
 
-/// Computes HMAC-SHA256 hash of user ID for anonymous ACK routing
-///
-/// This is used in Kafka-based Delivery ACK (Solution 1D) to hash
-/// sender_id and recipient_id before storing in Kafka events.
+/// Computes HMAC-SHA256 hash of user ID for anonymous ACK routing.
 ///
 /// # Security Properties
 /// - One-way function: cannot reverse hash to get user_id
@@ -95,7 +92,7 @@ pub fn compute_user_id_hash(user_id: &str, secret_key: &[u8]) -> String {
     if secret_key.len() != 32 {
         tracing::warn!(
             key_size = secret_key.len(),
-            "DELIVERY_SECRET_KEY should be exactly 32 bytes for optimal security"
+            "HMAC secret_key should be exactly 32 bytes for optimal security"
         );
     }
 
