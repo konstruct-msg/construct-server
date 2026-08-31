@@ -7,4 +7,4 @@
 pub mod types;
 
 // Re-export commonly used types
-pub use types::{DeliveryAckEvent, MessageEnvelope, MessageType};
+pub use types::{MessageEnvelope, MessageType};
