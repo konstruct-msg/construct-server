@@ -932,7 +932,11 @@ impl KeyService for KeyGrpcService {
             Some(req.device_ids.as_slice())
         };
 
-        let (bundles, unavailable) = core::get_prekey_bundles(
+        let core::PreKeyBundleSet {
+            bundles,
+            unavailable,
+            active_devices,
+        } = core::get_prekey_bundles(
             &self.context.db,
             &req.user_id,
             device_ids,
@@ -1045,6 +1049,9 @@ impl KeyService for KeyGrpcService {
         Ok(Response::new(proto::GetPreKeyBundlesResponse {
             bundles: proto_bundles,
             unavailable_devices: unavailable,
+            // The account's device set, not "the devices this call happened to build bundles
+            // for". A caller prunes against this and only this — §A.3.
+            active_devices,
         }))
     }
 }
