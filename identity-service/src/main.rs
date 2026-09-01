@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use base64::{Engine as _, engine::general_purpose as b64};
 use construct_config::Config;
+use construct_server_shared::auth_service::core as auth_core;
 use construct_server_shared::{db::DbPool, queue::MessageQueue};
 use context::IdentityServiceContext;
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -597,6 +598,19 @@ impl AuthService for IdentityGrpcService {
             }
         })?;
 
+        // The account now belongs to this device. Without this the pointer went on naming the
+        // device `revoke_all_devices` had just deactivated three statements ago, so every "is this
+        // the primary device" question answered **no** for the account's only live device — and
+        // signing out of a recovered account therefore unregistered it, leaving the account with
+        // no active device and no way back except another recovery.
+        construct_server_shared::db::set_primary_device(
+            self.context.db_pool.as_ref(),
+            &user_id,
+            &new_device.device_id,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
         let (access_token, _, exp_timestamp) = app_context
             .auth_manager
             .create_token_for_device(&user_id, Some(&new_device.device_id))
@@ -1163,47 +1177,51 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
             ));
         }
 
-        let deactivated =
-            construct_db::deactivate_device(self.context.db_pool.as_ref(), &req.device_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+        // Same door as `logout`. Deactivation is irreversible — nothing in this workspace sets
+        // `is_active` back to TRUE, an inactive device cannot authenticate, and the key service
+        // serves no bundles for one — so the account-owning primary device is refused here for
+        // exactly the reason `logout` has always refused it. Until 2026-09-01 this handler called
+        // `construct_db::deactivate_device` directly and asked nothing, which made revoking the
+        // primary device from another device's Devices screen an unrecoverable account loss.
+        let app_context = Arc::new(self.context.to_app_context());
+        let outcome = auth_core::deactivate_device_unless_primary(
+            &app_context,
+            &user_id,
+            &req.device_id,
+            "revoke_device",
+        )
+        .await
+        .map_err(app_error_to_status)?;
 
-        if deactivated {
-            let mut queue = self.context.queue.lock().await;
-            // Access-token TTL window: any outstanding token for this device must
-            // be rejected until it would have expired naturally.
-            let access_ttl_secs = (self.context.config.access_token_ttl_hours
-                * construct_config::SECONDS_PER_HOUR)
-                .max(1);
-
-            // Mark device revoked (covers all access tokens with this device_id claim).
-            queue
-                .mark_device_revoked(&req.device_id, access_ttl_secs)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, device_id = %req.device_id, "Failed to mark device revoked");
-                    Status::internal("Failed to revoke device sessions")
-                })?;
-
-            // Also blocklist the caller's access token when it is for this device.
-            if claims.device_id.as_deref() == Some(req.device_id.as_str()) {
-                let remaining = (claims.exp - chrono::Utc::now().timestamp()).max(0);
-                if remaining > 0 {
-                    queue
-                        .invalidate_access_token(&claims.jti, remaining)
-                        .await
-                        .map_err(|e| {
-                            tracing::error!(error = %e, "Failed to blocklist access token after device revoke");
-                            Status::internal("Failed to revoke device sessions")
-                        })?;
-                }
+        let deactivated = match outcome {
+            auth_core::DeviceDeactivation::Deactivated => true,
+            auth_core::DeviceDeactivation::AlreadyInactive => false,
+            // The device row was found and owned above, so the user must exist; treat a missing
+            // row as the internal inconsistency it is rather than reporting a silent no-op.
+            auth_core::DeviceDeactivation::NoSuchUser => {
+                return Err(Status::internal("user not found for an owned device"));
             }
+            auth_core::DeviceDeactivation::RefusedPrimary => {
+                return Err(Status::failed_precondition(
+                    "cannot revoke the account's primary device",
+                ));
+            }
+        };
 
-            // Legacy session set is keyed by user_id (not device_id). Still best-effort
-            // for any residual session keys; fail closed if Redis errors.
-            if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
-                tracing::error!(error = %e, "Failed to revoke user sessions after device deactivate");
-                return Err(Status::internal("Failed to revoke device sessions"));
+        // The caller's own access token, which `deactivate_device_unless_primary` does not know
+        // about: it revokes the *device*, and this is the one caller that may be holding a live
+        // token for the device it just revoked.
+        if deactivated && claims.device_id.as_deref() == Some(req.device_id.as_str()) {
+            let remaining = (claims.exp - chrono::Utc::now().timestamp()).max(0);
+            if remaining > 0 {
+                let mut queue = self.context.queue.lock().await;
+                queue
+                    .invalidate_access_token(&claims.jti, remaining)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Failed to blocklist access token after device revoke");
+                        Status::internal("Failed to revoke device sessions")
+                    })?;
             }
         }
 

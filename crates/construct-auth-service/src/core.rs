@@ -285,8 +285,108 @@ pub async fn logout_user(
     Ok(())
 }
 
+/// What `deactivate_device_unless_primary` did, so each caller can report it in its
+/// own terms without re-deriving the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceDeactivation {
+    /// The device was active and is now unregistered; its tokens are revoked.
+    Deactivated,
+    /// Refused: this is the account-owning primary device. Nothing was changed.
+    RefusedPrimary,
+    /// Nothing to do — no such device, or it was already inactive.
+    AlreadyInactive,
+    /// No user row for `user_id`. Nothing was changed.
+    NoSuchUser,
+}
+
+/// Deactivate `device_id` of `user_id`, **refusing the account-owning primary device**,
+/// and revoke everything that device could still authenticate with.
+///
+/// ## Why this is one function
+///
+/// Deactivating a device is irreversible. `authenticate_device_core` rejects an inactive
+/// device with `"Device is inactive"`, and there is no path anywhere in this workspace that
+/// sets `is_active` back to TRUE — the single `UPDATE devices SET is_active` sets it FALSE.
+/// The key service filters `is_active = true` on every query, so an account whose primary
+/// device is deactivated also stops serving prekey bundles: no peer can start a session with
+/// it, and it cannot log in to fix that. Short of an account recovery (which requires a
+/// recovery key set up beforehand), that account is gone.
+///
+/// That is why `logout` has always refused it. `RevokeDevice` called
+/// `construct_db::deactivate_device` directly and did not, so the same irreversible operation
+/// had a guarded path and an unguarded one — and the unguarded one is reachable from the
+/// shipped Devices screen, which offers "revoke" on every row that is not the *current*
+/// device. `DeviceInfo` carries `is_current` and no `is_primary`, so from a linked desktop the
+/// account-owning phone is an ordinary revocable row and the client cannot even warn.
+///
+/// The rule now lives with the operation rather than beside it: there is no way to reach the
+/// deactivation without passing the check. Callers map the outcome to their own contract —
+/// `logout` treats `RefusedPrimary` as success (the token is revoked, the registration stays),
+/// `RevokeDevice` answers `FAILED_PRECONDITION`.
+///
+/// Redis revocation failures fail closed: reporting success would tell the caller a device can
+/// no longer authenticate when it still can.
+pub async fn deactivate_device_unless_primary(
+    app_context: &Arc<AppContext>,
+    user_id: &Uuid,
+    device_id: &str,
+    op: &'static str,
+) -> Result<DeviceDeactivation, AppError> {
+    let user = match construct_db::get_user_by_id(&app_context.db_pool, user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(DeviceDeactivation::NoSuchUser),
+        Err(e) => {
+            tracing::error!(error = %e, op, "device deactivate: failed to load user");
+            return Err(AppError::internal(
+                "Cannot complete request (user lookup failed)",
+            ));
+        }
+    };
+
+    if user.primary_device_id.as_deref() == Some(device_id) {
+        tracing::info!(
+            user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
+            op,
+            "primary device — keeping registration (tokens only)"
+        );
+        return Ok(DeviceDeactivation::RefusedPrimary);
+    }
+
+    let deactivated = construct_db::deactivate_device(&app_context.db_pool, device_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, op, "device deactivate: failed");
+            AppError::internal("Cannot complete request (device deactivation failed)")
+        })?;
+
+    if !deactivated {
+        return Ok(DeviceDeactivation::AlreadyInactive);
+    }
+
+    let mut queue = app_context.queue.lock().await;
+    let access_ttl_secs =
+        (app_context.config.access_token_ttl_hours * construct_config::SECONDS_PER_HOUR).max(1);
+    queue
+        .mark_device_revoked(device_id, access_ttl_secs)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, op, "device deactivate: failed to mark device revoked");
+            AppError::internal("Cannot complete request (device revoke marker failed)")
+        })?;
+    // Session set is user-scoped; still clear residual keys for this user.
+    if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
+        tracing::error!(error = %e, op, "device deactivate: failed to revoke user sessions");
+        return Err(AppError::internal(
+            "Cannot complete request (session revoke failed)",
+        ));
+    }
+
+    tracing::info!(device_id = %device_id, op, "device unregistered");
+    Ok(DeviceDeactivation::Deactivated)
+}
+
 /// Deactivate the requesting device on single-device logout, unless it is the
-/// user's primary device. Redis revocation failures fail closed.
+/// user's primary device.
 async fn deactivate_secondary_device_on_logout(
     app_context: &Arc<AppContext>,
     user_id: &Uuid,
@@ -296,62 +396,132 @@ async fn deactivate_secondary_device_on_logout(
         // No device_id in the token (older clients) — nothing to unregister.
         return Ok(());
     };
+    // Every outcome is success for a sign-out: the token is revoked either way, and refusing
+    // to unregister the primary device is the intended answer, not a failure.
+    deactivate_device_unless_primary(app_context, user_id, device_id, "logout").await?;
+    Ok(())
+}
 
-    let user = match construct_db::get_user_by_id(&app_context.db_pool, user_id).await {
-        Ok(Some(u)) => u,
-        Ok(None) => return Ok(()),
-        Err(e) => {
-            tracing::error!(error = %e, "logout: failed to load user for device cleanup");
-            return Err(AppError::internal(
-                "Cannot complete logout (user lookup failed)",
-            ));
-        }
-    };
+#[cfg(test)]
+mod deactivation_guard_tests {
+    use std::path::{Path, PathBuf};
 
-    // Never deactivate the account-owning primary device on a normal sign-out.
-    if user.primary_device_id.as_deref() == Some(device_id) {
-        tracing::info!(
-            user_hash = %log_safe_id(&user_id.to_string(), &app_context.config.logging.hash_salt),
-            "logout: primary device — keeping registration (token revoked only)"
-        );
-        return Ok(());
+    fn workspace_root() -> PathBuf {
+        // crates/construct-auth-service → workspace root
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crate lives two levels below the workspace root")
+            .to_path_buf()
     }
 
-    match construct_db::deactivate_device(&app_context.db_pool, device_id).await {
-        Ok(true) => {
-            let mut queue = app_context.queue.lock().await;
-            let access_ttl_secs = (app_context.config.access_token_ttl_hours
-                * construct_config::SECONDS_PER_HOUR)
-                .max(1);
-            queue
-                .mark_device_revoked(device_id, access_ttl_secs)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "logout: failed to mark device revoked");
-                    AppError::internal("Cannot complete logout (device revoke marker failed)")
-                })?;
-            // Session set is user-scoped; still clear residual keys for this user.
-            if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
-                tracing::error!(error = %e, "logout: failed to revoke user sessions");
-                return Err(AppError::internal(
-                    "Cannot complete logout (session revoke failed)",
-                ));
+    /// Every `.rs` file under the workspace's own source trees. `target/` and vendored
+    /// third-party code are excluded — they are not ours and would make the scan meaningless.
+    fn workspace_sources() -> Vec<(PathBuf, String)> {
+        let root = workspace_root();
+        let trees = [
+            "crates",
+            "identity-service",
+            "messaging-service",
+            "key-service",
+            "media-service",
+            "group-service",
+            "signaling-service",
+            "veil-service",
+            "masque-service",
+            "gateway",
+            "shared/src",
+            "shared/tests",
+        ];
+        let mut out = Vec::new();
+        for tree in trees {
+            let dir = root.join(tree);
+            if !dir.exists() {
+                continue;
             }
-            tracing::info!(
-                device_id = %device_id,
-                "logout: secondary device unregistered"
-            );
-            Ok(())
+            collect(&dir, &mut out);
         }
-        Ok(false) => {
-            // Already inactive or unknown — nothing to do.
-            Ok(())
+        assert!(
+            out.len() > 50,
+            "scanned only {} source files — the tree layout moved and this detector is reading \
+             nothing, which is worse than not having it",
+            out.len()
+        );
+        out
+    }
+
+    fn collect(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, "target" | "third_party" | ".git") {
+                    continue;
+                }
+                collect(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push((path, text));
+            }
         }
-        Err(e) => {
-            tracing::error!(error = %e, "logout: failed to deactivate secondary device");
-            Err(AppError::internal(
-                "Cannot complete logout (device deactivation failed)",
-            ))
-        }
+    }
+
+    /// **The defect, stated as a test.**
+    ///
+    /// Deactivating a device is irreversible and, for the account-owning primary device,
+    /// unrecoverable. `logout` refused it; `RevokeDevice` called `deactivate_device` directly and
+    /// did not, so the same operation had a guarded path and an unguarded one — and the unguarded
+    /// one is reachable from the shipped Devices screen.
+    ///
+    /// The fix is that there is now exactly one caller. This asserts that, because a second one
+    /// would not fail anywhere else: it compiles, it runs, and it takes an account with it.
+    #[test]
+    fn deactivate_device_has_exactly_one_caller() {
+        let callers: Vec<String> = workspace_sources()
+            .into_iter()
+            .filter(|(path, text)| {
+                // The definition itself, and this file.
+                !path.ends_with("construct-db/src/lib.rs")
+                    && !path.ends_with("construct-auth-service/src/core.rs")
+                    && text.contains("deactivate_device(")
+            })
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+
+        assert!(
+            callers.is_empty(),
+            "`construct_db::deactivate_device` must be reached only through \
+             `deactivate_device_unless_primary`, which holds the rule about which devices may be \
+             deactivated at all. New caller(s): {callers:?}"
+        );
+    }
+
+    /// The guard's premise: deactivation is one-way. If a reactivation path is ever added, the
+    /// reason for refusing to deactivate the primary device weakens and the refusal should be
+    /// revisited deliberately — not left standing because nobody noticed the ground moved.
+    #[test]
+    fn nothing_sets_a_device_active_again() {
+        let offenders: Vec<String> = workspace_sources()
+            .into_iter()
+            .filter(|(path, text)| {
+                !path.ends_with("construct-auth-service/src/core.rs")
+                    && (text.contains("is_active = TRUE WHERE")
+                        || text.contains("is_active = true WHERE")
+                        || text.contains("SET is_active = TRUE")
+                        || text.contains("SET is_active = true"))
+            })
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "a device can now be reactivated ({offenders:?}). `deactivate_device_unless_primary` \
+             refuses the primary device because deactivation is unrecoverable — re-read that \
+             rationale before deleting this test"
+        );
     }
 }
