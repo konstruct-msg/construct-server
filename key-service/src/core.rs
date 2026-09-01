@@ -451,6 +451,18 @@ async fn build_hybrid_kt_proof_if_present(
 }
 
 /// Get pre-key bundles for all devices of a user
+/// What a batch bundle fetch answered.
+///
+/// Three lists that are **not** subsets of one another, which is why they are named rather than
+/// returned as a tuple: `bundles` is what could be built, `unavailable` is what exists but had no
+/// keys to give, and `active_devices` is the account's device set — the only one of the three a
+/// caller may prune against. See `GetPreKeyBundlesResponse.active_devices` in construct-protos.
+pub struct PreKeyBundleSet {
+    pub bundles: Vec<PreKeyBundle>,
+    pub unavailable: Vec<String>,
+    pub active_devices: Vec<String>,
+}
+
 pub async fn get_prekey_bundles(
     db: &PgPool,
     user_id: &str,
@@ -458,7 +470,17 @@ pub async fn get_prekey_bundles(
     bundle_signing_key: Option<&SigningKey>,
     // See `get_prekey_bundle`: false ⇒ SPK-only bundles (drain guard), no OTPK consumed.
     consume_otpk: bool,
-) -> Result<(Vec<PreKeyBundle>, Vec<String>)> {
+) -> Result<PreKeyBundleSet> {
+    // The account's device set, asked separately and always — `device_ids` narrows the bundle
+    // query below, and deriving the set from a narrowed answer would report "these are the only
+    // devices" about a query that only asked after some of them. Cheap: one indexed column.
+    let active_devices: Vec<String> = sqlx::query_scalar(
+        "SELECT device_id FROM devices WHERE user_id = $1::uuid AND is_active = true",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+
     let devices: Vec<DeviceRow> = if let Some(ids) = device_ids {
         sqlx::query_as(
             r#"
@@ -609,7 +631,11 @@ pub async fn get_prekey_bundles(
         }
     }
 
-    Ok((bundles, unavailable))
+    Ok(PreKeyBundleSet {
+        bundles,
+        unavailable,
+        active_devices,
+    })
 }
 
 // ============================================================================
