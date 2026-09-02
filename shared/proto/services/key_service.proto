@@ -298,6 +298,30 @@ message GetPreKeyBundlesResponse {
 
   // Devices that had no pre-keys available
   repeated string unavailable_devices = 2;
+
+  // EVERY active device of `user_id`, whether or not this call asked about it and whether or
+  // not a bundle could be built for it. The account's device set, stated as such.
+  //
+  // Why it is a field of its own rather than "whatever `bundles` happens to contain": a client
+  // cannot prune its local device set from `bundles`, and the two reasons are independent.
+  //  * The request may narrow the query (`device_ids`), so `bundles` is a subset by design.
+  //  * The client drops entries from `bundles` on its own — construct-messenger discards a
+  //    device whose hybrid PQ bundle fails verification. That device exists; only this bundle
+  //    was unusable. Pruning on `bundles` would delete it.
+  // Absence from `bundles` is therefore not evidence of anything. Absence from THIS field is:
+  // the device is not active for this account, right now, and a peer holding it should forget it.
+  //
+  // **Empty is not an answer, and a client must never prune on it.** proto3 gives an absent
+  // field the same value as an explicitly empty one, so a server that predates this field is
+  // indistinguishable from an account whose every device was revoked. The two outcomes are not
+  // symmetric: refusing to prune on empty costs a wasted fan-out to a device that is gone, while
+  // pruning on empty during a rollout deletes every peer's device set at once. An account with no
+  // active devices has nothing to send to either way.
+  //
+  // This tells a caller nothing it could not already learn: the same set is what an unnarrowed
+  // fetch returns bundles for, and it is the server's own registry. See
+  // construct-docs/client/specs/MULTIDEVICE_PROTOCOL_PLAN.md §A.3.
+  repeated string active_devices = 3;
 }
 
 message DevicePreKeyBundle {
