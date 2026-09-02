@@ -1069,7 +1069,30 @@ pub async fn update_device_last_active(pool: &DbPool, device_id: &str) -> Result
     Ok(())
 }
 
+/// Point an account at the device that owns it.
+///
+/// Set once at registration (`create_user_with_device`) and again after an account recovery,
+/// which deactivates every device and registers a new one. Recovery did not do the second half
+/// until 2026-09-01, so a recovered account's `primary_device_id` went on naming the device the
+/// recovery had just deactivated. Everything that asks "is this the primary device" then answered
+/// **no** for the account's only live device — including the guard that refuses to deactivate it,
+/// so signing out of a recovered account unregistered its last device and left the account with
+/// none. See `deactivate_device_unless_primary`.
+pub async fn set_primary_device(pool: &DbPool, user_id: &Uuid, device_id: &str) -> Result<()> {
+    sqlx::query("UPDATE users SET primary_device_id = $1 WHERE id = $2")
+        .bind(device_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .context("Failed to set primary_device_id")?;
+    Ok(())
+}
+
 /// Deactivate a device (soft-delete). Returns true if a row was updated.
+///
+/// **Irreversible: nothing in this workspace sets `is_active` back to TRUE.** Call it through
+/// `construct_auth_service::core::deactivate_device_unless_primary`, which is the only caller and
+/// holds the rule about which devices may be deactivated at all.
 pub async fn deactivate_device(pool: &DbPool, device_id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE devices SET is_active = FALSE WHERE device_id = $1 AND is_active = TRUE",
