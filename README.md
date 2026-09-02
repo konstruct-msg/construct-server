@@ -1,304 +1,221 @@
-# Konstruct
+# Konstruct Server
 
-**Privacy by Architecture. Not by Promise.**
+Rust backend services for Konstruct.
 
-> Your messages are encrypted on your device before they leave it.  
-> The server routes sealed blobs — it cannot read what you wrote, who you wrote to, or when you last opened the app.
+The repository contains the gRPC services, shared crates, protobuf definitions,
+database migrations, deployment manifests, and operational scripts for the
+server side of the system. Product APIs are gRPC. HTTP is limited to health,
+metrics, public discovery, federation S2S, and edge proxying.
 
----
+Detailed implementation notes live in [DOCUMENTATION.md](DOCUMENTATION.md).
+Operational ADRs and session notes live in `~/Code/construct-docs`.
 
-## What is Konstruct?
+## Status
 
-Konstruct is an open, federation-capable, end-to-end encrypted messenger built on the principle that **privacy is a technical guarantee, not a policy statement**. Production runs a single node today — see [Federation](#federation) for what exists and what does not.
-
-We don't ask you to trust us. The cryptography makes trust unnecessary.
-
-```
-Signal's Security  +  Email's Openness  +  Minimal Attack Surface
-```
-
----
-
-## Privacy Guarantees
-
-### How this is enforced technically
-
-**End-to-end encryption** — Messages are encrypted on the sender's device using the recipient's public key. The ciphertext is what travels over the network. The server stores nothing readable.
-
-**Sealed sender** — The server does not learn who sent you a message. The sender's identity is encrypted inside the message envelope. To the server it's an opaque blob destined for a device. Anti-spam without identity: each sealed message carries an anonymous Privacy Pass token (VOPRF), so the server can rate-limit abuse without ever learning who is sending.
-
-**No message persistence** — Messages are never written to a database. They travel: sender → messaging-service → Redis Stream → recipient. Once delivered they are gone from the server.
-
-**Invite-only onboarding** — No phone number. No email. Access is via cryptographic invite tokens. Zero personally identifiable information required to register.
-
-**Passwordless authentication** — Your device *is* your identity. A device-local Ed25519 key pair is your credential. The server never sees a password.
-
-**Minimal metadata** — The server does not log IP addresses and does not store an activity history. Sealed sender is always on, so a delivered message carries no sender the server can read. What it does hold: an opaque account id, public keys, a push token, and — from the moment you add someone — a contact edge stored as `HMAC-SHA256(secret, user_id)` for both sides (`shared/migrations/037_contact_links.sql`). That keeps plaintext social-graph edges out of the database. It does not hide the graph from whoever holds the HMAC secret, which is this server.
-
----
-
-## Cryptography
-
-All encryption happens on the client. The server is a dumb router of sealed envelopes.
-
-### Key agreement — X3DH (Signal Protocol)
-
-```
-Alice fetches Bob's public key bundle from the server
-  ↓
-Alice performs X3DH locally — 4 ECDH operations
-  ↓
-Shared secret derived with HKDF-SHA256
-  ↓
-Double Ratchet session initialized — every message gets a fresh key
-```
-
-### Post-Quantum Cryptography — active today
-
-The server supports two crypto suites simultaneously:
-
-| Suite ID | Name | Keys | Status |
-|----------|------|------|--------|
-| `1` | ClassicX25519 | Ed25519 + X25519 | Active |
-| `2` | PQHybridKyber | Ed25519 + ML-KEM-768 ⊕ X25519 | Active |
-
-Hybrid PQC means: even if ML-KEM-768 has an undiscovered flaw, X25519 still protects you. Even if a quantum computer breaks X25519, ML-KEM-768 still protects you.
-
-**Why it matters now:** Nation-states collect encrypted traffic today to decrypt it when quantum computers become capable. "Harvest now, decrypt later" is a documented threat. Konstruct's PQC protects messages sent today against future quantum attacks.
-
-### Prekey signature scheme
-
-Every uploaded prekey is signed with the device's Ed25519 key:
-
-```
-Ed25519.sign(device_key, "KonstruktX3DH-v1" || [0x00, suite_id] || pubkey_bytes)
-```
-
-The server verifies all signatures on upload (RFC 8032 strict). A forged or tampered key bundle is rejected before it can reach any client.
-
-### Algorithms in use
-
-| Primitive | Algorithm | Notes |
-|-----------|-----------|-------|
-| Asymmetric encryption | X25519 + ML-KEM-768 (FIPS 203) | Hybrid KEM |
-| Identity signatures | Ed25519 (RFC 8032) | Strict verification |
-| Message encryption | ChaCha20-Poly1305 | 256-bit AEAD |
-| Key derivation | HKDF-SHA256 | Per Signal spec |
-| Token signing | PASETO v4.public (Ed25519) | Short-lived access tokens; legacy RS256 JWT still verified |
-| Anonymous anti-spam | Privacy Pass (VOPRF, ristretto255) | Per-message tokens — rate-limits senders the server cannot identify |
-
----
-
-## Federation
-
-**Status: implemented, not in production.** The S2S path exists and is tested
-(`crates/construct-federation/tests/s2s_sealed_sender_blind_test.rs`, plus a two-node harness in
-`ops/federation-smoke/`), but the deployment is a single node, and a second one has to be
-cross-pinned by SPKI with a peer that agrees to pin you back — there are no public seed nodes and
-no client-side server picker. Running your own instance today gives you an island, not a network.
-
-The design it is built toward:
-
-```
-alice@your-server.com  ←─ E2E encrypted ─→  bob@another-server.org
-        │                                             │
-   your server                                  their server
- (routes envelopes,                          (routes envelopes,
-  can't read them)                            can't read them)
-```
-
-- Run your own server. Control your own data.
-- No vendor lock-in — the protocol is open.
-- Server-to-server routing uses sealed sender — even federated servers don't learn conversation participants.
-
----
+- Production deployment is a single node.
+- Federation S2S code exists and is tested, but there are no public seed nodes
+  or client-side server selection flows.
+- A self-hosted instance is isolated unless it is explicitly peered with another
+  instance using mutual SPKI pinning.
+- License: AGPL-3.0-only. See [LICENSE](LICENSE).
 
 ## Architecture
 
+TLS terminates at Caddy. Caddy routes gRPC requests by protobuf service path to
+internal Rust services. Each service validates authentication itself; Caddy does
+not inject trusted user identity headers.
+
+| Service | Binary | Port | Role |
+| --- | --- | --- | --- |
+| `caddy` | external | 443 TCP / 8080 h2c | Edge TLS and gRPC routing |
+| `quic` | external | 443 UDP | Obfuscated QUIC transport to Caddy h2c |
+| `gateway` | `gateway` | HTTP 3000 / proxy 9443 | Health, well-known, federation S2S, veil/obfs4 proxy |
+| `identity` | `identity-service` | 50051 | Auth, device, device-link, user, invite, token issuance |
+| `messaging` | `messaging-service` | 50053 | Send, stream, sealed sender, Privacy Pass redemption, APNs, Sentinel |
+| `media` | `media-service` | 50056 | Encrypted media upload/download |
+| `veil` | `veil-service` | 50056 | VEIL capability issuer; separate deployment surface |
+| `key` | `key-service` | 50057 | X3DH and ML-KEM prekeys |
+| `group` | `group-service` | 50058 | MLS groups and broadcast channels |
+| `signaling` | `signaling-service` | 50060 | WebRTC signaling |
+| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay |
+
+Data stores:
+
+- PostgreSQL stores accounts, devices, public keys, migrations, contact-link
+  HMACs, and delivery receipt routing state.
+- Redis stores offline mailbox streams, wakeup pub/sub channels, rate limits,
+  PoW challenges, token-spend state, replay guards, and token blocklist entries.
+- Message content is not written to PostgreSQL.
+
+## Message Delivery
+
+Offline delivery uses Redis Streams, not Kafka.
+
+```text
+send
+  -> messaging-service
+  -> XADD delivery:offline:{user}              # legacy user stream
+  -> XADD delivery:offline:{user}:{device}     # per-device stream
+  -> PUBLISH inbox:wakeup:{user}
+
+stream
+  -> SUBSCRIBE inbox:wakeup:{user}
+  -> read device stream plus legacy user stream when claims contain device_id
+  -> dedupe by message_id, preferring device-stream entries
 ```
-Client (iOS / macOS)
-  │  gRPC over TLS (HTTP/2) — optionally via QUIC :443/UDP or veil/obfs4 gateway :9443
-  ▼
-Caddy :443      — edge TLS termination (Let's Encrypt), gRPC routing to services
-  │
-  ├──► identity-service  :50051  (Auth, Device, DeviceLink, User, Invite — merged)
-  ├──► messaging-service :50053  (Messaging, Notification, Sentinel — merged)
-  ├──► media-service     :50056  (encrypted attachments)
-  ├──► veil-service      :50056  (VEIL ticket provisioning — separate deployment)
-  ├──► key-service       :50057  (X3DH prekeys, ML-KEM keys)
-  ├──► group-service     :50058  (MLS groups RFC 9420 + broadcast channels)
-  ├──► signaling-service :50060  (WebRTC call signaling)
-  └──► gateway           :3000   (HTTP: /health, /.well-known, /federation; veil/obfs4 proxy :9443)
 
-Non-gRPC services:
-  └──► masque-service    :9200   (WebSocket MASQUE-lite QUIC datagram relay)
+Delivery invariants:
 
-Message flow (Redis-direct, no Kafka):
-  sender → messaging-service → Redis stream delivery:offline:{user}[:{device}] + PUBLISH inbox:wakeup → recipient
-  (never touches a SQL database — no message content persistence)
-```
+- `since_cursor` is a read offset only. It must never trim or delete mailbox
+  entries.
+- Retention is handled by `XADD MAXLEN ~` plus the age sweep.
+- Online users are woken by Redis pub/sub; APNs silent `new_message` is skipped
+  while `user:{user_id}:server_instance_id` is set.
+- `MSG_MAILBOX_USER_WRITE` controls legacy user-stream writes during cutover.
+  When it is disabled, failure to write a target stream is a hard error.
+- Mailbox payloads are written with `rmp_serde::encode::to_vec_named` and read
+  with `rmp_serde::from_slice`.
 
-**gRPC-first architecture.** Client APIs (messaging, auth, keys, media, notifications) are gRPC only. HTTP remains for health/metrics, public discovery (`/.well-known`), and federation S2S.
+## Authentication And Abuse Controls
 
----
+- Primary access tokens are PASETO v4.public. Legacy RS256 JWT verification is
+  retained for migration compatibility.
+- Logout and revoke use Redis blocklist keys: `invalidated_token:{jti}`.
+- Messaging requires a bearer token. Optional `x-user-id` and `x-device-id`
+  headers must match token claims.
+- Sealed sender redemption is controlled by `MSG_STEALTH_TOKEN_POLICY`:
+  `off`, `warn`, or `enforce`.
+- Privacy Pass uses `TOKEN_ISSUER_KEY`, a 32-byte hex VOPRF issuer key shared by
+  identity-service and messaging-service.
+- Empty token wallets may reduce abuse resistance, but must not reveal sender
+  identity or downgrade a sealed send to an identified send.
 
-## Minimal by Design
+## Cryptography
 
-| Feature | Our choice | Why |
-|---------|-----------|-----|
-| Read receipts | Off by default | The sender doesn't need to know you read it |
-| Typing indicators | None | Reduces anxiety, reduces metadata |
-| Presence / last seen | None | Your availability is your business |
-| Push notifications | Silent APNs only | You decide when to check |
-| Stories, reactions | None | Not a social network |
-| Analytics / telemetry | None | We collect nothing |
+Client-side encryption is outside this repository. The server stores and routes
+encrypted envelopes, verifies uploaded key material, and issues or redeems
+server-side tokens.
 
----
+| Area | Implementation |
+| --- | --- |
+| Device identity | Ed25519 |
+| Classic prekeys | X25519 |
+| Hybrid prekeys | ML-KEM-768 plus X25519 |
+| Prekey signatures | Ed25519, strict RFC 8032 verification |
+| Access tokens | PASETO v4.public; legacy RS256 JWT accepted |
+| Anonymous anti-abuse | Privacy Pass VOPRF over ristretto255 |
+| Groups | MLS, RFC 9420 |
 
-## Project Layout
+## Repository Layout
 
-```
+```text
 construct-server/
-├── gateway/               # Federation, health, discovery, veil/obfs4 proxy
-├── identity-service/      # Merged auth + user + invite (Phase 2.7)
-├── key-service/           # X3DH prekeys, PQC Kyber keys
-├── masque-service/        # WebSocket MASQUE-lite QUIC datagram relay
-├── media-service/         # Encrypted media upload/download
-├── messaging-service/     # Send/receive, streaming, receipts, APNs push, sentinel
-├── group-service/         # MLS group messaging (RFC 9420) + broadcast channels
-├── signaling-service/     # WebRTC call signaling relay
-├── veil-service/          # VEIL obfuscation ticket provisioning
-├── shared/
-│   ├── proto/             # Protobuf definitions (source of truth)
-│   ├── migrations/        # PostgreSQL schema (64 migrations, 001–064)
-│   └── tests/             # Integration tests
-└── crates/                # Shared libraries (25 crates)
-    ├── construct-crypto/  # Crypto primitives
-    ├── construct-auth/    # JWT, PoW
-    ├── construct-db/      # Database ORM + queries
-    ├── construct-pow/     # Proof-of-Work challenge/verify
-    ├── construct-apns/    # APNs HTTP/2 push client
-    ├── construct-rate-limit/ # Redis sliding window rate limiter
-    └── ...
+  gateway/               HTTP gateway, discovery, federation entrypoints
+  identity-service/      auth, user, device, invite, token issuance
+  messaging-service/     message send/stream, sealed sender, APNs, Sentinel
+  media-service/         encrypted media service
+  key-service/           prekey service
+  group-service/         MLS and broadcast channels
+  signaling-service/     WebRTC signaling
+  veil-service/          VEIL capability issuer
+  masque-service/        MASQUE-lite relay
+  shared/                protobufs, migrations, shared tests
+  crates/                shared Rust crates
+  ops/                   Docker Compose, Caddy, monitoring, deployment config
+  scripts/               local checks and operational scripts
 ```
 
----
+## Local Development
 
-## Running Locally
-
-### Dependencies
-
-```bash
-# Start PostgreSQL + Redis
-docker compose -f ops/docker-compose.dev.yml up -d
-```
-
-### Run a service
-
-```bash
-DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test \
-REDIS_URL=redis://localhost:6379 \
-RUST_LOG=info \
-cargo run -p identity-service
-```
-
-### Run tests
-
-```bash
-cargo test --workspace --lib       # unit tests (no infra needed)
-
-# Integration tests (need DB + Redis running)
-DATABASE_URL=... REDIS_URL=... cargo test -p construct-server-shared
-```
-
-### Pre-commit
-
-The repo has a pre-commit hook that runs `cargo fmt` and `cargo clippy -D warnings`. Run before committing:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace -- -D warnings
-```
-
----
-
-## Contributing
-
-Contributions are welcome. Before contributing, read the threat model below.
-
-### Our priorities
-
-| Priority | Area |
-|----------|------|
-| 🔴 Critical | Anything that weakens privacy or security guarantees |
-| 🟠 High | Cross-device message continuity, MLS group chats |
-| 🟡 Medium | Performance, observability, federation improvements |
-| 🟢 Nice to have | UI polish, client SDKs |
-
-### Rules for contributors
-
-1. **Privacy is non-negotiable.** No feature ships that adds server-side visibility into user behavior, content, or metadata.
-2. **No client REST.** gRPC-only for product APIs. HTTP is limited to health/metrics, `/.well-known` discovery, and federation S2S.
-3. **No PII in logs.** User IDs are HMAC-hashed before logging. IPs are never logged.
-4. **Test your crypto changes.** Security-critical code requires unit tests with known vectors.
-5. **Secrets never in source.** No keys, tokens, or credentials in any committed file — not even test fixtures.
-
----
-
-## Threat Model
-
-### Protected against
-
-- ✅ Network observers (ISP, WiFi, national-level interception)
-- ✅ Compromised server — server cannot decrypt messages
-- ✅ "Harvest now, decrypt later" quantum attacks — hybrid PQC active
-- ✅ MITM key substitution — prekey signatures verified client and server
-- ✅ Spam / bot registration — Proof-of-Work + invite-only + per-message Privacy Pass tokens (age-tiered issuance caps)
-- ✅ Message replay — idempotency keys, per-message ratchet keys
-
-### Not protected against
-
-- ❌ Compromised device (malware with screen access)
-- ❌ Screenshots by the recipient
-- ❌ Physical coercion of the recipient
-- ❌ Metadata analysis at the network layer (traffic volume, timing)
-
----
-
-## References
-
-- [Signal Protocol: X3DH](https://signal.org/docs/specifications/x3dh/)
-- [Signal Protocol: Double Ratchet](https://signal.org/docs/specifications/doubleratchet/)
-- [ML-KEM — FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)
-- [MLS — RFC 9420](https://www.rfc-editor.org/rfc/rfc9420)
-- [RFC 8032: Ed25519](https://datatracker.ietf.org/doc/html/rfc8032)
-
----
-
-## License
-
-AGPL-3.0-only — see [LICENSE](LICENSE). Network use = source-disclosure obligation (§13).
-
----
-
-<p align="center">
-  <b>Privacy is a right. Not a feature. Not a setting. Not a subscription tier.</b>
-</p>
-
-## Trademark
-
-**Konstruct™** / **Конструкт™** and the logo are trademarks of Maxim Eliseyev. The open-source
-license on this code does **not** grant trademark rights — see [TRADEMARK.md](TRADEMARK.md).
-Forks that distribute a modified version must rebrand.
-
-## После клонирования
+After cloning, enable the repository hooks:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-`hooksPath` — локальная настройка и не переносится с клоном, поэтому строку надо повторить
-в каждой копии. Хук прогоняет `cargo fmt --check`, `scripts/check-observability.py` и
-clippy — то же, что CI решает первым, до сборки образа. 2026-08-13 три коммита подряд
-выглядели выложенными, не будучи выложенными: Format Check падал на одной строке и
-останавливал деплой.
+Start local PostgreSQL and Redis:
+
+```bash
+docker compose -f ops/docker-compose.dev.yml up -d
+```
+
+Build the workspace:
+
+```bash
+cargo build
+```
+
+Run a service locally:
+
+```bash
+DATABASE_URL=postgres://postgres:password@localhost:5432/construct_test \
+REDIS_URL=redis://localhost:6379 \
+INSTANCE_DOMAIN=localhost \
+RUST_LOG=info \
+cargo run -p identity-service
+```
+
+Some services require additional secrets. Use
+[ops/secrets.example.env](ops/secrets.example.env) and
+`crates/construct-config/src/lib.rs` as the source of truth for environment
+variables.
+
+## Checks
+
+Default checks:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Offline mailbox Redis tests are ignored by default. Run them before changing
+delivery behavior or `MSG_MAILBOX_USER_WRITE`:
+
+```bash
+docker exec construct-redis-local redis-cli ping
+cargo test -p construct-queue --lib -- --ignored mailbox
+```
+
+Static observability checks:
+
+```bash
+python3 scripts/check-observability.py
+```
+
+## Production
+
+Production deployment is defined in [ops/docker-compose.prod.yml](ops/docker-compose.prod.yml).
+Secrets are read from `/opt/construct/secrets/app.env`; use
+[ops/secrets.example.env](ops/secrets.example.env) as the template.
+
+Before deploying, validate secrets:
+
+```bash
+./scripts/preflight-secrets.sh /opt/construct/secrets/app.env
+```
+
+Important configuration rules:
+
+- `INSTANCE_DOMAIN` is required on every Rust service.
+- `SERVER_SIGNING_KEY` is base64 for exactly 32 bytes.
+- `TOKEN_ISSUER_KEY` is hex for exactly 32 bytes.
+- Do not re-declare secrets from `app.env` as bare `${VAR}` entries under a
+  Compose `environment:` block; an unset shell variable overrides the secret
+  with an empty string.
+- Recreate services after secret changes with `docker compose up -d --force-recreate`;
+  `restart` does not re-read `env_file`.
+
+## References
+
+- [DOCUMENTATION.md](DOCUMENTATION.md)
+- [ops/docker-compose.prod.yml](ops/docker-compose.prod.yml)
+- [ops/secrets.example.env](ops/secrets.example.env)
+- [TRADEMARK.md](TRADEMARK.md)
+
+## Trademark
+
+Konstruct and the logo are trademarks of Maxim Eliseyev. The open-source
+license on this code does not grant trademark rights. Forks that distribute a
+modified version must rebrand.
