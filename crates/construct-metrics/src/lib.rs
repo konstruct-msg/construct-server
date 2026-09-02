@@ -659,8 +659,24 @@ pub fn init_registry() {
     Lazy::force(&SIGNALING_ERRORS_TOTAL);
     Lazy::force(&SIGNALING_SDP_REFUSED_TOTAL);
     Lazy::force(&MSG_MAILBOX_READ_TOTAL);
-    Lazy::force(&MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL);
     Lazy::force(&MSG_MAILBOX_WRITE_TOTAL);
+    // Both children, for the same reason as the two sets below, and with more at stake than
+    // either. This is the gate for `MSG_MAILBOX_USER_WRITE=0`, a flag that drops every message
+    // this counter would have caught — and its increment sits behind `if page.user_only > 0`, so
+    // until the first divergence there was no series at all. "No divergence yet" and "nobody
+    // wired the counter up" were the same reading, on the one number that decides whether a
+    // lossy cutover is safe.
+    //
+    // Found 2026-09-02 while taking a release baseline: the query returned an empty vector, and
+    // the only thing that distinguished the two meanings was that the companion
+    // `MSG_MAILBOX_READ_TOTAL` was empty too, so no mailbox had been read since the deploy. That
+    // is a proof by coincidence, and it does not survive the next run.
+    //
+    // The label set is closed: `path` is `stream` (the live subscription) or `pending` (the
+    // catch-up page), the two call sites in messaging-service. Nothing else produces it.
+    for path in ["stream", "pending"] {
+        MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL.with_label_values(&[path]);
+    }
     // Both children, not just the family. This label set is closed — a sealed send arrives by
     // one of exactly two doors — and the whole point of the counter is the *ratio* between them.
     // Left to appear on first use, the gate reads `absent / present` before the flip and
@@ -800,6 +816,74 @@ mod tests {
                     .filter(|l| l.contains("sealed_ingress"))
                     .collect::<Vec<_>>()
                     .join("\n")
+            );
+        }
+    }
+
+    /// The mailbox cutover gate must read as a number from the first scrape.
+    ///
+    /// `MSG_MAILBOX_USER_WRITE=0` drops every entry this counter exists to catch, so "flat zero
+    /// for the gate window" is the whole exit criterion — and the increment sits behind
+    /// `if page.user_only > 0`, which means an untripped counter produced no series at all.
+    /// A query then returned an empty vector for both "no divergence" and "nobody wired it up".
+    ///
+    /// Taking the release baseline on 2026-09-02 hit exactly that: the vector was empty, and the
+    /// only thing separating the two meanings was that `MSG_MAILBOX_READ_TOTAL` happened to be
+    /// empty too. That is a proof by coincidence and it does not survive a second run.
+    #[test]
+    fn test_mailbox_cutover_gate_has_both_paths_at_zero() {
+        init_registry();
+        let text = gather_metrics().unwrap();
+        for path in ["stream", "pending"] {
+            let series =
+                format!("construct_msg_mailbox_user_only_entries_total{{path=\"{path}\"}} 0");
+            assert!(
+                text.contains(&series),
+                "expected `{series}`, got:\n{}",
+                text.lines()
+                    .filter(|l| l.contains("mailbox_user_only"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+
+    /// Every `path` the two call sites can produce is pre-created above, or the gate is back to
+    /// reading an absence as a zero for whichever one was forgotten.
+    ///
+    /// A list in a comment is a promise; this is the check. It reads the call sites rather than
+    /// trusting them, so adding a third `path` in messaging-service reddens here instead of
+    /// silently reintroducing the trap for the new value only.
+    #[test]
+    fn every_user_only_path_label_is_preinitialised() {
+        let mut found: Vec<String> = Vec::new();
+        for file in [
+            "../../messaging-service/src/stream.rs",
+            "../../messaging-service/src/grpc.rs",
+        ] {
+            let text =
+                std::fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+            let Some(idx) = text.find("MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL") else {
+                panic!("{file} no longer increments the gate counter — did a call site move?");
+            };
+            // `.with_label_values(&["<path>"])` on the lines that follow the counter name.
+            let tail = &text[idx..];
+            let start = tail
+                .find("with_label_values(&[\"")
+                .expect("no label on the increment");
+            let rest = &tail[start + "with_label_values(&[\"".len()..];
+            let end = rest.find('"').expect("unterminated label literal");
+            found.push(rest[..end].to_string());
+        }
+        assert_eq!(
+            found.len(),
+            2,
+            "expected one increment per call site, found {found:?}"
+        );
+        for path in &found {
+            assert!(
+                ["stream", "pending"].contains(&path.as_str()),
+                "call site produces path=`{path}`, which init_registry does not pre-create"
             );
         }
     }
