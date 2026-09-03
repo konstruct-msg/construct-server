@@ -1184,38 +1184,6 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
         Ok(Response::new(Box::pin(tokio_stream::iter(items))))
     }
 
-    /// Store this device's sealed name and platform.
-    ///
-    /// **Not implemented yet, and says so.** The proto and both clients are ready
-    /// (`construct-protos@8a3b489`, `construct-messenger@844940ab`); what is missing is
-    /// server-side storage — a `BYTEA` column, a write keyed by the `device_id` from the caller's
-    /// **verified token** rather than from the request, and returning the blob in `ListDevices`
-    /// and `GetDeviceInfo`. That is S1 in `construct-docs/backend/SERVER_TASKS_2026-09-03.md`.
-    ///
-    /// An explicit `unimplemented` rather than a stub that answers `success: true`: the client
-    /// records a publish only after the server takes the blob, so a truthful refusal leaves it
-    /// retrying on the next device-set change, and a cheerful lie would make it stop forever
-    /// having stored nothing.
-    async fn set_device_metadata(
-        &self,
-        request: Request<proto::SetDeviceMetadataRequest>,
-    ) -> Result<Response<proto::SetDeviceMetadataResponse>, Status> {
-        // Verified now so the shape of the guard is settled before storage exists: the row written
-        // is the caller's own, named by the token's `device_id`, never by the request.
-        let token = request_token(request.metadata())?;
-        let claims = self
-            .context
-            .auth_manager
-            .verify_token(&token)
-            .map_err(|_| Status::unauthenticated("invalid access token"))?;
-        if claims.device_id.as_deref().unwrap_or_default().is_empty() {
-            return Err(Status::unauthenticated("token names no device"));
-        }
-        Err(Status::unimplemented(
-            "device metadata storage is not deployed yet",
-        ))
-    }
-
     async fn revoke_device(
         &self,
         request: Request<proto::RevokeDeviceRequest>,
