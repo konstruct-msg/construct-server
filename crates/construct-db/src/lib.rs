@@ -1119,7 +1119,8 @@ pub async fn get_user_primary_device(pool: &DbPool, user_id: &Uuid) -> Result<Op
             d.signed_prekey_signature,
             d.crypto_suites,
             d.registered_at,
-            d.is_active
+            d.is_active,
+            d.supports_pq_ratchet
         FROM devices d
         JOIN users u ON d.user_id = u.id
         WHERE d.user_id = $1 AND d.is_active = true

@@ -302,8 +302,14 @@ message DeviceInfo {
   // Device capabilities
   uint32 capabilities = 8;
 
+  // The device `users.primary_device_id` names. RevokeDevice refuses to revoke
+  // it (FAILED_PRECONDITION "cannot revoke the account's primary device"), so
+  // without this field a client can only learn which device is primary by
+  // trying to revoke one and reading the refusal.
+  bool is_primary = 9;
+
   // Reserved for future features
-  reserved 9 to 15;
+  reserved 10 to 15;
 }
 
 // ListDevicesResponse - wraps a single device in the stream
