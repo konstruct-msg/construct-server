@@ -39,8 +39,20 @@
 -- what actually gets delivered; the server does not keep the answer.
 -- `DeviceInfo.last_seen` therefore stays 0 on this server.
 --
--- 1 KiB is a cap, not a budget. A name and a platform tag sealed together are a
--- couple of hundred bytes; the limit exists so the column cannot be used as
+-- ## Why 4 KiB
+--
+-- The blob is not one sealed name. `SealedDeviceMetadata` carries one copy per
+-- active device of the account, each sealed to that device's X25519 identity key,
+-- because the account has no shared key to seal under — every device holds its own
+-- pair and linking establishes nothing between them. So the size scales with the
+-- device count: roughly 105-165 bytes per copy (ephemeral public key, nonce, AEAD
+-- tag, and a name), which puts 1 KiB — the figure an earlier draft used, when the
+-- blob was going to be a single sealed name — at a ceiling of six to nine devices.
+-- That is a refusal a real person could hit, and hitting it means the device list
+-- stops naming anything.
+--
+-- 4 KiB is still a cap and not a budget: around twenty-five to forty copies, far
+-- past any plausible account, and small enough that the column cannot become
 -- storage for something else. identity-service rejects anything larger with
 -- INVALID_ARGUMENT rather than truncating.
 
@@ -50,8 +62,8 @@ ALTER TABLE devices
     DROP CONSTRAINT IF EXISTS devices_sealed_metadata_len;
 ALTER TABLE devices
     ADD CONSTRAINT devices_sealed_metadata_len
-    CHECK (sealed_metadata IS NULL OR octet_length(sealed_metadata) <= 1024);
+    CHECK (sealed_metadata IS NULL OR octet_length(sealed_metadata) <= 4096);
 
 COMMENT ON COLUMN devices.sealed_metadata IS
     'Client-encrypted device name and platform. Opaque to the server: stored, returned '
-    'to the owning account in DeviceInfo.sealed_metadata, never parsed. Max 1 KiB.';
+    'to the owning account in DeviceInfo.sealed_metadata, never parsed. Max 4 KiB.';
