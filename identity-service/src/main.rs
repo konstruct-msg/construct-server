@@ -185,6 +185,48 @@ fn app_error_to_status(e: construct_error::AppError) -> Status {
     }
 }
 
+/// Build the wire view of a device row.
+///
+/// Shared by ListDevices and GetDeviceInfo so the two cannot disagree about what a device
+/// looks like — they did not exist together before, and a second hand-written copy is how
+/// one of them ends up still reporting `is_primary: false` for every row.
+///
+/// `device_name` and `platform` stay empty here permanently. Migration 013 removed the
+/// plaintext columns behind them as fingerprinting and an OS leak; clients read
+/// `sealed_metadata`, which this server stores and returns but cannot open.
+fn device_info(
+    d: &construct_db::Device,
+    current_device_id: Option<&str>,
+    primary_device_id: Option<&str>,
+) -> proto::DeviceInfo {
+    // `last_seen` stays 0, permanently. The server necessarily observes when a device
+    // makes a request; keeping the observation is what migration 013 removed, and a
+    // coarser version of it is the same column. Liveness is settled between clients from
+    // what actually gets delivered. See migration 068.
+    let last_seen = 0;
+
+    proto::DeviceInfo {
+        device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
+            user: None,
+            device_id: d.device_id.clone(),
+            platform: 0,
+            device_name: None,
+            registered_at: d.registered_at.timestamp(),
+            last_seen,
+            capabilities: 0,
+        }),
+        device_name: String::new(),
+        platform: 0,
+        last_seen,
+        created_at: d.registered_at.timestamp(),
+        push_provider: None,
+        is_current: Some(d.device_id.as_str()) == current_device_id,
+        capabilities: 0,
+        is_primary: Some(d.device_id.as_str()) == primary_device_id,
+        sealed_metadata: d.sealed_metadata.clone().unwrap_or_default(),
+    }
+}
+
 fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Status> {
     let auth = metadata
         .get("authorization")
@@ -1127,30 +1169,14 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
                 .and_then(|u| u.primary_device_id);
 
         let items: Vec<Result<proto::ListDevicesResponse, Status>> = devices
-            .into_iter()
+            .iter()
             .map(|d| {
-                let is_current = Some(d.device_id.as_str()) == current_device_id.as_deref();
-                let is_primary = Some(d.device_id.as_str()) == primary_device_id.as_deref();
                 Ok(proto::ListDevicesResponse {
-                    device: Some(proto::DeviceInfo {
-                        device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
-                            user: None,
-                            device_id: d.device_id.clone(),
-                            platform: 0,
-                            device_name: None,
-                            registered_at: d.registered_at.timestamp(),
-                            last_seen: 0,
-                            capabilities: 0,
-                        }),
-                        device_name: String::new(),
-                        platform: 0,
-                        last_seen: 0,
-                        created_at: d.registered_at.timestamp(),
-                        push_provider: None,
-                        is_current,
-                        capabilities: 0,
-                        is_primary,
-                    }),
+                    device: Some(device_info(
+                        d,
+                        current_device_id.as_deref(),
+                        primary_device_id.as_deref(),
+                    )),
                 })
             })
             .collect();
@@ -1363,9 +1389,100 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
 
     async fn get_device_info(
         &self,
-        _request: Request<proto::GetDeviceInfoRequest>,
+        request: Request<proto::GetDeviceInfoRequest>,
     ) -> Result<Response<proto::GetDeviceInfoResponse>, Status> {
-        Err(Status::unimplemented("GetDeviceInfo not implemented"))
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let user_id = uuid::Uuid::parse_str(&claims.sub)
+            .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        let req = request.into_inner();
+        if req.device_id.is_empty() {
+            return Err(Status::invalid_argument("device_id is required"));
+        }
+
+        let device = construct_db::get_device_by_id(self.context.db_pool.as_ref(), &req.device_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // A device belonging to another account, an inactive one, and one that does not exist
+        // all answer the same way. Distinguishing them would turn this RPC into an oracle for
+        // whether a given device id is registered anywhere on the server.
+        let device = device
+            .filter(|d| d.user_id == Some(user_id) && d.is_active)
+            .ok_or_else(|| Status::not_found("device not found"))?;
+
+        let primary_device_id =
+            construct_db::get_user_by_id(self.context.db_pool.as_ref(), &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .and_then(|u| u.primary_device_id);
+
+        Ok(Response::new(proto::GetDeviceInfoResponse {
+            device: Some(device_info(
+                &device,
+                claims.device_id.as_deref(),
+                primary_device_id.as_deref(),
+            )),
+        }))
+    }
+
+    /// Store the calling device's sealed name/platform blob.
+    ///
+    /// The device_id comes from the verified token and nowhere else — there is no field for
+    /// it in the request. A device can therefore only write its own row, which is what keeps
+    /// "rename my Mac" from being "rename someone else's phone in my account".
+    ///
+    /// The bytes are never parsed here. The server holds no key for them, so a malformed blob
+    /// is indistinguishable from a well-formed one and neither is the server's business.
+    async fn set_device_metadata(
+        &self,
+        request: Request<proto::SetDeviceMetadataRequest>,
+    ) -> Result<Response<proto::SetDeviceMetadataResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+
+        let device_id = claims
+            .device_id
+            .ok_or_else(|| Status::failed_precondition("token names no device"))?;
+
+        let req = request.into_inner();
+        if req.sealed_metadata.len() > construct_db::SEALED_METADATA_MAX_BYTES {
+            return Err(Status::invalid_argument(format!(
+                "sealed_metadata is {} bytes, over the {} byte limit",
+                req.sealed_metadata.len(),
+                construct_db::SEALED_METADATA_MAX_BYTES
+            )));
+        }
+
+        // Empty clears it. A client that wants no stored name sends no bytes rather than
+        // sealing an empty string, which would be a blob every reader has to open to find
+        // out means nothing.
+        let data = (!req.sealed_metadata.is_empty()).then_some(req.sealed_metadata.as_slice());
+
+        let updated = construct_db::set_device_sealed_metadata(
+            self.context.db_pool.as_ref(),
+            &device_id,
+            data,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !updated {
+            return Err(Status::not_found("no active device for this token"));
+        }
+
+        Ok(Response::new(proto::SetDeviceMetadataResponse {
+            success: true,
+        }))
     }
 
     async fn initiate_device_link(
