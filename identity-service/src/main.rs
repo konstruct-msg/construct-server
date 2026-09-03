@@ -1118,10 +1118,19 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        // The primary device is the one RevokeDevice refuses to revoke. Reported here so the
+        // client can grey out the action instead of discovering the rule from a failed call.
+        let primary_device_id =
+            construct_db::get_user_by_id(self.context.db_pool.as_ref(), &user_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .and_then(|u| u.primary_device_id);
+
         let items: Vec<Result<proto::ListDevicesResponse, Status>> = devices
             .into_iter()
             .map(|d| {
                 let is_current = Some(d.device_id.as_str()) == current_device_id.as_deref();
+                let is_primary = Some(d.device_id.as_str()) == primary_device_id.as_deref();
                 Ok(proto::ListDevicesResponse {
                     device: Some(proto::DeviceInfo {
                         device: Some(construct_server_shared::shared::proto::core::v1::DeviceId {
@@ -1140,6 +1149,7 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
                         push_provider: None,
                         is_current,
                         capabilities: 0,
+                        is_primary,
                     }),
                 })
             })
