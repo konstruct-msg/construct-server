@@ -798,6 +798,9 @@ pub struct Device {
     pub is_active: bool,
     /// Client-declared support for SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
     pub supports_pq_ratchet: bool,
+    /// The device's own name and platform, encrypted by that device under a key this
+    /// server does not hold. Opaque: stored, returned to the owning account, never parsed.
+    pub sealed_metadata: Option<Vec<u8>>,
 }
 
 /// Data for creating a new device
@@ -859,7 +862,8 @@ where
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW(), TRUE, $9)
         RETURNING device_id, server_hostname, user_id, verifying_key,
                   identity_public, signed_prekey_public, signed_prekey_signature,
-                  crypto_suites, registered_at, is_active, supports_pq_ratchet
+                  crypto_suites, registered_at, is_active, supports_pq_ratchet,
+                  sealed_metadata
         "#,
     )
     .bind(&data.device_id)
@@ -904,7 +908,7 @@ pub async fn get_device_by_id(pool: &DbPool, device_id: &str) -> Result<Option<D
     let device = sqlx::query_as::<_, Device>(
         "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
                 signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at,
-                is_active, supports_pq_ratchet
+                is_active, supports_pq_ratchet, sealed_metadata
          FROM devices WHERE device_id = $1",
     )
     .bind(device_id)
@@ -936,7 +940,7 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
     let devices = sqlx::query_as::<_, Device>(
         "SELECT device_id, server_hostname, user_id, verifying_key, identity_public,
                 signed_prekey_public, signed_prekey_signature, crypto_suites, registered_at,
-                is_active, supports_pq_ratchet
+                is_active, supports_pq_ratchet, sealed_metadata
          FROM devices WHERE user_id = $1 AND is_active = TRUE ORDER BY registered_at DESC",
     )
     .bind(user_id)
@@ -1058,15 +1062,50 @@ pub async fn device_exists(pool: &DbPool, device_id: &str) -> Result<bool> {
     Ok(exists)
 }
 
-/// Update device's last_active_at timestamp
-pub async fn update_device_last_active(pool: &DbPool, device_id: &str) -> Result<()> {
-    sqlx::query("UPDATE devices SET last_active_at = NOW() WHERE device_id = $1")
-        .bind(device_id)
-        .execute(pool)
-        .await
-        .context("Failed to update device last_active")?;
+/// Maximum accepted size of `devices.sealed_metadata`, matching the CHECK constraint
+/// in migration 068.
+///
+/// The blob holds one sealed copy per active device of the account — the account has no
+/// shared key to seal under — so it grows with the device count at roughly 105-165 bytes
+/// a copy. 4 KiB is twenty-five to forty copies: past any plausible account, and still
+/// small enough that the column cannot become storage for something else.
+pub const SEALED_METADATA_MAX_BYTES: usize = 4096;
 
-    Ok(())
+/// Store a device's client-encrypted name/platform blob.
+///
+/// The server does not hold the key and never parses the bytes; `data` is written and
+/// handed back to the account that owns the row, nothing more. Callers must pass a
+/// `device_id` taken from the caller's own verified token — this function does not check
+/// ownership, and nothing else stops one device rewriting another's row.
+///
+/// `None` clears the value. Anything longer than [`SEALED_METADATA_MAX_BYTES`] is
+/// rejected here rather than truncated: a truncated ciphertext is a blob that no client
+/// can open, stored as though it were fine.
+pub async fn set_device_sealed_metadata(
+    pool: &DbPool,
+    device_id: &str,
+    data: Option<&[u8]>,
+) -> Result<bool> {
+    if let Some(bytes) = data
+        && bytes.len() > SEALED_METADATA_MAX_BYTES
+    {
+        anyhow::bail!(
+            "sealed_metadata is {} bytes, over the {} byte limit",
+            bytes.len(),
+            SEALED_METADATA_MAX_BYTES
+        );
+    }
+
+    let result = sqlx::query(
+        "UPDATE devices SET sealed_metadata = $2 WHERE device_id = $1 AND is_active = TRUE",
+    )
+    .bind(device_id)
+    .bind(data)
+    .execute(pool)
+    .await
+    .context("Failed to store device sealed_metadata")?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// Point an account at the device that owns it.
@@ -1120,7 +1159,8 @@ pub async fn get_user_primary_device(pool: &DbPool, user_id: &Uuid) -> Result<Op
             d.crypto_suites,
             d.registered_at,
             d.is_active,
-            d.supports_pq_ratchet
+            d.supports_pq_ratchet,
+            d.sealed_metadata
         FROM devices d
         JOIN users u ON d.user_id = u.id
         WHERE d.user_id = $1 AND d.is_active = true
@@ -1794,4 +1834,29 @@ pub async fn get_contact_request_sender(
         .try_into()
         .map_err(|_| anyhow::anyhow!("decrypted from_enc is not 16 bytes"))?;
     Ok(Uuid::from_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SEALED_METADATA_MAX_BYTES`, the `INVALID_ARGUMENT` in identity-service, and the
+    /// CHECK constraint in migration 068 are three copies of one number. Two of them
+    /// agreeing is the failure worth catching: a request the service accepts and the
+    /// database then refuses surfaces as an opaque 500 on a settings screen, and the
+    /// number is far enough from the code that changes it that nothing else would notice.
+    #[test]
+    fn sealed_metadata_cap_matches_the_migration() {
+        let migration = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../shared/migrations/068_device_sealed_metadata.sql"
+        ));
+
+        let needle = format!("octet_length(sealed_metadata) <= {SEALED_METADATA_MAX_BYTES}");
+        assert!(
+            migration.contains(&needle),
+            "migration 068 must cap sealed_metadata at {SEALED_METADATA_MAX_BYTES} bytes \
+             to match SEALED_METADATA_MAX_BYTES; looked for `{needle}`"
+        );
+    }
 }
