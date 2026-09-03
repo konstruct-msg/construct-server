@@ -1063,9 +1063,13 @@ pub async fn device_exists(pool: &DbPool, device_id: &str) -> Result<bool> {
 }
 
 /// Maximum accepted size of `devices.sealed_metadata`, matching the CHECK constraint
-/// in migration 068. A sealed name and platform are a couple of hundred bytes; the cap
-/// is here so the column cannot become storage for something else.
-pub const SEALED_METADATA_MAX_BYTES: usize = 1024;
+/// in migration 068.
+///
+/// The blob holds one sealed copy per active device of the account — the account has no
+/// shared key to seal under — so it grows with the device count at roughly 105-165 bytes
+/// a copy. 4 KiB is twenty-five to forty copies: past any plausible account, and still
+/// small enough that the column cannot become storage for something else.
+pub const SEALED_METADATA_MAX_BYTES: usize = 4096;
 
 /// Store a device's client-encrypted name/platform blob.
 ///

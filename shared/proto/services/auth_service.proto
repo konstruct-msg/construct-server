@@ -324,7 +324,7 @@ message DeviceInfo {
   // above stay empty and are not what a client should read. Migration 013 removed
   // the plaintext columns as fingerprinting and an OS leak, and that still holds;
   // this is how the device list gets its names and icons back without reopening
-  // either. Empty until the device calls SetDeviceMetadata. Max 1 KiB.
+  // either. Empty until the device calls SetDeviceMetadata. Max 4 KiB.
   bytes sealed_metadata = 10;
 
   // Reserved for future features
@@ -346,14 +346,56 @@ message SetDeviceMetadataRequest {
   // Ciphertext of whatever the client chooses to show for this device — name,
   // platform, whatever a later version adds. The server does not read it, so its
   // internal shape is the clients' to agree on and can change without a server
-  // release. Empty clears the stored value. Max 1024 bytes; larger is
-  // INVALID_ARGUMENT, never a silent truncation.
+  // release. Empty clears the stored value. Max 4096 bytes — the blob holds one
+  // sealed copy per device of the account, so it grows with the device count;
+  // larger is INVALID_ARGUMENT, never a silent truncation.
   bytes sealed_metadata = 1;
 }
 
 // SetDeviceMetadataResponse - Stored
 message SetDeviceMetadataResponse {
   bool success = 1;
+}
+
+// DeviceMetadata - what a device says about itself to its own account.
+//
+// The plaintext inside a SealedDeviceMetadata copy. The server never sees it: these are the
+// two fields migration 013 dropped from the devices table as device fingerprinting and an OS
+// leak, and they are back only because they are now opaque to the server.
+//
+// Clients agree on this shape between themselves; the server ships nothing when it changes.
+// A field added here is readable only by clients that know it, which is the ordinary proto3
+// rule and is why this is a message and not a hand-rolled encoding.
+message DeviceMetadata {
+  // What a person calls this device. Never a model string a client did not choose to send —
+  // the point of 013 stands, and "iPhone 15 Pro" is a fingerprint whether the server can read
+  // it or not.
+  string device_name = 1;
+
+  // Which platform, for the icon in the device list.
+  shared.proto.core.v1.DevicePlatform platform = 2;
+}
+
+// SealedDeviceMetadata - the bytes stored in DeviceInfo.sealed_metadata.
+//
+// One copy of the same DeviceMetadata per active device of the account, this device included,
+// each sealed to that device's X25519 identity key (construct-core `seal_to_device_key`).
+//
+// Per device rather than under one account key because the account has no shared key: every
+// device holds its own identity pair and linking establishes nothing between them. The cost is
+// a copy per device — units of them. What it buys is that a revoked device stops being sealed
+// to on the next re-seal, instead of keeping the ability to read until someone rotates a key
+// that today has no rotation.
+//
+// A copy carries no recipient label, deliberately: the server promised not to parse this blob,
+// and a field that makes parsing convenient is an invitation to start. A reader finds its own
+// copy by trying each — one X25519 and one AEAD open per copy.
+//
+// Re-sealed whenever the account's device set changes. A device linked after the last re-seal
+// has no copy and shows unnamed until its siblings re-seal, which is the ordinary path they
+// already run when they notice a new sibling.
+message SealedDeviceMetadata {
+  repeated bytes copies = 1;
 }
 
 // RevokeDeviceRequest - Revoke device
