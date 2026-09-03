@@ -171,6 +171,56 @@ fn extract_authed_device_id<T>(
     construct_server_shared::auth_utils::extract_device_id(auth, req.metadata())
 }
 
+/// The bucket a bundle request is counted against.
+///
+/// Per **device** when the access token carries a `device_id` claim, per client IP otherwise.
+///
+/// The IP key was introduced because the scheme before it read a caller-supplied device id, which
+/// is unverifiable and rotatable — a client could mint a fresh budget per request. That reasoning
+/// still holds, and this does not undo it: the claim comes out of a verified token and nothing
+/// here reads the `x-device-id` header. `auth_utils::extract_device_id` falls back to that header
+/// for legacy tokens without a device claim, which is why this uses `extract_authed_caller` and
+/// takes the claim alone — a legacy token cannot promote itself to a private budget by asserting
+/// a header, it stays on the IP bucket with everyone else.
+///
+/// Why per device at all: the limit is 10/min per (bucket, target), and an IP bucket is shared by
+/// every device behind one NAT asking about the same peer. That is the definition of a
+/// multi-device account, and the moment it is tightest — a freshly linked device running its
+/// first handshakes — is exactly when the budget matters. 2026-09-03: a Desktop linked minutes
+/// earlier spent all ten within eighty seconds and could not rebuild its session afterwards,
+/// while the phone beside it, on the same IP and the same account, had spent two of the same ten.
+///
+/// An unauthenticated sealed-sender fetch has no device to name and keeps the IP bucket, which is
+/// the case the IP key was written for.
+fn bundle_rate_key<T>(
+    req: &Request<T>,
+    auth: &construct_auth::AuthManager,
+    client_ip: &str,
+    target_user_id: &str,
+) -> String {
+    // `extract_authed_caller`, never `auth_utils::extract_device_id` — see the doc above. The
+    // claim, and nothing else, decides the bucket.
+    let claimed_device =
+        construct_server_shared::auth_utils::extract_authed_caller(auth, req.metadata())
+            .ok()
+            .and_then(|caller| caller.device_id);
+    bucket_for(claimed_device.as_deref(), client_ip, target_user_id)
+}
+
+/// Which bucket a request lands in, given the device the **verified token** named (if any).
+///
+/// Split from the extraction so the choice can be tested without minting a token: the two halves
+/// fail differently — this one by picking the wrong bucket, the other by trusting the wrong source
+/// for the device id — and only one of them needs an `AuthManager` to exercise.
+fn bucket_for(claimed_device: Option<&str>, client_ip: &str, target_user_id: &str) -> String {
+    match claimed_device {
+        Some(device_id) if !device_id.is_empty() => {
+            format!("rate:bundle_dev:{}:{}", device_id, target_user_id)
+        }
+        _ => format!("rate:bundle_ip:{}:{}", client_ip, target_user_id),
+    }
+}
+
 /// Extract client IP from `x-forwarded-for` / `x-real-ip` gRPC metadata (set by
 /// Caddy's `reverse_proxy`). Used for per-IP rate limiting on anonymous bundle fetches.
 ///
@@ -325,8 +375,14 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundleRequest>,
     ) -> Result<Response<proto::GetPreKeyBundleResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
-        // Resolve OTPK consumption BEFORE consuming the request: the self-fetch rule needs
-        // the auth metadata, which `into_inner()` discards.
+        // Both resolved BEFORE consuming the request: the self-fetch rule and the rate bucket
+        // read the auth metadata, which `into_inner()` discards.
+        let rate_bucket = bundle_rate_key(
+            &request,
+            &self.context.auth,
+            &client_ip,
+            &request.get_ref().user_id,
+        );
         let consume_otpk = resolve_otpk_consumption(
             &request,
             &self.context,
@@ -340,9 +396,9 @@ impl KeyService for KeyGrpcService {
             return Err(Status::invalid_argument("user_id is required"));
         }
 
-        // Per-IP, per-target rate limit: max 10 bundle requests per minute per
-        // (client_ip, target_user) pair. Prevents OTPK exhaustion — the old scheme
-        // used caller_device (self-reported, unverifiable); IP is harder to spoof.
+        // Per-target rate limit: max 10 bundle requests per minute, counted per authenticated
+        // device where the token names one and per client IP otherwise. Prevents OTPK exhaustion.
+        // See `bundle_rate_key` for why the device claim — and only the claim — is safe here.
         // Fails closed: Redis unavailable → deny (OTPK exhaustion safety).
         {
             const LUA: &str = r#"
@@ -351,9 +407,9 @@ impl KeyService for KeyGrpcService {
                 return count
             "#;
             let mut redis = self.context.redis.clone();
-            let rate_key = format!("rate:bundle_ip:{}:{}", client_ip, req.user_id);
+            let rate_key = &rate_bucket;
             let count: i64 = redis::Script::new(LUA)
-                .key(&rate_key)
+                .key(rate_key)
                 .arg(60i64)
                 .invoke_async(&mut redis)
                 .await
@@ -880,7 +936,14 @@ impl KeyService for KeyGrpcService {
         request: Request<proto::GetPreKeyBundlesRequest>,
     ) -> Result<Response<proto::GetPreKeyBundlesResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
-        // Resolved before `into_inner()` — the self-fetch rule needs the auth metadata.
+        // Resolved before `into_inner()` — the self-fetch rule and the rate bucket both read the
+        // auth metadata.
+        let rate_bucket = bundle_rate_key(
+            &request,
+            &self.context.auth,
+            &client_ip,
+            &request.get_ref().user_id,
+        );
         let consume_otpk = resolve_otpk_consumption(
             &request,
             &self.context,
@@ -894,7 +957,7 @@ impl KeyService for KeyGrpcService {
             return Err(Status::invalid_argument("user_id is required"));
         }
 
-        // Per-IP, per-target rate limit (same as single-bundle path).
+        // Per-target rate limit (same bucketing as the single-bundle path).
         {
             const LUA: &str = r#"
                 local count = redis.call('INCR', KEYS[1])
@@ -902,9 +965,9 @@ impl KeyService for KeyGrpcService {
                 return count
             "#;
             let mut redis = self.context.redis.clone();
-            let rate_key = format!("rate:bundle_ip:{}:{}", client_ip, req.user_id);
+            let rate_key = &rate_bucket;
             let count: i64 = redis::Script::new(LUA)
-                .key(&rate_key)
+                .key(rate_key)
                 .arg(60i64)
                 .invoke_async(&mut redis)
                 .await
@@ -1381,4 +1444,98 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod bundle_rate_bucket_tests {
+    use super::*;
+
+    /// The point of the change: two devices of one account, behind one NAT, asking about the same
+    /// peer must not share a budget. On 2026-09-03 they did — a Desktop linked minutes earlier
+    /// spent all ten of the minute's requests and could not rebuild its session, while the phone
+    /// beside it had spent two of the same ten.
+    #[test]
+    fn two_devices_on_one_ip_get_two_buckets() {
+        let a = bucket_for(Some("b26a2cf863f7db48"), "203.0.113.7", "7574fdec");
+        let b = bucket_for(Some("f1a3d746f85c8f8c"), "203.0.113.7", "7574fdec");
+        assert_ne!(
+            a, b,
+            "same IP, same target, different devices — must be different buckets"
+        );
+    }
+
+    /// One device asking about two peers is two conversations, and the limit is per target.
+    #[test]
+    fn one_device_gets_a_bucket_per_target() {
+        assert_ne!(
+            bucket_for(Some("b26a2cf863f7db48"), "203.0.113.7", "7574fdec"),
+            bucket_for(Some("b26a2cf863f7db48"), "203.0.113.7", "ffeeddc6"),
+        );
+    }
+
+    /// A caller the token does not name keeps the IP bucket — the sealed-sender fetch this
+    /// limiter was written for, and any legacy token without a device claim. Falling back to a
+    /// per-caller bucket here would hand every unauthenticated request a private budget, which is
+    /// exactly the OTPK exhaustion the limit exists to stop.
+    #[test]
+    fn an_unnamed_caller_stays_on_the_ip_bucket() {
+        let expected = "rate:bundle_ip:203.0.113.7:7574fdec";
+        assert_eq!(bucket_for(None, "203.0.113.7", "7574fdec"), expected);
+        assert_eq!(bucket_for(Some(""), "203.0.113.7", "7574fdec"), expected);
+    }
+
+    /// Two unnamed callers behind one IP still share, as before. Stated because it is the
+    /// property the IP key was introduced for and the one a per-device bucket must not weaken.
+    #[test]
+    fn unnamed_callers_behind_one_ip_still_share() {
+        assert_eq!(
+            bucket_for(None, "203.0.113.7", "7574fdec"),
+            bucket_for(None, "203.0.113.7", "7574fdec"),
+        );
+        assert_ne!(
+            bucket_for(None, "203.0.113.7", "7574fdec"),
+            bucket_for(None, "198.51.100.4", "7574fdec"),
+        );
+    }
+
+    /// **The security half, checked at the source.** `auth_utils::extract_device_id` falls back to
+    /// the `x-device-id` header when a token carries no device claim, and that header is
+    /// caller-supplied and rotatable — a client could mint a fresh budget per request, which is
+    /// the precise weakness the IP key replaced. `bundle_rate_key` must therefore never reach for
+    /// it. A plausible tidy-up ("we already have a helper for this") reintroduces the hole in one
+    /// line and changes no behaviour any other test can see.
+    #[test]
+    fn the_bucket_never_reads_a_caller_supplied_device_id() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("fn bundle_rate_key<T>(")
+            .expect("bundle_rate_key was renamed — this check no longer guards it");
+        let end = src[start..]
+            .find("\nfn bucket_for(")
+            .expect("bucket_for no longer follows bundle_rate_key — re-anchor this check")
+            + start;
+        // Comments only, stripped: this check is about what the code reads, and the doc above
+        // names `extract_device_id` precisely to say it is not used. Prose must not redden it.
+        let body: String = src[start..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("fn bundle_rate_key"),
+            "the slice lost the function itself — re-anchor this check"
+        );
+        assert!(
+            !body.contains("x-device-id"),
+            "bundle_rate_key reads the x-device-id header, which the caller controls"
+        );
+        assert!(
+            !body.contains("extract_device_id"),
+            "bundle_rate_key calls extract_device_id, which falls back to the x-device-id header"
+        );
+        assert!(
+            body.contains("extract_authed_caller"),
+            "bundle_rate_key no longer takes the device id from verified claims"
+        );
+    }
 }
