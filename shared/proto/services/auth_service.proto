@@ -93,6 +93,11 @@ service DeviceService {
   // GetDeviceInfo - Get specific device details
   rpc GetDeviceInfo(GetDeviceInfoRequest) returns (GetDeviceInfoResponse);
 
+  // SetDeviceMetadata - Store this device's own sealed name/platform blob
+  // Authenticated; writes only the row named by the caller's own token. A device
+  // cannot set another device's metadata, including its own account's.
+  rpc SetDeviceMetadata(SetDeviceMetadataRequest) returns (SetDeviceMetadataResponse);
+
   // =========================================================================
   // Device Linking
   // =========================================================================
@@ -287,7 +292,12 @@ message DeviceInfo {
   // Platform
   shared.proto.core.v1.DevicePlatform platform = 3;
 
-  // Last seen timestamp
+  // Last seen timestamp.
+  //
+  // Not populated: migration 013 removed `devices.last_active_at` as timing
+  // metadata and it has not come back, so this server has no answer to give and
+  // sends 0. Clients must treat 0 as "unknown", never as the epoch, and settle
+  // liveness between themselves from what actually gets delivered.
   int64 last_seen = 4;
 
   // Created timestamp
@@ -308,8 +318,17 @@ message DeviceInfo {
   // trying to revoke one and reading the refusal.
   bool is_primary = 9;
 
+  // The device's own name and platform, encrypted by that device under a key the
+  // server does not hold. Opaque here: the server stores this blob, returns it to
+  // the account that owns it, and never parses it — `device_name` and `platform`
+  // above stay empty and are not what a client should read. Migration 013 removed
+  // the plaintext columns as fingerprinting and an OS leak, and that still holds;
+  // this is how the device list gets its names and icons back without reopening
+  // either. Empty until the device calls SetDeviceMetadata. Max 1 KiB.
+  bytes sealed_metadata = 10;
+
   // Reserved for future features
-  reserved 10 to 15;
+  reserved 11 to 15;
 }
 
 // ListDevicesResponse - wraps a single device in the stream
@@ -320,6 +339,21 @@ message ListDevicesResponse {
 // GetDeviceInfoResponse - wraps a single device info response
 message GetDeviceInfoResponse {
   DeviceInfo device = 1;
+}
+
+// SetDeviceMetadataRequest - Store the calling device's sealed name/platform
+message SetDeviceMetadataRequest {
+  // Ciphertext of whatever the client chooses to show for this device — name,
+  // platform, whatever a later version adds. The server does not read it, so its
+  // internal shape is the clients' to agree on and can change without a server
+  // release. Empty clears the stored value. Max 1024 bytes; larger is
+  // INVALID_ARGUMENT, never a silent truncation.
+  bytes sealed_metadata = 1;
+}
+
+// SetDeviceMetadataResponse - Stored
+message SetDeviceMetadataResponse {
+  bool success = 1;
 }
 
 // RevokeDeviceRequest - Revoke device
