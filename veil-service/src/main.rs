@@ -126,6 +126,7 @@ impl VeilService for VeilGrpcService {
                     Status::resource_exhausted(format!("retry_after={retry_after}"))
                 }
                 VoucherError::Db(e) => Status::internal(format!("db error: {e}")),
+                VoucherError::Json(e) => Status::internal(format!("json error: {e}")),
             })?;
 
         construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL
