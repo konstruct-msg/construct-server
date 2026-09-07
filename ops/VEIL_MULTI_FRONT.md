@@ -2,6 +2,8 @@
 
 Enable automatic capability issuance and (optionally) failover to a second front.
 
+**If the new VPS already serves its cover site in a browser, skip the VPS runbook and go to [§2f](#2f-cover-already-up--attach-to-home-and-test).** Home does not auto-detect the box — see construct-docs `decisions/relay-enrollment-is-admission.md`.
+
 **Code status (2026-08-05):**
 - Client: `VeilCapabilityProvisioner` first-issues over any live transport after login.
 - Server: `veil-service` `IssueVeilCapability` + `issue_bundle` (K=3 alternates when N>1).
@@ -22,15 +24,19 @@ spki() {
     | openssl dgst -sha256 -r 2>/dev/null | awk '{print $1}'
 }
 
-spki api.divany-kresla.uk
-# expected (2026-08-05 live): 5621e47a745614de08efb054b01388f3bcf32c763ecf5f0aeaeb6b0785ff6861
+spki <primary-front>
+# compare against the pin held in private ops
 ```
 
-| Front | Role today | Live TLS (2026-08-05) |
+| Front | Role today | Live TLS |
 |---|---|---|
-| `api.divany-kresla.uk` | **Primary** RU veil-front | OK — SPKI matches iOS `ruRelayPinnedSPKI` |
-| `veil.ams.konstruct.cc` | Listed in `tools/relays.json` as `ams-het-1` | **No usable cert** (handshake/empty) — not a second front until redeployed |
-| `ice.ams.konstruct.cc` | Retired obfs4 | Do not re-use (`retiredRelayHosts` on client) |
+| `<primary-front>` | **Primary** veil-front | Probe with `spki` above; pin must match the client seed |
+| `<second-front>` | Second front | Probe before listing it anywhere |
+| `<retired-front>` | **Retired** — moved to `deprecated_ids` | Kept only so clients rotate off it |
+
+> **Never commit live front hostnames or SPKI pins to this repository.** It is public.
+> A censor that can read the inventory gets every access point for free. Real
+> hostnames, pins and the `VEIL_RELAYS` value live in private ops only.
 
 ---
 
@@ -46,10 +52,10 @@ On the **home server** (`/opt/construct/secrets/app.env`):
 VEIL_ISSUER_SEED=<64 hex chars>
 
 # Single front (legacy form is fine)
-VEIL_RELAY_ADDRESS=api.divany-kresla.uk:443
+VEIL_RELAY_ADDRESS=<primary-front>:443
 VEIL_RELAY_SCOPE=ru
-VEIL_RELAY_SPKI=5621e47a745614de08efb054b01388f3bcf32c763ecf5f0aeaeb6b0785ff6861
-VEIL_RELAY_SNI=api.divany-kresla.uk
+VEIL_RELAY_SPKI=<64hex-spki>
+VEIL_RELAY_SNI=<primary-front>
 ```
 
 Then:
@@ -101,7 +107,7 @@ VEIL_ISSUER_SEED=<same as §1>
 
 # Multi-front form (preferred). Semicolon-separated:
 #   address,scope,spki,sni
-VEIL_RELAYS=api.divany-kresla.uk:443,ru,5621e47a745614de08efb054b01388f3bcf32c763ecf5f0aeaeb6b0785ff6861,api.divany-kresla.uk;<SECOND_HOST>:443,<scope>,<64hex-spki>,<sni>
+VEIL_RELAYS=<primary-front>:443,ru,<64hex-spki>,<primary-front>;<SECOND_HOST>:443,<scope>,<64hex-spki>,<sni>
 ```
 
 `docker compose … up -d --force-recreate veil`  
@@ -109,14 +115,9 @@ Boot log should show `count=2` (or more).
 
 ### 2c. Signed relay manifest
 
-Source of truth in repo: `tools/relays.json`. After adding the second front + live SPKI:
-
-```bash
-cd tools
-# Private key: tools/relay_signing_key.hex (NEVER on a VPS)
-python3 sign_relay_manifest.py sign relays.json --key relay_signing_key.hex
-# Deploy signed output to konstruct.cc/.well-known/construct-server (and mirrors)
-```
+Relay inventory in repo: `tools/relays.json`. The **published** artifact is not that
+file — see §2f-C for the procedure. In short: `sign` is the wrong verb for the live
+manifest; hand-edit the merged manifest and `resign` it.
 
 Client accepts alternates only if `{addr, spki}` matches seed **or** this signed manifest
 (`VeilAlternatesCache` Option C).
@@ -143,11 +144,138 @@ server-handed alternates even when `VEIL_RELAYS` is correct.
 2. Block primary (DNS sinkhole / firewall) or force selector away from it.
 3. Client should dial the alternate **without** re-calling IssueVeilCapability on the dead front.
 
+### 2f. Cover already up — attach to home and test
+
+Use this when the VPS runbook is done (`https://$DOMAIN/` is the cover, not Construct) and you need the **home** side plus a real tunnel.
+
+VPS-side checklist (already true if the cover opens): construct-docs `manuals&instructions/veil-front-new-vps-runbook.md` §6–7. Authenticated path is **not** “open the cover”; the relay will look identical to a browser unless the client presents a capability.
+
+#### A. Pin the live SPKI (laptop, not the VPS)
+
+```sh
+DOMAIN=<the-new-front-hostname>
+echo | openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/null \
+  | openssl x509 -pubkey -noout 2>/dev/null \
+  | openssl pkey -pubin -outform DER 2>/dev/null \
+  | openssl dgst -sha256 -r 2>/dev/null | awk '{print $1}'
+```
+
+This hex must match `VEIL_RELAYS`, `tools/relays.json`, and the client seed/manifest. Do not copy an old pin from `relays.json` if the cert was re-issued without `--reuse-key`.
+
+Confirm on the VPS that `ISSUER_PUBKEY` is the public half of home `VEIL_ISSUER_SEED` (`8a0ee71c…` for the production issuer). Wrong pubkey → cover still opens, AUTH never leaves cover.
+
+#### B. Tell home (the only “discovery”)
+
+On the **home** server `/opt/construct/secrets/app.env`, set `VEIL_RELAYS` to **both** fronts (`address,scope,spki,sni` records, `;`-separated) — §2b. Then:
+
+```bash
+docker compose -f ops/docker-compose.prod.yml up -d --force-recreate veil
+docker logs construct-veil-1 2>&1 | tail -40
+# expect: Configured VEIL fronts  count=2
+# expect: both host:port keys listed
+```
+
+`restart` is not enough (env_file). `count=1` → malformed record or recreate skipped. Do **not** list `ams.konstruct.cc` (plain Caddy) here.
+
+#### C. Signed manifest (client trust)
+
+Without an entry in the signed manifest (or a `seedRelays` append in an app release), a stock client **rejects** the new `{addr, spki}` even if `IssueVeilCapability` returns it.
+
+**Do not run `sign_relay_manifest.py sign` against the live manifest.** `sign` emits a
+relay-only document, and what is published is the *merged discovery manifest*, which also
+carries `grpc_endpoint`, `signaling_endpoint`, `token_encryption_key`, `capabilities`,
+`services` and `bundle_signing_key`. Deploying `sign` output drops all of that. It also
+writes `version` and `signed_at` as integers, while the client decodes both as `String?`
+(`VeilCertFetcher.ConstructServerWellKnown`) — so the file would not merely be thin, it
+would fail to parse at all. `resign` exists for exactly this file: it re-computes the
+signature over the current content, leaving every field alone.
+
+Procedure — edit `construct-landing/.well-known/construct-server` (source of truth per
+`.well-known/README.md`), then mirror the **signed bytes**:
+
+```bash
+LANDING=~/Code/construct-landing/.well-known/construct-server
+PUB=8a0ee71cd95f86a9f6877211accefaff6bb97f3051b3b2141f1c71690b9a2dcf
+
+# 1. Hand-edit $LANDING: veil.relays[] from tools/relays.json, veil.primary to a LIVE
+#    front, veil.deprecated_ids for retired ids. Bump "version" (string) and set
+#    "signed_at" (ISO-8601 UTC). Touch nothing else.
+
+# 2. Re-sign in place — signing key stays on the laptop, never on a VPS.
+cd ~/Code/construct-server
+python3 tools/sign_relay_manifest.py resign "$LANDING" --key tools/relay_signing_key.hex
+python3 tools/sign_relay_manifest.py verify  "$LANDING" --pubkey "$PUB"
+# expect: Relays: N  and  ✅ Signature VALID
+
+# 3. Mirror the signed file byte-for-byte, keep tools/relays.json in step.
+cp "$LANDING" .well-known/construct-server
+```
+
+**Both mirrors must be pushed, close together.** The client races them and takes the first
+response that verifies (`VeilCertFetcher.fetchAndCacheRelayConfig`):
+
+| Mirror | Served from |
+|---|---|
+| `https://konstruct.cc/.well-known/construct-server` | `construct-landing` |
+| `https://raw.githubusercontent.com/konstruct-msg/construct-server/main/.well-known/construct-server` | this repo, branch `main` |
+
+A stale mirror is **not** harmless just because the old file is validly signed.
+`RelayManifestFreshness.verdict` compares a candidate against the device's **cache**, not
+against the other mirror — and with no cache it returns `.accept` unconditionally. A fresh
+install that wins the race against the stale mirror therefore latches the old manifest:
+dead `primary`, empty `relays`. That is precisely the new-user path this whole runbook
+exists to serve. `raw.githubusercontent.com` also caches for ~5 min; confirm the new
+`version` on both URLs before calling the deploy done.
+
+#### D. Test 1 — logged-in phone, first front still reachable (in-band alternate)
+
+1. Device already has a session and a live tunnel to the **primary**.
+2. Force a capability refresh (relaunch / wait for renew) so `IssueVeilCapability` runs against N=2.
+3. Logs: `VEIL provision: cached N/M alternate front(s)` with N≥1.
+4. Then Test 2.
+
+#### E. Test 2 — failover (this is “traffic through the new relay”)
+
+On the test network, make the **primary** unusable (DNS sinkhole, `/etc/hosts` → `127.0.0.1`, Little Snitch). Leave the new front alone.
+
+Expect:
+
+- Client does **not** call `IssueVeilCapability` on the dead front.
+- **New relay** logs: `capability (v3) valid, routing to tunnel ticket_id=…`
+- **Home** gRPC access log / veil-upstream: source IP is the **relay VPS**, not the phone.
+- Messaging still works (send / stream).
+
+If you never block the primary, the selector will keep the working seed. Silence on the new box is not a failed deploy.
+
+#### F. Test 3 — capability straight at the new hostname (DEBUG / Internal)
+
+Stock App Store importer still requires `{addr, spki}` in `hardcodedRelaySPKIs` / seed. For a hostname that is **not** in the IPA:
+
+```bash
+# laptop — construct-veil/deploy/scripts/provision-link.sh
+# NEVER on the relay; needs the config-signing seed locally
+RELAY=${DOMAIN}:443 DAYS=1 ./provision-link.sh second-front-smoke
+```
+
+Paste/scan the `konstruct://veil-config?d=…` link in an **Internal/DEBUG** build that already pins this SPKI (temporary `seedRelays` append), **or** after the signed manifest is fetched. On the relay, AUTH must precede any gRPC to home. Browser-only success is still just the cover.
+
+A 60-day tester link is the wrong TTL for this door; hours, then throw the B2 away after V3.
+
+#### If AUTH never happens
+
+| Symptom | Cause |
+|---|---|
+| Cover OK, app also only sees cover | Missing/wrong capability, wrong `ISSUER_PUBKEY`, clock skew |
+| `UnknownRelay` / empty `alternates` | Address not in `VEIL_RELAYS` or `count` still 1 |
+| Client drops the alternate | `{addr, spki}` not in seed **and** not in the signed manifest it actually fetched |
+| HandshakeFailure | Stale SPKI in env vs live cert |
+| Home sees the phone IP | Client is on **direct**, not VEIL (auto-mode; primary still reachable) |
+
 ---
 
 ## 3. Second-front options (decision guide)
 
-### Option A — Revive / re-home `veil.ams.konstruct.cc` (fastest if infra exists)
+### Option A — Revive / re-home `<retired-front>` (fastest if infra exists)
 
 **Pros:** domain already in `tools/relays.json` (`ams-het-1`); NL/Hetzner diversity vs RU primary; same issuer model.
 
@@ -155,7 +283,7 @@ server-handed alternates even when `VEIL_RELAYS` is correct.
 
 **Work:**
 1. Deploy `construct-veil` prod stack on a reachable AMS VPS (`deploy/docker-compose.prod.yml`).
-2. `DOMAIN=veil.ams.konstruct.cc` (or a fresh subdomain), LE cert with `--reuse-key`.
+2. `DOMAIN=<retired-front>` (or a fresh subdomain), LE cert with `--reuse-key`.
 3. `ISSUER_PUBKEY=8a0ee71c…`, backend `ams.konstruct.cc:443` (or current home).
 4. DNS A/AAAA → VPS; `spki` into `VEIL_RELAYS` + `relays.json` + client seed.
 
@@ -165,8 +293,8 @@ server-handed alternates even when `VEIL_RELAYS` is correct.
 
 **Checklist:**
 1. VPS outside RU DPI (e.g. EU commercial VPS — not the same AS as primary if possible).
-2. Domain that looks like ordinary HTTPS — **do not re-use divany-kresla branding**.
-3. Cover image: **`construct-veil/deploy/cover-site-weather/`** (NearSky — IP weather + Open-Meteo + SSE). Primary stays on furniture `cover-site/`.
+2. Domain that looks like ordinary HTTPS — **do not re-use the primary front's branding**.
+3. Cover image: **`construct-veil/deploy/cover-site-weather/`** (IP weather + Open-Meteo + SSE). The primary keeps its own, unrelated cover.
 4. Relay: same `construct-veil` stack (`--site cover:8080`, same `ISSUER_PUBKEY`).
 5. Wire into A/B/C trust set (§2).
 
@@ -195,21 +323,21 @@ Cloudflare/Workers-style or shared CDN hostname. Highest collateral cost for a c
 | 5 | Sign+deploy manifest + client seed | Client accepts alternates |
 | 6 | Failover smoke | Full EntryDirectory Source 1 |
 
-### Concrete pilot: nearsky.ru → divany IP (chain)
+### Concrete pilot: domestic front → primary IP (chain)
 
-Target layout (Selectel domestic + existing divany clean at `195.133.44.113`):
+Target layout (domestic VPS + the existing clean primary, dialled by IP):
 
 ```text
-client → nearsky.ru (chain) → 195.133.44.113:443 (SNI api.divany-kresla.uk) → DO backend
-client → api.divany-kresla.uk (direct) → DO backend   # primary when reachable
+client → <domestic-front> (chain) → <primary-front-ip>:443 (SNI <primary-front>) → DO backend
+client → <primary-front> (direct) → DO backend   # primary when reachable
 ```
 
-- **IP dial is supported:** `--chain-upstream-addr 195.133.44.113:443` +
-  `--chain-upstream-sni api.divany-kresla.uk` + SPKI pin (no DNS required on nearsky).
+- **IP dial is supported:** `--chain-upstream-addr <primary-front-ip>:443` +
+  `--chain-upstream-sni <primary-front>` + SPKI pin (no DNS required on the domestic box).
 - Full steps, ROLE_RELAY issuance, compose overlay:
   **`construct-veil/deploy/CHAIN.md`** + `docker-compose.chain.yml`.
-- Client seed order: divany first, nearsky second (ISP blocks divany → Selectel still
-  reaches 195.133.44.113).
+- Client seed order: primary first, domestic second (ISP blocks the primary → the
+  domestic box still reaches its IP).
 
 ---
 
@@ -220,4 +348,5 @@ client → api.divany-kresla.uk (direct) → DO backend   # primary when reachab
 - `construct-veil/deploy/` — front stack
 - `construct-docs/decisions/entry-directory-design.md`
 - `construct-docs/decisions/veil-ticket-provisioning-system.md`
+- `construct-docs/decisions/relay-enrollment-is-admission.md` — no self-enroll; this runbook is the self-operated attach path
 - Client: `VeilCapabilityProvisioner`, `VeilAlternatesCache`
