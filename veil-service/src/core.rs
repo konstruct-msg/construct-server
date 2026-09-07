@@ -109,9 +109,11 @@ pub enum VoucherError {
     QuotaExceeded { retry_after: i64 },
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("config blob json error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
-/// Result of a committed bootstrap-voucher mint (blob already persisted).
+/// Tracing row is committed; B2 blob / config_uri are signed after COMMIT and never stored.
 #[derive(Debug)]
 pub struct IssuedVoucher {
     pub config_uri: String,
@@ -710,23 +712,21 @@ pub fn sign_config_blob(
     spki: &str,
     capability_b64: &str,
     exp: i64,
-) -> (String, String) {
+) -> Result<(String, String), VoucherError> {
     let mut fields: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
     fields.insert("capability", capability_b64.to_string().into());
     fields.insert("exp", serde_json::Value::Number(exp.into()));
     fields.insert("relay", relay.to_string().into());
     fields.insert("sni", sni.to_string().into());
     fields.insert("spki", spki.to_string().into());
-    let canonical =
-        serde_json::to_string(&fields).expect("config blob fields are always valid JSON");
+    let canonical = serde_json::to_string(&fields)?;
     let sig = issuer.sign(canonical.as_bytes());
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
     let mut full = fields;
     full.insert("signature", format!("ed25519:{sig_b64}").into());
-    let json =
-        serde_json::to_string(&full).expect("config blob with signature is always valid JSON");
+    let json = serde_json::to_string(&full)?;
     let d = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
-    (format!("konstruct://veil-config?d={d}"), json)
+    Ok((format!("konstruct://veil-config?d={d}"), json))
 }
 
 /// Mint a short-lived B2 voucher under a single Postgres transaction (quota + tracing).
@@ -800,7 +800,7 @@ pub async fn issue_bootstrap_voucher(
         &minted.issued.spki,
         &capability_b64,
         minted.issued.not_after,
-    );
+    )?;
 
     Ok(IssuedVoucher {
         config_uri,
@@ -1274,7 +1274,8 @@ mod tests {
             "deadbeef",
             &cap_b64,
             exp,
-        );
+        )
+        .expect("canonical config blob");
 
         assert!(uri.starts_with("konstruct://veil-config?d="));
         let d = uri
@@ -1338,7 +1339,8 @@ mod tests {
             &minted.issued.spki,
             &cap_b64,
             minted.issued.not_after,
-        );
+        )
+        .expect("canonical config blob");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["exp"].as_i64(), Some(minted.issued.not_after));
     }
@@ -1392,17 +1394,23 @@ mod tests {
             .execute(&pool)
             .await;
         let ctx = voucher_test_ctx(pool.clone(), &["front.example:443"]);
-        for i in 0..VOUCHER_QUOTA {
-            issue_bootstrap_voucher(&ctx, user)
-                .await
-                .unwrap_or_else(|e| panic!("mint {i} should succeed: {e}"));
-        }
-        match issue_bootstrap_voucher(&ctx, user).await {
-            Err(VoucherError::QuotaExceeded { retry_after }) => {
-                assert!(retry_after <= 24 * 3600);
-            }
-            other => panic!("expected QuotaExceeded, got {other:?}"),
-        }
+        let (r0, r1, r2, r3) = tokio::join!(
+            issue_bootstrap_voucher(&ctx, user),
+            issue_bootstrap_voucher(&ctx, user),
+            issue_bootstrap_voucher(&ctx, user),
+            issue_bootstrap_voucher(&ctx, user),
+        );
+        let results = [r0, r1, r2, r3];
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let quota = results
+            .iter()
+            .filter(|r| matches!(r, Err(VoucherError::QuotaExceeded { .. })))
+            .count();
+        assert_eq!(ok, VOUCHER_QUOTA, "parallel mints: {results:?}");
+        assert!(
+            quota >= 1,
+            "expected at least one QuotaExceeded, got {results:?}"
+        );
         let _ = sqlx::query("DELETE FROM veil_bootstrap_vouchers WHERE issuer_user_id = $1")
             .bind(user)
             .execute(&pool)
