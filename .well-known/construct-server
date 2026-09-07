@@ -23,11 +23,38 @@
     "signaling.SignalingService"
   ],
   "signaling_endpoint": "ams.konstruct.cc:443",
-  "signature": "ed25519:lZBIP9nIi1PpkrJ6cRQyjtzfLyZ8IPMnq6Vwnx6uAhfd9uWXhhYmRYQdW_U0CrjmHvopsF_vRz6bdy4LMekMBQ",
-  "signed_at": "2026-07-13T10:29:26Z",
+  "signed_at": "2026-09-07T09:15:56Z",
   "token_encryption_key": "nQprvXXCBhi+dqZV94DeI2/jzac0vgr4nqcbefmUzzc=",
   "veil": {
-    "primary": "veil.ams.konstruct.cc:443"
+    "primary": "api.divany-kresla.uk:443",
+    "relays": [
+      {
+        "id": "ru-div-1",
+        "addr": "api.divany-kresla.uk",
+        "port": 443,
+        "domain": "api.divany-kresla.uk",
+        "sni": "api.divany-kresla.uk",
+        "spki_sha256": "5621e47a745614de08efb054b01388f3bcf32c763ecf5f0aeaeb6b0785ff6861",
+        "bridge_cert": "zdfEJKLpy4nVo09zbd/5q3Yx02FyL7Tlr+5Aurww51IbYacIWIqbcTndB1UL+n2g68XBQw",
+        "wt_path": "/api/stream",
+        "wt_host_header": "api.divany-kresla.uk",
+        "region": "RU"
+      },
+      {
+        "id": "ru-nearsky-1",
+        "addr": "api.nearsky.org",
+        "port": 443,
+        "domain": "api.nearsky.org",
+        "sni": "api.nearsky.org",
+        "spki_sha256": "71f31b4c12b83fa7feb48144dbf848fe941cf589333f89d2d79e9d78c8696365",
+        "region": "RU"
+      }
+    ],
+    "deprecated_ids": [
+      "spb-mt-1",
+      "ams-het-1"
+    ]
   },
-  "version": "1.0"
+  "version": "1.1",
+  "signature": "ed25519:Wvt9Ka-_vTvGalqGBhogJm9D7q01OURKkKGLohpVQn_NA85Ln0nCbpK99GLKS2LI907a8DBOJILRpKokf9lPBw"
 }
