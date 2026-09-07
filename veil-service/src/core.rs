@@ -9,9 +9,10 @@
 //!   blob        = ticket_id[16] || auth_key[32] || not_before[8 LE] || not_after[8 LE]
 //!                 || suite_id[1] || scope_len[u8] || scope || sig[64]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use base64::Engine;
 use construct_server_shared::db::DbPool;
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
@@ -27,6 +28,16 @@ pub const DEFAULT_ALTERNATES_K: usize = 3;
 /// are stable within an epoch and rotate across epochs — Salmon-lite: each account
 /// learns a bounded, rotating subset, which bounds (does not prevent) enumeration.
 pub const ALT_ROTATION_SECS: i64 = 24 * 3600;
+
+/// Bootstrap voucher TTL (45 minutes). Shorter than personal caps so a photographed
+/// QR is not a standing front advertisement.
+pub const VOUCHER_TTL_SECS: i64 = 2700;
+
+/// Per-issuer rolling 24h issuance cap (all account ages).
+pub const VOUCHER_QUOTA: usize = 3;
+
+/// Tracing-table `pool` for user-vouched bootstrap (disjoint from personal caps).
+pub const VOUCHER_POOL: &str = "user-voucher";
 
 /// Domain-separation prefix for the capability signing message. MUST match
 /// `construct_veil_protocol::capability::CAP_DOMAIN`.
@@ -67,6 +78,8 @@ pub struct VeilServiceContext {
     pub issuer: SigningKey,
     /// Capability validity in seconds.
     pub ticket_ttl_secs: i64,
+    /// `VEIL_BOOTSTRAP_VOUCHER` in {1, on, true}, read once at boot.
+    pub bootstrap_voucher_enabled: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -86,6 +99,26 @@ pub enum IssueError {
     /// must name the primary (auto first-issue still always sends the seed address).
     #[error("relay_address required when multiple relays are configured")]
     RelayAddressRequired,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum VoucherError {
+    #[error("no relays configured")]
+    NoRelaysConfigured,
+    #[error("bootstrap voucher quota exceeded")]
+    QuotaExceeded { retry_after: i64 },
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
+/// Result of a committed bootstrap-voucher mint (blob already persisted).
+#[derive(Debug)]
+pub struct IssuedVoucher {
+    pub config_uri: String,
+    pub exp: i64,
+    pub ticket_id: Vec<u8>,
+    pub relay_address: String,
+    pub not_after: i64,
 }
 
 /// Result of issuing a capability.
@@ -616,6 +649,178 @@ pub fn plan_bundle_addresses(
     Ok((primary, alts))
 }
 
+/// `VEIL_BOOTSTRAP_VOUCHER` in {1, on, true} (case-insensitive). Unset/0/off → false.
+pub fn bootstrap_voucher_flag_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("on")
+                || v.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
+
+/// Rank **all** configured fronts (does not exclude a primary) and return the lowest.
+/// N=1 returns the sole key. Empty map → `NoRelaysConfigured`.
+pub fn select_voucher_front(
+    relays: &HashMap<String, RelayInfo>,
+    issuer_user_id: Uuid,
+    epoch: i64,
+) -> Result<&str, IssueError> {
+    if relays.is_empty() {
+        return Err(IssueError::NoRelaysConfigured);
+    }
+    let mut ranked: Vec<(u64, &String)> = relays
+        .keys()
+        .map(|a| (alt_rank(issuer_user_id, a, epoch), a))
+        .collect();
+    ranked.sort_unstable_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)));
+    Ok(ranked[0].1.as_str())
+}
+
+/// Seconds until `oldest_issued_at + 24h`, floored at 0.
+pub fn voucher_retry_after_secs(
+    oldest_issued_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    let unlock_at = oldest_issued_at + chrono::Duration::hours(24);
+    (unlock_at - now).num_seconds().max(0)
+}
+
+/// Ok if under quota; Err(retry_after) when COUNT >= 3.
+pub fn voucher_quota_retry_after(
+    in_window_issued_at: &[chrono::DateTime<chrono::Utc>],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), i64> {
+    if in_window_issued_at.len() < VOUCHER_QUOTA {
+        return Ok(());
+    }
+    let oldest = in_window_issued_at.iter().copied().min().unwrap_or(now);
+    Err(voucher_retry_after_secs(oldest, now))
+}
+
+/// Signed `konstruct://veil-config?d=` blob. Canonical bytes match `make-config-link`
+/// (BTreeMap → compact JSON, slashes unescaped; capability is standard base64).
+pub fn sign_config_blob(
+    issuer: &SigningKey,
+    relay: &str,
+    sni: &str,
+    spki: &str,
+    capability_b64: &str,
+    exp: i64,
+) -> (String, String) {
+    let mut fields: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+    fields.insert("capability", capability_b64.to_string().into());
+    fields.insert("exp", serde_json::Value::Number(exp.into()));
+    fields.insert("relay", relay.to_string().into());
+    fields.insert("sni", sni.to_string().into());
+    fields.insert("spki", spki.to_string().into());
+    let canonical =
+        serde_json::to_string(&fields).expect("config blob fields are always valid JSON");
+    let sig = issuer.sign(canonical.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let mut full = fields;
+    full.insert("signature", format!("ed25519:{sig_b64}").into());
+    let json =
+        serde_json::to_string(&full).expect("config blob with signature is always valid JSON");
+    let d = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+    (format!("konstruct://veil-config?d={d}"), json)
+}
+
+/// Mint a short-lived B2 voucher under a single Postgres transaction (quota + tracing).
+/// Signs the config blob only after COMMIT so a failed INSERT never returns a uri.
+pub async fn issue_bootstrap_voucher(
+    ctx: &VeilServiceContext,
+    issuer_user_id: Uuid,
+) -> Result<IssuedVoucher, VoucherError> {
+    if ctx.relays.is_empty() {
+        return Err(VoucherError::NoRelaysConfigured);
+    }
+
+    let mut tx = ctx.db_pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(issuer_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let issued_at_rows: Vec<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT ticket_id, issued_at FROM veil_bootstrap_vouchers \
+         WHERE issuer_user_id = $1 AND issued_at > NOW() - INTERVAL '24 hours' \
+         FOR UPDATE",
+    )
+    .bind(issuer_user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let times: Vec<_> = issued_at_rows.iter().map(|(_, t)| *t).collect();
+    if let Err(retry_after) = voucher_quota_retry_after(&times, chrono::Utc::now()) {
+        return Err(VoucherError::QuotaExceeded { retry_after });
+    }
+
+    let epoch = unix_now() / ALT_ROTATION_SECS;
+    let relay_address = select_voucher_front(&ctx.relays, issuer_user_id, epoch)
+        .map_err(|_| VoucherError::NoRelaysConfigured)?
+        .to_string();
+    let relay = ctx
+        .relays
+        .get(&relay_address)
+        .ok_or(VoucherError::NoRelaysConfigured)?;
+
+    let minted = mint_capability_b2(
+        &ctx.issuer,
+        &relay_address,
+        relay,
+        VOUCHER_TTL_SECS,
+        unix_now(),
+    );
+
+    sqlx::query(
+        "INSERT INTO veil_bootstrap_vouchers \
+         (ticket_id, issuer_user_id, pool, relay_address, not_after) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&minted.ticket_id)
+    .bind(issuer_user_id)
+    .bind(VOUCHER_POOL)
+    .bind(&relay_address)
+    .bind(minted.issued.not_after)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let capability_b64 = base64::engine::general_purpose::STANDARD.encode(&minted.issued.blob);
+    let (config_uri, _json) = sign_config_blob(
+        &ctx.issuer,
+        &minted.issued.relay_address,
+        &minted.issued.sni,
+        &minted.issued.spki,
+        &capability_b64,
+        minted.issued.not_after,
+    );
+
+    Ok(IssuedVoucher {
+        config_uri,
+        exp: minted.issued.not_after,
+        ticket_id: minted.ticket_id,
+        relay_address: minted.issued.relay_address,
+        not_after: minted.issued.not_after,
+    })
+}
+
+/// Drop tracing rows older than 7 days. Errors are for the caller to log.
+pub async fn sweep_bootstrap_vouchers(pool: &DbPool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM veil_bootstrap_vouchers WHERE issued_at < NOW() - INTERVAL '7 days'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,5 +1181,269 @@ mod tests {
         assert_ne!(a.ticket_id, b.ticket_id);
         assert_ne!(a.auth_key, b.auth_key);
         assert_ne!(a.issued.blob, b.issued.blob);
+    }
+
+    // ── bootstrap voucher ───────────────────────────────────────────────────
+
+    #[test]
+    fn bootstrap_voucher_flag_parses_on_values() {
+        assert!(bootstrap_voucher_flag_enabled(Some("1")));
+        assert!(bootstrap_voucher_flag_enabled(Some("on")));
+        assert!(bootstrap_voucher_flag_enabled(Some("ON")));
+        assert!(bootstrap_voucher_flag_enabled(Some("true")));
+        assert!(bootstrap_voucher_flag_enabled(Some(" True ")));
+        assert!(!bootstrap_voucher_flag_enabled(None));
+        assert!(!bootstrap_voucher_flag_enabled(Some("")));
+        assert!(!bootstrap_voucher_flag_enabled(Some("0")));
+        assert!(!bootstrap_voucher_flag_enabled(Some("off")));
+        assert!(!bootstrap_voucher_flag_enabled(Some("false")));
+        assert!(!bootstrap_voucher_flag_enabled(Some("yes")));
+    }
+
+    #[test]
+    fn select_voucher_front_empty_is_no_relays() {
+        let relays = HashMap::new();
+        match select_voucher_front(&relays, Uuid::from_u128(1), 0) {
+            Err(IssueError::NoRelaysConfigured) => {}
+            other => panic!("expected NoRelaysConfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_voucher_front_n1_returns_sole_key() {
+        let relays = relay_set(&["only:443"]);
+        assert_eq!(
+            select_voucher_front(&relays, Uuid::from_u128(1), 0).unwrap(),
+            "only:443"
+        );
+    }
+
+    #[test]
+    fn select_voucher_front_ranks_all_keys_does_not_exclude_primary() {
+        let relays = relay_set(&["a:1", "b:1", "c:1"]);
+        let user = Uuid::from_u128(42);
+        let epoch = 7;
+        let picked = select_voucher_front(&relays, user, epoch).unwrap();
+        let mut ranked: Vec<(u64, &str)> = ["a:1", "b:1", "c:1"]
+            .iter()
+            .map(|a| (alt_rank(user, a, epoch), *a))
+            .collect();
+        ranked.sort_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)));
+        assert_eq!(picked, ranked[0].1);
+        // select_alternate_addresses excludes a named primary; this helper must not.
+        assert!(relays.contains_key(picked));
+        let alts = select_alternate_addresses(&relays, picked, user, 3, epoch);
+        assert!(!alts.contains(&picked.to_string()));
+        assert_eq!(alts.len(), 2);
+    }
+
+    #[test]
+    fn select_voucher_front_stable_within_epoch_tie_break_by_address() {
+        let relays = relay_set(&["z:1", "a:1", "m:1"]);
+        let user = Uuid::from_u128(7);
+        let a = select_voucher_front(&relays, user, 100).unwrap();
+        let b = select_voucher_front(&relays, user, 100).unwrap();
+        assert_eq!(a, b);
+        let mut ranked: Vec<(u64, &str)> = ["z:1", "a:1", "m:1"]
+            .iter()
+            .map(|addr| (alt_rank(user, addr, 100), *addr))
+            .collect();
+        ranked.sort_by(|x, y| x.0.cmp(&y.0).then_with(|| x.1.cmp(y.1)));
+        assert_eq!(a, ranked[0].1);
+    }
+
+    #[test]
+    fn sign_config_blob_canonical_json_and_uri() {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let issuer = test_issuer();
+        let vk: VerifyingKey = issuer.verifying_key();
+        // Bytes that differ between standard base64 (`+/`) and base64url (`-_`).
+        let blob = [0xfb, 0xff, 0x00];
+        let cap_b64 = STANDARD.encode(blob);
+        assert!(
+            cap_b64.contains('+') || cap_b64.contains('/') || cap_b64.contains('='),
+            "fixture must exercise standard base64 alphabet, got {cap_b64}"
+        );
+        let exp = 1_770_000_000i64;
+        let (uri, json) = sign_config_blob(
+            &issuer,
+            "front.example:443",
+            "front.example",
+            "deadbeef",
+            &cap_b64,
+            exp,
+        );
+
+        assert!(uri.starts_with("konstruct://veil-config?d="));
+        let d = uri
+            .strip_prefix("konstruct://veil-config?d=")
+            .expect("uri prefix");
+        let decoded = URL_SAFE_NO_PAD.decode(d).expect("d= is base64url");
+        assert_eq!(decoded, json.as_bytes());
+
+        let full: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(full["exp"].as_i64(), Some(exp));
+        assert_eq!(full["capability"].as_str(), Some(cap_b64.as_str()));
+        assert_ne!(
+            full["capability"].as_str().unwrap(),
+            URL_SAFE_NO_PAD.encode(blob)
+        );
+
+        let mut unsigned: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        unsigned.insert("capability", cap_b64.clone().into());
+        unsigned.insert("exp", serde_json::Value::Number(exp.into()));
+        unsigned.insert("relay", "front.example:443".into());
+        unsigned.insert("sni", "front.example".into());
+        unsigned.insert("spki", "deadbeef".into());
+        let canonical = serde_json::to_string(&unsigned).unwrap();
+        let cap_pos = canonical.find("\"capability\"").unwrap();
+        let exp_pos = canonical.find("\"exp\"").unwrap();
+        let relay_pos = canonical.find("\"relay\"").unwrap();
+        let sni_pos = canonical.find("\"sni\"").unwrap();
+        let spki_pos = canonical.find("\"spki\"").unwrap();
+        assert!(
+            cap_pos < exp_pos && exp_pos < relay_pos && relay_pos < sni_pos && sni_pos < spki_pos
+        );
+
+        let sig_field = full["signature"].as_str().expect("signature field");
+        let sig_b64 = sig_field.strip_prefix("ed25519:").expect("ed25519: prefix");
+        let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).expect("sig is base64url");
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte sig");
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        vk.verify(canonical.as_bytes(), &sig)
+            .expect("signature must verify over compact unsigned JSON");
+    }
+
+    #[test]
+    fn voucher_json_exp_equals_capability_not_after() {
+        use base64::engine::general_purpose::STANDARD;
+
+        let issuer = test_issuer();
+        let relay = RelayInfo {
+            scope: "ru".into(),
+            spki: "deadbeef".into(),
+            sni: "front.example".into(),
+        };
+        let now = 1_700_000_000i64;
+        let minted =
+            mint_capability_b2(&issuer, "front.example:443", &relay, VOUCHER_TTL_SECS, now);
+        assert_eq!(minted.issued.not_after, now + VOUCHER_TTL_SECS);
+        let cap_b64 = STANDARD.encode(&minted.issued.blob);
+        let (_uri, json) = sign_config_blob(
+            &issuer,
+            &minted.issued.relay_address,
+            &minted.issued.sni,
+            &minted.issued.spki,
+            &cap_b64,
+            minted.issued.not_after,
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["exp"].as_i64(), Some(minted.issued.not_after));
+    }
+
+    #[test]
+    fn voucher_retry_after_is_oldest_plus_24h_floored_at_zero() {
+        let oldest = chrono::DateTime::from_timestamp(1_000, 0).unwrap();
+        let plus_one_hour = chrono::DateTime::from_timestamp(1_000 + 3600, 0).unwrap();
+        assert_eq!(voucher_retry_after_secs(oldest, plus_one_hour), 23 * 3600);
+        let past_window = chrono::DateTime::from_timestamp(1_000 + 24 * 3600 + 10, 0).unwrap();
+        assert_eq!(voucher_retry_after_secs(oldest, past_window), 0);
+    }
+
+    #[test]
+    fn voucher_quota_third_ok_fourth_exhausted() {
+        let t0 = chrono::DateTime::from_timestamp(1_000, 0).unwrap();
+        let t1 = chrono::DateTime::from_timestamp(2_000, 0).unwrap();
+        let t2 = chrono::DateTime::from_timestamp(3_000, 0).unwrap();
+        let now = chrono::DateTime::from_timestamp(1_000 + 3600, 0).unwrap();
+        assert!(voucher_quota_retry_after(&[t0, t1], now).is_ok());
+        let retry = voucher_quota_retry_after(&[t0, t1, t2], now).unwrap_err();
+        assert_eq!(retry, 23 * 3600);
+        assert!(voucher_quota_retry_after(&[], now).is_ok());
+    }
+
+    async fn voucher_test_pool() -> sqlx::PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://construct:password@localhost/construct".to_string());
+        sqlx::PgPool::connect(&url)
+            .await
+            .expect("Failed to connect to test DB")
+    }
+
+    fn voucher_test_ctx(pool: sqlx::PgPool, addrs: &[&str]) -> VeilServiceContext {
+        VeilServiceContext {
+            db_pool: Arc::new(pool),
+            relays: relay_set(addrs),
+            issuer: test_issuer(),
+            ticket_ttl_secs: DEFAULT_TICKET_TTL_SECS,
+            bootstrap_voucher_enabled: true,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn voucher_quota_fourth_mint_exhausted() {
+        let pool = voucher_test_pool().await;
+        let user = Uuid::new_v4();
+        let _ = sqlx::query("DELETE FROM veil_bootstrap_vouchers WHERE issuer_user_id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await;
+        let ctx = voucher_test_ctx(pool.clone(), &["front.example:443"]);
+        for i in 0..VOUCHER_QUOTA {
+            issue_bootstrap_voucher(&ctx, user)
+                .await
+                .unwrap_or_else(|e| panic!("mint {i} should succeed: {e}"));
+        }
+        match issue_bootstrap_voucher(&ctx, user).await {
+            Err(VoucherError::QuotaExceeded { retry_after }) => {
+                assert!(retry_after <= 24 * 3600);
+            }
+            other => panic!("expected QuotaExceeded, got {other:?}"),
+        }
+        let _ = sqlx::query("DELETE FROM veil_bootstrap_vouchers WHERE issuer_user_id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn voucher_insert_failure_returns_no_blob() {
+        let pool = voucher_test_pool().await;
+        const CONSTRAINT: &str = "veil_bootstrap_vouchers_test_insert_fail";
+        let _ = sqlx::query(&format!(
+            "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
+        ))
+        .execute(&pool)
+        .await;
+        sqlx::query(&format!(
+            "ALTER TABLE veil_bootstrap_vouchers \
+             ADD CONSTRAINT {CONSTRAINT} \
+             CHECK (relay_address <> 'insert-fail.example:443')"
+        ))
+        .execute(&pool)
+        .await
+        .expect("add test constraint");
+
+        let ctx = voucher_test_ctx(pool.clone(), &["insert-fail.example:443"]);
+        let result = issue_bootstrap_voucher(&ctx, Uuid::new_v4()).await;
+
+        let _ = sqlx::query(&format!(
+            "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
+        ))
+        .execute(&pool)
+        .await;
+
+        match result {
+            Err(VoucherError::Db(_)) => {}
+            Ok(v) => panic!(
+                "INSERT failure must not return a blob, got {}",
+                v.config_uri
+            ),
+            other => panic!("expected Db error, got {other:?}"),
+        }
     }
 }
