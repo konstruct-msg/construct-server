@@ -606,6 +606,62 @@ pub fn record_auth_security_fail_open(control: &'static str) {
 }
 
 // ============================================================================
+// VEIL bootstrap vouchers (veil-service only)
+// ============================================================================
+//
+// Do not Lazy::force these in init_registry — that runs in all seven services
+// and would make identity/messaging export a lying 0. veil-service main forces
+// them after boot via force_veil_bootstrap_voucher_metrics.
+
+/// Issued user-vouched bootstrap vouchers. Label `pool` is constant `user-voucher`.
+pub static VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_veil_bootstrap_vouchers_issued_total",
+            "Issued user-vouched VEIL bootstrap vouchers by pool"
+        ),
+        &["pool"]
+    )
+    .expect("Failed to register VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL metric")
+});
+
+/// IssueBootstrapVoucher rejected by the 3/24h issuance quota.
+pub static VEIL_BOOTSTRAP_VOUCHERS_RATE_LIMITED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_veil_bootstrap_vouchers_rate_limited_total",
+        "IssueBootstrapVoucher requests rejected by issuance quota"
+    ))
+    .expect("Failed to register VEIL_BOOTSTRAP_VOUCHERS_RATE_LIMITED_TOTAL metric")
+});
+
+/// IssueBootstrapVoucher rejected because VEIL_BOOTSTRAP_VOUCHER is off.
+pub static VEIL_BOOTSTRAP_VOUCHERS_FLAG_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_veil_bootstrap_vouchers_flag_rejected_total",
+        "IssueBootstrapVoucher requests rejected because the mint flag is off"
+    ))
+    .expect("Failed to register VEIL_BOOTSTRAP_VOUCHERS_FLAG_REJECTED_TOTAL metric")
+});
+
+/// Issued while only one VEIL_RELAYS front is configured (N=1 dogfood).
+pub static VEIL_BOOTSTRAP_VOUCHERS_N1_ISSUED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_veil_bootstrap_vouchers_n1_issued_total",
+        "Bootstrap vouchers issued while only one VEIL front is configured"
+    ))
+    .expect("Failed to register VEIL_BOOTSTRAP_VOUCHERS_N1_ISSUED_TOTAL metric")
+});
+
+/// Register veil-only voucher counters. Call from veil-service main, not init_registry.
+pub fn force_veil_bootstrap_voucher_metrics() {
+    Lazy::force(&VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL);
+    VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL.with_label_values(&["user-voucher"]);
+    Lazy::force(&VEIL_BOOTSTRAP_VOUCHERS_RATE_LIMITED_TOTAL);
+    Lazy::force(&VEIL_BOOTSTRAP_VOUCHERS_FLAG_REJECTED_TOTAL);
+    Lazy::force(&VEIL_BOOTSTRAP_VOUCHERS_N1_ISSUED_TOTAL);
+}
+
+// ============================================================================
 // Metrics Collection
 // ============================================================================
 
@@ -784,6 +840,11 @@ mod tests {
             "construct_turn_active_allocations",
             "construct_kt_proof_failures_total",
             "gateway_requests_total",
+            // veil-service only — forced from that binary's main, not here.
+            "construct_veil_bootstrap_vouchers_issued_total",
+            "construct_veil_bootstrap_vouchers_rate_limited_total",
+            "construct_veil_bootstrap_vouchers_flag_rejected_total",
+            "construct_veil_bootstrap_vouchers_n1_issued_total",
         ] {
             assert!(
                 !text.contains(orphan),
