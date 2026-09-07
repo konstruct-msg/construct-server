@@ -12,7 +12,8 @@ use tracing::info;
 use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::veil_service_server::{VeilService, VeilServiceServer};
 use veil_service::core::{
-    self, RelayInfo, VeilServiceContext, merge_legacy_relay, parse_relays_spec,
+    self, RelayInfo, VeilServiceContext, VoucherError, bootstrap_voucher_flag_enabled,
+    merge_legacy_relay, parse_relays_spec,
 };
 
 #[derive(Clone)]
@@ -102,12 +103,51 @@ impl VeilService for VeilGrpcService {
 
     async fn issue_bootstrap_voucher(
         &self,
-        _request: Request<proto::IssueBootstrapVoucherRequest>,
+        request: Request<proto::IssueBootstrapVoucherRequest>,
     ) -> Result<Response<proto::IssueBootstrapVoucherResponse>, Status> {
-        // Client hides A's mint UI on UNIMPLEMENTED.
-        Err(Status::unimplemented(
-            "issue bootstrap voucher is not enabled",
-        ))
+        let user_id =
+            construct_server_shared::auth_utils::extract_user_id(&self.auth, request.metadata())?;
+
+        if !self.context.bootstrap_voucher_enabled {
+            construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_FLAG_REJECTED_TOTAL.inc();
+            return Err(Status::unimplemented(
+                "issue bootstrap voucher is not enabled",
+            ));
+        }
+
+        let issued = core::issue_bootstrap_voucher(&self.context, user_id)
+            .await
+            .map_err(|e| match e {
+                VoucherError::NoRelaysConfigured => {
+                    Status::failed_precondition("no relays configured on veil-service")
+                }
+                VoucherError::QuotaExceeded { retry_after } => {
+                    construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_RATE_LIMITED_TOTAL.inc();
+                    Status::resource_exhausted(format!("retry_after={retry_after}"))
+                }
+                VoucherError::Db(e) => Status::internal(format!("db error: {e}")),
+                VoucherError::Json(e) => Status::internal(format!("json error: {e}")),
+            })?;
+
+        construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_ISSUED_TOTAL
+            .with_label_values(&[core::VOUCHER_POOL])
+            .inc();
+        if self.context.relays.len() == 1 {
+            construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_N1_ISSUED_TOTAL.inc();
+        }
+
+        info!(
+            issuer_user_id = %user_id,
+            ticket_id = %hex::encode(&issued.ticket_id),
+            relay = %issued.relay_address,
+            not_after = issued.not_after,
+            "issued bootstrap voucher"
+        );
+
+        Ok(Response::new(proto::IssueBootstrapVoucherResponse {
+            config_uri: issued.config_uri,
+            exp: issued.exp,
+        }))
     }
 }
 
@@ -204,12 +244,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    let bootstrap_voucher_enabled =
+        bootstrap_voucher_flag_enabled(env::var("VEIL_BOOTSTRAP_VOUCHER").ok().as_deref());
+    info!(
+        enabled = bootstrap_voucher_enabled,
+        "IssueBootstrapVoucher flag"
+    );
+
     let context = Arc::new(VeilServiceContext {
         db_pool,
         relays,
         issuer,
         ticket_ttl_secs: core::DEFAULT_TICKET_TTL_SECS,
+        bootstrap_voucher_enabled,
     });
+
+    construct_metrics::force_veil_bootstrap_voucher_metrics();
 
     let auth = Arc::new(
         AuthManager::new(&config)
@@ -238,6 +288,26 @@ async fn main() -> Result<()> {
         }
     });
     info!("Veil gRPC listening on {}", grpc_bind);
+
+    {
+        let pool = Arc::clone(&context.db_pool);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match core::sweep_bootstrap_vouchers(&pool).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(deleted = n, "swept expired bootstrap vouchers")
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(error = %e, "bootstrap voucher sweep failed")
+                    }
+                }
+            }
+        });
+    }
 
     // REST health server.
     let app = Router::new()
