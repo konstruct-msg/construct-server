@@ -41,6 +41,12 @@ if [ "$fail" -eq 0 ] && [ "${SKIP_CLIPPY:-0}" != "1" ]; then
     cargo clippy --all-targets --all-features -- -D warnings || fail=1
 fi
 
+# Репозиторий публичный, а утечку координат фронта CI не поймает: она проходит
+# все проверки как обычный JSON. И откатить её нельзя — после пуша содержимое
+# остаётся доступным по SHA даже после переписывания истории. Поэтому здесь.
+printf '\n[pre-push] координаты veil-front\n'
+"$(git rev-parse --show-toplevel)/.githooks/no-front-coordinates" || fail=1
+
 if [ "$fail" -ne 0 ]; then
     cat <<'EOF'
 
