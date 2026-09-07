@@ -14,10 +14,15 @@ package shared.proto.services.v1;
 // до истечения текущей.
 //
 // IssueVeilCapability — JWT-gated (требует валидную пользовательскую сессию;
-// user_id берётся из метаданных x-user-id, проставленных gateway/envoy).
+// extract_user_id verifies Bearer; optional x-user-id must match claims).
 service VeilService {
   // Клиент → backend. Выдаёт свежую подписанную capability у истечения текущей.
   rpc IssueVeilCapability(IssueVeilCapabilityRequest) returns (IssueVeilCapabilityResponse);
+  // JWT-gated (Bearer verified in-process; Caddy does not inject x-user-id).
+  // Mints a short-lived B2 transport voucher (bearer until TTL, not one-use)
+  // for a not-yet-registered peer. Not a contact invite. Feature-flagged; default off.
+  rpc IssueBootstrapVoucher(IssueBootstrapVoucherRequest)
+      returns (IssueBootstrapVoucherResponse);
 }
 
 message IssueVeilCapabilityRequest {
@@ -86,4 +91,16 @@ message EntryPoint {
   string sni = 4;
   int64 not_after = 5;
   uint32 capability_version = 6;
+}
+
+message IssueBootstrapVoucherRequest {
+  // Empty. Server picks the front via select_voucher_front over VEIL_RELAYS.
+}
+
+message IssueBootstrapVoucherResponse {
+  // Full deep link: konstruct://veil-config?d=<base64url JSON>.
+  // Client QR-encodes this string. Do not display coordinates parsed from it.
+  string config_uri = 1;
+  // Unix seconds; same as JSON exp / capability not_after. For countdown UI.
+  int64 exp = 2;
 }
