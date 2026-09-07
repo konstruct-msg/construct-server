@@ -99,6 +99,16 @@ impl VeilService for VeilGrpcService {
             alternates,
         }))
     }
+
+    async fn issue_bootstrap_voucher(
+        &self,
+        _request: Request<proto::IssueBootstrapVoucherRequest>,
+    ) -> Result<Response<proto::IssueBootstrapVoucherResponse>, Status> {
+        // Client hides A's mint UI on UNIMPLEMENTED.
+        Err(Status::unimplemented(
+            "issue bootstrap voucher is not enabled",
+        ))
+    }
 }
 
 async fn health_check() -> Json<serde_json::Value> {
