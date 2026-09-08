@@ -77,18 +77,38 @@ impl VeilService for VeilGrpcService {
             "issued veil capability"
         );
 
+        let map_json_err = |e: serde_json::Error| Status::internal(format!("json error: {e}"));
+        let signature = core::sign_entrypoint_tuple(
+            &self.context.issuer,
+            &issued.relay_address,
+            &issued.sni,
+            &issued.spki,
+            issued.not_after,
+        )
+        .map_err(map_json_err)?;
         let alternates = bundle
             .alternates
             .into_iter()
-            .map(|a| proto::EntryPoint {
-                capability: a.blob,
-                relay_address: a.relay_address,
-                spki: a.spki,
-                sni: a.sni,
-                not_after: a.not_after,
-                capability_version: a.capability_version,
+            .map(|a| {
+                let signature = core::sign_entrypoint_tuple(
+                    &self.context.issuer,
+                    &a.relay_address,
+                    &a.sni,
+                    &a.spki,
+                    a.not_after,
+                )
+                .map_err(map_json_err)?;
+                Ok(proto::EntryPoint {
+                    capability: a.blob,
+                    relay_address: a.relay_address,
+                    spki: a.spki,
+                    sni: a.sni,
+                    not_after: a.not_after,
+                    capability_version: a.capability_version,
+                    signature,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, Status>>()?;
 
         Ok(Response::new(proto::IssueVeilCapabilityResponse {
             capability: issued.blob,
@@ -98,6 +118,7 @@ impl VeilService for VeilGrpcService {
             not_after: issued.not_after,
             capability_version: issued.capability_version,
             alternates,
+            signature,
         }))
     }
 
