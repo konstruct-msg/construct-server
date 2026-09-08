@@ -36,6 +36,34 @@ pub const VOUCHER_TTL_SECS: i64 = 2700;
 /// Per-issuer rolling 24h issuance cap (all account ages).
 pub const VOUCHER_QUOTA: usize = 3;
 
+/// Upper bound on `VEIL_VOUCHER_QUOTA`. The quota is the blast-radius control for a
+/// bearer credential anyone who photographs the QR can use, so an operator typo must
+/// not be able to turn it off — a value outside 1..=MAX_VOUCHER_QUOTA is refused and
+/// the default stands.
+pub const MAX_VOUCHER_QUOTA: usize = 50;
+
+/// Read `VEIL_VOUCHER_QUOTA`, falling back to [`VOUCHER_QUOTA`].
+///
+/// Exists so a test run can be unblocked without a rebuild. Raising it in production
+/// widens how fast one account can hand out access; put it back afterwards.
+pub fn voucher_quota_from_env(raw: Option<&str>) -> usize {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return VOUCHER_QUOTA;
+    };
+    match raw.parse::<usize>() {
+        Ok(n) if (1..=MAX_VOUCHER_QUOTA).contains(&n) => n,
+        _ => {
+            tracing::warn!(
+                value = raw,
+                default = VOUCHER_QUOTA,
+                max = MAX_VOUCHER_QUOTA,
+                "VEIL_VOUCHER_QUOTA is not an integer in 1..=MAX — keeping the default"
+            );
+            VOUCHER_QUOTA
+        }
+    }
+}
+
 /// Tracing-table `pool` for user-vouched bootstrap (disjoint from personal caps).
 pub const VOUCHER_POOL: &str = "user-voucher";
 
@@ -80,6 +108,8 @@ pub struct VeilServiceContext {
     pub ticket_ttl_secs: i64,
     /// `VEIL_BOOTSTRAP_VOUCHER` in {1, on, true}, read once at boot.
     pub bootstrap_voucher_enabled: bool,
+    /// Vouchers one account may mint per 24h. `VEIL_VOUCHER_QUOTA` or [`VOUCHER_QUOTA`].
+    pub voucher_quota: usize,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -691,12 +721,13 @@ pub fn voucher_retry_after_secs(
     (unlock_at - now).num_seconds().max(0)
 }
 
-/// Ok if under quota; Err(retry_after) when COUNT >= 3.
+/// Ok if under quota; Err(retry_after) once `quota` have been issued inside the window.
 pub fn voucher_quota_retry_after(
     in_window_issued_at: &[chrono::DateTime<chrono::Utc>],
     now: chrono::DateTime<chrono::Utc>,
+    quota: usize,
 ) -> Result<(), i64> {
-    if in_window_issued_at.len() < VOUCHER_QUOTA {
+    if in_window_issued_at.len() < quota {
         return Ok(());
     }
     let oldest = in_window_issued_at.iter().copied().min().unwrap_or(now);
@@ -787,7 +818,8 @@ pub async fn issue_bootstrap_voucher(
     .await?;
 
     let times: Vec<_> = issued_at_rows.iter().map(|(_, t)| *t).collect();
-    if let Err(retry_after) = voucher_quota_retry_after(&times, chrono::Utc::now()) {
+    if let Err(retry_after) = voucher_quota_retry_after(&times, chrono::Utc::now(), ctx.voucher_quota)
+    {
         return Err(VoucherError::QuotaExceeded { retry_after });
     }
 
@@ -1481,10 +1513,39 @@ mod tests {
         let t1 = chrono::DateTime::from_timestamp(2_000, 0).unwrap();
         let t2 = chrono::DateTime::from_timestamp(3_000, 0).unwrap();
         let now = chrono::DateTime::from_timestamp(1_000 + 3600, 0).unwrap();
-        assert!(voucher_quota_retry_after(&[t0, t1], now).is_ok());
-        let retry = voucher_quota_retry_after(&[t0, t1, t2], now).unwrap_err();
+        assert!(voucher_quota_retry_after(&[t0, t1], now, VOUCHER_QUOTA).is_ok());
+        let retry = voucher_quota_retry_after(&[t0, t1, t2], now, VOUCHER_QUOTA).unwrap_err();
         assert_eq!(retry, 23 * 3600);
-        assert!(voucher_quota_retry_after(&[], now).is_ok());
+        assert!(voucher_quota_retry_after(&[], now, VOUCHER_QUOTA).is_ok());
+    }
+
+    #[test]
+    fn voucher_quota_honours_a_raised_limit() {
+        let t = |n: i64| chrono::DateTime::from_timestamp(n, 0).unwrap();
+        let now = t(1_000 + 3600);
+        let three = [t(1_000), t(2_000), t(3_000)];
+        // Exhausted at the default, still open once the operator raises it.
+        assert!(voucher_quota_retry_after(&three, now, VOUCHER_QUOTA).is_err());
+        assert!(voucher_quota_retry_after(&three, now, 5).is_ok());
+        assert!(voucher_quota_retry_after(&three, now, 3).is_err());
+    }
+
+    #[test]
+    fn voucher_quota_env_parses_or_keeps_the_default() {
+        assert_eq!(voucher_quota_from_env(Some("10")), 10);
+        assert_eq!(voucher_quota_from_env(Some("  7 ")), 7);
+        assert_eq!(voucher_quota_from_env(Some("1")), 1);
+        assert_eq!(voucher_quota_from_env(Some("50")), 50);
+        // Anything that would disable or explode the blast-radius control is refused,
+        // and the default stands rather than the service failing to boot.
+        for bad in ["0", "51", "-1", "many", "3.5", "", "   "] {
+            assert_eq!(
+                voucher_quota_from_env(Some(bad)),
+                VOUCHER_QUOTA,
+                "must keep the default for {bad:?}"
+            );
+        }
+        assert_eq!(voucher_quota_from_env(None), VOUCHER_QUOTA);
     }
 
     async fn voucher_test_pool() -> sqlx::PgPool {
@@ -1502,6 +1563,7 @@ mod tests {
             issuer: test_issuer(),
             ticket_ttl_secs: DEFAULT_TICKET_TTL_SECS,
             bootstrap_voucher_enabled: true,
+            voucher_quota: VOUCHER_QUOTA,
         }
     }
 

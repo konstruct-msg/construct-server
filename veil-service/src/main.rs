@@ -272,12 +272,22 @@ async fn main() -> Result<()> {
         "IssueBootstrapVoucher flag"
     );
 
+    let voucher_quota = core::voucher_quota_from_env(env::var("VEIL_VOUCHER_QUOTA").ok().as_deref());
+    if voucher_quota != core::VOUCHER_QUOTA {
+        info!(
+            quota = voucher_quota,
+            default = core::VOUCHER_QUOTA,
+            "Bootstrap voucher quota overridden by VEIL_VOUCHER_QUOTA"
+        );
+    }
+
     let context = Arc::new(VeilServiceContext {
         db_pool,
         relays,
         issuer,
         ticket_ttl_secs: core::DEFAULT_TICKET_TTL_SECS,
         bootstrap_voucher_enabled,
+        voucher_quota,
     });
 
     construct_metrics::force_veil_bootstrap_voucher_metrics();
