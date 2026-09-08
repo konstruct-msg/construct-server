@@ -80,6 +80,13 @@ message IssueVeilCapabilityResponse {
   // если сконфигурирован ≤1 релей. capability каждого выпущена тем же путём
   // (bearer/key-bound), что и основная — по наличию veil_pk в запросе.
   repeated EntryPoint alternates = 7;
+
+  // Ed25519 over the primary coordinate tuple
+  // {"exp":<i64>,"relay":"<host:port>","sni":"<sni>","spki":"<hex sha256 spki>"},
+  // as "ed25519:<base64url>". Same scheme as EntryPoint.signature. Absent =>
+  // the client falls back to the signed-manifest / in-binary seed gate.
+  // Required once those public lists are emptied.
+  string signature = 8;
 }
 
 // Один альтернативный вход: те же поля, что и в основном ответе, но для другого
@@ -91,6 +98,11 @@ message EntryPoint {
   string sni = 4;
   int64 not_after = 5;
   uint32 capability_version = 6;
+  // Ed25519 over the canonical coordinate tuple
+  // {"exp":<i64>,"relay":"<host:port>","sni":"<sni>","spki":"<hex sha256 spki>"},
+  // as "ed25519:<base64url>". Absent => the client falls back to the
+  // signed-manifest gate (today's behaviour).
+  string signature = 7;
 }
 
 message IssueBootstrapVoucherRequest {

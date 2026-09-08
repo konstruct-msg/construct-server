@@ -703,6 +703,18 @@ pub fn voucher_quota_retry_after(
     Err(voucher_retry_after_secs(oldest, now))
 }
 
+/// Ed25519 over compact canonical JSON (`BTreeMap` key order, slashes unescaped).
+/// Result is `ed25519:<base64url-no-pad>`. The `signature` field itself is not signed.
+fn sign_canonical_fields(
+    issuer: &SigningKey,
+    fields: &BTreeMap<&str, serde_json::Value>,
+) -> Result<String, serde_json::Error> {
+    let canonical = serde_json::to_string(fields)?;
+    let sig = issuer.sign(canonical.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    Ok(format!("ed25519:{sig_b64}"))
+}
+
 /// Signed `konstruct://veil-config?d=` blob. Canonical bytes match `make-config-link`
 /// (BTreeMap → compact JSON, slashes unescaped; capability is standard base64).
 pub fn sign_config_blob(
@@ -719,14 +731,33 @@ pub fn sign_config_blob(
     fields.insert("relay", relay.to_string().into());
     fields.insert("sni", sni.to_string().into());
     fields.insert("spki", spki.to_string().into());
-    let canonical = serde_json::to_string(&fields)?;
-    let sig = issuer.sign(canonical.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+    let signature = sign_canonical_fields(issuer, &fields)?;
     let mut full = fields;
-    full.insert("signature", format!("ed25519:{sig_b64}").into());
+    full.insert("signature", signature.into());
     let json = serde_json::to_string(&full)?;
     let d = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
     Ok((format!("konstruct://veil-config?d={d}"), json))
+}
+
+/// Issuer signature over an `EntryPoint` coordinate tuple. Same canonicalisation as
+/// [`sign_config_blob`], but the signed fields are **only** `exp`, `relay`, `sni`,
+/// `spki` — never the capability. `exp` is the tuple's own expiry (`not_after`).
+///
+/// A signature over the address alone would authenticate `relay` while leaving
+/// `spki` free to substitute; without `exp` a retired front can never be un-vouched.
+pub fn sign_entrypoint_tuple(
+    issuer: &SigningKey,
+    relay: &str,
+    sni: &str,
+    spki: &str,
+    exp: i64,
+) -> Result<String, serde_json::Error> {
+    let mut fields: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+    fields.insert("exp", serde_json::Value::Number(exp.into()));
+    fields.insert("relay", relay.to_string().into());
+    fields.insert("sni", sni.to_string().into());
+    fields.insert("spki", spki.to_string().into());
+    sign_canonical_fields(issuer, &fields)
 }
 
 /// Mint a short-lived B2 voucher under a single Postgres transaction (quota + tracing).
@@ -1315,6 +1346,96 @@ mod tests {
         let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
         vk.verify(canonical.as_bytes(), &sig)
             .expect("signature must verify over compact unsigned JSON");
+    }
+
+    #[test]
+    fn sign_entrypoint_tuple_canonical_json_and_base64url_sig() {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let issuer = test_issuer();
+        let vk: VerifyingKey = issuer.verifying_key();
+        // Bytes that differ between standard base64 (`+/`) and base64url (`-_`).
+        // Capability is NOT in the signed tuple; the fixture exists so a
+        // regression that copies `sign_config_blob`'s field set is visible.
+        let blob = [0xfb, 0xff, 0x00];
+        let cap_b64 = STANDARD.encode(blob);
+        assert!(
+            cap_b64.contains('+') || cap_b64.contains('/') || cap_b64.contains('='),
+            "fixture must exercise standard base64 alphabet, got {cap_b64}"
+        );
+        let exp = 1_770_000_000i64;
+        let relay = "front.example:443";
+        // Slash must stay unescaped in compact JSON (client verifies the same bytes).
+        let sni = "cdn/front.example";
+        let spki = "deadbeef";
+
+        let sig_field =
+            sign_entrypoint_tuple(&issuer, relay, sni, spki, exp).expect("canonical tuple");
+
+        let mut unsigned: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        unsigned.insert("exp", serde_json::Value::Number(exp.into()));
+        unsigned.insert("relay", relay.into());
+        unsigned.insert("sni", sni.into());
+        unsigned.insert("spki", spki.into());
+        let canonical = serde_json::to_string(&unsigned).unwrap();
+        assert!(
+            !canonical.contains('\\'),
+            "slashes must not be escaped, got {canonical}"
+        );
+        assert!(canonical.contains("cdn/front.example"));
+        assert!(
+            !canonical.contains("capability"),
+            "capability must not be in the signed tuple"
+        );
+        assert!(!canonical.contains(&cap_b64));
+
+        let exp_pos = canonical.find("\"exp\"").unwrap();
+        let relay_pos = canonical.find("\"relay\"").unwrap();
+        let sni_pos = canonical.find("\"sni\"").unwrap();
+        let spki_pos = canonical.find("\"spki\"").unwrap();
+        assert!(exp_pos < relay_pos && relay_pos < sni_pos && sni_pos < spki_pos);
+
+        let sig_b64 = sig_field.strip_prefix("ed25519:").expect("ed25519: prefix");
+        let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).expect("sig is base64url");
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte sig");
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        vk.verify(canonical.as_bytes(), &sig)
+            .expect("signature must verify over compact unsigned JSON");
+    }
+
+    #[test]
+    fn sign_entrypoint_tuple_any_field_change_invalidates() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use ed25519_dalek::{Verifier, VerifyingKey};
+
+        let issuer = test_issuer();
+        let vk: VerifyingKey = issuer.verifying_key();
+        let exp = 1_770_000_000i64;
+        let relay = "front.example:443";
+        let sni = "front.example";
+        let spki = "deadbeef";
+        let sig_field =
+            sign_entrypoint_tuple(&issuer, relay, sni, spki, exp).expect("canonical tuple");
+        let sig_b64 = sig_field.strip_prefix("ed25519:").expect("ed25519: prefix");
+        let sig_bytes = URL_SAFE_NO_PAD.decode(sig_b64).expect("sig is base64url");
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte sig");
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+
+        let verify = |r: &str, n: &str, p: &str, e: i64| {
+            let mut fields: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+            fields.insert("exp", serde_json::Value::Number(e.into()));
+            fields.insert("relay", r.to_string().into());
+            fields.insert("sni", n.to_string().into());
+            fields.insert("spki", p.to_string().into());
+            let canonical = serde_json::to_string(&fields).unwrap();
+            vk.verify(canonical.as_bytes(), &sig)
+        };
+        assert!(verify(relay, sni, spki, exp).is_ok());
+        assert!(verify("evil.example:443", sni, spki, exp).is_err());
+        assert!(verify(relay, "evil.example", spki, exp).is_err());
+        assert!(verify(relay, sni, "cafebabe", exp).is_err());
+        assert!(verify(relay, sni, spki, exp + 1).is_err());
     }
 
     #[test]
