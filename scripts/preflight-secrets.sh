@@ -163,6 +163,55 @@ if [[ -f "$AM_DIR/alertmanager.yml" ]]; then
     err "ops/alertmanager/telegram_token is missing or empty — Alertmanager cannot authenticate (see telegram_token.example)."
   elif grep -q "PUT_YOUR_BOT_TOKEN_HERE" "$AM_DIR/telegram_token" 2>/dev/null; then
     err "ops/alertmanager/telegram_token still holds the placeholder."
+  else
+    # The check above says the token EXISTS. It says nothing about whether the process
+    # that needs it can open it, and on 2026-09-10 that was the whole difference: the
+    # file was present, non-placeholder, the config loaded, `chat_id` was right, and
+    # every notification failed with
+    #     could not read /etc/alertmanager/telegram_token: permission denied
+    # because the file was root-owned 0600 and the container runs as nobody. Alertmanager
+    # reads it at SEND time, not at config load, so nothing complained until the first
+    # real alert — and the metrics read as "1 notification, 0 failures" while the retry
+    # loop spun, because only `notification_requests_failed_total` moves until the retries
+    # are exhausted. Present is not readable, and readable is what matters.
+    am_uid="${ALERTMANAGER_UID:-}"
+    if [[ -z "$am_uid" ]] && command -v docker >/dev/null 2>&1; then
+      am_uid="$(docker inspect -f '{{.Config.User}}' construct-alertmanager 2>/dev/null | cut -d: -f1)"
+      [[ "$am_uid" == "nobody" ]] && am_uid=65534
+    fi
+    # 65534 is `nobody` in the busybox base prom/alertmanager ships; the image sets
+    # USER nobody. Override with ALERTMANAGER_UID if that ever changes.
+    [[ "$am_uid" =~ ^[0-9]+$ ]] || am_uid=65534
+
+    # GNU stat on the server, BSD stat on a developer's Mac — same three numbers.
+    tok_stat="$(stat -c '%u %g %a' "$AM_DIR/telegram_token" 2>/dev/null \
+             || stat -f '%u %g %Lp' "$AM_DIR/telegram_token" 2>/dev/null || true)"
+    if [[ -z "$tok_stat" ]]; then
+      warn "could not stat ops/alertmanager/telegram_token — skipping the readability check."
+    else
+      read -r tok_uid tok_gid tok_mode <<< "$tok_stat"
+      # Zero-pad so ${mode:0:1} is really the owner digit for a 3-digit mode like 600.
+      while [[ "${#tok_mode}" -lt 3 ]]; do tok_mode="0$tok_mode"; done
+      m_owner="${tok_mode: -3:1}"; m_group="${tok_mode: -2:1}"; m_other="${tok_mode: -1}"
+      readable=0
+      [[ "$tok_uid" == "$am_uid" && $(( m_owner & 4 )) -ne 0 ]] && readable=1
+      [[ "$tok_gid" == "$am_uid" && $(( m_group & 4 )) -ne 0 ]] && readable=1
+      [[ $(( m_other & 4 )) -ne 0 ]] && readable=1
+      if [[ "$readable" -eq 0 ]]; then
+        err "ops/alertmanager/telegram_token is not readable by uid $am_uid (owner=$tok_uid group=$tok_gid mode=$tok_mode) — Alertmanager will fail every notification with 'permission denied'. Fix: sudo chown $am_uid:$am_uid ops/alertmanager/telegram_token && sudo chmod 400 ops/alertmanager/telegram_token"
+      fi
+      # The mount is a directory; an unsearchable one fails the open just as flatly.
+      dir_stat="$(stat -c '%u %g %a' "$AM_DIR" 2>/dev/null \
+               || stat -f '%u %g %Lp' "$AM_DIR" 2>/dev/null || true)"
+      if [[ -n "$dir_stat" ]]; then
+        read -r d_uid d_gid d_mode <<< "$dir_stat"
+        while [[ "${#d_mode}" -lt 3 ]]; do d_mode="0$d_mode"; done
+        d_other="${d_mode: -1}"
+        if [[ "$d_uid" != "$am_uid" && "$d_gid" != "$am_uid" && $(( d_other & 1 )) -eq 0 ]]; then
+          err "ops/alertmanager/ is not searchable by uid $am_uid (owner=$d_uid group=$d_gid mode=$d_mode) — the token cannot be opened whatever its own mode says. Fix: sudo chmod o+x ops/alertmanager"
+        fi
+      fi
+    fi
   fi
 fi
 
