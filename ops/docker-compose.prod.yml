@@ -202,6 +202,21 @@ services:
       PORT: "8081"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: identity
+      # Arms every production guard in construct-config. Absent, `is_production_environment()`
+      # is false and `load_required_hex_secret` silently substitutes the KNOWN INSECURE DEFAULT
+      # instead of refusing to boot — for REQUEST_ENVELOPE_KEY, USERNAME_HMAC_SECRET and
+      # CONTACT_HMAC_SECRET alike. Those defaults are public constants in this public repository
+      # (`secret_hygiene.rs`), so the at-rest protection they stand in for is worth nothing.
+      #
+      # Found 2026-09-10: REQUEST_ENVELOPE_KEY was absent from app.env and production had been
+      # encrypting contact_requests.from_user_id under `construct-insecure-envelope-key!!` — the
+      # guard that exists to prevent exactly that could not fire, because nothing said this was
+      # production.
+      #
+      # ORDER MATTERS. With this set, a missing required secret is a REFUSED BOOT, which is the
+      # point. Put every secret in place first (./scripts/preflight-secrets.sh must pass), then
+      # deploy this. Reversed, the services do not come back up.
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       APNS_ENABLED: ${APNS_ENABLED:-true}
       APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
@@ -244,6 +259,7 @@ services:
       PORT: "8083"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: messaging
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-7}
@@ -276,6 +292,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: key
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       # USERNAME_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
     volumes:
@@ -299,6 +316,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: veil
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       VEIL_GRPC_BIND_ADDRESS: "[::]:50056"
       # VEIL_ISSUER_SEED + VEIL_RELAY_* come from env_file (app.env). Do NOT list them
@@ -324,6 +342,7 @@ services:
       MEDIA_BIND_ADDRESS: "0.0.0.0:8087"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: media
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       MEDIA_PUBLIC_HOST: ${INSTANCE_DOMAIN}
       # Explicit storage path on a named volume. Without this the service wrote to
@@ -359,6 +378,7 @@ services:
       METRICS_PORT: "8097"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: group
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://messaging:50053}
     volumes:
@@ -379,6 +399,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: signaling
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       INSTANCE_DOMAIN: ${INSTANCE_DOMAIN}
       PORT: "50060"
       METRICS_PORT: "8091"
@@ -403,6 +424,7 @@ services:
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info,sqlx=warn}
       SERVICE_NAME: gateway
+      ENVIRONMENT: ${ENVIRONMENT:-production}
       # SERVER_SIGNING_KEY + ICE_SERVER_KEY come from env_file (app.env). Do NOT re-list
       # as ${VAR}: an unset interpolation blanked SERVER_SIGNING_KEY, so the gateway
       # derived+published a bogus token_encryption_key from an empty seed.
