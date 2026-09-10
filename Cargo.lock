@@ -3957,7 +3957,7 @@ dependencies = [
 
 [[package]]
 name = "signaling-service"
-version = "0.1.0"
+version = "0.18.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -4933,6 +4933,7 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

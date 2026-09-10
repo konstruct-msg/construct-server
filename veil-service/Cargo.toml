@@ -33,6 +33,7 @@ sqlx = { workspace = true }
 axum = { workspace = true }
 prometheus = { workspace = true }
 hex = { workspace = true }
+sha2 = { workspace = true }
 base64 = { workspace = true }
 construct-metrics = { path = "../crates/construct-metrics" }
 tonic = "0.14.2"

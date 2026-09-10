@@ -71,7 +71,7 @@ impl VeilService for VeilGrpcService {
         let issued = bundle.primary;
         info!(
             user_id = %user_id,
-            relay = %issued.relay_address,
+            front = %core::front_label(&self.context.issuer, &issued.relay_address),
             capability_version = issued.capability_version,
             alternates = bundle.alternates.len(),
             "issued veil capability"
@@ -253,9 +253,14 @@ async fn main() -> Result<()> {
             "No relays configured (set VEIL_RELAYS and/or VEIL_RELAY_ADDRESS) — IssueVeilCapability will reject all requests"
         );
     } else {
+        // Labels, not addresses: this line ran on every boot and printed the whole
+        // front list in the clear.
         info!(
             count = relays.len(),
-            relays = ?relays.keys().collect::<Vec<_>>(),
+            fronts = ?relays
+                .keys()
+                .map(|addr| core::front_label(&issuer, addr))
+                .collect::<Vec<_>>(),
             "Configured VEIL fronts"
         );
         if relays.len() == 1 {
@@ -272,12 +277,23 @@ async fn main() -> Result<()> {
         "IssueBootstrapVoucher flag"
     );
 
+    let voucher_quota =
+        core::voucher_quota_from_env(env::var("VEIL_VOUCHER_QUOTA").ok().as_deref());
+    if voucher_quota != core::VOUCHER_QUOTA {
+        info!(
+            quota = voucher_quota,
+            default = core::VOUCHER_QUOTA,
+            "Bootstrap voucher quota overridden by VEIL_VOUCHER_QUOTA"
+        );
+    }
+
     let context = Arc::new(VeilServiceContext {
         db_pool,
         relays,
         issuer,
         ticket_ttl_secs: core::DEFAULT_TICKET_TTL_SECS,
         bootstrap_voucher_enabled,
+        voucher_quota,
     });
 
     construct_metrics::force_veil_bootstrap_voucher_metrics();

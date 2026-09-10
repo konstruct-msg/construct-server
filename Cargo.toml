@@ -91,6 +91,7 @@ base64 = "0.22"
 
 # Crypto
 hex = "0.4"
+sha2 = "0.10"
 zeroize = "1.8"
 
 # Metrics
