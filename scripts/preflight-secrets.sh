@@ -78,24 +78,52 @@ check_hex_len() {
   fi
 }
 
-# --- 1. no surrounding quotes on any secret ---------------------------------
-echo "[1/3] quote check"
+# --- 1. no key assigned twice -----------------------------------------------
+# `raw_value` above says "last matching assignment wins", which is dotenv's rule and
+# also the whole problem: a key assigned twice loses one value in silence. On
+# 2026-09-09 TOKEN_ISSUER_KEY was in this file twice. Nothing anywhere reported it —
+# `secret_hygiene.rs` validates `env::var`, which is the already-collapsed result, so
+# it cannot see a duplicate by construction.
+#
+# It happened to be harmless: the surviving value was the one whose commitment the
+# client pins. Had the other line been last, `serverPubkey != pinnedK` would have made
+# every client reject every issued batch, wallets would have stayed empty behind a
+# full-hour back-off, and no server-side error would have been raised at all —
+# TOKEN_ISSUER_KEY_VERSION defaults to 1, so the client's rollout-safety escape (skip
+# verification for an unpinned version) would not have fired either.
+#
+# So the check is here, at the level of the file, which is the only level where the
+# fact still exists.
+echo "[1/4] duplicate-key check"
+dup_keys="$(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$FILE" \
+            | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' \
+            | sort | uniq -d)"
+if [[ -n "$dup_keys" ]]; then
+  while IFS= read -r k; do
+    [[ -z "$k" ]] && continue
+    n="$(grep -cE "^[[:space:]]*${k}=" "$FILE")"
+    err "$k is assigned $n times — dotenv keeps the LAST one and drops the rest silently. Delete the ones that are not live (check with: docker compose exec <service> printenv $k)."
+  done <<< "$dup_keys"
+fi
+
+# --- 2. no surrounding quotes on any secret ---------------------------------
+echo "[2/4] quote check"
 for k in SERVER_SIGNING_KEY TOKEN_ISSUER_KEY BUNDLE_SIGNING_KEY BUNDLE_SIGNING_PUBLIC_KEY \
          APNS_DEVICE_TOKEN_ENCRYPTION_KEY USERNAME_HMAC_SECRET CONTACT_HMAC_SECRET \
          MEDIA_HMAC_SECRET CSRF_SECRET LOG_HASH_SALT TURN_SECRET; do
   check_no_quotes "$k"
 done
 
-# --- 2. format / length for keyed secrets (only if present) -----------------
-echo "[2/3] format/length check"
+# --- 3. format / length for keyed secrets (only if present) -----------------
+echo "[3/4] format/length check"
 check_base64_len SERVER_SIGNING_KEY 32
 check_base64_len BUNDLE_SIGNING_KEY 32
 check_base64_len BUNDLE_SIGNING_PUBLIC_KEY 32
 check_hex_len    TOKEN_ISSUER_KEY 32
 check_hex_len    APNS_DEVICE_TOKEN_ENCRYPTION_KEY 32
 
-# --- 3. presence + known-bad values -----------------------------------------
-echo "[3/3] presence + known-insecure checks"
+# --- 4. presence + known-bad values -----------------------------------------
+echo "[4/4] presence + known-insecure checks"
 present SERVER_SIGNING_KEY || warn "SERVER_SIGNING_KEY absent — federation + token-encryption (sealed sender) disabled."
 present TOKEN_ISSUER_KEY   || warn "TOKEN_ISSUER_KEY absent — Privacy Pass issuance + redemption disabled."
 present BUNDLE_SIGNING_KEY || warn "BUNDLE_SIGNING_KEY absent — sender certs fall back to the federation signer."
