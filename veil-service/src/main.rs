@@ -277,7 +277,8 @@ async fn main() -> Result<()> {
         "IssueBootstrapVoucher flag"
     );
 
-    let voucher_quota = core::voucher_quota_from_env(env::var("VEIL_VOUCHER_QUOTA").ok().as_deref());
+    let voucher_quota =
+        core::voucher_quota_from_env(env::var("VEIL_VOUCHER_QUOTA").ok().as_deref());
     if voucher_quota != core::VOUCHER_QUOTA {
         info!(
             quota = voucher_quota,

@@ -844,7 +844,8 @@ pub async fn issue_bootstrap_voucher(
     .await?;
 
     let times: Vec<_> = issued_at_rows.iter().map(|(_, t)| *t).collect();
-    if let Err(retry_after) = voucher_quota_retry_after(&times, chrono::Utc::now(), ctx.voucher_quota)
+    if let Err(retry_after) =
+        voucher_quota_retry_after(&times, chrono::Utc::now(), ctx.voucher_quota)
     {
         return Err(VoucherError::QuotaExceeded { retry_after });
     }
@@ -1541,7 +1542,10 @@ mod tests {
         let label = front_label(&issuer, addr);
         assert_eq!(label, front_label(&issuer, addr), "stable across calls");
         assert_eq!(label.len(), 8, "short enough to read in a log line");
-        assert!(!label.contains("front"), "the address must not survive in the label");
+        assert!(
+            !label.contains("front"),
+            "the address must not survive in the label"
+        );
         assert!(
             label.chars().all(|c| c.is_ascii_hexdigit()),
             "opaque hex, nothing structured a reader could parse back"
