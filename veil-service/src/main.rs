@@ -71,7 +71,7 @@ impl VeilService for VeilGrpcService {
         let issued = bundle.primary;
         info!(
             user_id = %user_id,
-            relay = %issued.relay_address,
+            front = %core::front_label(&self.context.issuer, &issued.relay_address),
             capability_version = issued.capability_version,
             alternates = bundle.alternates.len(),
             "issued veil capability"
@@ -253,9 +253,14 @@ async fn main() -> Result<()> {
             "No relays configured (set VEIL_RELAYS and/or VEIL_RELAY_ADDRESS) — IssueVeilCapability will reject all requests"
         );
     } else {
+        // Labels, not addresses: this line ran on every boot and printed the whole
+        // front list in the clear.
         info!(
             count = relays.len(),
-            relays = ?relays.keys().collect::<Vec<_>>(),
+            fronts = ?relays
+                .keys()
+                .map(|addr| core::front_label(&issuer, addr))
+                .collect::<Vec<_>>(),
             "Configured VEIL fronts"
         );
         if relays.len() == 1 {

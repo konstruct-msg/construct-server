@@ -15,6 +15,7 @@ use std::sync::Arc;
 use base64::Engine;
 use construct_server_shared::db::DbPool;
 use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Default capability validity: 60 days (aligned with Let's Encrypt rotation).
@@ -248,6 +249,27 @@ pub fn resolve_primary_relay<'a>(
         1 => Ok(relays.keys().next().map(|s| s.as_str()).expect("len==1")),
         _ => Err(IssueError::RelayAddressRequired),
     }
+}
+
+/// An opaque, stable label for a front address, for logs.
+///
+/// Front addresses are the asset a censor most wants: `relay=live.example:443` next to
+/// a `user_id` hands over both the map and who walks it. But dropping the field makes
+/// incidents unreadable, and the DB cannot substitute — `relay_scope` is empty on every
+/// issued row, so logs are the only record of which front served whom.
+///
+/// So the address is replaced by `SHA-256(issuer_seed || address)`, first 4 bytes. The
+/// issuer seed is already the service's most closely held secret and is present
+/// wherever these logs are written, so this needs no new ops knob. Labels are stable
+/// across restarts (group by front, correlate a session) and stay stable across a cert
+/// rotation, since only the address is hashed. Recovering the address means guessing it
+/// and knowing the seed; guessing alone is not enough, which is the point — the address
+/// space is small enough that an unsalted digest would be a lookup table.
+pub fn front_label(issuer: &SigningKey, address: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(issuer.to_bytes());
+    hasher.update(address.as_bytes());
+    hex::encode(&hasher.finalize()[..4])
 }
 
 /// Intermediate mint result for a B2 bearer capability (before DB persist).
@@ -656,7 +678,11 @@ pub async fn issue_bundle(
         // primary already succeeded. Skip and log; the client still gets a usable set.
         match issue_one(ctx, user_id, &addr, veil_pk, role).await {
             Ok(cap) => alternates.push(cap),
-            Err(e) => tracing::warn!(relay = %addr, error = %e, "skipping alternate front"),
+            Err(e) => tracing::warn!(
+                front = %front_label(&ctx.issuer, &addr),
+                error = %e,
+                "skipping alternate front"
+            ),
         }
     }
 
@@ -1505,6 +1531,39 @@ mod tests {
         assert_eq!(voucher_retry_after_secs(oldest, plus_one_hour), 23 * 3600);
         let past_window = chrono::DateTime::from_timestamp(1_000 + 24 * 3600 + 10, 0).unwrap();
         assert_eq!(voucher_retry_after_secs(oldest, past_window), 0);
+    }
+
+    #[test]
+    fn front_label_hides_the_address_and_stays_stable() {
+        let issuer = test_issuer();
+        let addr = "front.example:443";
+
+        let label = front_label(&issuer, addr);
+        assert_eq!(label, front_label(&issuer, addr), "stable across calls");
+        assert_eq!(label.len(), 8, "short enough to read in a log line");
+        assert!(!label.contains("front"), "the address must not survive in the label");
+        assert!(
+            label.chars().all(|c| c.is_ascii_hexdigit()),
+            "opaque hex, nothing structured a reader could parse back"
+        );
+    }
+
+    #[test]
+    fn front_label_separates_fronts_and_issuers() {
+        let issuer = test_issuer();
+        assert_ne!(
+            front_label(&issuer, "a.example:443"),
+            front_label(&issuer, "b.example:443"),
+            "different fronts must be distinguishable in a log"
+        );
+
+        // The salt is the issuer seed, so labels do not carry across deployments — a
+        // leaked log from one server says nothing about another's fronts.
+        let other = SigningKey::from_bytes(&[3u8; 32]);
+        assert_ne!(
+            front_label(&issuer, "a.example:443"),
+            front_label(&other, "a.example:443")
+        );
     }
 
     #[test]
