@@ -97,6 +97,48 @@ pub fn derive_token_enc_public_key_base64(seed_b64: &str) -> Option<String> {
     Some(STANDARD.encode(public_key.as_bytes()))
 }
 
+/// Parse the `TOKEN_ISSUER_KEY` environment value into the VOPRF issuer scalar.
+///
+/// Exactly 64 hex characters, i.e. 32 bytes; `None` for anything else. One copy, because
+/// there were two: identity-service and messaging-service each carried the same inline
+/// `step_by(2)` loop, and the pair of them is the reason this crate exists. A third copy
+/// was about to be written for the gateway.
+///
+/// The inline version had a latent panic the length check hid rather than prevented: it
+/// sliced `&s[i..i + 2]` while stepping by two over `0..s.len()`, so an **odd**-length
+/// value indexed past the end and an unlucky operator got a boot-time crash instead of
+/// "TOKEN_ISSUER_KEY must be 64 hex chars". A non-ASCII character did the same by landing
+/// off a char boundary. Length and alphabet are checked here before any indexing happens.
+pub fn issuer_key_from_hex(hex_str: &str) -> Option<[u8; 32]> {
+    let s = hex_str.trim();
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    // `as_chunks`, not `chunks_exact(2)`: clippy's `chunks_exact_to_as_chunks` rejects the
+    // latter for a constant size, and the const-generic form is why — the length is in the
+    // type, so the pair below cannot be a short slice and the remainder is provably empty
+    // for the 64 bytes the check above already guaranteed.
+    let (pairs, _remainder) = s.as_bytes().as_chunks::<2>();
+    for (i, pair) in pairs.iter().enumerate() {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+/// The published issuer commitment `K = k·G` for a hex issuer scalar, base64-encoded.
+///
+/// This is what a client pins and verifies the batched DLEQ proof against, so publishing it
+/// is what makes a key rotation something other than a flag-day: without it the pin has to
+/// be a compiled-in constant, and rotating the scalar silently rejects every issued batch on
+/// every client at once.
+pub fn issuer_public_key_base64(hex_str: &str) -> Option<String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    issuer_key_from_hex(hex_str).map(|k| STANDARD.encode(issuer_public_key(&k)))
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Sealed-box opening (X25519 + HKDF-SHA256 + ChaChaPoly)
 // ──────────────────────────────────────────────────────────────────────────
@@ -696,5 +738,80 @@ mod tests {
             KAT_PROOF_HEX,
             "DLEQ transcript changed — wire break"
         );
+    }
+
+    // ── issuer_key_from_hex ────────────────────────────────────────────────
+
+    /// The reason this function exists rather than a third inline `step_by(2)` loop. The old
+    /// version sliced `&s[i..i + 2]` while stepping by two across the whole string, so an odd
+    /// length ran off the end and panicked — at service boot, on a typo, instead of logging
+    /// "must be 64 hex chars". A panic is not a validation failure; it is a service that does
+    /// not start.
+    #[test]
+    fn odd_length_is_rejected_not_a_panic() {
+        assert_eq!(issuer_key_from_hex(&"a".repeat(63)), None);
+        assert_eq!(issuer_key_from_hex("abc"), None);
+        assert_eq!(issuer_key_from_hex(""), None);
+    }
+
+    /// Same defect, the other way in: a character whose length does not divide the stride puts
+    /// `i + 2` off a char boundary, and slicing there panics rather than erroring.
+    ///
+    /// It must be a THREE-byte character. The first version of this test used `ё`, which is two
+    /// bytes — so every even offset still landed on a boundary, nothing panicked, and the test
+    /// passed against the very parser it was written to condemn. `€` is three bytes, so offset 2
+    /// lands inside it.
+    #[test]
+    fn non_ascii_is_rejected_not_a_panic() {
+        let s = format!("€{}", "0".repeat(61)); // 3 + 61 = 64 bytes
+        assert_eq!(
+            s.len(),
+            64,
+            "the length check must not be what rejects this"
+        );
+        assert_eq!(issuer_key_from_hex(&s), None);
+    }
+
+    #[test]
+    fn wrong_length_and_non_hex_are_rejected() {
+        assert_eq!(issuer_key_from_hex(&"0".repeat(62)), None);
+        assert_eq!(issuer_key_from_hex(&"0".repeat(66)), None);
+        assert_eq!(issuer_key_from_hex(&"z".repeat(64)), None);
+    }
+
+    #[test]
+    fn a_valid_scalar_round_trips() {
+        let hex = "0123456789abcdef".repeat(4); // 64 chars
+        let k = issuer_key_from_hex(&hex).expect("64 hex chars must parse");
+        assert_eq!(k[0], 0x01);
+        assert_eq!(k[1], 0x23);
+        assert_eq!(k[31], 0xef);
+        // Surrounding whitespace is what an env file yields on a stray space; not a failure.
+        assert_eq!(issuer_key_from_hex(&format!("  {hex}\n")), Some(k));
+    }
+
+    /// Uppercase is still hex. An operator pasting from a tool that upper-cases must not
+    /// silently disable issuance.
+    #[test]
+    fn uppercase_hex_parses_to_the_same_scalar() {
+        let lower = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            issuer_key_from_hex(&lower),
+            issuer_key_from_hex(&lower.to_uppercase())
+        );
+    }
+
+    /// The published commitment must be the base64 of `K = k·G` for that scalar — the value a
+    /// client pins. If these two ever disagree, every DLEQ verification fails at once.
+    #[test]
+    fn published_commitment_matches_the_scalar_it_came_from() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let hex = "0123456789abcdef".repeat(4);
+        let k = issuer_key_from_hex(&hex).unwrap();
+        assert_eq!(
+            issuer_public_key_base64(&hex),
+            Some(STANDARD.encode(issuer_public_key(&k)))
+        );
+        assert_eq!(issuer_public_key_base64("not-a-key"), None);
     }
 }

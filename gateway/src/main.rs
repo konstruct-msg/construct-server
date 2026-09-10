@@ -41,6 +41,17 @@ struct GatewayState {
     /// Base64-encoded Ed25519 public key for S2S federation signature verification.
     /// Derived from SERVER_SIGNING_KEY. None if federation is disabled.
     federation_public_key: Option<String>,
+    /// Base64-encoded VOPRF issuer commitment `K = k·G`, and the version it belongs to.
+    ///
+    /// identity-service builds these into a discovery document at `main.rs` — but that handler
+    /// is not the one clients reach: this one answers `/.well-known/*`, with its own schema, and
+    /// the two fields were simply absent from it. So a client could not learn the commitment and
+    /// had to carry the pin as a compiled-in constant (`BlindTokenService.issuerKeyPins`), which
+    /// makes every rotation a flag-day — the opposite of what `token_issuer_key_version` exists
+    /// for. Publishing them here is what lets a client pin by version and a rotation land without
+    /// an app release.
+    token_issuer_public: Option<String>,
+    token_issuer_key_version: u32,
 }
 
 /// Derive the X25519 token-encryption public key from an optional base64 seed.
@@ -132,11 +143,37 @@ async fn main() -> Result<()> {
         None
     };
 
+    // The commitment is a PUBLIC value derived from the issuer scalar. It is computed here and
+    // not fetched from identity-service because this process already reads the same `app.env`,
+    // so `TOKEN_ISSUER_KEY` is in its environment either way — deriving `K = k·G` adds no
+    // exposure that the shared secrets file has not already granted. (That every service shares
+    // one env_file is worth revisiting on its own; it is not something this change introduces.)
+    let token_issuer_public = std::env::var("TOKEN_ISSUER_KEY")
+        .ok()
+        .and_then(|hex| construct_crypto::privacy_pass::issuer_public_key_base64(&hex));
+    let token_issuer_key_version: u32 = std::env::var("TOKEN_ISSUER_KEY_VERSION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1);
+    match &token_issuer_public {
+        Some(pk) => info!(
+            issuer_public = %pk,
+            version = token_issuer_key_version,
+            "Privacy Pass issuer commitment will be advertised in .well-known"
+        ),
+        None => {
+            info!("TOKEN_ISSUER_KEY unset or malformed — .well-known omits the issuer commitment")
+        }
+    }
+
     let state = GatewayState {
         config: config.clone(),
         bundle_verification_key,
         token_encryption_key,
         federation_public_key,
+        token_issuer_public,
+        token_issuer_key_version,
     };
 
     // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
@@ -463,6 +500,15 @@ async fn well_known_construct_server(
     // Expose bundle verification key when configured so clients can verify server-signed bundles.
     if let Some(vk) = &state.bundle_verification_key {
         body["bundle_verification_key"] = json!(vk);
+    }
+
+    // The Privacy Pass issuer commitment, so a client can verify the batched DLEQ proof against
+    // a key it fetched rather than one compiled into it. Absent when issuance is not configured —
+    // the same shape as every other optional field here, and a client with no pin for the
+    // returned version skips verification rather than rejecting the batch.
+    if let Some(pk) = &state.token_issuer_public {
+        body["server"]["token_issuer_public"] = json!(pk);
+        body["server"]["token_issuer_key_version"] = json!(state.token_issuer_key_version);
     }
 
     // Expose token encryption key (X25519) for clients to seal Privacy Pass tokens in SealedInner.

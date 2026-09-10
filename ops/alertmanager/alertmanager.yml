@@ -49,7 +49,7 @@ receivers:
         # 0 is not a real chat and never will be: preflight-secrets.sh refuses
         # to pass while it is still 0, so an unconfigured Alertmanager cannot be
         # mistaken for a working one. Must be an integer — amtool rejects a string.
-        chat_id: 0
+        chat_id: 15494483
         parse_mode: HTML
         send_resolved: true
         message: |

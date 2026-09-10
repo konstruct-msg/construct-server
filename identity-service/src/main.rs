@@ -2994,24 +2994,16 @@ async fn main() -> Result<()> {
     // before the context so the derived commitment K = k·G can be published in well-known and
     // pinned by clients.
     let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
-        Ok(hex_str) => {
-            let bytes = (0..hex_str.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16))
-                .collect::<Result<Vec<u8>, _>>();
-            match bytes {
-                Ok(b) if b.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&b);
-                    info!("Privacy Pass token issuer key loaded — IssueTokens enabled");
-                    Some(arr)
-                }
-                _ => {
-                    tracing::warn!("TOKEN_ISSUER_KEY must be 64 hex chars — IssueTokens disabled");
-                    None
-                }
+        Ok(hex_str) => match construct_crypto::privacy_pass::issuer_key_from_hex(&hex_str) {
+            Some(k) => {
+                info!("Privacy Pass token issuer key loaded — IssueTokens enabled");
+                Some(k)
             }
-        }
+            None => {
+                tracing::warn!("TOKEN_ISSUER_KEY must be 64 hex chars — IssueTokens disabled");
+                None
+            }
+        },
         Err(_) => {
             info!("TOKEN_ISSUER_KEY not set — IssueTokens disabled");
             None
