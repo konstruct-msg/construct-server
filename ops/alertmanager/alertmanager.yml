@@ -52,10 +52,26 @@ receivers:
         chat_id: 15494483
         parse_mode: HTML
         send_resolved: true
+        # Deliberately says almost nothing.
+        #
+        # The alert stream is an availability and topology oracle: whoever can read this chat
+        # learns what the services are called, how many there are, and — the part that matters
+        # for this product — the minute the server is in trouble, which is the minute it is
+        # cheapest to act against it. That objection does not go away by changing messenger; it
+        # is a property of putting the text anywhere off-box.
+        #
+        # So the body is a status, an urgency, and an opaque fingerprint. The fingerprint is what
+        # keeps this usable: it is stable across FIRING and RESOLVED for the same alert, and it
+        # resolves to the full detail in Alertmanager —
+        #     curl -s localhost:9093/api/v2/alerts | jq '.[] | select(.fingerprint=="<id>")'
+        # over the operator's tunnel, on a channel that already required access to the host.
+        #
+        # `severity` stays because it answers the only question the phone has to answer at 03:00 —
+        # whether to get up — and it says nothing about what is broken. `alertname`, `summary`,
+        # `description` and `instance` are gone: together they were the map.
         message: |
-          <b>{{ .Status | toUpper }}</b> {{ .CommonLabels.alertname }}
-          {{ range .Alerts }}{{ .Annotations.summary }}
-          {{ .Annotations.description }}
+          <b>{{ .Status | toUpper }}</b> · {{ .CommonLabels.severity }} · {{ .Alerts | len }}
+          {{ range .Alerts }}{{ .Fingerprint }}
           {{ end }}
 
 inhibit_rules:
