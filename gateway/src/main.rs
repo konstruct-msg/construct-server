@@ -162,9 +162,9 @@ async fn main() -> Result<()> {
             version = token_issuer_key_version,
             "Privacy Pass issuer commitment will be advertised in .well-known"
         ),
-        None => info!(
-            "TOKEN_ISSUER_KEY unset or malformed — .well-known omits the issuer commitment"
-        ),
+        None => {
+            info!("TOKEN_ISSUER_KEY unset or malformed — .well-known omits the issuer commitment")
+        }
     }
 
     let state = GatewayState {

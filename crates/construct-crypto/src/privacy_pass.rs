@@ -759,7 +759,11 @@ mod tests {
     #[test]
     fn non_ascii_is_rejected_not_a_panic() {
         let s = format!("€{}", "0".repeat(61)); // 3 + 61 = 64 bytes
-        assert_eq!(s.len(), 64, "the length check must not be what rejects this");
+        assert_eq!(
+            s.len(),
+            64,
+            "the length check must not be what rejects this"
+        );
         assert_eq!(issuer_key_from_hex(&s), None);
     }
 
