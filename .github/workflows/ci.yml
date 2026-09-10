@@ -73,6 +73,14 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Which compiler judges this push
+        # rust-toolchain.toml pins 1.98.0, but `dtolnay/rust-toolchain@stable` may export
+        # RUSTUP_TOOLCHAIN, which overrides the file. Rather than assert one way or the
+        # other, print it: a run that disagrees with the pin then says so in its own log
+        # instead of surfacing later as "green locally, red in CI" — which is exactly the
+        # divergence the pin was added to close (clippy 1.98 knows lints 1.92 does not).
+        run: rustc --version && cargo --version
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -112,6 +120,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Which compiler judges this push
+        # rust-toolchain.toml pins 1.98.0, but `dtolnay/rust-toolchain@stable` may export
+        # RUSTUP_TOOLCHAIN, which overrides the file. Rather than assert one way or the
+        # other, print it: a run that disagrees with the pin then says so in its own log
+        # instead of surfacing later as "green locally, red in CI" — which is exactly the
+        # divergence the pin was added to close (clippy 1.98 knows lints 1.92 does not).
+        run: rustc --version && cargo --version
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -194,6 +210,10 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Which compiler judges this push
+        # See the same step in the fmt and clippy jobs.
+        run: rustc --version && cargo --version
 
       - name: Cache cargo registry
         uses: actions/cache@v4
