@@ -115,7 +115,12 @@ pub fn issuer_key_from_hex(hex_str: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut out = [0u8; 32];
-    for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+    // `as_chunks`, not `chunks_exact(2)`: clippy's `chunks_exact_to_as_chunks` rejects the
+    // latter for a constant size, and the const-generic form is why — the length is in the
+    // type, so the pair below cannot be a short slice and the remainder is provably empty
+    // for the 64 bytes the check above already guaranteed.
+    let (pairs, _remainder) = s.as_bytes().as_chunks::<2>();
+    for (i, pair) in pairs.iter().enumerate() {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         out[i] = ((hi << 4) | lo) as u8;
