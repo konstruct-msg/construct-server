@@ -33,6 +33,17 @@ SSH_TARGET="${CONSTRUCT_OBS_SSH:-}"
 PROM_PORT="${CONSTRUCT_OBS_PROM_PORT:-9090}"
 ALERT_PORT="${CONSTRUCT_OBS_ALERT_PORT:-9093}"
 GRAFANA_PORT="${CONSTRUCT_OBS_GRAFANA_PORT:-3001}"
+# The port Grafana is published on ON THE SERVER — not the port inside its container.
+# docker-compose.observability.yml maps "127.0.0.1:3001:3000": the container listens on 3000,
+# the host publishes 3001. An -L forward reaches the remote HOST's loopback, never into a
+# container namespace, so it has to name 3001. It named 3000, where nothing listens.
+#
+# That is the precise failure this script was written to prevent. Three runs in a row printed
+# "Grafana — nothing listening on 3001 (tunnel down)" while `docker ps` showed the container up
+# for four weeks: a forward pointed at an empty port and a dead tunnel are indistinguishable from
+# the probe's end. Prometheus (9090:9090) and Alertmanager (9093:9093) publish on the same number
+# they listen on, which is why only this one was wrong and why it stayed wrong.
+GRAFANA_REMOTE_PORT="${CONSTRUCT_OBS_GRAFANA_REMOTE_PORT:-3001}"
 
 # One multiplexed connection for all three forwards. `-O check` / `-O exit` then manage it by name,
 # which is what makes "is it up" answerable — pgrep over a command line is not, and neither is
@@ -100,7 +111,7 @@ cmd_up() {
             -o ServerAliveCountMax=3 \
             -L "${PROM_PORT}:127.0.0.1:9090" \
             -L "${ALERT_PORT}:127.0.0.1:9093" \
-            -L "${GRAFANA_PORT}:127.0.0.1:3000" \
+            -L "${GRAFANA_PORT}:127.0.0.1:${GRAFANA_REMOTE_PORT}" \
             "$SSH_TARGET"
         c_dim "tunnel opened to ${SSH_TARGET}"
     fi
