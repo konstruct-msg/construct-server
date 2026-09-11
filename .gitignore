@@ -60,7 +60,13 @@ DEPLOY_*.md
 .env.test
 .aider*
 
-fuzz/
+# Fuzzing: the targets and their seeds are source and belong in review — a
+# harness nobody can read is a harness nobody notices has stopped compiling.
+# Only the build products and the machine-generated corpus stay out.
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/Cargo.lock
 
 # Relay manifest private signing key — NEVER commit
 tools/relay_signing_key.hex

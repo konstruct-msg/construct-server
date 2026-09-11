@@ -1,0 +1,55 @@
+[package]
+name = "construct-server-fuzz"
+license = "AGPL-3.0-only"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+prost = "0.14.3"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+construct-server-shared = { path = "../shared" }
+construct-crypto = { path = "../crates/construct-crypto" }
+
+[workspace]
+members = ["."]
+
+# ── Fuzz targets ──────────────────────────────────────────────────────────────
+# Every target below calls a production function directly. None of them
+# reimplements a decision the server makes: a harness that restates the parser it
+# is testing proves that the copy does not panic, which is not the claim.
+
+[[bin]]
+name = "fuzz_sealed_inner"
+path = "fuzz_targets/fuzz_sealed_inner.rs"
+doc = false
+test = false
+
+[[bin]]
+name = "fuzz_sealed_door"
+path = "fuzz_targets/fuzz_sealed_door.rs"
+doc = false
+test = false
+
+[[bin]]
+name = "fuzz_sealed_token_open"
+path = "fuzz_targets/fuzz_sealed_token_open.rs"
+doc = false
+test = false
+
+[[bin]]
+name = "fuzz_privacy_pass_verify"
+path = "fuzz_targets/fuzz_privacy_pass_verify.rs"
+doc = false
+test = false
+
+[profile.release]
+opt-level = 3
+debug = true       # keep debug info for crash symbolication
+overflow-checks = true   # an arithmetic wrap on attacker-supplied bytes is a finding, not a value
