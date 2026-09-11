@@ -567,6 +567,13 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         Err(GrpcStatus::unimplemented("send_sealed_message"))
     }
 
+    async fn publish_intake_tags(
+        &self,
+        _: GrpcRequest<proto_svc::PublishIntakeTagsRequest>,
+    ) -> Result<GrpcResponse<proto_svc::PublishIntakeTagsResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("publish_intake_tags"))
+    }
+
     async fn edit_message(
         &self,
         _: GrpcRequest<proto_svc::EditMessageRequest>,

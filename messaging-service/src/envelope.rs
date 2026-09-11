@@ -195,58 +195,93 @@ pub(crate) async fn dispatch_sealed_sender(
         };
 
         construct_metrics::STEALTH_SEALED_LOCAL_TOTAL.inc();
-        let has_token =
-            !sealed_inner.token_nonce.is_empty() && !sealed_inner.token_bytes.is_empty();
-        construct_metrics::STEALTH_TOKEN_PRESENT_TOTAL
-            .with_label_values(&[if has_token { "present" } else { "absent" }])
+
+        // ── Intake credential, checked before anything is charged ─────────────
+        // A token per sealed envelope charges the same for a stranger's first contact and for
+        // the four-hundredth message between two people who have been talking for a year —
+        // measured 2026-09-11, delivery receipts alone were 36–38% of all spend, and they are
+        // spent by the person who was *written to*. An envelope carrying a credential the
+        // recipient issued owes nothing, so this runs first and the whole redemption below is
+        // skipped. See construct-docs/decisions/contact-traffic-is-vouched-not-purchased.md.
+        //
+        // Anything other than a match falls through to the token path, which is exactly what
+        // the envelope would have done before this existed. A credential is a discount, never
+        // a requirement, so a wrong one cannot be a delivery failure on its own.
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let intake = {
+            let mut conn = context.redis_conn.clone();
+            crate::intake::check_intake_credential(
+                &mut conn,
+                context.token_enc_static_secret.as_ref(),
+                &sealed_inner.intake_tag_sealed,
+                &recipient_id,
+                now_unix,
+            )
+            .await
+        };
+        construct_metrics::MSG_INTAKE_CHECK_TOTAL
+            .with_label_values(&[intake.as_label()])
             .inc();
 
-        let mut conn = context.redis_conn.clone();
-        // Logical-message unit: `token_spend_id` shared across multi-chunk wire
-        // envelopes so one Privacy Pass token pays for the whole set (album /
-        // large body), not one token per chunk. The unit is bound to
-        // `recipient_user_id` so a client-chosen spend_id cannot cover
-        // envelopes to other users (TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC).
-        // Empty spend_id = legacy per-envelope redemption.
-        let result = crate::token_redeem::redeem_token_checked(
-            &mut conn,
-            context.token_issuer_key.as_ref(),
-            context.token_enc_static_secret.as_ref(),
-            &sealed_inner.token_nonce,
-            &sealed_inner.token_bytes,
-            &sealed_inner.token_spend_id,
-            &recipient_id,
-        )
-        .await;
+        if intake.owes_token() {
+            let has_token =
+                !sealed_inner.token_nonce.is_empty() && !sealed_inner.token_bytes.is_empty();
+            construct_metrics::STEALTH_TOKEN_PRESENT_TOTAL
+                .with_label_values(&[if has_token { "present" } else { "absent" }])
+                .inc();
 
-        let result_label = result.as_label();
-        construct_metrics::STEALTH_TOKEN_CHECK_TOTAL
-            .with_label_values(&[mode_label, result_label])
-            .inc();
+            let mut conn = context.redis_conn.clone();
+            // Logical-message unit: `token_spend_id` shared across multi-chunk wire
+            // envelopes so one Privacy Pass token pays for the whole set (album /
+            // large body), not one token per chunk. The unit is bound to
+            // `recipient_user_id` so a client-chosen spend_id cannot cover
+            // envelopes to other users (TOKEN_SPEND_UNIT_RECIPIENT_BINDING_SPEC).
+            // Empty spend_id = legacy per-envelope redemption.
+            let result = crate::token_redeem::redeem_token_checked(
+                &mut conn,
+                context.token_issuer_key.as_ref(),
+                context.token_enc_static_secret.as_ref(),
+                &sealed_inner.token_nonce,
+                &sealed_inner.token_bytes,
+                &sealed_inner.token_spend_id,
+                &recipient_id,
+            )
+            .await;
 
-        if !result.is_accept() {
-            if policy == StealthTokenPolicy::Enforce {
-                tracing::warn!(
-                    result = result_label,
-                    "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
-                );
-                return Err(anyhow::Error::new(TokenRejected {
-                    label: result_label,
-                }));
-            } else {
+            let result_label = result.as_label();
+            construct_metrics::STEALTH_TOKEN_CHECK_TOTAL
+                .with_label_values(&[mode_label, result_label])
+                .inc();
+
+            if !result.is_accept() {
+                if policy == StealthTokenPolicy::Enforce {
+                    tracing::warn!(
+                        result = result_label,
+                        "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
+                    );
+                    return Err(anyhow::Error::new(TokenRejected {
+                        label: result_label,
+                    }));
+                } else {
+                    tracing::info!(
+                        result = result_label,
+                        "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
+                    );
+                }
+            } else if policy == StealthTokenPolicy::Warn
+                && result == crate::token_redeem::TokenRedeemResult::Ok
+            {
+                // Success-path visibility for the warn-mode validation window: confirms the
+                // client→server VOPRF round-trip works end-to-end (first redemption of a real
+                // client token). unit_covered is silent (expected for multi-chunk follow-ups).
                 tracing::info!(
-                    result = result_label,
-                    "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
+                    "sealed sender: Privacy Pass token redeemed OK (warn-mode validation)"
                 );
             }
-        } else if policy == StealthTokenPolicy::Warn
-            && result == crate::token_redeem::TokenRedeemResult::Ok
-        {
-            // Success-path visibility for the warn-mode validation window: confirms the
-            // client→server VOPRF round-trip works end-to-end (first redemption of a real
-            // client token). unit_covered is silent (expected for multi-chunk follow-ups).
-            tracing::info!("sealed sender: Privacy Pass token redeemed OK (warn-mode validation)");
-        }
+        } // if intake.owes_token()
     }
 
     // ── Delivery-tag anti-replay (two-layer) ───────────────────────────────

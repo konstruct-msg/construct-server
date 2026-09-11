@@ -217,8 +217,25 @@ enum ContentType {
   // Server forwards opaquely (treat identically to E2EE_SIGNAL).
   CONTENT_TYPE_SESSION_READY = 26;
 
+  // INTAKE_KEY — the recipient hands a contact the 32-byte `intake_key` its account
+  // accepts, so that contact's envelopes can carry an intake tag instead of buying a
+  // Privacy Pass token (see SealedInner.intake_tag_sealed).
+  //
+  // Payload is a framed side channel inside the ciphertext, and it has to be: the key is
+  // a secret, and a credential readable by the relay is a credential the relay can use.
+  // knst_byte5 = true for that reason, sealed_inner_content_type = false for the same one.
+  //
+  // Sent on contact establishment, on rotation (which is how a contact is revoked), and
+  // lazily to contacts that predate the mechanism — the first send to a peer that has no
+  // key of ours carries one. Existing contacts are not backfilled in a sweep: a hundred
+  // contacts would mean a hundred control messages at once, each of which would itself
+  // need paying for, so the graph migrates as it is used and pays nothing extra.
+  //
+  // Server forwards opaquely (treat identically to E2EE_SIGNAL).
+  CONTENT_TYPE_INTAKE_KEY = 27;
+
   // Reserved for future types
-  reserved 3 to 9, 15 to 19, 27 to 100;
+  reserved 3 to 9, 15 to 19, 28 to 100;
 }
 
 // MessagePriority - Delivery priority
@@ -465,6 +482,48 @@ message SealedInner {
   // envelope naming the sending device would undo sealing entirely. The server
   // blanks Envelope.sender_device on delivery for the same reason.
   string recipient_device = 19;
+
+  // Intake credential — what this envelope carries INSTEAD of a Privacy Pass token when
+  // the recipient has vouched for the sender.
+  //
+  //   intake_tag = HMAC-SHA256(intake_key,
+  //                            "knst-intake-v1" || 0x00 || recipient_account_id
+  //                                             || 0x00 || epoch_be64)[0..16]
+  //   epoch      = floor(unix_seconds / 86400)
+  //
+  // sealed to the destination server's X25519 key, exactly as token_bytes is and for the
+  // same reason: SealedInner is a plaintext proto the relay parses, and a tag in the clear
+  // is harvestable by any relay that routes the envelope — after which that relay can send
+  // to this recipient for free until the epoch rolls.
+  //
+  // WHY THIS FIELD EXISTS: a token per sealed envelope charges the same for a stranger's
+  // first contact and for the four-hundredth message between two people who have been
+  // talking for a year. Measured 2026-09-11, delivery receipts alone were 36-38% of all
+  // token spend, and they are spent by the person who was *written to*. The server cannot
+  // be told which envelopes to exempt — content_type lives inside the seal on purpose
+  // (see the DEPRECATED note on field 5) — so the question is not which envelopes are
+  // exempt but what one carries instead.
+  //
+  // PER RECIPIENT, NEVER PER PAIR. The tag is identical for every sender holding the key.
+  // A pair-wise value would be a stable pseudonymous handle for the sender inside each
+  // epoch, which is exactly the linkability sealed sender exists to destroy. The server
+  // therefore learns one bit — "from someone this recipient vouched for" — and nothing
+  // that separates one contact from another.
+  //
+  // Contract:
+  //   • Empty = no credential; the envelope pays with token_nonce / token_bytes as before.
+  //   • Present and valid for recipient_user_id at the current or previous epoch = no
+  //     token is owed, and none is checked.
+  //   • Present and invalid = no worse than absent; the envelope falls back to the token
+  //     path. A wrong tag must never be a delivery failure on its own, or a stale clock
+  //     would drop messages.
+  //   • The recipient publishes tags for a window of future epochs, so a device that has
+  //     been offline for a day does not break its own incoming traffic.
+  //
+  // Derivation and normalisation live in construct-core (`intake_tag`), not in each
+  // client: two clients disagreeing about case in recipient_account_id produce different
+  // tags, the envelope is silently charged a token, and nothing reports a mismatch.
+  bytes intake_tag_sealed = 20;
 
   // Reserved for future sealed fields
   reserved 8 to 15;

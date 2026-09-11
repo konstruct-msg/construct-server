@@ -29,6 +29,20 @@ service MessagingService {
   // Idempotency key = SealedInner.delivery_tag (already unique and replay-checked).
   rpc SendSealedMessage(SendSealedMessageRequest) returns (SendMessageResponse);
 
+  // PublishIntakeTags - the recipient tells the server which intake tags its account
+  // accepts, so envelopes from vouched contacts owe no Privacy Pass token
+  // (SealedInner.intake_tag_sealed). AUTHENTICATED: tags are stored against the caller's
+  // own account and never against an id taken from the request, or publishing would be a
+  // way to vouch for someone else's incoming traffic.
+  //
+  // The server stores tags. It never derives one — that needs `intake_key`, and holding
+  // that would make a database dump free sending to every account rather than to the few
+  // epochs a dump happens to contain.
+  //
+  // Publish a window of future epochs, not just today's: a device that has been offline
+  // for a day would otherwise break its own incoming traffic.
+  rpc PublishIntakeTags(PublishIntakeTagsRequest) returns (PublishIntakeTagsResponse);
+
   // DEPRECATED: EditMessage relied on a server-visible message id reference.
   // Edits are now sent as regular E2EE messages with MessageContent.edit inside
   // the encrypted payload. Kept as a stub returning UNIMPLEMENTED for old clients.
@@ -569,4 +583,29 @@ message RequestKeySyncRequest {
 
 message RequestKeySyncResponse {
   // Always empty; delivery is fire-and-forget (offline queue if needed)
+}
+
+// ============================================================================
+// Intake tags
+// ============================================================================
+
+message IntakeTagEntry {
+  // floor(unix_seconds / 86400) — the UTC day this tag is valid for.
+  uint64 epoch = 1;
+  // 16 bytes. Derived by construct-core `intake_tag` and by nothing else; a client that
+  // computes it itself will disagree about normalisation and be silently charged.
+  bytes tag = 2;
+}
+
+message PublishIntakeTagsRequest {
+  // The current epoch and a window of future ones. The server drops entries whose epoch is
+  // already past its grace, and caps how many one call may carry.
+  repeated IntakeTagEntry tags = 1;
+}
+
+message PublishIntakeTagsResponse {
+  // How many entries were stored. Fewer than sent is not an error — an epoch that has
+  // already expired, a tag of the wrong length, or a window longer than the cap are all
+  // dropped individually rather than failing the call.
+  uint32 accepted = 1;
 }
