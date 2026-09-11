@@ -4,6 +4,7 @@ mod envelope;
 mod fail_open;
 mod federation;
 mod grpc;
+mod intake;
 mod notification_core;
 mod notification_grpc;
 mod receipts;

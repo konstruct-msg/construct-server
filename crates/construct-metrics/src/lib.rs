@@ -526,6 +526,28 @@ pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register STEALTH_TOKEN_CHECK_TOTAL metric")
 });
 
+/// Whether a sealed envelope arrived with a valid intake credential, and therefore owed no
+/// Privacy Pass token.
+///
+/// Label `result`: "vouched" | "absent" | "unrecognised"
+///
+/// This is the number the rollout is steered by. Traffic between established contacts should
+/// converge on `vouched` as clients ship the credential; `absent` is the untouched population plus
+/// genuine strangers, and it is expected to stay non-zero forever. `unrecognised` is the one to
+/// watch: a credential that was presented and did not match means a clock, a rotation, or a
+/// publishing gap, and unlike the other two it is a client trying and failing rather than not
+/// trying. A rising `unrecognised` is the signal to stop before flipping enforce.
+pub static MSG_INTAKE_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_intake_check_total",
+            "Intake credential outcomes for sealed-sender messages"
+        ),
+        &["result"]
+    )
+    .expect("Failed to register MSG_INTAKE_CHECK_TOTAL metric")
+});
+
 // ============================================================================
 // Abuse-control fail-open (messaging availability bias)
 // ============================================================================
@@ -747,6 +769,12 @@ pub fn init_registry() {
     // absent instead of zero cannot be told from a counter nobody wired up.
     for routing in ["named", "unnamed", "unknown_device"] {
         MSG_DELIVERY_ROUTING_TOTAL.with_label_values(&[routing]);
+    }
+    // Closed label set, and the question asked of it is a ratio — how much traffic is
+    // already vouched. A `vouched` that is absent rather than zero is exactly the shape
+    // that would be read as "the rollout has not started" when it has and is failing.
+    for result in ["vouched", "absent", "unrecognised"] {
+        MSG_INTAKE_CHECK_TOTAL.with_label_values(&[result]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);

@@ -742,6 +742,66 @@ impl MessagingService for MessagingGrpcService {
         Ok(Response::new(resp))
     }
 
+    /// PublishIntakeTags — the recipient tells this server which intake tags its account
+    /// accepts, so envelopes from vouched contacts owe no Privacy Pass token.
+    ///
+    /// The account comes from the caller's own credentials and never from the request body.
+    /// A request-supplied id would make publishing a way to vouch for someone *else's*
+    /// incoming traffic — the one thing this RPC must not permit.
+    ///
+    /// Entries are dropped individually rather than failing the call: an epoch already past
+    /// its grace, a tag of the wrong length, or a window longer than the cap each land as a
+    /// smaller `accepted` count. A publish that is partly usable beats one that is refused,
+    /// because the cost of refusing is that the client's contacts pay tokens.
+    async fn publish_intake_tags(
+        &self,
+        request: Request<proto::PublishIntakeTagsRequest>,
+    ) -> Result<Response<proto::PublishIntakeTagsResponse>, Status> {
+        let user_id = extract_authed_user_id(request.metadata(), &self.context)
+            .await
+            .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
+
+        let req = request.into_inner();
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut conn = self.context.redis_conn.clone();
+        // The publisher's id arrives as a `Uuid` and the sender's arrives as a wire `String`, and
+        // they have to meet at one Redis key. `Uuid::to_string` is lowercase hyphenated, which is
+        // the canonical form `tag_key` normalises both sides to — so the two spellings converge
+        // rather than silently producing two keyspaces, one written and one read.
+        let account = user_id.to_string();
+        let mut accepted: u32 = 0;
+        for entry in req
+            .tags
+            .into_iter()
+            .take(crate::intake::MAX_PUBLISHED_EPOCHS)
+        {
+            match crate::intake::store_published_tag(
+                &mut conn,
+                &account,
+                entry.epoch,
+                &entry.tag,
+                now_unix,
+            )
+            .await
+            {
+                Ok(true) => accepted += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // Redis is down. Report what landed rather than erroring: the caller's
+                    // retry is a whole window again, and the window is idempotent.
+                    tracing::warn!(error = %e, "intake tag publish failed part-way");
+                    break;
+                }
+            }
+        }
+
+        Ok(Response::new(proto::PublishIntakeTagsResponse { accepted }))
+    }
+
     async fn edit_message(
         &self,
         request: Request<proto::EditMessageRequest>,
