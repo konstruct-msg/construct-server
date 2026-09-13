@@ -108,6 +108,32 @@ services:
     image: redis:7-alpine
     container_name: construct-redis
     restart: unless-stopped
+    # ── Memory fence under `maxmemory` ────────────────────────────────────────
+    # Redis's own `maxmemory` accounts for the dataset. It does not account for
+    # allocator fragmentation, and it does not account for the copy-on-write of the
+    # fork that `appendonly yes` takes to rewrite the AOF — which is exactly when RSS
+    # spikes, and exactly when memory is already tight. Without a container limit that
+    # spike is the host's problem, and the kernel picks the victim: on this box that is
+    # as likely to be Postgres as Redis.
+    #
+    # 2x `maxmemory`. Tighter than that turns an ordinary AOF rewrite into an OOM kill,
+    # which is a self-inflicted outage; looser stops being a fence. Sized against the
+    # smallest documented production host (2 vCPU / 4 GB, deployment/DEPLOYMENT.md),
+    # where this is a quarter of RAM.
+    #
+    # This only became the right trade on 2026-09-13. Before that, killing Redis meant
+    # refusing every sealed send — so a memory limit would have converted a host-wide
+    # risk into a guaranteed messaging outage. Now the sealed door degrades to
+    # per-instance counters and skips the token check instead, so the blast radius of
+    # this limit firing is "limits are approximate for a minute".
+    #
+    # Verify it applied — `deploy.resources` is silently ignored by some runners, and
+    # this repository has shipped a mounted-but-inert config file before:
+    #   docker inspect -f '{{.HostConfig.Memory}}' construct-redis   # want 1073741824
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     # `--appendonly yes` дописан 2026-08-13. Без него сохранялись только
     # RDB-снимки со стандартными точками (3600s/1 изменение, 300s/100,
     # 60s/10000), то есть жёсткое падение хоста теряло до часа записей —

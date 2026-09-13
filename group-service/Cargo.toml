@@ -37,6 +37,7 @@ redis = { workspace = true }
 
 construct-server-shared = { path = "../shared" }
 construct-db = { path = "../crates/construct-db" }
+construct-redis = { path = "../crates/construct-redis" }
 construct-config = { path = "../crates/construct-config" }
 construct-auth = { path = "../crates/construct-auth" }
 construct-rate-limit = { path = "../crates/construct-rate-limit" }

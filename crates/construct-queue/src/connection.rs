@@ -29,8 +29,10 @@ impl RedisConnection {
             .map_err(|e| anyhow::anyhow!("Failed to parse Redis URL: {}", e))?;
 
         tracing::debug!("Getting Redis connection manager...");
-        let conn = client
-            .get_connection_manager()
+        // This is the connection the sealed-sender door runs on, and its circuit breaker
+        // trips on errors — so the response timeout in `construct_redis::connect` is what
+        // turns a hung Redis into a failure it can see instead of a hang it cannot.
+        let conn = construct_redis::manager_for(client)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {}", e))?;
 

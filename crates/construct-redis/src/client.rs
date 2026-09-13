@@ -3,6 +3,8 @@
 use crate::Result;
 use redis::{AsyncCommands, aio::ConnectionManager};
 
+use crate::connect::manager_for;
+
 /// Redis client with automatic reconnection
 #[derive(Clone)]
 pub struct RedisClient {
@@ -15,7 +17,10 @@ impl RedisClient {
     /// Supports both redis:// and rediss:// (TLS) URLs
     pub async fn connect(url: &str) -> Result<Self> {
         let client = redis::Client::open(url)?;
-        let conn = ConnectionManager::new(client).await?;
+        // `connect::manager_for`, never `ConnectionManager::new` — the latter takes the
+        // library's default timeouts, and a connection whose timeouts came from a
+        // dependency's default is a connection nobody decided the timeouts for.
+        let conn = manager_for(client).await?;
         Ok(Self { conn })
     }
 

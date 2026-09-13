@@ -78,7 +78,8 @@ pub(crate) struct CallRegistry {
 impl CallRegistry {
     pub(crate) async fn new(redis_url: &str, instance_id: String) -> Result<Self, anyhow::Error> {
         let client = redis::Client::open(redis_url)?;
-        let redis = ConnectionManager::new(client.clone()).await?;
+        // Shared timeouts, not the library's defaults — see `construct_redis::connect`.
+        let redis = construct_redis::manager_for(client.clone()).await?;
         Ok(Self {
             calls: RwLock::new(HashMap::new()),
             active_calls: RwLock::new(HashMap::new()),

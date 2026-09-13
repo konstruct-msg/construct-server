@@ -25,7 +25,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = RedisClient::connect("redis://localhost:6379").await?;
+//!     let mut client = RedisClient::connect("redis://localhost:6379").await?;
 //!     
 //!     // Set with expiry
 //!     client.set_ex("key", "value", 3600).await?;
@@ -38,6 +38,8 @@
 //! ```
 
 mod client;
+pub mod connect;
+pub use connect::{connect as connect_manager, connection_config, manager_for};
 mod streams;
 
 pub use client::RedisClient;

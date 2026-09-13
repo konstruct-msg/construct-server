@@ -91,7 +91,8 @@ impl KeyServiceContext {
 
         let redis_url = env::var("REDIS_URL").context("REDIS_URL must be set")?;
         let redis_client = redis::Client::open(redis_url).context("Failed to open Redis client")?;
-        let redis = RedisConnectionManager::new(redis_client)
+        // Shared timeouts, not the library's defaults — see `construct_redis::connect`.
+        let redis = construct_redis::manager_for(redis_client)
             .await
             .context("Failed to connect to Redis")?;
 

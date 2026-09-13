@@ -44,6 +44,9 @@ fi
 # Репозиторий публичный, а утечку координат фронта CI не поймает: она проходит
 # все проверки как обычный JSON. И откатить её нельзя — после пуша содержимое
 # остаётся доступным по SHA даже после переписывания истории. Поэтому здесь.
+printf '\n[pre-push] таймауты Redis\n'
+scripts/check-redis-timeouts.sh || fail=1
+
 printf '\n[pre-push] координаты veil-front\n'
 "$(git rev-parse --show-toplevel)/.githooks/no-front-coordinates" || fail=1
 

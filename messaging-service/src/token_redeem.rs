@@ -456,7 +456,9 @@ mod tests {
     async fn try_redis() -> Option<redis::aio::ConnectionManager> {
         let redis_client =
             redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
-        redis::aio::ConnectionManager::new(redis_client).await.ok()
+        // Same timeouts as production: a test connection that waits forever hides the
+        // exact failure the sealed door's breaker exists for.
+        construct_redis::manager_for(redis_client).await.ok()
     }
 
     fn issue_sealed(issuer: &[u8; 32], server_secret: &X25519StaticSecret) -> ([u8; 32], Vec<u8>) {

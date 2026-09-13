@@ -199,8 +199,7 @@ pub(crate) async fn make_test_service(db: Arc<sqlx::PgPool>) -> GroupServiceImpl
 pub(crate) async fn get_test_redis() -> redis::aio::ConnectionManager {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = redis::Client::open(url).expect("Invalid REDIS_URL");
-    client
-        .get_connection_manager()
+    construct_redis::manager_for(client)
         .await
         .expect("Failed to connect to Redis")
 }

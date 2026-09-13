@@ -39,7 +39,8 @@ async fn main() -> anyhow::Result<()> {
 
     let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
     let redis_client = redis::Client::open(redis_url)?;
-    let redis = redis_client.get_connection_manager().await?;
+    // Shared timeouts, not the library's defaults — see `construct_redis::connect`.
+    let redis = construct_redis::manager_for(redis_client).await?;
 
     // MLS cleanup worker
     let cleanup_interval_hours: u64 = std::env::var("MLS_CLEANUP_INTERVAL_HOURS")

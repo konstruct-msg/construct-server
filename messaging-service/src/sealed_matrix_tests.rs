@@ -45,7 +45,7 @@ fn database_url() -> String {
 
 async fn try_redis() -> Option<redis::aio::ConnectionManager> {
     let client = redis::Client::open(redis_url()).ok()?;
-    redis::aio::ConnectionManager::new(client).await.ok()
+    construct_redis::manager_for(client).await.ok()
 }
 
 async fn try_db_pool() -> Option<Arc<DbPool>> {

@@ -342,11 +342,8 @@ mod tests {
         }
 
         async fn redis_conn() -> ConnectionManager {
-            redis::Client::open("redis://127.0.0.1:6379")
-                .unwrap()
-                .get_connection_manager()
-                .await
-                .unwrap()
+            let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+            construct_redis::manager_for(client).await.unwrap()
         }
 
         async fn del_key(redis: &mut ConnectionManager, key: &str) {
