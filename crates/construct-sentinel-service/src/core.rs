@@ -23,8 +23,8 @@
 //   sentinel:violations:24h               → counter (TTL = 86400s)
 // ============================================================================
 
-use crate::degraded::{BreakerState, DegradedLimiter};
 use anyhow::Result;
+use construct_rate_limit::{BreakerState, DegradedLimiter};
 use redis::AsyncCommands;
 use sqlx::PgPool;
 use std::sync::Arc;

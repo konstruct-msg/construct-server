@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+construct-rate-limit = { path = "../construct-rate-limit" }
 # Core runtime
 anyhow      = { workspace = true }
 thiserror   = { workspace = true }

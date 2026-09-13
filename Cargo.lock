@@ -855,6 +855,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "construct-metrics",
+ "construct-rate-limit",
  "redis",
  "sqlx",
  "thiserror 2.0.18",

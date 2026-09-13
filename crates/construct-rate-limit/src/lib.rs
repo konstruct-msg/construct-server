@@ -15,6 +15,14 @@ use uuid::Uuid;
 
 use construct_error::AppError;
 
+/// Surviving a Redis outage without taking messaging down: a circuit breaker plus a
+/// bounded in-process counter. Lived in `construct-sentinel-service` until 2026-09-13,
+/// which made it reachable only by depending on another service's crate — so the sealed
+/// door had no fallback and simply gave up. It is a limiting mechanism, so it belongs
+/// with the limiter.
+pub mod degraded;
+pub use degraded::{BreakerState, DegradedLimiter, DegradedOutcome};
+
 /// Rate limit action types
 #[derive(Debug, Clone, Copy)]
 pub enum RateLimitAction {

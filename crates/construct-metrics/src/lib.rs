@@ -529,7 +529,7 @@ pub static STEALTH_TOKEN_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 /// Whether a sealed envelope arrived with a valid intake credential, and therefore owed no
 /// Privacy Pass token.
 ///
-/// Label `result`: "vouched" | "absent" | "unrecognised"
+/// Label `result`: "vouched" | "absent" | "unrecognised" | "unavailable"
 ///
 /// This is the number the rollout is steered by. Traffic between established contacts should
 /// converge on `vouched` as clients ship the credential; `absent` is the untouched population plus
@@ -561,12 +561,18 @@ pub static MSG_INTAKE_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 //   dispatch_dedup      — dispatch_envelope dedup mark/check
 //   sentinel            — SentinelCore::check_send_permission outer Err
 //   rate_trust          — TrustLevel + hourly/fanout limits skipped (Redis down)
-//   sealed_ip           — per-IP sealed-sender rate limit
+//   sealed_ip           — RETIRED 2026-09-13. Meant "the per-IP window was skipped";
+//                         that branch no longer exists, the window degrades instead.
 //   delivery_tag        — sealed delivery_tag replay cache
 //   federation_origin   — federation per-origin rate limit
 //   otpk_drain_check    — key-service OTPK drain threshold (Redis GET)
 //   otpk_drain_record   — key-service OTPK drain counter (Redis INCR)
 //   voip_push           — VoIP push recipient/peer rate limit (Redis)
+//   sealed_ip_degraded  — sealed-sender per-IP window running on the per-instance
+//                         fallback counter (Redis unreachable, breaker open)
+//   sealed_ip_untracked — the fallback table is full, so that window counts nothing
+//   stealth_token       — Privacy Pass redemption could not be checked (Redis) and
+//                         enforce allowed the envelope rather than refusing it
 //
 // Policy (launch): fail-open remains intentional. Alert when rate of any label
 // is non-zero for sustained periods (Redis outage or misconfig).
@@ -773,7 +779,7 @@ pub fn init_registry() {
     // Closed label set, and the question asked of it is a ratio — how much traffic is
     // already vouched. A `vouched` that is absent rather than zero is exactly the shape
     // that would be read as "the rollout has not started" when it has and is failing.
-    for result in ["vouched", "absent", "unrecognised"] {
+    for result in ["vouched", "absent", "unrecognised", "unavailable"] {
         MSG_INTAKE_CHECK_TOTAL.with_label_values(&[result]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);

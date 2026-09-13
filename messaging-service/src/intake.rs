@@ -52,13 +52,21 @@ pub(crate) enum IntakeCheck {
     Vouched,
     /// No credential on the envelope. The token path applies, exactly as before.
     Absent,
-    /// A credential that did not open, was the wrong size, or matched nothing — including when
-    /// Redis could not answer.
+    /// A credential that did not open, was the wrong size, or matched nothing.
     ///
     /// Deliberately indistinguishable from `Absent` in consequence: the envelope falls back to the
     /// token path and delivery is unaffected. A wrong tag must never be a delivery failure on its
     /// own, or a clock an hour behind would drop messages rather than charge for them.
     Unrecognised,
+    /// The credential could not be *checked* — Redis did not answer the lookup.
+    ///
+    /// Same consequence as `Unrecognised` (fall back to the token path), and split from it only so
+    /// the two can be told apart from outside. They have opposite causes: `Unrecognised` means the
+    /// sender and this server disagree about which tags are live, which is a bug or an epoch
+    /// boundary and is worth waking someone for; `Unavailable` means the store is down, which the
+    /// Redis alerts already say. Counted as one label, an outage reads as a credential failure and
+    /// sends the operator looking in the wrong place.
+    Unavailable,
 }
 
 impl IntakeCheck {
@@ -67,10 +75,14 @@ impl IntakeCheck {
             Self::Vouched => "vouched",
             Self::Absent => "absent",
             Self::Unrecognised => "unrecognised",
+            Self::Unavailable => "unavailable",
         }
     }
 
     /// Does this envelope still owe a Privacy Pass token?
+    ///
+    /// Everything that is not a confirmed match owes one, `Unavailable` included: a credential we
+    /// could not check is not a credential.
     pub(crate) fn owes_token(self) -> bool {
         self != Self::Vouched
     }
@@ -143,10 +155,16 @@ pub(crate) fn tag_matches(presented: &[u8], stored: &[u8]) -> bool {
 /// the two fields fails closed in both directions anyway: a 32-byte token presented here is the
 /// wrong length for a tag, and a 16-byte tag presented as a token fails the `[u8; 32]` conversion.
 ///
-/// Every failure returns `Unrecognised`, including a Redis outage. That is the conservative
-/// direction: an envelope that cannot be shown to be vouched falls back to paying, which is what
-/// it did before this existed. The opposite default — trusting a credential we could not check —
-/// would turn one unreachable Redis into free sending to everybody.
+/// Every failure falls back to the token path — `Unrecognised` when the credential is wrong,
+/// `Unavailable` when Redis could not be asked. That is the conservative direction: an envelope
+/// that cannot be shown to be vouched pays, which is what it did before this existed. The opposite
+/// default — trusting a credential we could not check — would turn one unreachable Redis into free
+/// sending to everybody.
+///
+/// The two failures are one outcome here and two labels outside, because what an operator should
+/// do about them differs completely. What must NOT follow from `Unavailable` is a refusal: the
+/// token path it falls back to degrades rather than rejects when Redis is the reason (see
+/// `envelope.rs`), so an outage costs tokens their check, not messages their delivery.
 pub(crate) async fn check_intake_credential(
     conn: &mut redis::aio::ConnectionManager,
     server_secret: Option<&x25519_dalek::StaticSecret>,
@@ -177,7 +195,7 @@ pub(crate) async fn check_intake_credential(
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "intake tag lookup unavailable — falling back to the token path");
-                return IntakeCheck::Unrecognised;
+                return IntakeCheck::Unavailable;
             }
         }
     }
@@ -216,6 +234,42 @@ pub(crate) async fn store_published_tag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A credential we could not check and a credential that was wrong have the same
+    /// consequence and must not have the same name. They have opposite causes:
+    /// `Unrecognised` means senders and this server disagree about which tags are live,
+    /// `Unavailable` means the store is down. Counted as one label, an outage reads as a
+    /// credential failure and sends the operator to the wrong place.
+    #[test]
+    fn an_unreachable_store_is_not_a_wrong_credential() {
+        assert_ne!(
+            IntakeCheck::Unavailable.as_label(),
+            IntakeCheck::Unrecognised.as_label()
+        );
+        let labels = [
+            IntakeCheck::Vouched.as_label(),
+            IntakeCheck::Absent.as_label(),
+            IntakeCheck::Unrecognised.as_label(),
+            IntakeCheck::Unavailable.as_label(),
+        ];
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            labels.len(),
+            "every outcome needs its own label"
+        );
+    }
+
+    /// Only a confirmed match skips the token. A credential that could not be checked is
+    /// not a credential — if `Unavailable` ever stopped owing a token, one unreachable
+    /// Redis would be free sending to every account on the server.
+    #[test]
+    fn only_a_confirmed_match_skips_the_token() {
+        assert!(!IntakeCheck::Vouched.owes_token());
+        assert!(IntakeCheck::Absent.owes_token());
+        assert!(IntakeCheck::Unrecognised.owes_token());
+        assert!(IntakeCheck::Unavailable.owes_token());
+    }
 
     #[test]
     fn an_epoch_is_a_utc_day() {

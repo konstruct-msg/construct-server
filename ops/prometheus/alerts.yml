@@ -26,12 +26,16 @@ groups:
           summary: "Redis is unreachable"
           description: >
             Offline delivery queues, rate limits and caches are all in this instance.
-            Sealed sends — which is all ordinary messaging — STOP: under
-            MSG_STEALTH_TOKEN_POLICY=enforce the intake lookup returns `unrecognised`
-            and the token redemption returns `redis_error`, neither of which is an
-            accept, so every envelope is refused. This description said sends continue
-            until 2026-09-13; that was true under `warn` and stopped being true the day
-            enforce was switched on. See AnonymousDoorRefusingEverything below.
+            Sealed sends continue: the per-IP window degrades to a per-instance counter
+            and the token check is skipped rather than failed (see the sealed_door
+            group). Queued offline delivery is stalled, and for the length of this
+            outage nothing is enforcing token spend — so the thing to watch is how long
+            it lasts, not whether sends are landing.
+
+            This text has been wrong in both directions. It claimed sends continue while
+            enforce was refusing all of them (2026-09-11 to 2026-09-13); it is true again
+            only because the refusal was changed to a degradation. If the degradation is
+            ever reverted, this sentence has to go with it.
 
       # Not an incident — a planning trigger, and the only observer the hardening
       # ladder's rung 55.5 has. That rung ("split the mailbox off this instance, then
@@ -131,20 +135,32 @@ groups:
   # off quietly is not a control.
   - name: sealed_door
     rules:
-      # The per-IP window is the only thing between a stranger's socket and the
-      # parser. On a Redis error `check_sealed_ip_limit` returns Allow.
-      - alert: SealedDoorRateLimitFailOpen
-        expr: increase(construct_msg_abuse_fail_open_total{control="sealed_ip"}[10m]) > 0
-        for: 0m
+      # The per-IP window now degrades to a per-instance counter rather than
+      # switching off. Non-zero means the ceiling is approximate (N processes means
+      # N x limit) for as long as this fires.
+      - alert: SealedDoorRateLimitDegraded
+        expr: increase(construct_msg_abuse_fail_open_total{control="sealed_ip_degraded"}[10m]) > 0
+        for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Per-IP limit on the anonymous send path is not being applied"
+          summary: "Per-IP limit on the anonymous send path is running on fallback counters"
           description: >
-            Redis is not answering the sealed-sender rate-limit path, so sends are
-            passing that gate uncounted. On its own this is survivable — the token
-            gate behind it fails closed — but the two together mean the door is in
-            an unmeasured state, and a burst during this window is invisible.
+            Redis is not answering the sealed-sender window, so the limit is approximate
+            and per-instance. Sends continue by design. The breaker recovers on its own
+            once Redis returns; sustained firing means it is not returning.
+
+      # The fallback table is full, so the degraded window has stopped limiting.
+      - alert: SealedDoorRateLimitUntracked
+        expr: increase(construct_msg_abuse_fail_open_total{control="sealed_ip_untracked"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Degraded per-IP window is at capacity — anonymous sends pass uncounted"
+          description: >
+            50k distinct /64s inside one minute while Redis is also down. Treat as an
+            abuse campaign timed to an outage rather than as a coincidence.
 
       # Second fail-open on the same path, same outage, different consequence:
       # replays are delivered again instead of being dropped.
@@ -160,24 +176,42 @@ groups:
             is delivered a second time. Deliberately fail-open: a Redis outage must not
             drop messages. Bounded by how long this fires.
 
-      # The other direction, and the more expensive one. `redis_error` is not an
-      # accept, so under enforce this is not a rate limit doing its job — it is
-      # ordinary traffic between established contacts being refused.
-      - alert: AnonymousDoorRefusingEverything
-        expr: >
-          increase(construct_stealth_token_check_total{mode="enforce",result="redis_error"}[5m]) > 0
-        for: 0m
+      # The token gate could not run. Replaces AnonymousDoorRefusingEverything
+      # (2026-09-13): `redis_error` used to be a rejection under enforce, which made one
+      # Redis outage a total messaging outage and handed anyone who could degrade Redis a
+      # way to stop delivery. It now degrades, so this is "spend is unenforced", not
+      # "sends are failing".
+      - alert: SealedDoorTokenCheckDegraded
+        expr: increase(construct_msg_abuse_fail_open_total{control="stealth_token"}[10m]) > 0
+        for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "Enforce is refusing sealed sends because Redis cannot answer"
+          summary: "Privacy Pass spend is not being checked — Redis cannot answer"
           description: >
-            Not abuse: the anti-abuse state store is unreachable and enforce treats
-            "cannot check" as "reject". All sealed messaging is down for as long as
-            this fires, and clients answer each rejection with a forced wallet
-            replenish that clears their back-off, so identity-service load rises while
-            this is happening. Check RedisDown first. Emergency lever:
-            MSG_STEALTH_TOKEN_POLICY=warn.
+            Sealed sends are being delivered without a token check: for the length of this
+            window a token can be double-spent and an envelope carrying none at all passes.
+            Accepted deliberately, because the alternative refused every sealed send. Check
+            RedisDown. If this has to be stopped without waiting for Redis, the lever is
+            MSG_STEALTH_TOKEN_POLICY — but note that setting it to enforce does NOT restore
+            the check while Redis is down, it only changes what happens to bad tokens.
+
+      # Enforce refusing sends for a reason that is NOT an outage — a real rejection
+      # rate. Under enforce every one of these is a message that did not arrive.
+      - alert: SealedSendsRefusedByEnforce
+        expr: >
+          sum(rate(construct_stealth_token_check_total{mode="enforce",result!~"ok|unit_covered|redis_error"}[10m]))
+            / clamp_min(sum(rate(construct_stealth_token_check_total{mode="enforce"}[10m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of sealed sends are being refused under enforce"
+          description: >
+            Not an outage (redis_error is excluded). Either clients are failing to obtain
+            or present tokens, or issuance is broken. Each refusal makes the client force a
+            wallet replenish with its back-off cleared, so this is self-amplifying — check
+            identity-service IssueTokens before assuming abuse.
 
       # Not a Redis story. A jump in `unrecognised` means senders and this server
       # disagree about which intake tags are live — the epoch rollover at 00:00 UTC
@@ -193,9 +227,11 @@ groups:
         annotations:
           summary: "More than 10% of intake credentials are not recognised"
           description: >
-            Senders are presenting tags this server does not hold. Suspect the daily
-            epoch boundary (floor(unix/86400), grace of one epoch) or a publish window
-            that stopped being refreshed. Measured 2026-09-11 on the first live pair:
+            Senders are presenting tags this server does not hold. A Redis outage does
+            NOT land here — that is counted as `unavailable`, split from `unrecognised`
+            on 2026-09-13 precisely so this alert means one thing. Suspect the daily epoch
+            boundary (floor(unix/86400), grace of one epoch) or a publish window that
+            stopped being refreshed. Measured 2026-09-11 on the first live pair:
             17 vouched, 2 absent, 0 unrecognised.
 
   - name: observability

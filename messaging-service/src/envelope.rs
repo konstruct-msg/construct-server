@@ -134,6 +134,62 @@ pub(crate) fn convert_envelope_to_proto(
     })
 }
 
+/// What the token gate does about one redemption outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenGateAction {
+    /// The envelope proceeds and the outcome is what the policy expects.
+    Deliver,
+    /// The envelope is refused; the client replenishes and retries once.
+    Reject,
+    /// The envelope proceeds because the gate could not run at all. Distinct from
+    /// `Deliver` so the skip is metered rather than looking like an ordinary pass.
+    DeliverUnchecked,
+}
+
+/// Decide what `policy` does about `result`.
+///
+/// ── "Cannot check" is not "invalid" ─────────────────────────────────────────────
+/// The spent-nonce set lives in Redis, and Redis is one container. Until 2026-09-13
+/// `RedisError` took the same branch as a forged token, so a Redis outage refused every
+/// sealed send — which is all ordinary messaging, because `StealthSendRecovery` forbids
+/// falling back to an identified send and is right to: a server that can force identified
+/// sends by rejecting tokens can deanonymise any sender on demand.
+///
+/// It was worse than an outage. Each rejection makes the client call
+/// `BlindTokenService.forceReplenish()`, which clears both back-off timers and fetches a
+/// new batch, so a degraded backend answered every failed send with extra load on the
+/// issuer path. And it handed anyone who could degrade Redis a way to stop delivery
+/// entirely, which is a larger prize than anything the token gate protects.
+///
+/// So unavailability degrades: the envelope is delivered, the skip is metered, and
+/// `SealedDoorTokenCheckDegraded` fires. What is given up for the length of the outage is
+/// real and worth naming — a token can be double-spent, and an envelope carrying none at
+/// all passes. That is the cheaper half of the trade. The expensive half was handing an
+/// attacker a messaging kill switch in exchange for it.
+///
+/// `NotConfigured` deliberately does NOT degrade: it means this instance has no issuer
+/// key, which in production cannot happen past boot (`load_required_hex_secret` is
+/// required there), so it is a deployment error and refusing loudly is how it is found.
+pub(crate) fn token_gate_action(
+    policy: construct_config::StealthTokenPolicy,
+    result: crate::token_redeem::TokenRedeemResult,
+) -> TokenGateAction {
+    use crate::token_redeem::TokenRedeemResult as R;
+    use construct_config::StealthTokenPolicy as P;
+
+    if result.is_accept() {
+        return TokenGateAction::Deliver;
+    }
+    match (policy, result) {
+        // Off never reaches here (the caller skips the whole block), but a policy that
+        // rejects under Off would be a surprising thing to leave expressible.
+        (P::Off, _) => TokenGateAction::Deliver,
+        (_, R::RedisError) => TokenGateAction::DeliverUnchecked,
+        (P::Enforce, _) => TokenGateAction::Reject,
+        (P::Warn, _) => TokenGateAction::Deliver,
+    }
+}
+
 /// Route a SealedSenderEnvelope:
 ///  - Cross-server (recipient_server ≠ ours): forward via FederationClient
 ///  - Local (same server or empty): parse SealedInner → deliver to recipient_user_id
@@ -256,8 +312,8 @@ pub(crate) async fn dispatch_sealed_sender(
                 .with_label_values(&[mode_label, result_label])
                 .inc();
 
-            if !result.is_accept() {
-                if policy == StealthTokenPolicy::Enforce {
+            match token_gate_action(policy, result) {
+                TokenGateAction::Reject => {
                     tracing::warn!(
                         result = result_label,
                         "sealed sender: Privacy Pass token redemption failed — rejecting (enforce mode)"
@@ -265,21 +321,32 @@ pub(crate) async fn dispatch_sealed_sender(
                     return Err(anyhow::Error::new(TokenRejected {
                         label: result_label,
                     }));
-                } else {
-                    tracing::info!(
-                        result = result_label,
-                        "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
+                }
+                TokenGateAction::DeliverUnchecked => {
+                    construct_metrics::record_abuse_fail_open("stealth_token");
+                    tracing::error!(
+                        mode = mode_label,
+                        "sealed sender: Privacy Pass state store unreachable — delivering without a token check"
                     );
                 }
-            } else if policy == StealthTokenPolicy::Warn
-                && result == crate::token_redeem::TokenRedeemResult::Ok
-            {
-                // Success-path visibility for the warn-mode validation window: confirms the
-                // client→server VOPRF round-trip works end-to-end (first redemption of a real
-                // client token). unit_covered is silent (expected for multi-chunk follow-ups).
-                tracing::info!(
-                    "sealed sender: Privacy Pass token redeemed OK (warn-mode validation)"
-                );
+                TokenGateAction::Deliver => {
+                    if !result.is_accept() {
+                        tracing::info!(
+                            result = result_label,
+                            "sealed sender: Privacy Pass token redemption failed — allowing (warn mode)"
+                        );
+                    } else if policy == StealthTokenPolicy::Warn
+                        && result == crate::token_redeem::TokenRedeemResult::Ok
+                    {
+                        // Success-path visibility for the warn-mode validation window: confirms
+                        // the client→server VOPRF round-trip works end-to-end (first redemption of
+                        // a real client token). unit_covered is silent (expected for multi-chunk
+                        // follow-ups).
+                        tracing::info!(
+                            "sealed sender: Privacy Pass token redeemed OK (warn-mode validation)"
+                        );
+                    }
+                }
             }
         } // if intake.owes_token()
     }
@@ -373,4 +440,116 @@ pub(crate) async fn dispatch_sealed_sender(
         rate_limit_challenge: None,
         attempt_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TokenGateAction, token_gate_action};
+    use crate::token_redeem::TokenRedeemResult as R;
+    use construct_config::StealthTokenPolicy as P;
+
+    const ALL_RESULTS: [R; 9] = [
+        R::Ok,
+        R::UnitCovered,
+        R::MissingToken,
+        R::DecryptFailed,
+        R::InvalidToken,
+        R::DoubleSpent,
+        R::UnitExhausted,
+        R::RedisError,
+        R::NotConfigured,
+    ];
+
+    /// The whole point of this change: an unreachable state store must not read as a
+    /// forged token. Before 2026-09-13 these two took the same branch, and the cost was
+    /// that one Redis outage refused every sealed send in the system.
+    #[test]
+    fn enforce_refuses_a_bad_token_but_not_an_unreachable_redis() {
+        assert_eq!(
+            token_gate_action(P::Enforce, R::InvalidToken),
+            TokenGateAction::Reject
+        );
+        assert_eq!(
+            token_gate_action(P::Enforce, R::RedisError),
+            TokenGateAction::DeliverUnchecked
+        );
+    }
+
+    /// Every way a token can be *wrong* is still refused under enforce. Listed one by one
+    /// rather than as "everything else", so adding a variant that should be refused and
+    /// forgetting it here shows up as a missing line instead of passing by default.
+    #[test]
+    fn enforce_refuses_every_rejection_reason() {
+        for result in [
+            R::MissingToken,
+            R::DecryptFailed,
+            R::InvalidToken,
+            R::DoubleSpent,
+            R::UnitExhausted,
+        ] {
+            assert_eq!(
+                token_gate_action(P::Enforce, result),
+                TokenGateAction::Reject,
+                "{} must still be refused under enforce",
+                result.as_label()
+            );
+        }
+    }
+
+    /// A missing issuer key is a deployment error, not an outage — it cannot happen past
+    /// boot in production, so refusing loudly is how it gets found. Degrading it would
+    /// mean a deploy could silently turn the gate off for good.
+    #[test]
+    fn a_missing_issuer_key_is_not_treated_as_an_outage() {
+        assert_eq!(
+            token_gate_action(P::Enforce, R::NotConfigured),
+            TokenGateAction::Reject
+        );
+    }
+
+    /// Degradation is about *availability*, not about relaxing warn. Under warn nothing is
+    /// refused either way, but the unavailable case must still be distinguishable, because
+    /// that is what the metric and the alert are keyed on.
+    #[test]
+    fn warn_delivers_everything_but_still_names_the_unchecked_case() {
+        for result in ALL_RESULTS {
+            let action = token_gate_action(P::Warn, result);
+            assert_ne!(
+                action,
+                TokenGateAction::Reject,
+                "warn must never refuse ({})",
+                result.as_label()
+            );
+        }
+        assert_eq!(
+            token_gate_action(P::Warn, R::RedisError),
+            TokenGateAction::DeliverUnchecked,
+            "an unchecked delivery under warn is still unchecked, and must be metered as such"
+        );
+    }
+
+    /// An accepted token is an ordinary delivery under every policy — never the metered
+    /// `DeliverUnchecked`, or the fail-open counter would count normal traffic and the
+    /// alert built on it would be noise.
+    #[test]
+    fn an_accepted_token_is_never_reported_as_unchecked() {
+        for policy in [P::Off, P::Warn, P::Enforce] {
+            for result in [R::Ok, R::UnitCovered] {
+                assert_eq!(
+                    token_gate_action(policy, result),
+                    TokenGateAction::Deliver,
+                    "{} under {:?} must be a plain delivery",
+                    result.as_label(),
+                    policy
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn off_refuses_nothing() {
+        for result in ALL_RESULTS {
+            assert_ne!(token_gate_action(P::Off, result), TokenGateAction::Reject);
+        }
+    }
 }
