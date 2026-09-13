@@ -2333,6 +2333,7 @@ dependencies = [
  "construct-config",
  "construct-crypto",
  "construct-metrics",
+ "construct-rate-limit",
  "construct-server-shared",
  "ed25519-dalek",
  "hex",

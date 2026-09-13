@@ -26,8 +26,12 @@ groups:
           summary: "Redis is unreachable"
           description: >
             Offline delivery queues, rate limits and caches are all in this instance.
-            Messaging sends continue (the sentinel limiter degrades to per-instance
-            counters), but queued offline delivery is stalled.
+            Sealed sends — which is all ordinary messaging — STOP: under
+            MSG_STEALTH_TOKEN_POLICY=enforce the intake lookup returns `unrecognised`
+            and the token redemption returns `redis_error`, neither of which is an
+            accept, so every envelope is refused. This description said sends continue
+            until 2026-09-13; that was true under `warn` and stopped being true the day
+            enforce was switched on. See AnonymousDoorRefusingEverything below.
 
       # Not an incident — a planning trigger, and the only observer the hardening
       # ladder's rung 55.5 has. That rung ("split the mailbox off this instance, then
@@ -119,6 +123,81 @@ groups:
   # pointed at a service renamed to `identity` and nobody noticed; the Redis
   # exporter was never scraped at all, which meant the memory alerts below could
   # not have fired even once. This alert makes that class loud.
+  # ── The unauthenticated sealed-sender door ──────────────────────────────────
+  # SendSealedMessage deliberately skips extract_authed_user_id. Everything that
+  # limits a stranger on that path lives in Redis, and until 2026-09-13 every one
+  # of these controls could disengage without anyone being told: the fail-open
+  # counters were on a Grafana panel and on no alert. A control that turns itself
+  # off quietly is not a control.
+  - name: sealed_door
+    rules:
+      # The per-IP window is the only thing between a stranger's socket and the
+      # parser. On a Redis error `check_sealed_ip_limit` returns Allow.
+      - alert: SealedDoorRateLimitFailOpen
+        expr: increase(construct_msg_abuse_fail_open_total{control="sealed_ip"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Per-IP limit on the anonymous send path is not being applied"
+          description: >
+            Redis is not answering the sealed-sender rate-limit path, so sends are
+            passing that gate uncounted. On its own this is survivable — the token
+            gate behind it fails closed — but the two together mean the door is in
+            an unmeasured state, and a burst during this window is invisible.
+
+      # Second fail-open on the same path, same outage, different consequence:
+      # replays are delivered again instead of being dropped.
+      - alert: DeliveryTagReplayCheckFailOpen
+        expr: increase(construct_msg_abuse_fail_open_total{control="delivery_tag"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sealed-sender replay check is not being applied"
+          description: >
+            The delivery-tag cache is unavailable, so a captured envelope replayed now
+            is delivered a second time. Deliberately fail-open: a Redis outage must not
+            drop messages. Bounded by how long this fires.
+
+      # The other direction, and the more expensive one. `redis_error` is not an
+      # accept, so under enforce this is not a rate limit doing its job — it is
+      # ordinary traffic between established contacts being refused.
+      - alert: AnonymousDoorRefusingEverything
+        expr: >
+          increase(construct_stealth_token_check_total{mode="enforce",result="redis_error"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Enforce is refusing sealed sends because Redis cannot answer"
+          description: >
+            Not abuse: the anti-abuse state store is unreachable and enforce treats
+            "cannot check" as "reject". All sealed messaging is down for as long as
+            this fires, and clients answer each rejection with a forced wallet
+            replenish that clears their back-off, so identity-service load rises while
+            this is happening. Check RedisDown first. Emergency lever:
+            MSG_STEALTH_TOKEN_POLICY=warn.
+
+      # Not a Redis story. A jump in `unrecognised` means senders and this server
+      # disagree about which intake tags are live — the epoch rollover at 00:00 UTC
+      # is where that happens, and under enforce the cost of disagreeing is a
+      # refused envelope rather than a charged token.
+      - alert: IntakeCredentialsNotRecognised
+        expr: >
+          sum(rate(construct_msg_intake_check_total{result="unrecognised"}[15m]))
+            / clamp_min(sum(rate(construct_msg_intake_check_total[15m])), 0.001) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of intake credentials are not recognised"
+          description: >
+            Senders are presenting tags this server does not hold. Suspect the daily
+            epoch boundary (floor(unix/86400), grace of one epoch) or a publish window
+            that stopped being refreshed. Measured 2026-09-11 on the first live pair:
+            17 vouched, 2 absent, 0 unrecognised.
+
   - name: observability
     rules:
       - alert: TargetDown

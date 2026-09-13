@@ -49,6 +49,7 @@ construct-config = { path = "../crates/construct-config" }
 construct-auth = { path = "../crates/construct-auth" }
 construct-crypto = { path = "../crates/construct-crypto", features = ["pqc"] }
 construct-metrics = { path = "../crates/construct-metrics" }
+construct-rate-limit = { path = "../crates/construct-rate-limit" }
 
 [[bin]]
 name = "key-service"

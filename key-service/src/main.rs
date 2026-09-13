@@ -217,7 +217,16 @@ fn bucket_for(claimed_device: Option<&str>, client_ip: &str, target_user_id: &st
         Some(device_id) if !device_id.is_empty() => {
             format!("rate:bundle_dev:{}:{}", device_id, target_user_id)
         }
-        _ => format!("rate:bundle_ip:{}:{}", client_ip, target_user_id),
+        // Per /64 on IPv6, not per address: an unnamed caller renting a machine gets a
+        // /64 with it, and a /128 key would hand it 2^64 private budgets against one
+        // victim's OTPK pool — the exhaustion this limiter exists to stop, bought for
+        // nothing. Shared with the messaging-service sealed-sender window rather than
+        // restated, so the two doors cannot drift on what an address is.
+        _ => format!(
+            "rate:bundle_ip:{}:{}",
+            construct_rate_limit::client_rate_bucket(client_ip),
+            target_user_id
+        ),
     }
 }
 
@@ -1482,6 +1491,21 @@ mod bundle_rate_bucket_tests {
         let expected = "rate:bundle_ip:203.0.113.7:7574fdec";
         assert_eq!(bucket_for(None, "203.0.113.7", "7574fdec"), expected);
         assert_eq!(bucket_for(Some(""), "203.0.113.7", "7574fdec"), expected);
+    }
+
+    /// An unnamed caller cannot buy itself a fresh budget by moving inside its own /64.
+    /// This is the drain in item 5 of the pre-release hardening list, made cheap: renting
+    /// one machine used to mean 2^64 buckets against a single victim's OTPK pool.
+    #[test]
+    fn an_unnamed_caller_cannot_rotate_inside_its_own_slash_64() {
+        assert_eq!(
+            bucket_for(None, "2001:db8:1:2::1", "7574fdec"),
+            bucket_for(None, "2001:db8:1:2::dead:beef", "7574fdec"),
+        );
+        assert_ne!(
+            bucket_for(None, "2001:db8:1:2::1", "7574fdec"),
+            bucket_for(None, "2001:db8:1:3::1", "7574fdec"),
+        );
     }
 
     /// Two unnamed callers behind one IP still share, as before. Stated because it is the

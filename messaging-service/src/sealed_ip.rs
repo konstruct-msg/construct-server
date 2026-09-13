@@ -46,9 +46,17 @@ pub(crate) async fn check_sealed_ip_limit(
     client_ip: &str,
 ) -> SealedIpDecision {
     let mut conn = context.redis_conn.clone();
+    // Counted per /64 on IPv6, not per address. A /64 comes free with any rented
+    // machine, so a window keyed on the exact address is a window the sender opens
+    // as many of as it likes. `client_rate_bucket` is shared with key-service's
+    // bundle limit rather than restated here — two limiters disagreeing about what
+    // an address is would be one meaning on two carriers.
     match construct_rate_limit::sliding_window_check_and_record(
         &mut conn,
-        &format!("sealed_ip:{client_ip}"),
+        &format!(
+            "sealed_ip:{}",
+            construct_rate_limit::client_rate_bucket(client_ip)
+        ),
         context.config.messaging.sealed_ip_rate_limit_per_min,
         60,
     )
@@ -90,6 +98,21 @@ mod tests {
     fn unknown_when_no_ip_headers() {
         let m = tonic::metadata::MetadataMap::new();
         assert_eq!(extract_client_ip(&m), "unknown");
+    }
+
+    #[test]
+    fn the_window_counts_an_ipv6_prefix_not_an_address() {
+        // The gate this gives a stranger is only as good as what it counts. Rotating
+        // inside a rented /64 is free; rotating out of one is not.
+        use construct_rate_limit::client_rate_bucket;
+        let a = extract_client_ip(&meta_with("x-forwarded-for", "2001:db8:1:2::1"));
+        let b = extract_client_ip(&meta_with("x-forwarded-for", "2001:db8:1:2::dead:beef"));
+        assert_ne!(a, b, "the extractor must keep the full address");
+        assert_eq!(
+            client_rate_bucket(&a),
+            client_rate_bucket(&b),
+            "but the window must count them as one sender"
+        );
     }
 
     #[test]
