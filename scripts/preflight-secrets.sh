@@ -8,8 +8,14 @@
 # then silently corrupts or drops traffic.
 #
 # Mirrors the runtime check in `construct-config::secret_hygiene` — keep the two in
-# sync. See construct-docs decisions/key-rotation-and-secret-hygiene.md and
+# sync. See construct-docs decisions/key-rotation-and-secret-hygiene.md,
+# decisions/secrets-are-sliced-not-shared.md, and
 # deployment/stealth-token-keys-runbook.md §6.
+#
+# Also dry-runs scripts/split-secrets.sh against ops/secrets-allowlist.ini so a
+# slice that would leak PASETO_PRIVATE_KEY (etc.) fails here, not at recreate.
+# Compose still reads app.env until the cutover PR; this check does not write
+# slices/ onto the server.
 #
 # Usage:
 #   ./scripts/preflight-secrets.sh [path/to/app.env]   # default: /opt/construct/secrets/app.env
@@ -94,7 +100,7 @@ check_hex_len() {
 #
 # So the check is here, at the level of the file, which is the only level where the
 # fact still exists.
-echo "[1/4] duplicate-key check"
+echo "[1/5] duplicate-key check"
 dup_keys="$(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$FILE" \
             | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' \
             | sort | uniq -d)"
@@ -107,7 +113,7 @@ if [[ -n "$dup_keys" ]]; then
 fi
 
 # --- 2. no surrounding quotes on any secret ---------------------------------
-echo "[2/4] quote check"
+echo "[2/5] quote check"
 for k in SERVER_SIGNING_KEY TOKEN_ISSUER_KEY BUNDLE_SIGNING_KEY BUNDLE_SIGNING_PUBLIC_KEY \
          APNS_DEVICE_TOKEN_ENCRYPTION_KEY USERNAME_HMAC_SECRET CONTACT_HMAC_SECRET \
          MEDIA_HMAC_SECRET CSRF_SECRET LOG_HASH_SALT TURN_SECRET; do
@@ -115,7 +121,7 @@ for k in SERVER_SIGNING_KEY TOKEN_ISSUER_KEY BUNDLE_SIGNING_KEY BUNDLE_SIGNING_P
 done
 
 # --- 3. format / length for keyed secrets (only if present) -----------------
-echo "[3/4] format/length check"
+echo "[3/5] format/length check"
 check_base64_len SERVER_SIGNING_KEY 32
 check_base64_len BUNDLE_SIGNING_KEY 32
 check_base64_len BUNDLE_SIGNING_PUBLIC_KEY 32
@@ -123,7 +129,7 @@ check_hex_len    TOKEN_ISSUER_KEY 32
 check_hex_len    APNS_DEVICE_TOKEN_ENCRYPTION_KEY 32
 
 # --- 4. presence + known-bad values -----------------------------------------
-echo "[4/4] presence + known-insecure checks"
+echo "[4/5] presence + known-insecure checks"
 present SERVER_SIGNING_KEY || warn "SERVER_SIGNING_KEY absent — federation + token-encryption (sealed sender) disabled."
 present TOKEN_ISSUER_KEY   || warn "TOKEN_ISSUER_KEY absent — Privacy Pass issuance + redemption disabled."
 present BUNDLE_SIGNING_KEY || warn "BUNDLE_SIGNING_KEY absent — sender certs fall back to the federation signer."
@@ -146,6 +152,23 @@ fi
 masque="$(raw_value MASQUE_AUTH_TOKEN)"
 if [[ -z "$masque" ]]; then
   warn "MASQUE_AUTH_TOKEN absent — masque-service will fail-boot in production (open relay)."
+fi
+
+# --- 5. per-service slices (dry-run; compose still reads app.env) ------------
+# Does not write slices/ next to app.env. Catches an allowlist that would leak
+# PASETO_PRIVATE_KEY into media, or identity/messaging TOKEN_ISSUER_KEY drift,
+# before anyone points compose at the slices.
+echo "[5/5] secret-slice check"
+SPLIT="$(dirname "$0")/split-secrets.sh"
+if [[ ! -x "$SPLIT" && -f "$SPLIT" ]]; then
+  chmod +x "$SPLIT"
+fi
+if [[ -x "$SPLIT" ]]; then
+  if ! "$SPLIT" --check-only "$FILE"; then
+    err "split-secrets --check-only failed — slices would leak a private key or the allowlist is inconsistent. See ops/secrets-allowlist.ini."
+  fi
+else
+  warn "scripts/split-secrets.sh missing or not executable — skipping slice check."
 fi
 
 # --- alerting path -----------------------------------------------------------

@@ -13,9 +13,13 @@
 # for removal once clients are off obfs4.
 #
 # Secrets management:
-#   /opt/construct/secrets/app.env — manually maintained on the server.
+#   /opt/construct/secrets/app.env — the operator source of truth (chmod 600).
 #   Template: ops/secrets.example.env
-#   Services read secrets directly from this file (no vault-agent).
+#   Services currently read that file as env_file (no vault-agent).
+#   Slices: scripts/split-secrets.sh + ops/secrets-allowlist.ini generate
+#   per-service files under secrets/slices/; preflight dry-runs that split.
+#   Compose will switch env_file to the slices in a follow-up — until then
+#   every service still sees the full file. Do not re-introduce Vault-on-box.
 #
 # DNS: A record ams.konstruct.cc → VPS IP (no Cloudflare proxy)
 # TLS: Caddy auto-obtains Let's Encrypt certs via TLS-ALPN-01
@@ -207,9 +211,10 @@ services:
 
   # ─── Core Services ─────────────────────────────────────────────────────────
   # All services:
-  #   - Use env_file from Vault-populated /secrets/app.env (via volume mount)
+  #   - env_file: /opt/construct/secrets/app.env (operator-edited; slices later)
   #   - Only non-secret env vars (PORT, RUST_LOG, INSTANCE_DOMAIN) set here
-  #   - Read secrets from /opt/construct/secrets/app.env (managed manually on server)
+  #   - Do NOT list app.env secrets under environment: as ${VAR} — unset
+  #     interpolation blanks them. See secrets-are-sliced-not-shared.md.
 
   # auth-service + user-service + invite merged into identity-service (2026-06-30)
   identity:

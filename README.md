@@ -189,6 +189,11 @@ python3 scripts/check-observability.py
 Production deployment is defined in [ops/docker-compose.prod.yml](ops/docker-compose.prod.yml).
 Secrets are read from `/opt/construct/secrets/app.env`; use
 [ops/secrets.example.env](ops/secrets.example.env) as the template.
+That file is the operator source of truth. `scripts/split-secrets.sh` can
+already emit per-service slices from [ops/secrets-allowlist.ini](ops/secrets-allowlist.ini);
+compose still points `env_file` at `app.env` until the cutover. Preflight
+dry-runs the split so a slice that would leak a private key fails before
+recreate.
 
 Before deploying, validate secrets:
 

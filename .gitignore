@@ -77,3 +77,7 @@ ops/alertmanager/telegram_token
 
 # Секреты бэкапа (публичный ключ + адрес Storage Box)
 ops/backup.env
+
+# Generated per-service secret slices (operator machine or /opt/construct/secrets/slices)
+**/secrets/slices/
+scripts/testdata/secret-split/slices/
