@@ -167,7 +167,11 @@ Redis/internal errors. IDs are **32-char hex device ids**, not user UUIDs.
   `up -d --force-recreate`, not `restart`.
 - `SERVER_SIGNING_KEY` = **base64**; `TOKEN_ISSUER_KEY` = **hex**.
 - `secret_hygiene` fails boot on present-but-malformed secrets;
-  `scripts/preflight-secrets.sh` before deploy.
+  `scripts/preflight-secrets.sh` before deploy (includes a dry-run of
+  `scripts/split-secrets.sh` against `ops/secrets-allowlist.ini`).
+  Compose still injects the full `app.env`; slices are not live yet.
+  Do not add Vault-on-box or encrypt `app.env` with a key that lives next to it
+  (construct-docs `decisions/secrets-are-sliced-not-shared.md`).
 - Stream knobs / rate limits / PoW tiers: `construct-config` + env
   (`MSG_STREAM_*`, `MSG_POW_*`, `IP_RATE_LIMIT_*`, …). tonic **0.14.x** has no
   `http2_keepalive_while_idle` — app HeartbeatAck is the keepalive.

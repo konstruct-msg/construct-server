@@ -60,6 +60,17 @@ jobs:
       - name: Verify shared/proto matches its upstream
         run: ./scripts/sync-protos.sh --check
 
+  # Allowlist / splitter: a media slice that contains PASETO_PRIVATE_KEY must fail
+  # here, not after compose points env_file at the slices. No Rust, no services.
+  secret-split:
+    name: Secret slice allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run split-secrets fixture tests
+        run: bash scripts/test-split-secrets.sh
+
   # Check formatting
   fmt:
     name: Format Check

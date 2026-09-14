@@ -25,11 +25,18 @@ Optional args to override default hosts:
 ```bash
 ./scripts/generate_test_keys.sh     # Generate keys for local/CI testing
 ./scripts/cleanup_test_keys.sh      # Remove generated test keys
-./scripts/rotate-secret.sh          # Rotate a single secret on the VPS
-./scripts/emergency-rotate-all.sh   # Rotate all secrets (emergency use)
-./scripts/check-secret-expiry.sh    # Check when secrets were last rotated
-./scripts/create-secrets.sh         # Bootstrap secrets on a new VPS
+./scripts/preflight-secrets.sh      # Validate app.env (format, duplicates, slices)
+./scripts/split-secrets.sh          # Write per-service slices from app.env + allowlist
+./scripts/test-split-secrets.sh     # Allowlist / leak checks against a fixture
 ```
+
+There is no periodic rotator. Break-glass rotation is the stealth-token runbook
+in construct-docs (`deployment/stealth-token-keys-runbook.md` §6). Compose still
+reads `app.env` directly; `split-secrets.sh` is preflighted now and becomes the
+injection path in a follow-up.
+
+See `ops/secrets-allowlist.ini` and construct-docs
+`decisions/secrets-are-sliced-not-shared.md`.
 
 ## Observability
 
