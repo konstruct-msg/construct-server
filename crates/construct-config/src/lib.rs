@@ -17,6 +17,7 @@ mod messaging;
 mod microservices;
 mod redis;
 mod secret_hygiene;
+mod secret_needs;
 mod security;
 
 // Re-export all public types
@@ -36,6 +37,7 @@ pub use secret_hygiene::{
     INSECURE_CONTACT_HMAC, INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
     allow_insecure_secrets, is_production_environment,
 };
+pub use secret_needs::SecretNeeds;
 pub use security::{CsrfConfig, SecurityConfig};
 
 use anyhow::Result;
@@ -203,8 +205,21 @@ impl Config {
         format!("{}@{}", user_uuid, self.instance_domain)
     }
 
-    /// Load configuration from environment variables
+    /// Load configuration from environment variables.
+    ///
+    /// Requires every secret [`SecretNeeds::ALL`] names — the historical behaviour,
+    /// kept so tests and anything that has not switched still boot the same way.
+    /// Production services should call [`Self::from_env_for`] with their slice.
     pub fn from_env() -> Result<Self> {
+        Self::from_env_for(SecretNeeds::ALL)
+    }
+
+    /// Load configuration, requiring only the secrets this service uses.
+    ///
+    /// Present-but-malformed values still fail (`secret_hygiene::validate`) even
+    /// when `needs` does not name them. Absent + not needed → empty, never the
+    /// insecure default.
+    pub fn from_env_for(needs: SecretNeeds) -> Result<Self> {
         dotenvy::dotenv().ok();
 
         // Fail-fast on malformed secrets BEFORE building any sub-config, so a bad value
@@ -214,8 +229,8 @@ impl Config {
         secret_hygiene::validate()?;
 
         // Load sub-configurations
-        let logging = LoggingConfig::from_env()?;
-        let security = SecurityConfig::from_env()?;
+        let logging = LoggingConfig::from_env(needs.log_hash_salt)?;
+        let security = SecurityConfig::from_env(needs)?;
         let apns = ApnsConfig::from_env()?;
         let federation = FederationConfig::from_env()?;
         let db = DbConfig::from_env();
@@ -223,7 +238,7 @@ impl Config {
         let redis_key_prefixes = RedisKeyPrefixes::from_env();
         let redis_channels = RedisChannels::from_env();
         let media = MediaConfig::from_env();
-        let csrf = CsrfConfig::from_env()?;
+        let csrf = CsrfConfig::from_env(needs.csrf)?;
         let microservices = MicroservicesConfig::from_env();
         let messaging = MessagingConfig::from_env();
 
@@ -233,8 +248,8 @@ impl Config {
         let federation_enabled = federation.enabled;
 
         Ok(Self {
-            database_url: std::env::var("DATABASE_URL")?,
-            redis_url: std::env::var("REDIS_URL")?,
+            database_url: required_env("DATABASE_URL", needs.database_url)?,
+            redis_url: required_env("REDIS_URL", needs.redis_url)?,
 
             // JWT_SECRET is deprecated - RS256 is now required
             jwt_secret: std::env::var("JWT_SECRET").unwrap_or_default(),
@@ -486,6 +501,14 @@ impl Config {
             );
             value
         })
+    }
+}
+
+fn required_env(name: &str, required: bool) -> Result<String> {
+    match std::env::var(name) {
+        Ok(v) if !v.trim().is_empty() => Ok(v),
+        _ if required => anyhow::bail!("{name} is required but unset/empty"),
+        _ => Ok(String::new()),
     }
 }
 

@@ -139,7 +139,7 @@ impl KeyServiceContext {
             }
         };
 
-        let config = construct_config::Config::from_env()
+        let config = construct_config::Config::from_env_for(construct_config::SecretNeeds::KEY)
             .context("Failed to load config for AuthManager")?;
         let auth = Arc::new(
             construct_auth::AuthManager::new(&config)

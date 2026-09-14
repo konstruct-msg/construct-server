@@ -93,10 +93,19 @@ for f in "$OUT"/*.env; do
 done
 assert "unlisted keys stay out of every slice" test "$unlisted" -eq 0
 
-assert "media still gets DATABASE_URL (Config still requires it)" \
-  slice_has media DATABASE_URL
-assert "media still gets USERNAME_HMAC_SECRET (Config still requires it)" \
-  slice_has media USERNAME_HMAC_SECRET
+assert "media still gets DATABASE_URL" slice_has media DATABASE_URL
+assert "media lacks USERNAME_HMAC_SECRET" slice_lacks media USERNAME_HMAC_SECRET
+assert "media lacks CONTACT_HMAC_SECRET" slice_lacks media CONTACT_HMAC_SECRET
+assert "media lacks REQUEST_ENVELOPE_KEY" slice_lacks media REQUEST_ENVELOPE_KEY
+assert "media lacks LOG_HASH_SALT" slice_lacks media LOG_HASH_SALT
+assert "media lacks REDIS_URL" slice_lacks media REDIS_URL
+assert "gateway lacks DATABASE_URL" slice_lacks gateway DATABASE_URL
+assert "gateway lacks USERNAME_HMAC_SECRET" slice_lacks gateway USERNAME_HMAC_SECRET
+assert "gateway lacks REDIS_URL" slice_lacks gateway REDIS_URL
+assert "identity has USERNAME_HMAC_SECRET" slice_has identity USERNAME_HMAC_SECRET
+assert "identity has REQUEST_ENVELOPE_KEY" slice_has identity REQUEST_ENVELOPE_KEY
+assert "messaging has LOG_HASH_SALT" slice_has messaging LOG_HASH_SALT
+assert "signaling has CONTACT_HMAC_SECRET" slice_has signaling CONTACT_HMAC_SECRET
 assert "quic does not inherit config_common" slice_lacks quic DATABASE_URL
 assert "quic slice has no assignments" test -z "$(keys_of quic)"
 

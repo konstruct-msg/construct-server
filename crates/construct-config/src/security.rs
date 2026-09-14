@@ -82,7 +82,7 @@ pub struct SecurityConfig {
 }
 
 impl SecurityConfig {
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
+    pub(crate) fn from_env(needs: crate::SecretNeeds) -> anyhow::Result<Self> {
         Ok(Self {
             prekey_ttl_days: std::env::var("PREKEY_TTL_DAYS")
                 .ok()
@@ -196,16 +196,19 @@ impl SecurityConfig {
                 "USERNAME_HMAC_SECRET",
                 crate::secret_hygiene::INSECURE_USERNAME_HMAC,
                 32,
+                needs.username_hmac,
             )?,
             contact_hmac_secret: load_required_hex_secret(
                 "CONTACT_HMAC_SECRET",
                 crate::secret_hygiene::INSECURE_CONTACT_HMAC,
                 32,
+                needs.contact_hmac,
             )?,
             request_envelope_key: load_required_hex_secret(
                 "REQUEST_ENVELOPE_KEY",
                 crate::secret_hygiene::INSECURE_ENVELOPE_KEY,
                 32,
+                needs.request_envelope,
             )?,
         })
     }
@@ -215,11 +218,14 @@ impl SecurityConfig {
 ///
 /// - Present + valid → used
 /// - Present + malformed → hard error (never silently fall back)
-/// - Absent → insecure default only when not production OR `ALLOW_INSECURE_SECRETS`
+/// - Absent + `required` → insecure default only when not production OR `ALLOW_INSECURE_SECRETS`;
+///   production without the opt-in is a refused boot
+/// - Absent + not required → empty (never the insecure default)
 fn load_required_hex_secret(
     name: &str,
     insecure_default: &[u8],
     expected_len: usize,
+    required: bool,
 ) -> anyhow::Result<Vec<u8>> {
     use crate::secret_hygiene::{allow_insecure_secrets, is_production_environment};
 
@@ -245,6 +251,7 @@ fn load_required_hex_secret(
             }
             Ok(bytes)
         }
+        _ if !required => Ok(Vec::new()),
         _ => {
             if is_production_environment() && !allow_insecure_secrets() {
                 anyhow::bail!(
@@ -281,7 +288,18 @@ pub struct CsrfConfig {
 }
 
 impl CsrfConfig {
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
+    pub(crate) fn from_env(required: bool) -> anyhow::Result<Self> {
+        if !required {
+            return Ok(Self {
+                enabled: false,
+                secret: String::new(),
+                token_ttl_secs: 3600,
+                allowed_origins: Vec::new(),
+                cookie_name: "csrf_token".to_string(),
+                header_name: "X-CSRF-Token".to_string(),
+            });
+        }
+
         let is_production = crate::secret_hygiene::is_production_environment();
 
         let enabled = std::env::var("CSRF_ENABLED")

@@ -56,7 +56,7 @@ async fn health_check() -> impl IntoResponse {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load configuration
-    let config = Config::from_env()?;
+    let config = Config::from_env_for(construct_config::SecretNeeds::MESSAGING)?;
     let config = Arc::new(config);
 
     // Initialize tracing

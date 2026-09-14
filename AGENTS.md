@@ -169,7 +169,9 @@ Redis/internal errors. IDs are **32-char hex device ids**, not user UUIDs.
 - `secret_hygiene` fails boot on present-but-malformed secrets;
   `scripts/preflight-secrets.sh` before deploy (includes a dry-run of
   `scripts/split-secrets.sh` against `ops/secrets-allowlist.ini`).
-  Compose still injects the full `app.env`; slices are not live yet.
+  Production binaries load `Config::from_env_for(SecretNeeds::*)` so HMAC / DB
+  URLs are not required of services that do not use them. Compose still injects
+  the full `app.env`; slices are not live yet.
   Do not add Vault-on-box or encrypt `app.env` with a key that lives next to it
   (construct-docs `decisions/secrets-are-sliced-not-shared.md`).
 - Stream knobs / rate limits / PoW tiers: `construct-config` + env

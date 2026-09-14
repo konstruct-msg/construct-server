@@ -211,7 +211,7 @@ fn load_relays() -> std::collections::HashMap<String, RelayInfo> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Arc::new(Config::from_env()?);
+    let config = Arc::new(Config::from_env_for(construct_config::SecretNeeds::VEIL)?);
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(&config.rust_log))
