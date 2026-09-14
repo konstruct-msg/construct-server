@@ -213,6 +213,42 @@ groups:
             wallet replenish with its back-off cleared, so this is self-amplifying — check
             identity-service IssueTokens before assuming abuse.
 
+      # The failure that actually happened, and that the rule below could not see.
+      #
+      # On 2026-09-13 the intake credential stopped being attached for a stretch and
+      # every envelope paid a token instead. `unrecognised` stayed at zero throughout,
+      # because the tag was not *wrong* — it was not sent. The envelopes counted as
+      # `absent`, which is indistinguishable from ordinary traffic: `absent` is the
+      # untouched population plus every genuine stranger, and it is expected to stay
+      # non-zero forever.
+      #
+      # So this watches for a COLLAPSE rather than a level. There is no defensible
+      # threshold on the vouched share during a rollout — the true value could be
+      # anything — but "it worked this week and has done nothing for six hours while
+      # traffic kept arriving" is a statement about this deployment rather than a guess.
+      # The last clause is what keeps it quiet before the mechanism has ever worked.
+      - alert: IntakeCredentialsStoppedBeingUsed
+        expr: >
+          sum(increase(construct_msg_intake_check_total{result="vouched"}[6h])) == 0
+          and sum(increase(construct_msg_intake_check_total[6h])) > 0
+          and sum(increase(construct_msg_intake_check_total{result="vouched"}[7d])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vouched traffic has gone to zero while sealed sends continue"
+          description: >
+            Every sealed envelope is buying a Privacy Pass token again. Not an outage and
+            not a wrong credential — senders are attaching none. Look on the device side
+            first: `sealedTag` returns nil when we hold no intake key for the recipient,
+            and logs the reason. Measured 2026-09-11 on the first live pair: 39 vouched,
+            2 absent.
+
+            Replayed against the recorded series before being committed, which is the only
+            way to know a rule can fire at all: FIRING at 09-13 20:30Z and 23:00Z (the real
+            stretch), silent at 09-11 16:55Z (vouching), 09-14 07:30Z (vouching again) and
+            09-12 12:00Z (no traffic).
+
       # Not a Redis story. A jump in `unrecognised` means senders and this server
       # disagree about which intake tags are live — the epoch rollover at 00:00 UTC
       # is where that happens, and under enforce the cost of disagreeing is a
