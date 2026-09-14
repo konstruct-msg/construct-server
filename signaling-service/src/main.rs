@@ -155,36 +155,37 @@ async fn main() -> anyhow::Result<()> {
     // Load JWT auth manager for device_id cross-verification.
     // Auth is required for user/device identity (Bearer); Config keys must be present
     // in production. Degraded None only when Config fails in non-prod.
-    let auth: Option<Arc<AuthManager>> = match Config::from_env() {
-        Ok(config) => match AuthManager::new(&config) {
-            Ok(manager) => {
-                info!("JWT/PASETO device verification enabled");
-                Some(Arc::new(manager))
-            }
+    let auth: Option<Arc<AuthManager>> =
+        match Config::from_env_for(construct_config::SecretNeeds::SIGNALING) {
+            Ok(config) => match AuthManager::new(&config) {
+                Ok(manager) => {
+                    info!("JWT/PASETO device verification enabled");
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    if construct_config::is_production_environment() {
+                        return Err(e.context(
+                            "AuthManager init failed in production (set PASETO/JWT public keys)",
+                        ));
+                    }
+                    tracing::warn!(
+                        error = %e,
+                        "AuthManager init failed — auth disabled (dev only; set PASETO/JWT keys)"
+                    );
+                    None
+                }
+            },
             Err(e) => {
                 if construct_config::is_production_environment() {
-                    return Err(e.context(
-                        "AuthManager init failed in production (set PASETO/JWT public keys)",
-                    ));
+                    return Err(e.context("Config load failed in production"));
                 }
                 tracing::warn!(
                     error = %e,
-                    "AuthManager init failed — auth disabled (dev only; set PASETO/JWT keys)"
+                    "Config load failed — auth disabled (dev only)"
                 );
                 None
             }
-        },
-        Err(e) => {
-            if construct_config::is_production_environment() {
-                return Err(e.context("Config load failed in production"));
-            }
-            tracing::warn!(
-                error = %e,
-                "Config load failed — auth disabled (dev only)"
-            );
-            None
-        }
-    };
+        };
 
     let http_port: u16 = env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8091".into())

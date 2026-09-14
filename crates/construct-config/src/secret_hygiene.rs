@@ -162,8 +162,8 @@ fn require_hex_len(name: &str, value: &str, bytes: usize) -> Result<()> {
 ///
 /// - PRESENT-but-malformed values always error (wrong length/encoding/quotes).
 /// - Known insecure constants error unless `ALLOW_INSECURE_SECRETS=true`.
-/// - In production, required HMAC/envelope secrets must be present (handled in
-///   `SecurityConfig::from_env`); this function still rejects `changeme`/empty TURN.
+/// - HMAC / envelope / CSRF presence is per-service (`SecretNeeds` /
+///   `SecurityConfig::from_env`). This function still rejects `changeme` TURN.
 pub fn validate() -> Result<()> {
     // 1. No secret may carry literal surrounding quotes.
     for name in QUOTE_SENSITIVE {
@@ -201,22 +201,10 @@ pub fn validate() -> Result<()> {
         require_hex_len("REQUEST_ENVELOPE_KEY", &v, 32)?;
     }
 
-    // 3. Production: required privacy secrets must not be absent.
+    // Presence of HMAC / envelope / CSRF / DB URLs is per-service (`SecretNeeds`).
+    // This function only rejects present-but-malformed values, plus the media
+    // HMAC pair when MEDIA_ENABLED (media-service also fail-fasts itself).
     if is_production_environment() && !allow_insecure_secrets() {
-        for name in [
-            "USERNAME_HMAC_SECRET",
-            "CONTACT_HMAC_SECRET",
-            "REQUEST_ENVELOPE_KEY",
-        ] {
-            if present(name).is_none() {
-                bail!(
-                    "{name} is REQUIRED in production. Generate with: openssl rand -hex 32. \
-                     For local-only insecure defaults set ALLOW_INSECURE_SECRETS=true."
-                );
-            }
-        }
-        // Media HMAC: either alias is enough; media-service also fail-fasts itself.
-        // Only enforce when media appears configured (MEDIA_ENABLED or either secret set).
         let media_enabled = present("MEDIA_ENABLED")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);

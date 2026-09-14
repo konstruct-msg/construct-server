@@ -11,7 +11,7 @@ pub struct LoggingConfig {
 }
 
 impl LoggingConfig {
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
+    pub(crate) fn from_env(require_salt: bool) -> anyhow::Result<Self> {
         Ok(Self {
             enable_message_metadata: std::env::var("LOG_MESSAGE_METADATA")
                 .unwrap_or_else(|_| "false".to_string())
@@ -22,12 +22,14 @@ impl LoggingConfig {
                 .parse()
                 .unwrap_or(false),
             hash_salt: {
-                let salt = std::env::var("LOG_HASH_SALT")
-                    .unwrap_or_else(|_| "default-salt-please-change".to_string());
-                if salt.is_empty() || salt == "default-salt-please-change" {
+                let salt = std::env::var("LOG_HASH_SALT").unwrap_or_default();
+                if !require_salt {
+                    salt
+                } else if salt.is_empty() || salt == "default-salt-please-change" {
                     anyhow::bail!("LOG_HASH_SALT must be set to a unique, secret value");
+                } else {
+                    salt
                 }
-                salt
             },
         })
     }

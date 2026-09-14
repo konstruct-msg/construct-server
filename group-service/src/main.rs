@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let config = Config::from_env()?;
+    let config = Config::from_env_for(construct_config::SecretNeeds::GROUP)?;
     let auth = Arc::new(AuthManager::new(&config).map_err(|e| {
         anyhow::anyhow!("Failed to initialize AuthManager (set PASETO/JWT public keys): {e}")
     })?);

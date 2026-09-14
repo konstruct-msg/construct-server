@@ -538,7 +538,7 @@ async fn run_cleanup_loop(pool: Arc<DbPool>, config: Arc<MediaConfig>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let main_config = Config::from_env()?;
+    let main_config = Config::from_env_for(construct_config::SecretNeeds::MEDIA)?;
     let media_config = Arc::new(MediaConfig::from_env().context(
         "Invalid media configuration — set MEDIA_UPLOAD_TOKEN_SECRET or MEDIA_HMAC_SECRET",
     )?);

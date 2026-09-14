@@ -2919,7 +2919,7 @@ fn verify_spk_signature(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::from_env()?;
+    let config = Config::from_env_for(construct_config::SecretNeeds::IDENTITY)?;
     let config = Arc::new(config);
 
     tracing_subscriber::registry()

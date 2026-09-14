@@ -99,7 +99,7 @@ fn derive_token_encryption_key(config: &Config) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::from_env()?;
+    let config = Config::from_env_for(construct_config::SecretNeeds::GATEWAY)?;
     let config = Arc::new(config);
 
     tracing_subscriber::registry()
