@@ -189,6 +189,9 @@ mod tests {
             "TOKEN_ISSUER_KEY",
             "PASETO_PRIVATE_KEY",
             "APNS_ENABLED",
+            "APNS_DEVICE_TOKEN_ENCRYPTION_KEY",
+            "BUNDLE_SIGNING_KEY",
+            "BUNDLE_SIGNING_PUBLIC_KEY",
             "MEDIA_ENABLED",
         ]
     }
@@ -210,6 +213,12 @@ mod tests {
         env.blank("PASETO_PRIVATE_KEY");
         env.blank("TOKEN_ISSUER_KEY");
         env.blank("SERVER_SIGNING_KEY");
+        env.blank("BUNDLE_SIGNING_KEY");
+        env.blank("BUNDLE_SIGNING_PUBLIC_KEY");
+        // Empty, not a valid-looking leftover: GitHub Actions YAML coerced an
+        // unquoted 64-zero literal to integer `0`, and hygiene then failed
+        // "must be exactly 64 hex chars" before SecretNeeds could run.
+        env.blank("APNS_DEVICE_TOKEN_ENCRYPTION_KEY");
     }
 
     #[test]
