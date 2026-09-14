@@ -151,7 +151,10 @@ enum ContentType {
   // Deprecated for SDP: use CONTENT_TYPE_CALL_SIGNAL for E2EE-wrapped call offer/answer.
   CONTENT_TYPE_WEBRTC_SIGNAL = 10;
 
-  // Presence updates (typing, online, receipts)
+  // Presence updates (typing, online).
+  // Not produced or consumed by the iOS client: there is no typing indicator and no online
+  // status by design, and since 2026-09-14 the client subscribes with include_presence=false.
+  // Kept so the enum value is never reused.
   CONTENT_TYPE_PRESENCE = 11;
 
   // E2EE-wrapped call signal (Double Ratchet).
@@ -168,12 +171,14 @@ enum ContentType {
 
   // DELIVERY_RECEIPT — end-to-end encrypted delivery confirmation (Variant 2).
   // Sent from recipient to original sender as a regular DR message with content_type=14.
-  // Payload is JSON: {"type":"delivery_receipt","message_ids":["<uuid>",...]}
+  // Payload is a binary `signaling.v1.DeliveryReceipt` (the JSON form this comment used to
+  // describe is gone; `parseBinaryReceipt` is the only reader).
   // Hides communication metadata from the server (unlike the legacy relay-receipt path).
   // If stealth mode is active, sealed sender is applied — server cannot correlate
   // the receipt sender with the original sealed message recipient.
-  // Backward compat: both this and the legacy stream receipt are sent; receiving side
-  // deduplicates (guard message.deliveryStatus != .delivered).
+  // This is the only receipt path. The legacy relay receipt on the message stream was removed
+  // on 2026-08-02 with `sendReceipt`; nothing dual-sends any more. The receiving side still
+  // guards on `deliveryStatus != .delivered`, which now only absorbs redelivery.
   CONTENT_TYPE_DELIVERY_RECEIPT = 14;
 
   // === Control Messages ===
