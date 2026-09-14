@@ -3,6 +3,18 @@
 	admin 127.0.0.1:2019
 }
 
+# See ops/Caddyfile: flush_interval -1 only on MessageStream, not unary.
+(messaging_grpc) {
+	handle /shared.proto.services.v1.MessagingService/MessageStream {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+}
+
 # ── Lean Relay Caddyfile ─────────────────────────────────────────────
 # Replace RELAY_DOMAIN with your actual domain (e.g., relay.example.com).
 # TLS certificates are auto-obtained from Let's Encrypt.
@@ -45,11 +57,7 @@ RELAY_DOMAIN {
 	handle /shared.proto.services.v1.InviteService/* {
 		reverse_proxy h2c://identity:50051
 	}
-	handle /shared.proto.services.v1.MessagingService/* {
-		reverse_proxy h2c://messaging:50053 {
-			flush_interval -1
-		}
-	}
+	import messaging_grpc
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}
@@ -102,11 +110,7 @@ RELAY_DOMAIN {
 	handle /shared.proto.services.v1.InviteService/* {
 		reverse_proxy h2c://identity:50051
 	}
-	handle /shared.proto.services.v1.MessagingService/* {
-		reverse_proxy h2c://messaging:50053 {
-			flush_interval -1
-		}
-	}
+	import messaging_grpc
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}

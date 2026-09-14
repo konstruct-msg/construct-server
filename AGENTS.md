@@ -109,6 +109,10 @@ list). Routing is `GET user:{user}:server_instance_id`.
   headers alone are never trusted.
 - **Caddy does not inject `x-user-id`.** Gateway `:9443` is veil/obfs4 proxy only, not JWT.
   Each service validates via `construct-auth::AuthManager`. File: `ops/Caddyfile`.
+  `flush_interval -1` is **MessageStream only**. Unary MessagingService RPCs must
+  not flush immediately — that emits DATA+END_STREAM and grpc-swift reports
+  "EOS alongside a data frame" instead of `privacy_pass:…`. Recreate caddy after
+  Caddyfile edits (`up -d --force-recreate caddy`); it is a single-file bind mount.
 - Refresh reverse index: `user_tokens:{user}` → `RevokeAll` is O(n_tokens), not O(all keys).
 
 ---

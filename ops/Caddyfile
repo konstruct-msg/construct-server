@@ -21,6 +21,27 @@
 	}
 }
 
+# Unary gRPC must not use flush_interval -1. Immediate flush on a unary
+# response lets Caddy emit DATA with END_STREAM before tonic's trailers
+# (grpc-status). grpc-swift GRPCCore then reports "Server sent EOS alongside
+# a data frame, but server is only allowed to close by sending status and
+# trailers" and the real status is lost. Trailers-only errors (e.g. first
+# privacy_pass:missing_token) still parse; a retry that carries a body
+# (SendMessageResponse, or any unary OK) hits this.
+#
+# MessageStream is bidi and must flush immediately so HeartbeatAck is not
+# buffered. handle is first-match: MessageStream before the wildcard.
+(messaging_grpc) {
+	handle /shared.proto.services.v1.MessagingService/MessageStream {
+		reverse_proxy h2c://messaging:50053 {
+			flush_interval -1
+		}
+	}
+	handle /shared.proto.services.v1.MessagingService/* {
+		reverse_proxy h2c://messaging:50053
+	}
+}
+
 # Prometheus scrape target, reachable only from the compose `internal` network —
 # no host port is published for it.
 #
@@ -66,11 +87,7 @@ ams.konstruct.cc {
 	handle /shared.proto.services.v1.InviteService/* {
 		reverse_proxy h2c://identity:50051
 	}
-	handle /shared.proto.services.v1.MessagingService/* {
-		reverse_proxy h2c://messaging:50053 {
-			flush_interval -1
-		}
-	}
+	import messaging_grpc
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}
@@ -140,11 +157,7 @@ ams.konstruct.cc {
 	handle /shared.proto.services.v1.InviteService/* {
 		reverse_proxy h2c://identity:50051
 	}
-	handle /shared.proto.services.v1.MessagingService/* {
-		reverse_proxy h2c://messaging:50053 {
-			flush_interval -1
-		}
-	}
+	import messaging_grpc
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}
