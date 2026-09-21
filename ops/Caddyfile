@@ -103,6 +103,10 @@ ams.konstruct.cc {
 	handle /shared.proto.services.v1.MediaService/* {
 		reverse_proxy h2c://media:50056
 	}
+	# Public sticker packs — hosted by media-service on its port, unauthenticated by design.
+	handle /shared.proto.services.v1.StickerService/* {
+		reverse_proxy h2c://media:50056
+	}
 	handle /shared.proto.services.v1.MlsService/* {
 		reverse_proxy h2c://group:50058
 	}
@@ -171,6 +175,10 @@ ams.konstruct.cc {
 		reverse_proxy h2c://key:50057
 	}
 	handle /shared.proto.services.v1.MediaService/* {
+		reverse_proxy h2c://media:50056
+	}
+	# Public sticker packs — hosted by media-service on its port, unauthenticated by design.
+	handle /shared.proto.services.v1.StickerService/* {
 		reverse_proxy h2c://media:50056
 	}
 	handle /shared.proto.services.v1.MlsService/* {

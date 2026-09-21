@@ -81,6 +81,8 @@ COPY --from=builder --chmod=+x /app/target/release/gateway /usr/local/bin/gatewa
 COPY --from=builder --chmod=+x /app/target/release/identity-service /usr/local/bin/identity-service
 COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/bin/messaging-service
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
+# Operator tool, not a service: signs a built sticker pack and inserts it (media-service/src/bin).
+COPY --from=builder --chmod=+x /app/target/release/sticker-publish /usr/local/bin/sticker-publish
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 COPY --from=builder --chmod=+x /app/target/release/group-service /usr/local/bin/group-service
 COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service

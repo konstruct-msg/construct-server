@@ -2498,6 +2498,7 @@ dependencies = [
  "ed25519-compact",
  "hex",
  "hmac 0.13.0",
+ "prost",
  "rand 0.10.1",
  "serde",
  "serde_json",

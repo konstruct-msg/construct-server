@@ -8,4 +8,6 @@
 pub mod config;
 pub mod core;
 pub mod rate_limit;
+pub mod sticker_grpc;
+pub mod stickers;
 pub mod utils;

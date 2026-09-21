@@ -25,6 +25,10 @@ pub struct MediaConfig {
     pub debug: bool,
     /// Max GenerateUploadToken calls per user per hour
     pub rate_limit_per_hour: u32,
+    /// Max StickerService calls per client IP per hour, all four RPCs together. Generous on
+    /// purpose: a device fetches a pack once, ever, so the only thing this bounds is bandwidth
+    /// from something that is not a client. NAT puts many devices behind one IP.
+    pub sticker_rate_limit_per_hour: u32,
 }
 
 impl Default for MediaConfig {
@@ -38,6 +42,7 @@ impl Default for MediaConfig {
             bind_address: "0.0.0.0:8082".to_string(),
             debug: false,
             rate_limit_per_hour: 50,
+            sticker_rate_limit_per_hour: 600,
         }
     }
 }
@@ -76,6 +81,10 @@ impl MediaConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(50),
+            sticker_rate_limit_per_hour: std::env::var("STICKER_RATE_LIMIT_PER_HOUR")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600),
         })
     }
 }
