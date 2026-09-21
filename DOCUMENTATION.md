@@ -257,6 +257,9 @@ his client subscribes with `since_cursor` — the Redis stream ID of the last me
 *durably persisted*. The server:
 
 1. reads **forward** from that cursor (`read_mailbox_messages` — side-effect-free dual-read);
+   the user stream is read from `StreamCatchupState::user_stream_id` when that is ahead —
+   a server-side position that moves past entries the reader examined and skipped (a
+   sibling device's), never told to the client;
 2. does **not** delete from the client cursor. Client-asserted `XTRIM` caused silent loss
    (paging/cancel races; multi-device shared mailbox). See construct-docs
    `decisions/minimal-server-delivery.md` (Accepted).

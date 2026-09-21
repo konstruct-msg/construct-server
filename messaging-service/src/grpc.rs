@@ -246,14 +246,15 @@ impl MessagingService for MessagingGrpcService {
                                 last_stream_id = ?catchup.last_stream_id,
                                 "Subscribe grace elapsed without Subscribe — offline catch-up"
                             );
+                            let resume_with_cursor = catchup.subscribe_with_cursor_seen;
                             if let Err(e) = poll_messages(
                                 &mut stream_queue,
                                 &context.config.messaging,
                                 uid,
                                 device_id.as_deref(),
-                                &mut catchup.last_stream_id,
+                                &mut catchup,
                                 &tx,
-                                catchup.subscribe_with_cursor_seen,
+                                resume_with_cursor,
                             )
                             .await
                             {
@@ -271,7 +272,7 @@ impl MessagingService for MessagingGrpcService {
                                 &context.config.messaging,
                                 uid,
                                 device_id.as_deref(),
-                                &mut catchup.last_stream_id,
+                                &mut catchup,
                                 &tx,
                                 false, // routine wakeup, not a resume catch-up
                             )
@@ -288,7 +289,7 @@ impl MessagingService for MessagingGrpcService {
                                 &context.config.messaging,
                                 uid,
                                 device_id.as_deref(),
-                                &mut catchup.last_stream_id,
+                                &mut catchup,
                                 &tx,
                                 false, // fallback tick, not a resume catch-up
                             ).await {
@@ -886,7 +887,7 @@ impl MessagingService for MessagingGrpcService {
         let page = {
             let mut queue = self.context.queue.lock().await;
             queue
-                .read_mailbox_messages(&user_id, device_id.as_deref(), since, limit)
+                .read_mailbox_messages(&user_id, device_id.as_deref(), since, since, limit)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };

@@ -26,6 +26,13 @@ pub(crate) const SUBSCRIBE_CATCHUP_GRACE: std::time::Duration =
 pub(crate) struct StreamCatchupState {
     /// Last Redis stream id used as exclusive XREAD start (resume position).
     pub last_stream_id: Option<String>,
+    /// Where the legacy **user** stream is read from, when it is ahead of
+    /// `last_stream_id`. Server-side only — the client is never told it, so a reconnect
+    /// starts both streams from the client's one cursor and re-examines at most one page.
+    /// Moves on what a read *examined*, not on what it delivered: the user stream holds
+    /// a sibling device's entries, which this reader skips and would otherwise re-read
+    /// on every poll (`MailboxPage::user_examined_through`).
+    pub user_stream_id: Option<String>,
     /// Subscribe on this connection carried a valid `since_cursor` (S2 canary).
     pub subscribe_with_cursor_seen: bool,
     /// First offline catch-up completed (Subscribe handler or grace timer).
@@ -458,14 +465,15 @@ pub(crate) async fn handle_stream_request(
             if !catchup.initial_catchup_done
                 && let Some(uid) = *user_id
             {
+                let resume_with_cursor = catchup.subscribe_with_cursor_seen;
                 if let Err(e) = poll_messages(
                     stream_queue,
                     &context.config.messaging,
                     uid,
                     device_id,
-                    &mut catchup.last_stream_id,
+                    catchup,
                     tx,
-                    catchup.subscribe_with_cursor_seen,
+                    resume_with_cursor,
                 )
                 .await
                 {
@@ -550,6 +558,20 @@ fn apply_since_cursor(cursor: &str, last_stream_id: &mut Option<String>) -> bool
 /// Compare two Redis stream IDs lexicographically by (timestamp, sequence).
 /// Returns `Ordering::Greater` if `a` is strictly newer than `b`.
 /// IDs with unexpected formats are treated as "not greater" (safe fallback).
+/// Where the user stream is read from: whichever of the examined-through position and
+/// the delivery cursor is ahead. A resume cursor from the client may have jumped
+/// `last_stream_id` past the examined-through position, and a delivery always has.
+fn user_read_position<'a>(
+    user_stream_id: Option<&'a str>,
+    last_stream_id: Option<&'a str>,
+) -> Option<&'a str> {
+    match (user_stream_id, last_stream_id) {
+        (Some(u), Some(d)) if compare_stream_ids(u, d) == std::cmp::Ordering::Greater => Some(u),
+        (Some(u), None) => Some(u),
+        (_, d) => d,
+    }
+}
+
 fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(id: &str) -> Option<(u64, u64)> {
         if let Some((ts, seq)) = id.split_once('-') {
@@ -647,7 +669,7 @@ pub(crate) async fn poll_messages(
     config: &construct_config::MessagingConfig,
     user_id: uuid::Uuid,
     device_id: Option<&str>,
-    last_stream_id: &mut Option<String>,
+    catchup: &mut StreamCatchupState,
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     // True only for the catch-up poll that follows a resume. The wakeup and fallback-tick
     // callers pass false: an empty read there is the normal idle case, and reporting it turned
@@ -656,6 +678,11 @@ pub(crate) async fn poll_messages(
 ) -> anyhow::Result<()> {
     let user_id_str = user_id.to_string();
     let limit = 50;
+    let StreamCatchupState {
+        last_stream_id,
+        user_stream_id,
+        ..
+    } = catchup;
 
     if last_stream_id.is_none() && is_resume_catchup {
         tracing::warn!(
@@ -671,8 +698,15 @@ pub(crate) async fn poll_messages(
     } else {
         "user_only"
     };
+    let user_since = user_read_position(user_stream_id.as_deref(), last_stream_id.as_deref());
     let page = queue
-        .read_mailbox_messages(&user_id_str, device_id, last_stream_id.as_deref(), limit)
+        .read_mailbox_messages(
+            &user_id_str,
+            device_id,
+            last_stream_id.as_deref(),
+            user_since,
+            limit,
+        )
         .await?;
     let messages = page.entries;
     construct_metrics::MSG_MAILBOX_READ_TOTAL
@@ -772,6 +806,12 @@ pub(crate) async fn poll_messages(
             "poll_messages: pushed message to gRPC stream"
         );
         *last_stream_id = Some(stream_id);
+    }
+
+    // Only once every entry above is delivered: an early return above leaves both
+    // positions where the next poll must start from.
+    if page.user_examined_through.is_some() {
+        *user_stream_id = page.user_examined_through;
     }
 
     Ok(())
@@ -903,6 +943,27 @@ mod tests {
             "d22fc8d6-21eb-42dd-9739-baf26fbe67bf"
         ));
         assert!(!is_valid_redis_stream_cursor("not-a-cursor"));
+    }
+
+    /// The user stream is read from the examined-through position only while it is ahead
+    /// of the delivery cursor; a delivery or a client resume that passes it takes over.
+    #[test]
+    fn user_stream_reads_from_whichever_position_is_ahead() {
+        assert_eq!(user_read_position(None, None), None);
+        assert_eq!(user_read_position(Some("500-0"), None), Some("500-0"));
+        assert_eq!(user_read_position(None, Some("300-0")), Some("300-0"));
+        assert_eq!(
+            user_read_position(Some("500-0"), Some("300-0")),
+            Some("500-0")
+        );
+        assert_eq!(
+            user_read_position(Some("500-0"), Some("700-0")),
+            Some("700-0")
+        );
+        assert_eq!(
+            user_read_position(Some("500-0"), Some("500-0")),
+            Some("500-0")
+        );
     }
 
     #[test]

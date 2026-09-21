@@ -830,11 +830,21 @@ impl MessageQueue {
     /// Stream ids from the two keys are not the same sequence, but both are
     /// millisecond-based; a client cursor from either works as a shared watermark.
     /// See construct-docs `decisions/minimal-server-delivery.md` step 3.
+    /// `since_id` is the reader's resume position — the device stream's, and the one the
+    /// client is told. `user_since_id` is where the **user** stream is read from; a caller
+    /// that keeps no separate position passes `since_id` again. The two are separate
+    /// because the user stream holds entries this reader examines and never delivers
+    /// (a sibling's — see `merge_mailbox_pages`), and a cursor that moves only on delivery
+    /// never moves past them: on 2026-09-21 a two-device stand read the same eight
+    /// sibling entries on every 5-second poll for as long as the reader had nothing of
+    /// its own to receive, and counted them each time. `MailboxPage::user_examined_through`
+    /// is what the caller stores to move the user position on its own.
     pub async fn read_mailbox_messages(
         &mut self,
         user_id: &str,
         device_id: Option<&str>,
         since_id: Option<&str>,
+        user_since_id: Option<&str>,
         count: usize,
     ) -> Result<MailboxPage> {
         let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
@@ -847,6 +857,7 @@ impl MessageQueue {
                 entries,
                 user_only: 0,
                 sibling_skipped: 0,
+                user_examined_through: None,
             });
         };
 
@@ -856,7 +867,7 @@ impl MessageQueue {
             .read_device_messages_from_stream(user_id, device_id, since_id, per_source)
             .await?;
         let user_msgs = self
-            .read_user_messages_from_stream(user_id, None, since_id, per_source)
+            .read_user_messages_from_stream(user_id, None, user_since_id, per_source)
             .await?;
 
         Ok(merge_mailbox_pages(
@@ -972,6 +983,13 @@ pub struct MailboxPage {
     /// page. They live in that device's stream by construction, so they are neither a
     /// delivery for this reader nor evidence about coverage — see `merge_mailbox_pages`.
     pub sibling_skipped: usize,
+    /// The user-stream id through which this read examined **every** entry — delivered
+    /// it, deduplicated it against the device copy, or skipped it as a sibling's — so the
+    /// caller may read the user stream from here next time without re-examining any of
+    /// them. `None` when the page was cut by `count` (an examined entry above the cut was
+    /// not delivered and must be read again) or when the user stream had nothing to
+    /// examine. Never compared with a device-stream id: it positions the user stream only.
+    pub user_examined_through: Option<String>,
 }
 
 /// Merge device + user mailbox pages for transitional dual-read.
@@ -1010,6 +1028,9 @@ fn merge_mailbox_pages(
         HashMap::new();
     let mut orphans: Vec<(String, Option<construct_message::types::MessageEnvelope>)> = Vec::new();
     let mut sibling_skipped = 0usize;
+    // The last user entry examined, wherever it goes below — kept, overwritten by the
+    // device copy, skipped, or an orphan. XREAD returns in id order, so it is the page's last.
+    let user_last_id = user_msgs.last().map(|(id, _)| id.clone());
 
     // User first, then device overwrites — device wins on collision.
     for (stream_id, envelope) in user_msgs.into_iter() {
@@ -1045,6 +1066,7 @@ fn merge_mailbox_pages(
             .collect();
 
     merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
+    let cut_by_count = merged.len() > count;
     merged.truncate(count);
 
     // Counted after truncation: only entries actually handed to the client are evidence.
@@ -1058,6 +1080,7 @@ fn merge_mailbox_pages(
         entries: merged,
         user_only,
         sibling_skipped,
+        user_examined_through: if cut_by_count { None } else { user_last_id },
     }
 }
 
@@ -1228,6 +1251,43 @@ mod mailbox_merge_tests {
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.user_only, 1);
         assert_eq!(page.sibling_skipped, 0);
+    }
+
+    /// The reader has nothing of its own; the user stream holds only a sibling's entries.
+    /// Nothing is delivered, so the delivery cursor cannot move — but the user stream was
+    /// examined through its last entry, and the caller is told so. Without this the same
+    /// entries are read, decoded and counted on every poll until the reader's next message.
+    #[test]
+    fn a_page_of_only_sibling_entries_is_examined_through_its_last_id() {
+        let user = vec![
+            ("100-0".to_string(), Some(env_for("to-b-1", "b"))),
+            ("200-0".to_string(), Some(env_for("to-b-2", "b"))),
+        ];
+        let page = merge_mailbox_pages(vec![], user, 10, "a");
+        assert!(page.entries.is_empty());
+        assert_eq!(page.sibling_skipped, 2);
+        assert_eq!(page.user_examined_through.as_deref(), Some("200-0"));
+    }
+
+    /// A page cut by `count` leaves examined entries undelivered above the cut. Claiming
+    /// the user stream examined through its last id would skip them next time; the claim
+    /// is withheld and the delivery cursor alone positions the next read.
+    #[test]
+    fn a_page_cut_by_count_does_not_claim_the_user_stream_examined() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("first"))),
+            ("200-0".to_string(), Some(env("second"))),
+            ("300-0".to_string(), Some(env_for("to-b", "b"))),
+        ];
+        let page = merge_mailbox_pages(vec![], user, 1, "a");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.user_examined_through, None);
+
+        let nothing = merge_mailbox_pages(vec![], vec![], 10, "a");
+        assert_eq!(
+            nothing.user_examined_through, None,
+            "an empty user page examined nothing and moves nothing"
+        );
     }
 
     /// `unknown_device` fallback: the envelope names a device that was not in the active
