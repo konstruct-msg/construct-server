@@ -50,7 +50,9 @@ send → XADD delivery:offline:{user}           (legacy; gated by MSG_MAILBOX_US
 
 stream → SUBSCRIBE inbox:wakeup:{user}
        → read_mailbox_messages (dual-read: device+user when claims.device_id present;
-         user-only for legacy tokens; dedupe by message_id, prefer device)
+         user-only for legacy tokens; dedupe by message_id, prefer device; a user-stream
+         entry whose recipient_device names ANOTHER device is skipped, not delivered,
+         not counted — it is in that device's stream already)
 ```
 
 **Invariants (do not regress):**
@@ -65,6 +67,10 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 4. **Step 4 cutover:** `MSG_MAILBOX_USER_WRITE` (default `1`). Gate =
    `construct_msg_mailbox_user_only_entries_total` **flat zero for 7 days**
    (not `mailbox_read_total{mode=…}` — that only proves clients send `device_id`).
+   Until 2026-09-21 the gate was unreachable for any two-device account: the merge read
+   the user stream whole, so every envelope named to a sibling counted as `user_only`
+   on the other device's read (and reached it). Those are now skipped at the merge and
+   counted as `construct_msg_mailbox_sibling_entries_skipped_total` instead.
    Rollback = set flag back to `1`. With flag off, reaching no stream is a **hard
    error**, never silent `Ok`.
 5. **Serialization:** `rmp_serde::encode::to_vec_named` write /

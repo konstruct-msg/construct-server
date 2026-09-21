@@ -169,7 +169,8 @@ Client → MessagingService::MessageStream
         └─► messaging-service/src/stream.rs
             pub(crate) async fn poll_messages(...)
               ├─ read_mailbox_messages (dual-read when token has device_id:
-              │     device stream + user stream, dedupe by message_id, prefer device;
+              │     device stream + user stream, dedupe by message_id, prefer device,
+              │     skip user-stream entries named to another device;
               │     legacy tokens without device_id → user stream only; no delete)
               ├─► messaging-service/src/envelope.rs
                │   pub(crate) fn convert_envelope_to_proto(...)

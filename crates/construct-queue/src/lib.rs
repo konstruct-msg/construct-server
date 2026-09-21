@@ -846,6 +846,7 @@ impl MessageQueue {
             return Ok(MailboxPage {
                 entries,
                 user_only: 0,
+                sibling_skipped: 0,
             });
         };
 
@@ -858,7 +859,12 @@ impl MessageQueue {
             .read_user_messages_from_stream(user_id, None, since_id, per_source)
             .await?;
 
-        Ok(merge_mailbox_pages(device_msgs, user_msgs, count))
+        Ok(merge_mailbox_pages(
+            device_msgs,
+            user_msgs,
+            count,
+            device_id,
+        ))
     }
 
     /// Store the sender_id of a message for receipt routing.
@@ -962,6 +968,10 @@ pub struct MailboxPage {
     /// user stream off. While this stays above zero, flipping the flag drops exactly these
     /// messages.
     pub user_only: usize,
+    /// User-stream entries named to **another** device of this account, left out of the
+    /// page. They live in that device's stream by construction, so they are neither a
+    /// delivery for this reader nor evidence about coverage — see `merge_mailbox_pages`.
+    pub sibling_skipped: usize,
 }
 
 /// Merge device + user mailbox pages for transitional dual-read.
@@ -969,10 +979,25 @@ pub struct MailboxPage {
 /// Prefer the device copy when `message_id` collides. Order by Redis stream id
 /// (millisecond watermark). Corrupt/`None` envelopes keep their stream ids for
 /// cursor advance and never collide on message_id.
+///
+/// **A user-stream entry named to a different device is not this reader's.** The
+/// legacy user stream holds every envelope of the account, including the ones
+/// `dispatch_envelope` routed to exactly one device by `recipient_device`. Read whole,
+/// it handed each device the envelopes of its siblings too — the 2026-09-21 baseline
+/// (construct-docs `sessions/2026-09-21-multidevice-baseline.md`) measured every
+/// envelope of a two-device account arriving on both devices, each unsealing the
+/// other's copy far enough to drop it — and it counted every one of them as
+/// `user_only`, so the cutover gate could never reach zero for an account with two
+/// devices. Such an entry is in the named device's own stream already; it is skipped
+/// here and counted separately. An entry named to *this* device that the device
+/// stream lacks is still `user_only`: that is the incompleteness the gate exists for.
+/// An unnamed entry (a sender that predates `recipient_device`, or a server-generated
+/// envelope) is for every device and is merged as before.
 fn merge_mailbox_pages(
     device_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     user_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     count: usize,
+    reader_device: &str,
 ) -> MailboxPage {
     use std::collections::{HashMap, HashSet};
 
@@ -984,9 +1009,26 @@ fn merge_mailbox_pages(
     let mut by_message_id: HashMap<String, (String, construct_message::types::MessageEnvelope)> =
         HashMap::new();
     let mut orphans: Vec<(String, Option<construct_message::types::MessageEnvelope>)> = Vec::new();
+    let mut sibling_skipped = 0usize;
 
     // User first, then device overwrites — device wins on collision.
-    for (stream_id, envelope) in user_msgs.into_iter().chain(device_msgs) {
+    for (stream_id, envelope) in user_msgs.into_iter() {
+        match envelope {
+            Some(env) => {
+                if env
+                    .recipient_device
+                    .as_deref()
+                    .is_some_and(|named| named != reader_device)
+                {
+                    sibling_skipped += 1;
+                    continue;
+                }
+                by_message_id.insert(env.message_id.clone(), (stream_id, env));
+            }
+            None => orphans.push((stream_id, None)),
+        }
+    }
+    for (stream_id, envelope) in device_msgs {
         match envelope {
             Some(env) => {
                 by_message_id.insert(env.message_id.clone(), (stream_id, env));
@@ -1015,6 +1057,7 @@ fn merge_mailbox_pages(
     MailboxPage {
         entries: merged,
         user_only,
+        sibling_skipped,
     }
 }
 
@@ -1073,7 +1116,7 @@ mod mailbox_merge_tests {
             ("150-0".to_string(), Some(env("m1"))),
             ("200-0".to_string(), Some(env("m3"))),
         ];
-        let page = merge_mailbox_pages(device, user, 10);
+        let page = merge_mailbox_pages(device, user, 10, "dev");
         let ids: Vec<_> = page
             .entries
             .iter()
@@ -1093,7 +1136,7 @@ mod mailbox_merge_tests {
             ("200-0".to_string(), Some(env("b"))),
             ("300-0".to_string(), Some(env("c"))),
         ];
-        let page = merge_mailbox_pages(vec![], user, 2);
+        let page = merge_mailbox_pages(vec![], user, 2, "dev");
         assert_eq!(page.entries.len(), 2);
         assert_eq!(page.entries[0].1.as_ref().unwrap().message_id, "a");
         assert_eq!(page.entries[1].1.as_ref().unwrap().message_id, "b");
@@ -1112,7 +1155,7 @@ mod mailbox_merge_tests {
             ("100-0".to_string(), Some(env("a"))),
             ("200-0".to_string(), Some(env("b"))),
         ];
-        assert_eq!(merge_mailbox_pages(device, user, 10).user_only, 0);
+        assert_eq!(merge_mailbox_pages(device, user, 10, "dev").user_only, 0);
     }
 
     /// Entries dropped by the count cap are re-read on the next poll, so counting them
@@ -1130,11 +1173,74 @@ mod mailbox_merge_tests {
             ("400-0".to_string(), Some(env("d"))),
         ];
         let device = vec![("100-0".to_string(), Some(env("a")))];
-        let page = merge_mailbox_pages(device, user, 3);
+        let page = merge_mailbox_pages(device, user, 3, "dev");
         assert_eq!(page.entries.len(), 3);
         assert_eq!(
             page.user_only, 2,
             "delivered `b` and `c` count, `d` does not"
         );
+    }
+
+    fn env_for(id: &str, device: &str) -> MessageEnvelope {
+        let mut e = env(id);
+        e.recipient_device = Some(device.to_string());
+        e
+    }
+
+    /// The 2026-09-21 baseline, as a table: an account with devices `a` and `b`, three
+    /// envelopes named to `b`, one named to `a`, one unnamed. Reader `a` must get its own
+    /// and the unnamed one, never `b`'s — and `b`'s must not count as coverage failures,
+    /// which is what kept the cutover gate red on every two-device account.
+    #[test]
+    fn user_stream_entries_named_to_a_sibling_are_neither_delivered_nor_counted() {
+        let user = vec![
+            ("100-0".to_string(), Some(env_for("to-b-1", "b"))),
+            ("200-0".to_string(), Some(env_for("to-a", "a"))),
+            ("300-0".to_string(), Some(env_for("to-b-2", "b"))),
+            ("400-0".to_string(), Some(env("unnamed"))),
+            ("500-0".to_string(), Some(env_for("to-b-3", "b"))),
+        ];
+        let device = vec![
+            ("200-0".to_string(), Some(env_for("to-a", "a"))),
+            ("400-0".to_string(), Some(env("unnamed"))),
+        ];
+        let page = merge_mailbox_pages(device, user, 10, "a");
+        let ids: Vec<_> = page
+            .entries
+            .iter()
+            .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["to-a", "unnamed"]);
+        assert_eq!(
+            page.user_only, 0,
+            "everything delivered was on the device stream"
+        );
+        assert_eq!(page.sibling_skipped, 3);
+    }
+
+    /// The filter must not hide the very thing the gate exists for: an entry named to
+    /// *this* device that the device stream does not have is a coverage failure, and it
+    /// is still delivered, from the user stream, so nothing is lost.
+    #[test]
+    fn entry_named_to_the_reader_but_missing_from_its_stream_is_still_user_only() {
+        let user = vec![("100-0".to_string(), Some(env_for("to-a", "a")))];
+        let page = merge_mailbox_pages(vec![], user, 10, "a");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.user_only, 1);
+        assert_eq!(page.sibling_skipped, 0);
+    }
+
+    /// `unknown_device` fallback: the envelope names a device that was not in the active
+    /// set, so `dispatch_envelope` wrote it to *every* device stream, name and all. The
+    /// user-stream copy is skipped for a reader it does not name, but the device-stream
+    /// copy still delivers — the fallback's whole point survives the filter.
+    #[test]
+    fn unknown_device_fallback_still_delivers_through_the_device_stream() {
+        let user = vec![("100-0".to_string(), Some(env_for("m", "ghost")))];
+        let device = vec![("100-0".to_string(), Some(env_for("m", "ghost")))];
+        let page = merge_mailbox_pages(device, user, 10, "a");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.user_only, 0);
+        assert_eq!(page.sibling_skipped, 1);
     }
 }

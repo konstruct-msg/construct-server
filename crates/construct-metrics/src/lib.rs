@@ -397,6 +397,25 @@ pub static MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL: Lazy<IntCounterVec> = Lazy::new(
     .expect("Failed to register MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL metric")
 });
 
+/// User-stream mailbox entries named to a different device of the same account, left
+/// out of a device's page by the dual-read merge.
+///
+/// Before the merge filtered them (2026-09-21) every such entry reached the wrong device
+/// too and was counted as `user_only`, which kept the cutover gate above zero for any
+/// account with two devices. This counts what the filter removes, so the cost the
+/// legacy user stream still imposes is a number and the moment it stops being one is
+/// visible. Expected to track the clients' `stealth_copy_for_sibling` going to zero.
+pub static MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_mailbox_sibling_entries_skipped_total",
+            "User-stream mailbox entries named to another device of the account, skipped at merge"
+        ),
+        &["path"]
+    )
+    .expect("Failed to register MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL metric")
+});
+
 /// Sealed sends accepted for dispatch, by the door they came in through.
 /// Labels: `ingress` = `sealed_rpc` (`SendSealedMessage`, unauthenticated) |
 /// `legacy_send_message` (a sealed payload on the authenticated `SendMessage`).
@@ -760,6 +779,7 @@ pub fn init_registry() {
     // catch-up page), the two call sites in messaging-service. Nothing else produces it.
     for path in ["stream", "pending"] {
         MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL.with_label_values(&[path]);
+        MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL.with_label_values(&[path]);
     }
     // Both children, not just the family. This label set is closed — a sealed send arrives by
     // one of exactly two doors — and the whole point of the counter is the *ratio* between them.
@@ -930,16 +950,20 @@ mod tests {
         init_registry();
         let text = gather_metrics().unwrap();
         for path in ["stream", "pending"] {
-            let series =
-                format!("construct_msg_mailbox_user_only_entries_total{{path=\"{path}\"}} 0");
-            assert!(
-                text.contains(&series),
-                "expected `{series}`, got:\n{}",
-                text.lines()
-                    .filter(|l| l.contains("mailbox_user_only"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
+            for family in [
+                "construct_msg_mailbox_user_only_entries_total",
+                "construct_msg_mailbox_sibling_entries_skipped_total",
+            ] {
+                let series = format!("{family}{{path=\"{path}\"}} 0");
+                assert!(
+                    text.contains(&series),
+                    "expected `{series}`, got:\n{}",
+                    text.lines()
+                        .filter(|l| l.contains("mailbox_"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
         }
     }
 

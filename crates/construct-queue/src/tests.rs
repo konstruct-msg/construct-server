@@ -721,3 +721,50 @@ async fn mailbox_xadd_ignores_sender_envelope_maxlen() {
 
     clear_mailbox(&mut queue, user, &[device]).await;
 }
+
+/// The 2026-09-21 baseline through Redis: with the legacy user stream still written, an
+/// envelope routed to one device used to arrive at its sibling as well, by way of the
+/// user stream, and to count as `user_only` on the sibling's read. Now the sibling's
+/// read neither delivers it nor counts it; the named device's read is unchanged.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
+    let user = "test_mailbox_sibling_user";
+    let (d1, d2) = ("test_mbx_sib_a", "test_mbx_sib_b");
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[d1, d2]).await;
+
+    // Routed to d1 alone, as dispatch_envelope does for a named recipient_device.
+    let mut env =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    env.recipient_device = Some(d1.to_string());
+    queue
+        .write_message_to_device_streams(user, &[d1.to_string()], &env)
+        .await
+        .expect("dispatch to d1");
+
+    let mine = queue
+        .read_mailbox_messages(user, Some(d1), Some("0"), 50)
+        .await
+        .expect("d1 read");
+    assert_eq!(mine.entries.len(), 1, "the named device gets it");
+    assert_eq!(mine.user_only, 0, "and from its own stream");
+    assert_eq!(mine.sibling_skipped, 0);
+
+    let theirs = queue
+        .read_mailbox_messages(user, Some(d2), Some("0"), 50)
+        .await
+        .expect("d2 read");
+    assert!(
+        theirs.entries.is_empty(),
+        "the sibling must not receive a copy it was never encrypted for, got {}",
+        theirs.entries.len()
+    );
+    assert_eq!(
+        theirs.user_only, 0,
+        "a sibling's envelope is not a coverage failure"
+    );
+    assert_eq!(theirs.sibling_skipped, 1);
+
+    clear_mailbox(&mut queue, user, &[d1, d2]).await;
+}
