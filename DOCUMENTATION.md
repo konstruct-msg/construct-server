@@ -33,7 +33,7 @@ Caddy :443   (edge TLS termination, Let's Encrypt; routes by /shared.proto.servi
   │                                 UserService, InviteService — merged)
   ├─► messaging-service   :50053  (MessagingService, MessageGateway,
   │                                 NotificationService, SentinelService — merged)
-  ├─► media-service       :50056  (MediaService)
+  ├─► media-service       :50056  (MediaService, StickerService)
   ├─► veil-service        :50056  (VeilService — separate deployment)
   ├─► key-service         :50057  (KeyService)
   ├─► group-service       :50058  (MlsService, ChannelService)
@@ -88,7 +88,7 @@ See `crates/construct-config/src/lib.rs` for the full list and defaults.
 |--------|----------------------|
 | identity-service | `AuthService`, `DeviceService`, `DeviceLinkService`, `UserService`, `InviteService` |
 | messaging-service | `MessagingService`, `MessageGateway`, `NotificationService`, `SentinelService` |
-| media-service | `MediaService` |
+| media-service | `MediaService`, `StickerService` (public, unauthenticated) |
 | key-service | `KeyService` |
 | group-service | `MlsService`, `ChannelService` |
 | signaling-service | `SignalingService` |
@@ -357,6 +357,7 @@ Key tables:
 | `kyber_prekeys` | ML-KEM-768 OTPKs; same soft-delete pattern |
 | `delivery_pending` | Receipt routing: `message_hash → sender_id` (30-day TTL). **Not message storage** — only used to route delivery receipts back to the original sender. |
 | `media_files` | Upload metadata (actual bytes on CDN/local storage) |
+| `sticker_blobs` / `sticker_packs` | Public sticker packs, content-addressed (sha256 / pack_id), **no TTL** — a pack must resolve for as long as any message references it. Migration 070. |
 | `user_blocks` | Block list entries |
 | `invites` | Invite tokens (used for invite-only onboarding) |
 | `contact_requests` | Contact request state |
@@ -564,6 +565,15 @@ docker logs construct-caddy --tail 50
 - Storage persists on named volume `media-data` (`MEDIA_STORAGE_DIR=/data/media`) —
   before 2026-07-16 it was ephemeral in-container and lost on redeploy
 - Retention: 7 days from upload (`MEDIA_FILE_TTL_SECONDS`; downloads do not extend)
+
+**Stickers (media-service, `StickerService`):**
+- Public, unauthenticated, per-IP window (`STICKER_RATE_LIMIT_PER_HOUR`, default 600)
+- Content-addressed: `pack_id = sha256(manifest canonical bytes)`, blob key = sha256(bytes);
+  the client verifies the Ed25519 signature (`BUNDLE_SIGNING_KEY`'s public half) and every hash
+- Not the media store: tables `sticker_blobs` / `sticker_packs`, no TTL, no reaper
+- Publish: `sticker-publish` (in the image, `media-service/src/bin`) signs a pack built by
+  `construct-messenger/scripts/build_sticker_pack.py` and inserts it — runbook in the vault,
+  `deployment/sticker-publish-runbook.md`; design `backend/STICKER_SERVICE_SPEC.md`
 
 **Sealed sender anti-abuse (stealth):**
 

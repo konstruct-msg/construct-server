@@ -7,18 +7,20 @@
 // construct-rate-limit + Redis.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// Sliding window counter keyed by user id.
-pub struct SlidingWindowLimiter {
-    inner: Mutex<HashMap<Uuid, Vec<Instant>>>,
+/// Sliding window counter keyed by user id (upload-token minting) or by client IP (the
+/// unauthenticated sticker RPCs, where an IP is all there is to key on).
+pub struct SlidingWindowLimiter<K = Uuid> {
+    inner: Mutex<HashMap<K, Vec<Instant>>>,
     max: u32,
     window: Duration,
 }
 
-impl SlidingWindowLimiter {
+impl<K: Hash + Eq> SlidingWindowLimiter<K> {
     pub fn new(max_per_window: u32, window: Duration) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
@@ -29,10 +31,10 @@ impl SlidingWindowLimiter {
 
     /// Record one event. Returns `false` if the caller is over the limit
     /// (event is NOT recorded when over limit).
-    pub fn check_and_record(&self, user_id: Uuid) -> bool {
+    pub fn check_and_record(&self, key: K) -> bool {
         let now = Instant::now();
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let entries = map.entry(user_id).or_default();
+        let entries = map.entry(key).or_default();
         entries.retain(|t| now.duration_since(*t) < self.window);
         if entries.len() as u32 >= self.max {
             return false;
@@ -52,7 +54,7 @@ mod tests {
 
     #[test]
     fn enforces_window_limit() {
-        let lim = SlidingWindowLimiter::new(2, Duration::from_secs(3600));
+        let lim: SlidingWindowLimiter = SlidingWindowLimiter::new(2, Duration::from_secs(3600));
         let u = Uuid::new_v4();
         assert!(lim.check_and_record(u));
         assert!(lim.check_and_record(u));

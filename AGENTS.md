@@ -16,7 +16,7 @@ See `ops/docker-compose.prod.yml`. Ports / roles:
 | `gateway` | `gateway` | HTTP 3000 / 9443 | health, well-known, federation S2S; veil/obfs4 → caddy:8080 |
 | `identity` | `identity-service` | 50051 | Auth + Device + DeviceLink + User + Invite; PoW; PP issuance; sender certs |
 | `messaging` | `messaging-service` | 50053 | send/stream, sealed+PP redeem, Redis mailbox, APNs, Sentinel (in-process) |
-| `media` | `media-service` | 50056 | Encrypted media gRPC; volume `media-data`; 7d TTL |
+| `media` | `media-service` | 50056 | Encrypted media gRPC; volume `media-data`; 7d TTL. Also `StickerService`: public packs, **no TTL**, published by `sticker-publish` (never via the request path) |
 | `veil` | `veil-service` | 50056 | VEIL capability issuance (separate deploy) |
 | `key` | `key-service` | 50057 | X3DH + ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS + broadcast channels |

@@ -42,9 +42,13 @@ message MessageContent {
     // Album of one or more media items (images/videos) sent as a single message.
     MediaAlbumMessage media_album = 10;
 
-    // StickerRef (pack_id + sticker_id) — assigned 11. See STICKER_CLIENT_SPEC.
-    // Do not reuse MediaType.STICKER (pixels-on-wire, rejected).
-    // StickerRef sticker = 11;
+    // Sticker by reference: pack hash + index + emoji, never pixels. The pack is public,
+    // content-addressed and fetched whole, out of band; what the ratchet carries is ~40 bytes.
+    // Do not reuse MediaType.STICKER for this (pixels-on-wire, rejected —
+    // construct-docs/decisions/sticker-id-wire-not-media.md; the shape is
+    // decisions/sticker-packs-content-addressed.md). Golden vectors and the rules every client
+    // must apply: conformance/knst_sticker_ref.json.
+    StickerRef sticker = 11;
 
     // Future content types: 12-20
   }
@@ -57,6 +61,32 @@ message MessageContent {
 
   // Reserved for future metadata
   reserved 23 to 50;
+}
+
+// StickerRef - A sticker named by its pack's identity, inside E2EE.
+//
+// Packs are content-addressed and immutable: pack_id is the SHA-256 of the pack's signed
+// manifest, so a cached pack is correct forever or it is a different pack. The sticker is an
+// index into that manifest — stable because the pack cannot change — which keeps the reference
+// at ~40 bytes. emoji is duplicated from the manifest on purpose: it is the one thing a
+// recipient can render with nothing downloaded, and it must survive the pack being unavailable.
+//
+// Every client validates before anything else touches the fields
+// (conformance/knst_sticker_ref.json, "rules"): pack_id is exactly 32 bytes, emoji is 1..32
+// bytes of UTF-8. Anything else is a corrupt message — not rendered, not stored as a sticker.
+// index is checked against the manifest once the pack is present, not here.
+message StickerRef {
+  // SHA-256 of the pack's canonical manifest. Also the cache key.
+  bytes pack_id = 1;
+
+  // Position in StickerPackManifest.stickers.
+  uint32 index = 2;
+
+  // The sticker's emoji, as in the manifest. The fallback render and the text preview.
+  string emoji = 3;
+
+  // Reserved for future features
+  reserved 4 to 10;
 }
 
 // TextMessage - Plain text message

@@ -33,11 +33,12 @@ use uuid::Uuid;
 
 use construct_server_shared::shared::proto::services::v1 as proto;
 use proto::media_service_server::{MediaService, MediaServiceServer};
+use proto::sticker_service_server::StickerServiceServer;
 
-mod config;
-mod core;
-mod rate_limit;
-mod utils;
+// The binary links the library rather than re-declaring its modules: `sticker-publish`
+// (src/bin) shares `stickers` with the service, and one compilation of each module is what
+// keeps the two binaries agreeing on what a pack is.
+use media_service::{config, core, rate_limit, sticker_grpc, utils};
 
 use config::MediaConfig;
 use rate_limit::SlidingWindowLimiter;
@@ -584,6 +585,11 @@ async fn main() -> Result<()> {
         media_config.rate_limit_per_hour,
         Duration::from_secs(3600),
     ));
+    // StickerService is unauthenticated, so its window is per client IP, not per user.
+    let sticker_limiter = Arc::new(SlidingWindowLimiter::<String>::new(
+        media_config.sticker_rate_limit_per_hour,
+        Duration::from_secs(3600),
+    ));
 
     // Background TTL cleanup (DB expires_at + orphan .partial files).
     {
@@ -603,6 +609,8 @@ async fn main() -> Result<()> {
     });
 
     let grpc_context = context.clone();
+    let sticker_service =
+        sticker_grpc::StickerGrpcService::new(Arc::clone(&context.db_pool), sticker_limiter);
     let grpc_bind_address =
         env::var("MEDIA_GRPC_BIND_ADDRESS").unwrap_or_else(|_| "[::]:50056".to_string());
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
@@ -619,6 +627,11 @@ async fn main() -> Result<()> {
             // 2 MB max per message — bounds memory even if a client lies about size
             // until the stream-level max_file_size check fires.
             MediaServiceServer::new(service).max_decoding_message_size(2 * 1024 * 1024),
+        )
+        // Public sticker packs on the same port: Caddy routes by proto path. Requests are
+        // tiny (a hash, a list of hashes); the 2 MB bound is a formality here.
+        .add_service(
+            StickerServiceServer::new(sticker_service).max_decoding_message_size(2 * 1024 * 1024),
         )
         .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
         .await
