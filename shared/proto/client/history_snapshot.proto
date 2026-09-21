@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package construct.client.history.v1;
+
+// Client-only. Never mirrored from construct-server, never copied into
+// construct-server/shared/proto. See AGENTS.md (`client/`).
+//
+// CTH1 record types (the stream byte, not a proto field):
+//   0x01 Manifest, 0x02 Contact, 0x03 Chat, 0x04 Message, 0x05 Reaction,
+//   0x06 PeerDeviceHint, 0x07 CallRecord, 0x08 MediaBlob,
+//   0x09–0x0D reserved (group / channel, CTH1 v2), 0x00 End (no proto).
+// Prose + golden vectors: construct-docs/client/shared/construct-history-snapshot.md
+// and conformance/knst_history_snapshot.json.
+
+import "messaging/content.proto";
+
+message HistoryManifest {
+  uint32 format_version = 1;     // 1
+  bytes snapshot_id = 2;         // 16 random bytes
+  bytes user_id = 3;             // 16-byte UUID
+  string source_device_id = 4;   // CryptoDeviceId, 32 lowercase hex
+  int64 created_at_unix = 5;
+  string app_version = 6;
+  uint32 contact_count = 7;
+  uint32 chat_count = 8;
+  uint32 message_count = 9;
+  uint32 reaction_count = 10;
+  uint32 media_blob_count = 11;
+  uint64 media_byte_count = 12;
+  uint32 phase = 13;             // 1 transcript, 2 media, 3 both (file). 0 is malformed.
+}
+
+message HistoryContact {
+  bytes user_id = 1;             // 16-byte UUID
+  string username = 2;
+  string display_name = 3;
+  string local_alias = 4;
+  bytes avatar = 5;
+  bool is_contact = 6;
+  bool is_blocked = 7;
+  bool am_i_sharing_with = 8;
+  bool is_sharing_with_me = 9;
+  int64 added_at_unix = 10;
+  int64 shared_with_me_at_unix = 11;
+}
+
+message HistoryChat {
+  bytes other_user_id = 1;       // 16-byte UUID — the upsert key
+  bool is_pinned = 2;
+  bool is_muted = 3;
+}
+
+message HistoryMessage {
+  string id = 1;                 // lowercase dashed UUID
+  bytes from_user_id = 2;        // 16-byte UUID
+  bytes to_user_id = 3;
+  int64 timestamp_unix_ms = 4;
+  bool is_sent_by_me = 5;
+  oneof body {                   // wire plaintext; discriminator and payload are one field
+    shared.proto.messaging.v1.MessageContent    message_content = 6;
+    shared.proto.messaging.v1.MediaAlbumMessage media_album     = 15;
+    bytes                                        profile_share   = 16;  // ProfileShareData binary
+  }
+  string reply_to_message_id = 7;
+  string reply_to_content = 8;
+  bool is_edited = 9;
+  int64 edited_at_unix_ms = 10;
+  string transcript_text = 11;
+  string transcript_language = 12;
+  int64 transcript_generated_at_unix = 13;
+  uint32 suite_id = 14;
+}
+
+message HistoryReaction {
+  string target_message_id = 1;  // lowercase dashed UUID
+  bytes reactor_user_id = 2;
+  string emoji = 3;
+  int64 timestamp_ms = 4;
+}
+
+message HistoryPeerDevice {
+  bytes account_id = 1;          // 16-byte UUID
+  string device_id = 2;          // 32 lowercase hex
+  bytes identity_key = 3;        // 32-byte X25519
+  int64 first_seen_at_unix = 4;
+}
+
+message HistoryCall {
+  string id = 1;
+  bytes peer_user_id = 2;        // 16-byte UUID
+  bool is_outgoing = 3;          // CTCallRecord.Direction; not a second directionRaw
+  uint32 status = 4;             // CTCallRecord.Status raw: 0 completed, 1 missed, 2 declined, 3 failed
+  int64 started_at_unix = 5;
+  int64 duration_seconds = 6;
+  // omitted: peerName (Contact.display_name), endedAt (derived when completed)
+}
+
+message HistoryMediaBlob {
+  string media_id = 1;
+  string mime_type = 2;
+  bytes blob = 3;                // plaintext on-disk bytes
+}

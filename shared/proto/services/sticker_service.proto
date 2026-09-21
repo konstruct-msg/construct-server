@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+import "messaging/sticker_pack.proto";
+
+// StickerService — public, content-addressed sticker packs.
+//
+// Every RPC here is unauthenticated on purpose. Pack bytes are the same for everyone and carry
+// nothing about the caller, so a token would attach an identity to a fetch for no benefit; a
+// client fetches over the sealed unauthenticated transport it already uses for prekey bundles.
+// Integrity does not come from the transport or from the server: the manifest is signed with
+// the key pinned as `bundle_signing_key`, `pack_id` is the hash of the manifest, and every blob
+// is verified against the hash the signed manifest names. A hostile server can withhold a pack;
+// it cannot substitute one.
+//
+// The access pattern is the privacy property. A client fetches a pack *whole*, once per device,
+// with no timing relationship to any message, so the server learns which packs a device holds
+// and nothing about which sticker went to whom or when. Per-sticker fetching on receive is the
+// thing this design forbids, and GetStickerBlob exists for cache repair, not for that.
+//
+// Design: construct-docs/decisions/sticker-packs-content-addressed.md.
+// Hosted by media-service next to MediaService; sticker bytes never enter the media store and
+// its 7-day TTL — a pack must resolve for as long as any message references it.
+service StickerService {
+  // The catalog: what can be installed. Pointers only — a manifest is trusted for what it is
+  // signed to say, a listing only for what exists.
+  rpc ListStickerPacks(ListStickerPacksRequest) returns (ListStickerPacksResponse);
+
+  // One pack's signed manifest. The client recomputes pack_id and checks the signature before
+  // reading anything else in it.
+  rpc GetStickerPackManifest(GetStickerPackManifestRequest) returns (GetStickerPackManifestResponse);
+
+  // Every blob of one pack, streamed in manifest order. The one request a device makes per
+  // pack. The server may omit blobs the client says it already holds.
+  rpc GetStickerPackBlobs(GetStickerPackBlobsRequest) returns (stream GetStickerPackBlobsResponse);
+
+  // One blob by hash. For repairing a cache that lost a file, not for fetching stickers as
+  // they arrive — that is a per-sticker access pattern, and the client must not use it so.
+  rpc GetStickerBlob(GetStickerBlobRequest) returns (GetStickerBlobResponse);
+}
+
+// ============================================================================
+// ListStickerPacks
+// ============================================================================
+
+message ListStickerPacksRequest {
+  // Opaque cursor from a previous response. Empty for the first page.
+  bytes page_token = 1;
+
+  // 0 means the server's default.
+  uint32 page_size = 2;
+}
+
+// What a catalog row needs to be drawn: enough to decide, never enough to trust. Installing
+// fetches and verifies the manifest.
+message StickerPackSummary {
+  bytes pack_id = 1;
+  string title = 2;
+  string publisher = 3;
+  uint32 sticker_count = 4;
+
+  // The pack's cover: the sha256 of one of its stickers, fetched with GetStickerBlob.
+  bytes cover_sha256 = 5;
+
+  // Sum of byte_len over the pack — what an install costs, shown before it is paid.
+  uint64 total_bytes = 6;
+
+  reserved 7 to 15;
+}
+
+message ListStickerPacksResponse {
+  repeated StickerPackSummary packs = 1;
+
+  // Empty when this was the last page.
+  bytes next_page_token = 2;
+}
+
+// ============================================================================
+// GetStickerPackManifest
+// ============================================================================
+
+message GetStickerPackManifestRequest {
+  bytes pack_id = 1;
+}
+
+message GetStickerPackManifestResponse {
+  shared.proto.messaging.v1.StickerPackManifest manifest = 1;
+}
+
+// ============================================================================
+// GetStickerPackBlobs
+// ============================================================================
+
+message GetStickerPackBlobsRequest {
+  bytes pack_id = 1;
+
+  // Hashes the client already holds (a shared sticker from another pack, a partial earlier
+  // fetch). The server skips these. Optional: an empty list means send everything.
+  repeated bytes have_sha256 = 2;
+}
+
+// One blob per message, whole — a sticker is at most 100 KiB, well inside any frame limit.
+message GetStickerPackBlobsResponse {
+  bytes sha256 = 1;
+  bytes data = 2;
+}
+
+// ============================================================================
+// GetStickerBlob
+// ============================================================================
+
+message GetStickerBlobRequest {
+  bytes sha256 = 1;
+}
+
+message GetStickerBlobResponse {
+  bytes data = 1;
+}

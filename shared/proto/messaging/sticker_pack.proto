@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package shared.proto.messaging.v1;
+
+// Sticker packs — content-addressed, immutable, public.
+//
+// A pack is named by the hash of its own manifest and a sticker by the hash of its bytes, so a
+// cached pack is correct forever or it is a different pack. Pack bytes are served unencrypted:
+// they are the same for everyone, and what stays inside E2EE is which sticker went to whom
+// (StickerRef in content.proto). Design: construct-docs/decisions/sticker-packs-content-addressed.md.
+//
+// Every hash is `bytes`, never hex — the binary-pipeline rule.
+
+// StickerEntry - One sticker in a pack.
+message StickerEntry {
+  // SHA-256 of the WebP bytes. The storage key, the cache key, and what the client verifies
+  // against before a blob is written.
+  bytes sha256 = 1;
+
+  // One emoji grapheme: the text fallback when the pack is absent, and the search term.
+  // Duplicated into StickerRef on send so a recipient without the pack still has it.
+  string emoji = 2;
+
+  // Always 512×512 for a static sticker; carried so a client can refuse before decoding.
+  uint32 width = 3;
+  uint32 height = 4;
+
+  // Checked before download, so an oversized entry is refused rather than streamed.
+  // A static sticker is at most 100 KiB.
+  uint32 byte_len = 5;
+
+  reserved 6 to 10;
+}
+
+// StickerPackManifest - A pack: its identity, its stickers, and the publisher's signature.
+//
+// pack_id is the SHA-256 of this message's canonical bytes — proto3 binary serialization, fields
+// in ascending number order, with pack_id and signature cleared. That is what every client
+// recomputes on fetch and compares before trusting anything else in the message, and what a
+// StickerRef names. conformance/knst_sticker_pack.json fixes the bytes.
+message StickerPackManifest {
+  // SHA-256 of the canonical bytes (see above). Cleared when computing itself.
+  bytes pack_id = 1;
+
+  string title = 2;
+
+  string publisher = 3;
+
+  // Display order. StickerRef.index points into this list, so it is part of the identity.
+  repeated StickerEntry stickers = 4;
+
+  // Ed25519 over the canonical bytes, by the key pinned as bundle_signing_key. Cleared when
+  // computing pack_id. Empty in a fixture pack; a client accepts an unsigned manifest only in
+  // DEBUG and only from its own bundle.
+  bytes signature = 5;
+
+  reserved 6 to 20;
+}
