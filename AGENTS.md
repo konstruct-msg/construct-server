@@ -199,6 +199,23 @@ still UUID-only). Details: migration 064, `construct-types` / `construct-db`.
 
 ---
 
+## Three questions before a delivery or crypto change lands
+
+Answered in the commit message or the session note — the answers, not "this is safe":
+
+1. What does this server (or any relay) learn that it did not learn before?
+2. What can a party — server, sender, a sibling device — withhold or substitute that it
+   could not before?
+3. Which trust boundary moves, and in which direction?
+
+"No improvement at the expense of security" has no content until it is a question with an
+answer; the questions are the content. An honest "something" on 1 or 2 makes the change a
+design decision (construct-docs `decisions/`), not a merge on the strength of the
+improvement. Worked example: PR #53, the mailbox merge filter — nothing new learned
+(`recipient_device` was already read at dispatch), a sender can misdirect only its own
+envelopes and only as the cutover would anyway, and the boundary moved inward (ciphertext
+sealed to one device no longer reaches its sibling). Asked before the merge.
+
 ## Server-influence minimization
 
 When device A references data on device B, apply construct-docs
