@@ -900,6 +900,11 @@ impl MessagingService for MessagingGrpcService {
                 .with_label_values(&["pending"])
                 .inc_by(page.user_only as u64);
         }
+        if page.sibling_skipped > 0 {
+            construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
+                .with_label_values(&["pending"])
+                .inc_by(page.sibling_skipped as u64);
+        }
 
         // encrypted_payload is opaque — server never reads crypto params from it.
         // Sort is by server timestamp (already chronological from Redis stream).

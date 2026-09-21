@@ -50,7 +50,9 @@ send → XADD delivery:offline:{user}           (legacy; gated by MSG_MAILBOX_US
 
 stream → SUBSCRIBE inbox:wakeup:{user}
        → read_mailbox_messages (dual-read: device+user when claims.device_id present;
-         user-only for legacy tokens; dedupe by message_id, prefer device)
+         user-only for legacy tokens; dedupe by message_id, prefer device; a user-stream
+         entry whose recipient_device names ANOTHER device is skipped, not delivered,
+         not counted — it is in that device's stream already)
 ```
 
 **Invariants (do not regress):**
@@ -65,6 +67,10 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 4. **Step 4 cutover:** `MSG_MAILBOX_USER_WRITE` (default `1`). Gate =
    `construct_msg_mailbox_user_only_entries_total` **flat zero for 7 days**
    (not `mailbox_read_total{mode=…}` — that only proves clients send `device_id`).
+   Until 2026-09-21 the gate was unreachable for any two-device account: the merge read
+   the user stream whole, so every envelope named to a sibling counted as `user_only`
+   on the other device's read (and reached it). Those are now skipped at the merge and
+   counted as `construct_msg_mailbox_sibling_entries_skipped_total` instead.
    Rollback = set flag back to `1`. With flag off, reaching no stream is a **hard
    error**, never silent `Ok`.
 5. **Serialization:** `rmp_serde::encode::to_vec_named` write /
@@ -192,6 +198,23 @@ Additive: `identity_public_key` + `identity_key_type` + `route_id`
 still UUID-only). Details: migration 064, `construct-types` / `construct-db`.
 
 ---
+
+## Three questions before a delivery or crypto change lands
+
+Answered in the commit message or the session note — the answers, not "this is safe":
+
+1. What does this server (or any relay) learn that it did not learn before?
+2. What can a party — server, sender, a sibling device — withhold or substitute that it
+   could not before?
+3. Which trust boundary moves, and in which direction?
+
+"No improvement at the expense of security" has no content until it is a question with an
+answer; the questions are the content. An honest "something" on 1 or 2 makes the change a
+design decision (construct-docs `decisions/`), not a merge on the strength of the
+improvement. Worked example: PR #53, the mailbox merge filter — nothing new learned
+(`recipient_device` was already read at dispatch), a sender can misdirect only its own
+envelopes and only as the cutover would anyway, and the boundary moved inward (ciphertext
+sealed to one device no longer reaches its sibling). Asked before the merge.
 
 ## Server-influence minimization
 

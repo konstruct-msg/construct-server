@@ -683,6 +683,11 @@ pub(crate) async fn poll_messages(
             .with_label_values(&["stream"])
             .inc_by(page.user_only as u64);
     }
+    if page.sibling_skipped > 0 {
+        construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
+            .with_label_values(&["stream"])
+            .inc_by(page.sibling_skipped as u64);
+    }
     let xread_ms = t_xread.elapsed().as_millis();
 
     let msg_count = messages.len();
