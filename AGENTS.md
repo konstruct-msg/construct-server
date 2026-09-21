@@ -70,7 +70,11 @@ stream → SUBSCRIBE inbox:wakeup:{user}
    Until 2026-09-21 the gate was unreachable for any two-device account: the merge read
    the user stream whole, so every envelope named to a sibling counted as `user_only`
    on the other device's read (and reached it). Those are now skipped at the merge and
-   counted as `construct_msg_mailbox_sibling_entries_skipped_total` instead.
+   counted as `construct_msg_mailbox_sibling_entries_skipped_total` instead. A skipped
+   entry is above the delivery cursor and stays there, so `MessageStream` keeps a second,
+   server-side position for the user stream (`StreamCatchupState::user_stream_id`) that
+   moves on what a read *examined* — without it the same entries were re-read and
+   re-counted on every 5 s poll (294 skips for 8 entries, first run after the filter).
    Rollback = set flag back to `1`. With flag off, reaching no stream is a **hard
    error**, never silent `Ok`.
 5. **Serialization:** `rmp_serde::encode::to_vec_named` write /

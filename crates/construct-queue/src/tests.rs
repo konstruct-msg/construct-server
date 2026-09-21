@@ -512,7 +512,7 @@ async fn mailbox_offline_backlog_survives_a_read_from_a_lower_cursor() {
     // "0" is every cursor below the two entries at once — the resume position of a
     // client that has persisted nothing.
     let page = queue
-        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .read_mailbox_messages(user, Some(device), Some("0"), Some("0"), 50)
         .await
         .expect("read after resume");
 
@@ -565,7 +565,7 @@ async fn mailbox_two_devices_each_receive_every_message() {
 
     for device in [d1, d2] {
         let page = queue
-            .read_mailbox_messages(user, Some(device), Some("0"), 50)
+            .read_mailbox_messages(user, Some(device), Some("0"), Some("0"), 50)
             .await
             .expect("read");
         let ids: Vec<String> = page
@@ -606,7 +606,7 @@ async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
         .expect("dispatch with no devices still lands in the user stream");
 
     let page = queue
-        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .read_mailbox_messages(user, Some(device), Some("0"), Some("0"), 50)
         .await
         .expect("read");
 
@@ -660,7 +660,7 @@ async fn mailbox_cutover_delivers_through_device_streams_only() {
         .expect("dispatch to a known device");
 
     let page = queue
-        .read_mailbox_messages(user, Some(device), Some("0"), 50)
+        .read_mailbox_messages(user, Some(device), Some("0"), Some("0"), 50)
         .await
         .expect("read");
     let ids: Vec<String> = page
@@ -744,7 +744,7 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
         .expect("dispatch to d1");
 
     let mine = queue
-        .read_mailbox_messages(user, Some(d1), Some("0"), 50)
+        .read_mailbox_messages(user, Some(d1), Some("0"), Some("0"), 50)
         .await
         .expect("d1 read");
     assert_eq!(mine.entries.len(), 1, "the named device gets it");
@@ -752,7 +752,7 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
     assert_eq!(mine.sibling_skipped, 0);
 
     let theirs = queue
-        .read_mailbox_messages(user, Some(d2), Some("0"), 50)
+        .read_mailbox_messages(user, Some(d2), Some("0"), Some("0"), 50)
         .await
         .expect("d2 read");
     assert!(
