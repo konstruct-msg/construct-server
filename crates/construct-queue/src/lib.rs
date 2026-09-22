@@ -855,7 +855,7 @@ impl MessageQueue {
             // compare against, so nothing here says anything about cutover readiness.
             return Ok(MailboxPage {
                 entries,
-                user_only: 0,
+                user_only_ids: Vec::new(),
                 sibling_skipped: 0,
                 user_examined_through: None,
             });
@@ -978,7 +978,14 @@ pub struct MailboxPage {
     /// and completeness is the whole question before `MSG_MAILBOX_USER_WRITE=0` turns the
     /// user stream off. While this stays above zero, flipping the flag drops exactly these
     /// messages.
-    pub user_only: usize,
+    ///
+    /// **The ids, not a count.** A count above zero says the cutover is unsafe and nothing
+    /// about why: the gate read 2 on 2026-09-21 and the only thing anyone could say about
+    /// those two was the ten-minute window the scrape put them in. These are the messages
+    /// the flag would have dropped, so they are what a reader needs to find the sender, the
+    /// route and the reason. `user_only()` is the count, derived rather than carried
+    /// alongside.
+    pub user_only_ids: Vec<String>,
     /// User-stream entries named to **another** device of this account, left out of the
     /// page. They live in that device's stream by construction, so they are neither a
     /// delivery for this reader nor evidence about coverage — see `merge_mailbox_pages`.
@@ -990,6 +997,14 @@ pub struct MailboxPage {
     /// not delivered and must be read again) or when the user stream had nothing to
     /// examine. Never compared with a device-stream id: it positions the user stream only.
     pub user_examined_through: Option<String>,
+}
+
+impl MailboxPage {
+    /// How many delivered entries the device stream did not have — the cutover gate, as a
+    /// number. Derived from `user_only_ids` so the two cannot disagree.
+    pub fn user_only(&self) -> usize {
+        self.user_only_ids.len()
+    }
 }
 
 /// Merge device + user mailbox pages for transitional dual-read.
@@ -1069,16 +1084,17 @@ fn merge_mailbox_pages(
     let cut_by_count = merged.len() > count;
     merged.truncate(count);
 
-    // Counted after truncation: only entries actually handed to the client are evidence.
-    let user_only = merged
+    // Collected after truncation: only entries actually handed to the client are evidence.
+    let user_only_ids: Vec<String> = merged
         .iter()
         .filter_map(|(_, e)| e.as_ref())
         .filter(|e| !device_ids.contains(&e.message_id))
-        .count();
+        .map(|e| e.message_id.clone())
+        .collect();
 
     MailboxPage {
         entries: merged,
-        user_only,
+        user_only_ids,
         sibling_skipped,
         user_examined_through: if cut_by_count { None } else { user_last_id },
     }
@@ -1149,7 +1165,7 @@ mod mailbox_merge_tests {
         // m1 kept the device stream id
         assert_eq!(page.entries[0].0, "150-0");
         // m2 exists only in the user stream — the device fan-out missed it.
-        assert_eq!(page.user_only, 1);
+        assert_eq!(page.user_only(), 1);
     }
 
     #[test]
@@ -1178,7 +1194,7 @@ mod mailbox_merge_tests {
             ("100-0".to_string(), Some(env("a"))),
             ("200-0".to_string(), Some(env("b"))),
         ];
-        assert_eq!(merge_mailbox_pages(device, user, 10, "dev").user_only, 0);
+        assert_eq!(merge_mailbox_pages(device, user, 10, "dev").user_only(), 0);
     }
 
     /// Entries dropped by the count cap are re-read on the next poll, so counting them
@@ -1199,8 +1215,37 @@ mod mailbox_merge_tests {
         let page = merge_mailbox_pages(device, user, 3, "dev");
         assert_eq!(page.entries.len(), 3);
         assert_eq!(
-            page.user_only, 2,
+            page.user_only(),
+            2,
             "delivered `b` and `c` count, `d` does not"
+        );
+    }
+
+    /// The gate names the messages, not just how many. Two delivered entries the device
+    /// stream lacks, and the page says **which** — that is what a reader needs to go from
+    /// "the cutover is unsafe" to the sender, the route and the reason.
+    ///
+    /// Mutation: report the count and discard the ids — this reddens; the count assertion
+    /// above it does not.
+    #[test]
+    fn user_only_ids_name_the_messages_the_cutover_would_drop() {
+        let user = vec![
+            ("100-0".to_string(), Some(env("covered"))),
+            ("200-0".to_string(), Some(env("stranded-1"))),
+            ("300-0".to_string(), Some(env("stranded-2"))),
+        ];
+        let device = vec![("100-0".to_string(), Some(env("covered")))];
+        let page = merge_mailbox_pages(device, user, 10, "dev");
+        let mut named = page.user_only_ids.clone();
+        named.sort();
+        assert_eq!(
+            named,
+            vec!["stranded-1".to_string(), "stranded-2".to_string()]
+        );
+        assert_eq!(
+            page.user_only(),
+            named.len(),
+            "the count is derived from them"
         );
     }
 
@@ -1235,7 +1280,8 @@ mod mailbox_merge_tests {
             .collect();
         assert_eq!(ids, vec!["to-a", "unnamed"]);
         assert_eq!(
-            page.user_only, 0,
+            page.user_only(),
+            0,
             "everything delivered was on the device stream"
         );
         assert_eq!(page.sibling_skipped, 3);
@@ -1249,7 +1295,7 @@ mod mailbox_merge_tests {
         let user = vec![("100-0".to_string(), Some(env_for("to-a", "a")))];
         let page = merge_mailbox_pages(vec![], user, 10, "a");
         assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.user_only, 1);
+        assert_eq!(page.user_only(), 1);
         assert_eq!(page.sibling_skipped, 0);
     }
 
@@ -1300,7 +1346,7 @@ mod mailbox_merge_tests {
         let device = vec![("100-0".to_string(), Some(env_for("m", "ghost")))];
         let page = merge_mailbox_pages(device, user, 10, "a");
         assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.user_only, 0);
+        assert_eq!(page.user_only(), 0);
         assert_eq!(page.sibling_skipped, 1);
     }
 }

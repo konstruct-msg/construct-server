@@ -896,10 +896,19 @@ impl MessagingService for MessagingGrpcService {
         construct_metrics::MSG_MAILBOX_READ_TOTAL
             .with_label_values(&["pending", mode])
             .inc();
-        if page.user_only > 0 {
+        if !page.user_only_ids.is_empty() {
             construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
                 .with_label_values(&["pending"])
-                .inc_by(page.user_only as u64);
+                .inc_by(page.user_only_ids.len() as u64);
+            // See the twin in `stream.rs`: the ids are the finding, the count only says there
+            // was one.
+            tracing::warn!(
+                user_id = %user_id,
+                device_id = device_id.as_deref().unwrap_or(""),
+                mailbox_mode = mode,
+                message_ids = ?page.user_only_ids,
+                "mailbox cutover blocker: delivered from the user stream, absent from the device stream"
+            );
         }
         if page.sibling_skipped > 0 {
             construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
