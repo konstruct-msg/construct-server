@@ -708,14 +708,27 @@ pub(crate) async fn poll_messages(
             limit,
         )
         .await?;
+    // Read before `entries` is moved out: a method on the page borrows the whole struct.
+    let user_only_count = page.user_only();
     let messages = page.entries;
     construct_metrics::MSG_MAILBOX_READ_TOTAL
         .with_label_values(&["stream", mode])
         .inc();
-    if page.user_only > 0 {
+    if !page.user_only_ids.is_empty() {
         construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
             .with_label_values(&["stream"])
-            .inc_by(page.user_only as u64);
+            .inc_by(page.user_only_ids.len() as u64);
+        // WARN, and with the ids: every one of these is a message `MSG_MAILBOX_USER_WRITE=0`
+        // would have dropped. The counter alone dates the divergence to a scrape interval and
+        // leaves nobody able to ask which message, from whom, by which route — which is where
+        // the gate stood on 2026-09-21 with two entries and no way to name them.
+        tracing::warn!(
+            user_id = %user_id_str,
+            device_id = device_id.unwrap_or(""),
+            mailbox_mode = mode,
+            message_ids = ?page.user_only_ids,
+            "mailbox cutover blocker: delivered from the user stream, absent from the device stream"
+        );
     }
     if page.sibling_skipped > 0 {
         construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
@@ -731,7 +744,7 @@ pub(crate) async fn poll_messages(
             device_id = device_id.unwrap_or(""),
             mailbox_mode = mode,
             msg_count,
-            user_only = page.user_only,
+            user_only = user_only_count,
             xread_ms,
             last_stream_id = ?last_stream_id,
             "poll_messages: read messages from Redis offline mailbox"

@@ -577,7 +577,8 @@ async fn mailbox_two_devices_each_receive_every_message() {
             assert!(ids.contains(id), "{device} missing {id}");
         }
         assert_eq!(
-            page.user_only, 0,
+            page.user_only(),
+            0,
             "{device}: full fan-out must leave nothing that only the user stream had"
         );
     }
@@ -611,7 +612,8 @@ async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
         .expect("read");
 
     assert_eq!(
-        page.user_only, 1,
+        page.user_only(),
+        1,
         "the gate must see a delivered entry the device stream did not have"
     );
 
@@ -669,7 +671,7 @@ async fn mailbox_cutover_delivers_through_device_streams_only() {
         .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
         .collect();
     assert!(ids.contains(&env.message_id), "device-only delivery failed");
-    assert_eq!(page.user_only, 0);
+    assert_eq!(page.user_only(), 0);
 
     let user_key = format!("{}:offline:{}", queue.delivery_queue_prefix, user);
     assert_eq!(stream_len(&mut queue, &user_key).await, 0);
@@ -748,7 +750,7 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
         .await
         .expect("d1 read");
     assert_eq!(mine.entries.len(), 1, "the named device gets it");
-    assert_eq!(mine.user_only, 0, "and from its own stream");
+    assert_eq!(mine.user_only(), 0, "and from its own stream");
     assert_eq!(mine.sibling_skipped, 0);
 
     let theirs = queue
@@ -761,7 +763,8 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
         theirs.entries.len()
     );
     assert_eq!(
-        theirs.user_only, 0,
+        theirs.user_only(),
+        0,
         "a sibling's envelope is not a coverage failure"
     );
     assert_eq!(theirs.sibling_skipped, 1);
