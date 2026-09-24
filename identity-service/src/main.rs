@@ -1063,8 +1063,7 @@ impl AuthService for IdentityGrpcService {
         // Validate before reserving. A malformed point must not spend cap: the
         // reservation is the hourly counter, and a reject after it is how the
         // remainder of the window used to disappear.
-        let mut decoded: Vec<(RistrettoPoint, [u8; 32])> =
-            Vec::with_capacity(blinded_points.len());
+        let mut decoded: Vec<(RistrettoPoint, [u8; 32])> = Vec::with_capacity(blinded_points.len());
         for raw in blinded_points {
             if raw.len() != 32 {
                 return Err(Status::invalid_argument(
@@ -1092,9 +1091,10 @@ impl AuthService for IdentityGrpcService {
             // refusal. Re-read and try again; three attempts is the whole window
             // in which two batches can pass each other.
             for _ in 0..3 {
-                let already = queue.token_issuance_count(&user_id).await.map_err(|e| {
-                    Status::resource_exhausted(format!("rate limit error: {}", e))
-                })?;
+                let already = queue
+                    .token_issuance_count(&user_id)
+                    .await
+                    .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
                 let want = issuance_grant(already, decoded.len() as u32, effective_cap);
                 if want == 0 {
                     break;
