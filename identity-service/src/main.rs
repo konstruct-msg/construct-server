@@ -71,6 +71,18 @@ fn effective_issuance_cap(
     }
 }
 
+/// How many of this request still fit under the hourly cap.
+///
+/// The old issuer incremented by the whole request and then rejected it, so a
+/// young account at 20/30 (or a mature one at 110/120) burned the remainder:
+/// the batch was refused, the counter moved past the cap, and the client
+/// backed off for the hour. A batch that does not fit is shortened to the
+/// room that is left, and a full window grants nothing — it does not borrow
+/// from the next one.
+fn issuance_grant(already: u32, want: u32, cap: u32) -> u32 {
+    cap.saturating_sub(already).min(want)
+}
+
 #[derive(Clone)]
 struct IdentityGrpcService {
     context: Arc<IdentityServiceContext>,
@@ -1048,32 +1060,11 @@ impl AuthService for IdentityGrpcService {
             self.token_issuance_max_per_hour,
         );
 
-        let count = self
-            .context
-            .queue
-            .lock()
-            .await
-            .increment_token_issuance_count(&user_id, blinded_points.len() as u64)
-            .await
-            .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
-        if count > effective_cap {
-            tracing::info!(
-                user_id = %user_id,
-                cap = effective_cap,
-                tier = if mature { "full" } else { "young" },
-                "issue_tokens: hourly cap reached"
-            );
-            return Err(Status::resource_exhausted(format!(
-                "token issuance rate limit exceeded ({}/hr{})",
-                effective_cap,
-                if mature { "" } else { ", new-account tier" }
-            )));
-        }
-
-        let mut evaluated_points: Vec<Vec<u8>> = Vec::with_capacity(blinded_points.len());
-        // 32-byte arrays for the DLEQ proof (batched over the whole issuance).
-        let mut blinded32: Vec<[u8; 32]> = Vec::with_capacity(blinded_points.len());
-        let mut evaluated32: Vec<[u8; 32]> = Vec::with_capacity(blinded_points.len());
+        // Validate before reserving. A malformed point must not spend cap: the
+        // reservation is the hourly counter, and a reject after it is how the
+        // remainder of the window used to disappear.
+        let mut decoded: Vec<(RistrettoPoint, [u8; 32])> =
+            Vec::with_capacity(blinded_points.len());
         for raw in blinded_points {
             if raw.len() != 32 {
                 return Err(Status::invalid_argument(
@@ -1090,10 +1081,61 @@ impl AuthService for IdentityGrpcService {
                     "blinded point: identity point not allowed",
                 ));
             }
-            let z: RistrettoPoint = k * point;
+            let raw32: [u8; 32] = raw.as_slice().try_into().expect("len checked == 32");
+            decoded.push((point, raw32));
+        }
+
+        let grant = {
+            let mut queue = self.context.queue.lock().await;
+            let mut reserved = 0u32;
+            // A lost compare-and-swap is a race with another issuance, not a
+            // refusal. Re-read and try again; three attempts is the whole window
+            // in which two batches can pass each other.
+            for _ in 0..3 {
+                let already = queue.token_issuance_count(&user_id).await.map_err(|e| {
+                    Status::resource_exhausted(format!("rate limit error: {}", e))
+                })?;
+                let want = issuance_grant(already, decoded.len() as u32, effective_cap);
+                if want == 0 {
+                    break;
+                }
+                let got = queue
+                    .try_reserve_token_issuance(&user_id, want, effective_cap)
+                    .await
+                    .map_err(|e| Status::resource_exhausted(format!("rate limit error: {}", e)))?;
+                if got > 0 {
+                    reserved = got;
+                    break;
+                }
+            }
+            reserved
+        };
+        if grant == 0 {
+            tracing::info!(
+                user_id = %user_id,
+                cap = effective_cap,
+                tier = if mature { "full" } else { "young" },
+                "issue_tokens: hourly cap reached"
+            );
+            return Err(Status::resource_exhausted(format!(
+                "token issuance rate limit exceeded ({}/hr{})",
+                effective_cap,
+                if mature { "" } else { ", new-account tier" }
+            )));
+        }
+        let decoded = &decoded[..grant as usize];
+
+        let mut evaluated_points: Vec<Vec<u8>> = Vec::with_capacity(decoded.len());
+        // 32-byte arrays for the DLEQ proof (batched over what we actually issued,
+        // which may be a prefix of the request when the hour had less room than
+        // the client asked for).
+        let mut blinded32: Vec<[u8; 32]> = Vec::with_capacity(decoded.len());
+        let mut evaluated32: Vec<[u8; 32]> = Vec::with_capacity(decoded.len());
+        for (point, raw32) in decoded {
+            let z: RistrettoPoint = k * *point;
             let z_bytes = z.compress().to_bytes();
             evaluated_points.push(z_bytes.to_vec());
-            blinded32.push(raw.as_slice().try_into().expect("len checked == 32"));
+            blinded32.push(*raw32);
             evaluated32.push(z_bytes);
         }
 
@@ -3329,6 +3371,32 @@ mod tests {
             effective_issuance_cap(None, now, 24, 500, 120),
             (120, false)
         );
+    }
+
+    /// The 2026-08-04 album. A young account at 20 of 30 asked for another 20.
+    /// Increment-then-reject moved the counter to 40 and issued nothing, so the
+    /// last 10 tokens of the hour did not exist. The grant is the room, not the ask.
+    #[test]
+    fn issuance_grant_keeps_the_remainder_of_a_young_window() {
+        assert_eq!(issuance_grant(20, 20, 30), 10);
+    }
+
+    #[test]
+    fn issuance_grant_keeps_the_remainder_of_a_full_window() {
+        assert_eq!(issuance_grant(110, 20, 120), 10);
+    }
+
+    #[test]
+    fn issuance_grant_of_a_full_window_is_zero() {
+        assert_eq!(issuance_grant(30, 20, 30), 0);
+        assert_eq!(issuance_grant(120, 20, 120), 0);
+        assert_eq!(issuance_grant(140, 20, 120), 0);
+    }
+
+    #[test]
+    fn issuance_grant_of_an_empty_window_is_the_request() {
+        assert_eq!(issuance_grant(0, 20, 120), 20);
+        assert_eq!(issuance_grant(0, 0, 120), 0);
     }
 
     #[test]

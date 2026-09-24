@@ -296,33 +296,56 @@ impl<'a> RateLimiter<'a> {
         Ok(())
     }
 
-    /// Increment Privacy Pass token issuance count for a user (hourly window).
-    /// Increments by `n` and returns the new total. Callers check against max (20/hr).
-    pub(crate) async fn increment_token_issuance_count(
+    fn privacy_pass_hour_key(user_id: &str) -> String {
+        let hour = chrono::Utc::now().timestamp() / 3600;
+        format!("rate:pp_tokens:{user_id}:{hour}")
+    }
+
+    /// Tokens already issued to this user in the current UTC hour.
+    pub(crate) async fn token_issuance_count(&mut self, user_id: &str) -> Result<u32> {
+        let key = Self::privacy_pass_hour_key(user_id);
+        let count: Option<u32> = self.client.get(&key).await?;
+        Ok(count.unwrap_or(0))
+    }
+
+    /// Compare-and-swap a reservation the caller already sized.
+    ///
+    /// The size is decided in identity-service (`issuance_grant`) — this script
+    /// does not size it again. It only commits `grant` when the key still has
+    /// room under `cap`, and returns 0 otherwise, leaving the counter untouched.
+    /// Returning the new total and letting the caller reject is what burned the
+    /// remainder: the increment had already happened.
+    pub(crate) async fn try_reserve_token_issuance(
         &mut self,
         user_id: &str,
-        n: u64,
+        grant: u32,
+        cap: u32,
     ) -> Result<u32> {
-        let hour = chrono::Utc::now().timestamp() / 3600;
-        let key = format!("rate:pp_tokens:{}:{}", user_id, hour);
-
+        let key = Self::privacy_pass_hour_key(user_id);
         let script = redis::Script::new(
             r"
-            local count = redis.call('INCRBY', KEYS[1], ARGV[2])
-            if count == tonumber(ARGV[2]) then
-                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+            local grant = tonumber(ARGV[1])
+            local cap = tonumber(ARGV[2])
+            if grant <= 0 or count + grant > cap then
+                return 0
             end
-            return count
+            local newcount = redis.call('INCRBY', KEYS[1], grant)
+            if newcount == grant then
+                redis.call('EXPIRE', KEYS[1], ARGV[3])
+            end
+            return grant
             ",
         );
 
-        let count: u32 = script
+        let reserved: u32 = script
             .key(&key)
+            .arg(grant)
+            .arg(cap)
             .arg(SECONDS_PER_HOUR)
-            .arg(n)
             .invoke_async(self.client.connection_mut())
             .await?;
 
-        Ok(count)
+        Ok(reserved)
     }
 }

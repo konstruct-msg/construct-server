@@ -212,10 +212,28 @@ impl MessageQueue {
             .await
     }
 
-    /// Increment Privacy Pass token issuance count for hourly rate limiting.
-    pub async fn increment_token_issuance_count(&mut self, user_id: &str, n: u64) -> Result<u32> {
+    /// How many Privacy Pass tokens this user has already been issued in the
+    /// current UTC hour. Missing key is zero, not an error.
+    pub async fn token_issuance_count(&mut self, user_id: &str) -> Result<u32> {
         rate_limiting::RateLimiter::new(&mut self.client)
-            .increment_token_issuance_count(user_id, n)
+            .token_issuance_count(user_id)
+            .await
+    }
+
+    /// Reserve exactly `grant` tokens if `grant` still fits under `cap`.
+    ///
+    /// Returns the grant on success and `0` when a concurrent issuer took the
+    /// room between the caller's read and this compare-and-swap. Never increments
+    /// past the cap: the previous counter moved by the whole request and the
+    /// refusal came afterwards, which burned the remainder of the hour.
+    pub async fn try_reserve_token_issuance(
+        &mut self,
+        user_id: &str,
+        grant: u32,
+        cap: u32,
+    ) -> Result<u32> {
+        rate_limiting::RateLimiter::new(&mut self.client)
+            .try_reserve_token_issuance(user_id, grant, cap)
             .await
     }
 
