@@ -517,6 +517,11 @@ impl KeyService for KeyGrpcService {
                         signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
                         kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
                         supports_pq_ratchet: b.supports_pq_ratchet,
+                        kyber_pre_key_created_at: b.kyber_pre_key_created_at,
+                        kyber_one_time_pre_key_signature: b.kyber_one_time_pre_key_signature,
+                        kyber_one_time_pre_key_created_at: b.kyber_one_time_pre_key_created_at,
+                        kyber_one_time_pre_key_hybrid_signature: b
+                            .kyber_one_time_pre_key_hybrid_signature,
                     }),
                     device_id: b.device_id,
                     has_one_time_key: otp_was_consumed,
@@ -620,18 +625,10 @@ impl KeyService for KeyGrpcService {
                 key_id: k.key_id,
                 public_key: k.public_key,
                 signature: k.signature,
+                created_at: k.created_at,
+                hybrid_signature: k.hybrid_signature,
             })
             .collect();
-
-        let (classic_count, kyber_count) = core::upload_prekeys(
-            &self.context.db,
-            &req.device_id,
-            &prekeys,
-            req.replace_existing,
-            &kyber_prekeys,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
 
         // Top-level hybrid prekey signatures (decoupled from rotation; over the CURRENT keys).
         let spk_hybrid_sig = req.signed_pre_key_hybrid_signature.clone();
@@ -666,6 +663,7 @@ impl KeyService for KeyGrpcService {
                 kspk.key_id,
                 &kspk.public_key,
                 &kspk.signature,
+                kspk.created_at,
                 None,
             )
             .await
@@ -688,6 +686,20 @@ impl KeyService for KeyGrpcService {
                 .await
                 .map_err(|e| Status::invalid_argument(format!("hybrid identity rejected: {e}")))?;
         }
+
+        // One-time keys last. Each Kyber one-time key carries a hybrid signature, checked against
+        // the hybrid identity key on the row — so a device that sends its hybrid identity and its
+        // first Kyber keys in one request needs the identity stored first. Until PQXDH v2 this
+        // ran first, when nothing here depended on the hybrid key.
+        let (classic_count, kyber_count) = core::upload_prekeys(
+            &self.context.db,
+            &req.device_id,
+            &prekeys,
+            req.replace_existing,
+            &kyber_prekeys,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         // Persist the PQ ratchet capability flag (additive, for Suite 3 support declaration).
         // This is used to advertise in PreKeyBundle so peers can choose PQ_RATCHET sessions.
@@ -799,6 +811,7 @@ impl KeyService for KeyGrpcService {
                     key_id,
                     &kspk.public_key,
                     &kspk.signature,
+                    kspk.created_at,
                     kyber_spk_hybrid_sig.as_deref(),
                 )
                 .await
@@ -1088,6 +1101,11 @@ impl KeyService for KeyGrpcService {
                     signed_pre_key_hybrid_signature: b.signed_prekey_hybrid_signature,
                     kyber_pre_key_hybrid_signature: b.kyber_pre_key_hybrid_signature,
                     supports_pq_ratchet: b.supports_pq_ratchet,
+                    kyber_pre_key_created_at: b.kyber_pre_key_created_at,
+                    kyber_one_time_pre_key_signature: b.kyber_one_time_pre_key_signature,
+                    kyber_one_time_pre_key_created_at: b.kyber_one_time_pre_key_created_at,
+                    kyber_one_time_pre_key_hybrid_signature: b
+                        .kyber_one_time_pre_key_hybrid_signature,
                 }),
                 platform: 0, // Unknown
                 kt_proof: b.kt_proof.map(to_proto_kt_proof),
