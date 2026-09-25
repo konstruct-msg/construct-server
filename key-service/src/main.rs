@@ -634,6 +634,15 @@ impl KeyService for KeyGrpcService {
         let spk_hybrid_sig = req.signed_pre_key_hybrid_signature.clone();
         let kyber_spk_hybrid_sig = req.kyber_signed_pre_key_hybrid_signature.clone();
 
+        // The classic and Kyber SPKs are stored in one transaction: a Kyber key the server refuses
+        // must not leave the classic SPK rotated behind it (the device keeps its old one).
+        let mut tx = self
+            .context
+            .db
+            .begin()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         // Handle optional classic signed prekey update
         if let Some(spk) = req.signed_pre_key {
             let signed_key = core::SignedPreKey {
@@ -643,22 +652,16 @@ impl KeyService for KeyGrpcService {
             };
             // None: the hybrid SPK signature is set separately by store_hybrid_identity below
             // (lockstep), so the rotation clears the column and the COALESCE re-sets it.
-            core::rotate_signed_prekey(
-                &self.context.db,
-                &req.device_id,
-                &signed_key,
-                "upload",
-                None,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| Status::internal(e.to_string()))?;
+            core::rotate_signed_prekey(&mut tx, &req.device_id, &signed_key, "upload", None)
+                .await
+                .map(|_| ())
+                .map_err(|e| Status::internal(e.to_string()))?;
         }
 
         // Handle optional Kyber signed prekey update
         if let Some(kspk) = req.kyber_signed_pre_key {
             core::upload_kyber_signed_prekey(
-                &self.context.db,
+                &mut tx,
                 &req.device_id,
                 kspk.key_id,
                 &kspk.public_key,
@@ -670,6 +673,10 @@ impl KeyService for KeyGrpcService {
             .map(|_| ())
             .map_err(|e| Status::internal(e.to_string()))?;
         }
+
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         // Handle optional hybrid PQ identity (Ed25519 + ML-DSA-65). Capability-gated:
         // only runs when a hybrid_identity_key is present. Runs AFTER SPK / Kyber SPK
@@ -791,8 +798,19 @@ impl KeyService for KeyGrpcService {
             signature: new_key.signature,
         };
 
+        // One transaction for both keys. The client rolls its classic SPK back whenever this RPC
+        // fails, so a Kyber key refused after the classic one was stored would leave the server
+        // serving an SPK whose secret the device just discarded — every new inbound session to it
+        // fails until the next successful rotation.
+        let mut tx = self
+            .context
+            .db
+            .begin()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         let (old_valid_until, new_spk_rotation_epoch) = core::rotate_signed_prekey(
-            &self.context.db,
+            &mut tx,
             &req.device_id,
             &signed_key,
             reason,
@@ -806,7 +824,7 @@ impl KeyService for KeyGrpcService {
             if let Some(kspk) = req.new_kyber_signed_pre_key {
                 let key_id = kspk.key_id;
                 let epoch = core::upload_kyber_signed_prekey(
-                    &self.context.db,
+                    &mut tx,
                     &req.device_id,
                     key_id,
                     &kspk.public_key,
@@ -820,6 +838,10 @@ impl KeyService for KeyGrpcService {
             } else {
                 (None, None)
             };
+
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(proto::RotateSignedPreKeyResponse {
             success: true,

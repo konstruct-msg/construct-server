@@ -5,7 +5,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 // ============================================================================
 // Types
@@ -931,7 +931,7 @@ pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, Date
 /// Checked by [`check_kyber_prekey_v2`] before writing: 1568 bytes, a signed `created_at` no
 /// older than `KYBER_SPK_MAX_AGE_SECS`, the Ed25519 signature over the v2 sign-message.
 pub async fn upload_kyber_signed_prekey(
-    db: &PgPool,
+    db: &mut PgConnection,
     device_id: &str,
     key_id: u32,
     public_key: &[u8],
@@ -946,7 +946,7 @@ pub async fn upload_kyber_signed_prekey(
         "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
     )
     .bind(device_id)
-    .fetch_one(db)
+    .fetch_one(&mut *db)
     .await
     .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
 
@@ -986,7 +986,7 @@ pub async fn upload_kyber_signed_prekey(
     .bind(signature)
     .bind(hybrid_sig)
     .bind(created_at as i64)
-    .fetch_one(db)
+    .fetch_one(&mut *db)
     .await?;
 
     Ok(new_epoch as u32)
@@ -1240,7 +1240,7 @@ pub async fn set_device_supports_pq_ratchet(
 
 /// Rotate signed pre-key (archive old one)
 pub async fn rotate_signed_prekey(
-    db: &PgPool,
+    db: &mut PgConnection,
     device_id: &str,
     new_key: &SignedPreKey,
     reason: &str,
@@ -1259,7 +1259,7 @@ pub async fn rotate_signed_prekey(
             "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
         )
         .bind(device_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *db)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Device not found or inactive: {}", device_id))?;
 
@@ -1294,7 +1294,7 @@ pub async fn rotate_signed_prekey(
         "#,
     )
     .bind(device_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *db)
     .await?;
 
     // Archive old key with its real key_id
@@ -1315,7 +1315,7 @@ pub async fn rotate_signed_prekey(
             .bind(&old.signed_prekey_public)
             .bind(&sig)
             .bind(reason)
-            .execute(db)
+            .execute(&mut *db)
             .await?;
     }
 
@@ -1341,7 +1341,7 @@ pub async fn rotate_signed_prekey(
     .bind(new_key.key_id as i32)
     .bind(&new_key.signature)
     .bind(spk_hybrid_sig)
-    .fetch_one(db)
+    .fetch_one(&mut *db)
     .await?;
 
     // Old key valid until (48 hours — aligns with signed_prekey_archive expires_at)
@@ -2336,7 +2336,7 @@ mod tests {
 
         let spk = device.kyber_key(1, now - 60);
         upload_kyber_signed_prekey(
-            &db,
+            &mut db.acquire().await.unwrap(),
             &device_id,
             spk.key_id,
             &spk.public_key,
@@ -2405,6 +2405,64 @@ mod tests {
             .unwrap();
         assert!(next.kyber_one_time_pre_key.is_none());
         assert!(next.kyber_one_time_pre_key_signature.is_none());
+    }
+
+    /// A Kyber SPK refused after the classic SPK was written in the same transaction leaves the
+    /// classic SPK as it was once the transaction is dropped — the handlers rely on both writers
+    /// running on the connection they are given.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_a_refused_kyber_spk_rolls_the_classic_spk_back() {
+        let db = get_test_db().await;
+        let device = SigningDevice::new();
+        let (device_id, _) = insert_signing_device(&db, &device, true).await;
+        let stored_spk = || async {
+            sqlx::query_scalar::<_, Option<Vec<u8>>>(
+                "SELECT signed_prekey_public FROM devices WHERE device_id = $1",
+            )
+            .bind(&device_id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        };
+        let before = stored_spk().await;
+
+        let public_key = vec![0x42u8; 32];
+        let mut message = b"KonstruktX3DH-v1".to_vec();
+        message.extend_from_slice(&[0x00, 0x01]);
+        message.extend_from_slice(&public_key);
+        let new_spk = SignedPreKey {
+            key_id: 77,
+            signature: device.ed25519.sign(&message).to_bytes().to_vec(),
+            public_key: public_key.clone(),
+        };
+        // An ML-KEM-768-sized key, as a build before PQXDH v2 would send.
+        let mut legacy = device.kyber_key(2, now_secs() - 60);
+        legacy.public_key.truncate(1184);
+
+        let mut tx = db.begin().await.unwrap();
+        rotate_signed_prekey(&mut tx, &device_id, &new_spk, "scheduled", None)
+            .await
+            .unwrap();
+        let refused = upload_kyber_signed_prekey(
+            &mut tx,
+            &device_id,
+            legacy.key_id,
+            &legacy.public_key,
+            &legacy.signature,
+            legacy.created_at,
+            None,
+        )
+        .await;
+        assert!(refused.is_err(), "a 1184-byte Kyber key is refused");
+        drop(tx);
+
+        assert_eq!(
+            stored_spk().await,
+            before,
+            "the classic SPK was rolled back with it"
+        );
+        assert_ne!(before, Some(public_key));
     }
 
     /// A Kyber one-time key needs the hybrid identity it is signed with, on the row.
