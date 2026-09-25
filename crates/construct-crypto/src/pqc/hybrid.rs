@@ -56,7 +56,8 @@ pub const HYBRID_SIGNATURE_SIZE: usize = key_sizes::HYBRID_SIGNATURE; // 3373
 ///
 /// Message = `"KonstruktX3DH-v1" || [0x00, suite_id] || public_key`
 ///
-/// `suite_id`: 0x01 = ClassicX25519, 0x10 = HybridKyber1024X25519
+/// `suite_id`: 0x01 = ClassicX25519 SPK. Kyber prekeys use
+/// [`build_kyber_prekey_sign_message_v2`], which puts `created_at` under the signature.
 pub fn build_prekey_sign_message(suite_id: u8, public_key: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(18 + public_key.len());
     message.extend_from_slice(b"KonstruktX3DH-v1");
@@ -65,12 +66,27 @@ pub fn build_prekey_sign_message(suite_id: u8, public_key: &[u8]) -> Vec<u8> {
     message
 }
 
-/// Verify an Ed25519 signature over a Kyber public key.
+/// Suite byte of the PQXDH v2 Kyber prekey sign-message (construct-core
+/// `KYBER_PREKEY_SIGN_SUITE_V2`). `0x10`, the v1 message over an ML-KEM-768 key with no time,
+/// is no longer accepted: a v1 signature does not verify as v2, so an old key cannot pass as new.
+pub const KYBER_PREKEY_SIGN_SUITE_V2: u8 = 0x11;
+
+/// The PQXDH v2 message every Kyber prekey (signed and one-time) is signed over:
+/// `"KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE) || public_key`.
 ///
-/// This is the Phase 1 approach: Ed25519 identity signs the ML-KEM public key.
-pub fn verify_kyber_key_signature(
+/// Must be byte-identical to construct-core `kyber_prekey_sign_message_v2` — the known-answer
+/// test below holds a signature the core produced.
+pub fn build_kyber_prekey_sign_message_v2(created_at: u64, public_key: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + public_key.len());
+    payload.extend_from_slice(&created_at.to_be_bytes());
+    payload.extend_from_slice(public_key);
+    build_prekey_sign_message(KYBER_PREKEY_SIGN_SUITE_V2, &payload)
+}
+
+/// Verify the device's Ed25519 signature over a v2 Kyber prekey.
+pub fn verify_kyber_prekey_signature_v2(
     verifying_key_bytes: &[u8],
-    suite_id: u8,
+    created_at: u64,
     public_key: &[u8],
     signature_bytes: &[u8],
 ) -> Result<()> {
@@ -87,10 +103,10 @@ pub fn verify_kyber_key_signature(
     ))?;
     let sig = Signature::from_bytes(&sig_array);
 
-    let message = build_prekey_sign_message(suite_id, public_key);
+    let message = build_kyber_prekey_sign_message_v2(created_at, public_key);
 
     vk.verify(&message, &sig)
-        .map_err(|_| anyhow::anyhow!("Kyber key signature verification failed"))
+        .map_err(|_| anyhow::anyhow!("Kyber prekey signature verification failed"))
 }
 
 // ── Hybrid signature (Ed25519 + ML-DSA-65) ────────────────────────────────────
@@ -179,16 +195,14 @@ pub fn verify_hybrid_signature(
     Ok(())
 }
 
-/// Verify a hybrid signature over a Kyber public key.
-///
-/// Combines `build_prekey_sign_message` with `verify_hybrid_signature`.
-pub fn verify_hybrid_kyber_key_signature(
+/// Verify the device's hybrid (Ed25519 + ML-DSA-65) signature over a v2 Kyber prekey.
+pub fn verify_hybrid_kyber_prekey_signature_v2(
     hybrid_verifying_key: &[u8],
-    suite_id: u8,
+    created_at: u64,
     kyber_public_key: &[u8],
     hybrid_signature: &[u8],
 ) -> Result<()> {
-    let message = build_prekey_sign_message(suite_id, kyber_public_key);
+    let message = build_kyber_prekey_sign_message_v2(created_at, kyber_public_key);
     verify_hybrid_signature(hybrid_verifying_key, &message, hybrid_signature)
 }
 
@@ -269,31 +283,60 @@ pub fn hybrid_sign(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// A signature construct-core produced over its `kyber_prekey_sign_message_v2`
+    /// (Ed25519 seed `[7; 32]`, `created_at` 1 700 000 000, public key `[0x42; 1568]`). If the
+    /// two sides ever build the message differently, every upload from a real device fails
+    /// here first rather than in production.
     #[test]
-    fn test_verify_kyber_key_signature_roundtrip() {
-        let sk = SigningKey::generate(&mut OsRng);
-        let vk = sk.verifying_key();
-        let kyber_pk = vec![0x42u8; 1184];
-
-        let message = build_prekey_sign_message(0x10, &kyber_pk);
-        let sig = sk.sign(&message);
-
-        let result = verify_kyber_key_signature(&vk.to_bytes(), 0x10, &kyber_pk, &sig.to_bytes());
-        assert!(result.is_ok());
+    fn test_kyber_prekey_signature_v2_matches_construct_core() {
+        let vk = SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+        let sig = hex::decode(
+            "c230638fe07461d33006f1ca5dc5abdbffe2a95d39e130b600ab8e9871fccafe\
+             808da9648931a9064ea13330eb636e7476ec07bc9f02029ab38731e92b3d1809",
+        )
+        .unwrap();
+        let kyber_pk = vec![0x42u8; 1568];
+        let message = build_kyber_prekey_sign_message_v2(1_700_000_000, &kyber_pk);
+        assert_eq!(
+            hex::encode(&message[..26]),
+            "4b6f6e737472756b74583344482d76310011000000006553f100"
+        );
+        assert_eq!(message.len(), 1594);
+        verify_kyber_prekey_signature_v2(&vk.to_bytes(), 1_700_000_000, &kyber_pk, &sig).unwrap();
+        // The time is under the signature.
+        assert!(
+            verify_kyber_prekey_signature_v2(&vk.to_bytes(), 1_700_000_001, &kyber_pk, &sig)
+                .is_err()
+        );
     }
 
     #[test]
-    fn test_verify_kyber_key_signature_wrong_key() {
+    fn test_a_v1_kyber_signature_does_not_verify_as_v2() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let kyber_pk = vec![0x42u8; 1568];
+        let v1 = sk.sign(&build_prekey_sign_message(0x10, &kyber_pk));
+        assert!(
+            verify_kyber_prekey_signature_v2(
+                &sk.verifying_key().to_bytes(),
+                0,
+                &kyber_pk,
+                &v1.to_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_verify_kyber_prekey_signature_v2_wrong_key() {
         let sk_a = SigningKey::generate(&mut OsRng);
         let sk_b = SigningKey::generate(&mut OsRng);
-        let kyber_pk = vec![0x42u8; 1184];
+        let kyber_pk = vec![0x42u8; 1568];
 
-        let message = build_prekey_sign_message(0x10, &kyber_pk);
-        let sig = sk_a.sign(&message);
+        let sig = sk_a.sign(&build_kyber_prekey_sign_message_v2(5, &kyber_pk));
 
-        let result = verify_kyber_key_signature(
+        let result = verify_kyber_prekey_signature_v2(
             &sk_b.verifying_key().to_bytes(),
-            0x10,
+            5,
             &kyber_pk,
             &sig.to_bytes(),
         );
@@ -363,14 +406,15 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_hybrid_kyber_key_signature_roundtrip() {
+    fn test_verify_hybrid_kyber_prekey_signature_v2_roundtrip() {
         let (sk, pk) = generate_hybrid_signature_keypair();
-        let kyber_pk = vec![0x55u8; 1184];
+        let kyber_pk = vec![0x55u8; 1568];
 
-        let message = build_prekey_sign_message(0x10, &kyber_pk);
+        let message = build_kyber_prekey_sign_message_v2(9, &kyber_pk);
         let sig = hybrid_sign(&sk, &message).unwrap();
 
-        let result = verify_hybrid_kyber_key_signature(&pk, 0x10, &kyber_pk, &sig);
+        assert!(verify_hybrid_kyber_prekey_signature_v2(&pk, 10, &kyber_pk, &sig).is_err());
+        let result = verify_hybrid_kyber_prekey_signature_v2(&pk, 9, &kyber_pk, &sig);
         assert!(
             result.is_ok(),
             "Hybrid Kyber key verification should succeed: {:?}",

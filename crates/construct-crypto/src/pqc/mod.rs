@@ -28,15 +28,17 @@ pub use hybrid::{
     HYBRID_SIG_PUBLIC_KEY_SIZE,
     HYBRID_SIG_SECRET_KEY_SIZE,
     HYBRID_SIGNATURE_SIZE,
+    KYBER_PREKEY_SIGN_SUITE_V2,
     ML_DSA_65_PUBLIC_KEY_SIZE,
     ML_DSA_65_SECRET_KEY_SIZE,
     ML_DSA_65_SIGNATURE_SIZE,
+    build_kyber_prekey_sign_message_v2,
     build_prekey_sign_message,
     generate_hybrid_signature_keypair,
     hybrid_sign,
-    verify_hybrid_kyber_key_signature,
+    verify_hybrid_kyber_prekey_signature_v2,
     verify_hybrid_signature,
-    verify_kyber_key_signature,
+    verify_kyber_prekey_signature_v2,
 };
 
 /// Post-quantum cryptography types and constants
