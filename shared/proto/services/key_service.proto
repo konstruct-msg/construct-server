@@ -201,20 +201,28 @@ message PreKeyBundle {
   // Key generation timestamp (for staleness detection)
   int64 generated_at = 9;
 
-  // ---- Post-Quantum (ML-KEM-1024) fields — Phase 1 ----
-  // All optional: absent when server has no Kyber keys for this device.
-  // Client MUST NOT require these fields until Phase 2 (client PQC rollout).
+  // ---- Post-Quantum (ML-KEM-1024) fields — PQXDH v2 ----
+  // Absent when the server has no Kyber keys for this device. PQXDH v2 initiators refuse to
+  // open a session without them (PQ is mandatory), so "absent" means "this device cannot be
+  // reached until it uploads Kyber keys", not "fall back to classical".
+  //
+  // Every Kyber key is signed by the device over the v2 sign-message
+  //   "KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE, unix seconds) || public_key
+  // twice: with the Ed25519 identity (verifying_key) and with the hybrid identity key
+  // (field 20). created_at is under both signatures, so the server cannot serve a retired
+  // signed pre-key as the current one; initiators reject a signed pre-key older than 30 days.
 
-  // Kyber signed pre-key public key (ML-KEM-1024, exactly 1184 bytes)
+  // Kyber signed pre-key public key (ML-KEM-1024, exactly 1568 bytes)
   optional bytes kyber_pre_key = 10;
 
   // Kyber signed pre-key ID
   optional uint32 kyber_pre_key_id = 11;
 
-  // Ed25519 signature over kyber_pre_key (64 bytes)
+  // Ed25519 signature (64 bytes) over the v2 sign-message for kyber_pre_key and
+  // kyber_pre_key_created_at (field 25)
   optional bytes kyber_pre_key_signature = 12;
 
-  // Kyber one-time pre-key (ML-KEM-1024, exactly 1184 bytes; single use)
+  // Kyber one-time pre-key (ML-KEM-1024, exactly 1568 bytes; single use)
   optional bytes kyber_one_time_pre_key = 13;
 
   // Kyber one-time pre-key ID
@@ -261,15 +269,29 @@ message PreKeyBundle {
   // signed_pre_key_signature, but signed/verified with the hybrid key. (scope B)
   optional bytes signed_pre_key_hybrid_signature = 22;
 
-  // Hybrid signature (3373 bytes) over the Kyber-SPK sign-message
-  // "KonstruktX3DH-v1" || [0x00, suite_id] || kyber_pre_key. (scope B)
+  // Hybrid signature (3373 bytes) over the same v2 sign-message as kyber_pre_key_signature
+  // (field 12), made with the hybrid identity key (field 20).
   optional bytes kyber_pre_key_hybrid_signature = 23;
 
-  // Supports SuiteID::PQ_RATCHET (3) for sparse continuous post-quantum ratchet.
-  // When true, initiators that also support it may open new sessions with suite 3
-  // (self-sustaining PQ material, no further OTPK consumption after the first message).
-  // Additive capability flag (see PQ_RATCHET_AND_OTPK_ELIMINATION_SPEC).
+  // Deprecated: PQXDH v2 cores open every session on SuiteID::PQ_RATCHET (3) and ignore this.
+  // Still written by older clients; kept so the field number is never reused.
   bool supports_pq_ratchet = 24;
+
+  // Signed creation time of the Kyber signed pre-key, unix seconds. Part of the message
+  // fields 12 and 23 sign. Distinct from kyber_spk_uploaded_at (17), which is the server's
+  // own, unsigned record.
+  optional uint64 kyber_pre_key_created_at = 25;
+
+  // Ed25519 signature (64 bytes) over the v2 sign-message for kyber_one_time_pre_key (13)
+  // and kyber_one_time_pre_key_created_at (27). Present whenever field 13 is.
+  optional bytes kyber_one_time_pre_key_signature = 26;
+
+  // Signed creation time of the Kyber one-time pre-key, unix seconds.
+  optional uint64 kyber_one_time_pre_key_created_at = 27;
+
+  // Hybrid signature (3373 bytes) over the same message as field 26, made with the hybrid
+  // identity key (field 20).
+  optional bytes kyber_one_time_pre_key_hybrid_signature = 28;
 }
 
 // ============================================================================
@@ -367,9 +389,11 @@ message UploadPreKeysRequest {
   // NOTE: field 4 is reserved (was used in a prior version); this field is 11.
   bool replace_existing = 11;
 
-  // ---- Post-Quantum (ML-KEM-1024) fields — Phase 1 ----
+  // ---- Post-Quantum (ML-KEM-1024) fields — PQXDH v2 ----
 
-  // Kyber one-time pre-keys batch (ML-KEM-1024)
+  // Kyber one-time pre-keys batch (ML-KEM-1024). Each carries both signatures (see
+  // KyberOneTimePreKey), so the device must have a hybrid identity key — stored, or sent in
+  // this same request (field 14).
   repeated KyberOneTimePreKey kyber_pre_keys = 12;
 
   // Optional: also update Kyber signed pre-key
@@ -394,14 +418,11 @@ message UploadPreKeysRequest {
   // ("KonstruktX3DH-v1" || [0x00, 0x01] || signed_pre_key_public). (scope B)
   optional bytes signed_pre_key_hybrid_signature = 16;
 
-  // Hybrid signature (3373 bytes) over the CURRENT Kyber SPK X3DH sign-message
-  // ("KonstruktX3DH-v1" || [0x00, 0x10] || kyber_signed_pre_key_public). (scope B)
+  // Hybrid signature (3373 bytes) over the CURRENT Kyber SPK's v2 sign-message
+  // ("KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE) || kyber_signed_pre_key_public).
   optional bytes kyber_signed_pre_key_hybrid_signature = 17;
 
-  // Capability declaration: this device supports SuiteID::PQ_RATCHET (3) for
-  // sparse continuous post-quantum ratchet on established sessions.
-  // Server persists it and advertises in PreKeyBundle responses.
-  // Clients should set this to true when they are capable (post-regen of bindings etc.).
+  // Deprecated: see PreKeyBundle.supports_pq_ratchet.
   bool supports_pq_ratchet = 18;
 
   // Reserved for future options
@@ -432,17 +453,28 @@ message SignedPreKeyUpload {
 }
 
 // ---- Post-Quantum (ML-KEM-1024) key upload types ----
+//
+// The v2 sign-message every Kyber key is signed over:
+//   "KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE, unix seconds) || public_key
+// The core produces all of these (construct-core `KyberPrekeyUpload`); a client uploads them
+// as given and never builds the message itself.
 
 // Single Kyber one-time pre-key upload
 message KyberOneTimePreKey {
-  // Key ID (client-generated, unique per device)
+  // Key ID (client-generated, unique per device; the core numbers these from 1000000)
   uint32 key_id = 1;
 
-  // ML-KEM-1024 public key (exactly 1184 bytes)
+  // ML-KEM-1024 public key (exactly 1568 bytes)
   bytes public_key = 2;
 
-  // Ed25519 signature over public_key (64 bytes)
+  // Ed25519 signature (64 bytes) over the v2 sign-message
   bytes signature = 3;
+
+  // Signed creation time, unix seconds (required; 0 is rejected)
+  uint64 created_at = 4;
+
+  // Hybrid signature (3373 bytes) over the same v2 sign-message, with the hybrid identity key
+  bytes hybrid_signature = 5;
 }
 
 // Kyber signed pre-key upload (persistent, rotated like X25519 SPK)
@@ -450,15 +482,20 @@ message KyberSignedPreKeyUpload {
   // Key ID
   uint32 key_id = 1;
 
-  // ML-KEM-1024 public key (exactly 1184 bytes)
+  // ML-KEM-1024 public key (exactly 1568 bytes)
   bytes public_key = 2;
 
-  // Ed25519 signature over public_key (64 bytes)
+  // Ed25519 signature (64 bytes) over the v2 sign-message
   bytes signature = 3;
 
   // NOTE: hybrid signatures over the Kyber SPK are uploaded via the top-level
-  // kyber_signed_pre_key_hybrid_signature field on UploadPreKeysRequest.
+  // kyber_signed_pre_key_hybrid_signature field on UploadPreKeysRequest, or atomically with a
+  // rotation via RotateSignedPreKeyRequest.kyber_signed_pre_key_hybrid_signature.
   reserved 4;
+
+  // Signed creation time, unix seconds (required; 0 is rejected). The server serves it back
+  // as PreKeyBundle.kyber_pre_key_created_at.
+  uint64 created_at = 5;
 }
 
 message UploadPreKeysResponse {
@@ -522,8 +559,8 @@ message RotateSignedPreKeyRequest {
   // UploadPreKeysRequest.signed_pre_key_hybrid_signature.
   optional bytes signed_pre_key_hybrid_signature = 5;
 
-  // Hybrid (ML-DSA) signature over new_kyber_signed_pre_key.public_key (suite 0x10). Stored
-  // atomically with the rotated Kyber SPK when both are present.
+  // Hybrid (ML-DSA) signature over new_kyber_signed_pre_key's v2 sign-message (suite 0x11,
+  // with its created_at). Stored atomically with the rotated Kyber SPK when both are present.
   optional bytes kyber_signed_pre_key_hybrid_signature = 6;
 }
 
