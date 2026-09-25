@@ -11,13 +11,23 @@ use sqlx::PgPool;
 // Types
 // ============================================================================
 
-/// ML-KEM-1024 public key size in bytes (NIST FIPS 203)
-pub const KYBER_PUBLIC_KEY_SIZE: usize = 1184;
+/// ML-KEM-1024 public key size in bytes (NIST FIPS 203). Until PQXDH v2 this constant said
+/// "ML-KEM-1024" and held 1184 — the ML-KEM-768 size, which is what clients actually sent.
+pub const KYBER_PUBLIC_KEY_SIZE: usize = 1568;
 /// ML-KEM-1024 ciphertext size in bytes (carried in PreKeySignalMessage.kem_ciphertext)
 #[allow(dead_code)]
 pub const KYBER_CIPHERTEXT_SIZE: usize = 1568;
 /// Ed25519 signature size in bytes
 pub const ED25519_SIGNATURE_SIZE: usize = 64;
+
+/// The oldest a Kyber signed pre-key may be, by its signed `created_at`, when it is uploaded.
+///
+/// construct-core's `KYBER_SPK_MAX_AGE_SECS`: an initiator refuses to encapsulate to an older
+/// one, so storing it would publish a bundle every peer rejects.
+pub const KYBER_SPK_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
+/// How far in the future a signed `created_at` may be (device clock skew).
+pub const KYBER_CREATED_AT_MAX_SKEW_SECS: u64 = 24 * 3600;
 
 /// Warn in logs when a served SPK is older than 8 days. Clients will reject at 10 days.
 const SPK_WARN_AGE_SECS: i64 = 8 * 24 * 3600;
@@ -46,6 +56,15 @@ pub struct PreKeyBundle {
     pub kyber_pre_key_signature: Option<Vec<u8>>,
     pub kyber_one_time_pre_key: Option<Vec<u8>>,
     pub kyber_one_time_pre_key_id: Option<u32>,
+    // ---- PQXDH v2 (migration 071): what the device signed alongside each Kyber key ----
+    /// Signed creation time of the Kyber SPK (unix seconds), under both of its signatures.
+    pub kyber_pre_key_created_at: Option<u64>,
+    /// Ed25519 signature over the Kyber OTPK's v2 sign-message.
+    pub kyber_one_time_pre_key_signature: Option<Vec<u8>>,
+    /// Signed creation time of the Kyber OTPK.
+    pub kyber_one_time_pre_key_created_at: Option<u64>,
+    /// Hybrid signature over the Kyber OTPK's v2 sign-message.
+    pub kyber_one_time_pre_key_hybrid_signature: Option<Vec<u8>>,
     // ---- SPK timestamps and rotation epochs (migration 031) ----
     pub spk_uploaded_at: Option<DateTime<Utc>>,
     pub spk_rotation_epoch: u32,
@@ -89,28 +108,23 @@ pub struct SignedPreKey {
     pub signature: Vec<u8>,
 }
 
-/// ML-KEM-1024 one-time pre-key with Ed25519 signature (Phase 1).
+/// ML-KEM-1024 one-time pre-key as a PQXDH v2 device uploads it: both signatures over
+/// `"KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE) || public_key`.
 #[derive(Debug, Clone)]
 pub struct KyberOneTimePreKey {
     pub key_id: u32,
-    /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1184) bytes
+    /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1568) bytes
     pub public_key: Vec<u8>,
     /// Ed25519 signature, exactly `ED25519_SIGNATURE_SIZE` (64) bytes
     pub signature: Vec<u8>,
-}
-
-/// ML-KEM-1024 one-time pre-key with hybrid (Ed25519 + ML-DSA-65) signature (Phase 2).
-#[derive(Debug, Clone)]
-pub struct HybridKyberOneTimePreKey {
-    pub key_id: u32,
-    /// Exactly `KYBER_PUBLIC_KEY_SIZE` (1184) bytes
-    pub public_key: Vec<u8>,
-    /// Hybrid signature: Ed25519 (64) + ML-DSA-65 (3309) = 3373 bytes
-    pub signature: Vec<u8>,
+    /// Signed creation time, unix seconds
+    pub created_at: u64,
+    /// Hybrid signature (Ed25519 + ML-DSA-65), 3373 bytes
+    pub hybrid_signature: Vec<u8>,
 }
 
 /// Validate ML-KEM-1024 public key size.
-/// Returns `Err` if the key is not exactly 1184 bytes.
+/// Returns `Err` if the key is not exactly 1568 bytes.
 pub fn validate_kyber_public_key(key: &[u8]) -> Result<()> {
     if key.len() != KYBER_PUBLIC_KEY_SIZE {
         anyhow::bail!(
@@ -147,11 +161,11 @@ pub fn validate_ed25519_signature(sig: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Cryptographically verify a prekey signature.
+/// Cryptographically verify a classic signed pre-key signature.
 ///
 /// Message = `"KonstruktX3DH-v1" || [0x00, suite_id] || public_key`
 ///
-/// `suite_id`: 0x01 = ClassicX25519, 0x10 = HybridKyber1024X25519
+/// `suite_id`: 0x01 = ClassicX25519. Kyber keys are checked by [`check_kyber_prekey_v2`].
 pub fn verify_prekey_signature(
     verifying_key_bytes: &[u8],
     suite_id: u8,
@@ -176,6 +190,72 @@ pub fn verify_prekey_signature(
 
     vk.verify(&message, &sig)
         .map_err(|_| anyhow::anyhow!("Prekey signature verification failed"))
+}
+
+/// The PQXDH v2 checks a Kyber prekey must pass before it is stored: size, a plausible signed
+/// `created_at`, and the device's Ed25519 signature over the v2 sign-message.
+///
+/// `max_age_secs` is `Some(KYBER_SPK_MAX_AGE_SECS)` for a signed pre-key and `None` for a
+/// one-time key, whose age decides nothing (a replayed, used one-time key meets a deleted
+/// secret). The server checks what an initiator will check, so a key that every peer would
+/// refuse is rejected here, where the device can hear about it, rather than served.
+pub fn check_kyber_prekey_v2(
+    verifying_key: &[u8],
+    public_key: &[u8],
+    created_at: u64,
+    signature: &[u8],
+    now: u64,
+    max_age_secs: Option<u64>,
+) -> Result<()> {
+    validate_kyber_public_key(public_key)?;
+    validate_ed25519_signature(signature)?;
+    if created_at == 0 {
+        anyhow::bail!("Kyber prekey created_at is required (PQXDH v2)");
+    }
+    if created_at > now.saturating_add(KYBER_CREATED_AT_MAX_SKEW_SECS) {
+        anyhow::bail!("Kyber prekey created_at is in the future: {created_at} > {now}");
+    }
+    if let Some(max_age) = max_age_secs
+        && now.saturating_sub(created_at) > max_age
+    {
+        anyhow::bail!(
+            "Kyber signed pre-key is older than {} days by its signed created_at",
+            max_age / 86400
+        );
+    }
+    construct_crypto::pqc::verify_kyber_prekey_signature_v2(
+        verifying_key,
+        created_at,
+        public_key,
+        signature,
+    )
+}
+
+/// The hybrid half of [`check_kyber_prekey_v2`]: the signature under the device's hybrid
+/// identity key, over the same v2 sign-message.
+pub fn check_kyber_prekey_hybrid_v2(
+    hybrid_identity_key: Option<&[u8]>,
+    public_key: &[u8],
+    created_at: u64,
+    hybrid_signature: &[u8],
+) -> Result<()> {
+    let hybrid_key = hybrid_identity_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Kyber prekey hybrid signature provided but device has no hybrid identity key"
+        )
+    })?;
+    validate_hybrid_signature(hybrid_signature)?;
+    construct_crypto::pqc::verify_hybrid_kyber_prekey_signature_v2(
+        hybrid_key,
+        created_at,
+        public_key,
+        hybrid_signature,
+    )
+    .map_err(|e| anyhow::anyhow!("Kyber prekey hybrid signature verification failed: {e}"))
+}
+
+fn now_secs() -> u64 {
+    Utc::now().timestamp().max(0) as u64
 }
 
 /// Build a canonical byte representation of the bundle for signing.
@@ -295,6 +375,7 @@ pub async fn get_prekey_bundle(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   kyber_signed_pre_key_created_at,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
@@ -314,6 +395,7 @@ pub async fn get_prekey_bundle(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   kyber_signed_pre_key_created_at,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
@@ -380,7 +462,7 @@ pub async fn get_prekey_bundle(
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING key_id, public_key, signature
+            RETURNING key_id, public_key, signature, created_at, hybrid_signature
             "#,
         )
         .bind(&device.device_id)
@@ -406,6 +488,17 @@ pub async fn get_prekey_bundle(
         kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
         kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
         kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
+        kyber_pre_key_created_at: device
+            .kyber_signed_pre_key_created_at
+            .map(|t| t.max(0) as u64),
+        kyber_one_time_pre_key_signature: kyber_otp.as_ref().map(|k| k.signature.clone()),
+        kyber_one_time_pre_key_created_at: kyber_otp
+            .as_ref()
+            .and_then(|k| k.created_at)
+            .map(|t| t.max(0) as u64),
+        kyber_one_time_pre_key_hybrid_signature: kyber_otp
+            .as_ref()
+            .and_then(|k| k.hybrid_signature.clone()),
         spk_uploaded_at: device.spk_uploaded_at,
         spk_rotation_epoch: device.spk_rotation_epoch as u32,
         kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
@@ -487,6 +580,7 @@ pub async fn get_prekey_bundles(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   kyber_signed_pre_key_created_at,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
@@ -505,6 +599,7 @@ pub async fn get_prekey_bundles(
             SELECT device_id, identity_public, verifying_key, signed_prekey_public,
                    signed_prekey_id, signed_prekey_signature, crypto_suites->>0 AS crypto_suite, registered_at,
                    kyber_signed_pre_key, kyber_signed_pre_key_id, kyber_signed_pre_key_signature,
+                   kyber_signed_pre_key_created_at,
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
@@ -568,7 +663,7 @@ pub async fn get_prekey_bundles(
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING key_id, public_key, signature
+                RETURNING key_id, public_key, signature, created_at, hybrid_signature
                 "#,
             )
             .bind(&device.device_id)
@@ -594,6 +689,17 @@ pub async fn get_prekey_bundles(
             kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
             kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
             kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
+            kyber_pre_key_created_at: device
+                .kyber_signed_pre_key_created_at
+                .map(|t| t.max(0) as u64),
+            kyber_one_time_pre_key_signature: kyber_otp.as_ref().map(|k| k.signature.clone()),
+            kyber_one_time_pre_key_created_at: kyber_otp
+                .as_ref()
+                .and_then(|k| k.created_at)
+                .map(|t| t.max(0) as u64),
+            kyber_one_time_pre_key_hybrid_signature: kyber_otp
+                .as_ref()
+                .and_then(|k| k.hybrid_signature.clone()),
             spk_uploaded_at: device.spk_uploaded_at,
             spk_rotation_epoch: device.spk_rotation_epoch as u32,
             kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
@@ -666,21 +772,36 @@ pub async fn upload_prekeys(
         anyhow::bail!("Device not found or inactive");
     }
 
-    // Validate Kyber key sizes and verify signatures before any DB writes
+    // Verify every Kyber key before any DB write: both signatures over the v2 sign-message.
+    // The hybrid one is required, not optional — a PQXDH v2 initiator uses a one-time key only
+    // when both verify, so a key without it would be served and never used. The hybrid identity
+    // key is read from the row, which is why the handler stores a hybrid identity sent in the
+    // same request before calling this.
     if !kyber_pre_keys.is_empty() {
-        let verifying_key: Vec<u8> = sqlx::query_scalar(
-            "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
+        let (verifying_key, hybrid_identity_key): (Vec<u8>, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
         )
         .bind(device_id)
         .fetch_one(db)
         .await
         .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
 
+        let now = now_secs();
         for k in kyber_pre_keys {
-            validate_kyber_public_key(&k.public_key)?;
-            validate_ed25519_signature(&k.signature)?;
-            // Suite 0x10 = HybridKyber1024X25519
-            verify_prekey_signature(&verifying_key, 0x10, &k.public_key, &k.signature)?;
+            check_kyber_prekey_v2(
+                &verifying_key,
+                &k.public_key,
+                k.created_at,
+                &k.signature,
+                now,
+                None,
+            )?;
+            check_kyber_prekey_hybrid_v2(
+                hybrid_identity_key.as_deref(),
+                &k.public_key,
+                k.created_at,
+                &k.hybrid_signature,
+            )?;
         }
     }
 
@@ -727,8 +848,9 @@ pub async fn upload_prekeys(
     for kk in kyber_pre_keys {
         sqlx::query(
             r#"
-            INSERT INTO kyber_one_time_pre_keys (device_id, key_id, public_key, signature)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO kyber_one_time_pre_keys
+                (device_id, key_id, public_key, signature, created_at, hybrid_signature)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (device_id, key_id) DO NOTHING
             "#,
         )
@@ -736,135 +858,8 @@ pub async fn upload_prekeys(
         .bind(kk.key_id as i32)
         .bind(&kk.public_key)
         .bind(&kk.signature)
-        .execute(db)
-        .await?;
-    }
-
-    // Return active counts
-    let classic_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false",
-    )
-    .bind(device_id)
-    .fetch_one(db)
-    .await?;
-
-    let kyber_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM kyber_one_time_pre_keys WHERE device_id = $1 AND is_expired = false",
-    )
-    .bind(device_id)
-    .fetch_one(db)
-    .await?;
-
-    construct_metrics::OTPK_UPLOADED_TOTAL.inc_by(prekeys.len() as u64);
-
-    Ok((classic_count as u32, kyber_count as u32))
-}
-
-/// Upload one-time pre-keys with **hybrid signatures** (Ed25519 + ML-DSA-65).
-///
-/// This is the Phase 2 post-quantum upgrade path. Instead of verifying Kyber
-/// OTPKs with a plain Ed25519 signature, each key is signed by the hybrid
-/// identity key (both Ed25519 AND ML-DSA-65 must verify).
-///
-/// The hybrid verifying key format is:
-/// `[ed25519_pk (32)] [mldsa65_pk (1952)]` = 1984 bytes
-///
-/// The hybrid signature format is:
-/// `[ed25519_sig (64)] [mldsa65_sig (3309)]` = 3373 bytes
-///
-/// The DB table (`kyber_one_time_pre_keys`) stores the hybrid signature as-is
-/// in the `signature` column. The column must be large enough to hold 3373 bytes.
-pub async fn upload_prekeys_hybrid(
-    db: &PgPool,
-    device_id: &str,
-    prekeys: &[OneTimePreKey],
-    replace_existing: bool,
-    hybrid_kyber_pre_keys: &[HybridKyberOneTimePreKey],
-) -> Result<(u32, u32)> {
-    // Verify device exists
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND is_active = true)",
-    )
-    .bind(device_id)
-    .fetch_one(db)
-    .await?;
-
-    if !exists {
-        anyhow::bail!("Device not found or inactive");
-    }
-
-    // Fetch hybrid verifying key (1984 bytes: ed25519_pk + mldsa65_pk)
-    let hybrid_verifying_key: Vec<u8> = sqlx::query_scalar(
-        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
-    )
-    .bind(device_id)
-    .fetch_one(db)
-    .await
-    .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
-
-    // Validate hybrid key sizes and verify hybrid signatures
-    for k in hybrid_kyber_pre_keys {
-        validate_kyber_public_key(&k.public_key)?;
-        validate_hybrid_signature(&k.signature)?;
-        // Suite 0x10 = HybridKyber1024X25519
-        construct_crypto::pqc::verify_hybrid_kyber_key_signature(
-            &hybrid_verifying_key,
-            0x10,
-            &k.public_key,
-            &k.signature,
-        )?;
-    }
-
-    // Soft-expire existing keys if requested
-    if replace_existing {
-        sqlx::query(
-            "UPDATE one_time_prekeys
-             SET is_expired = true, expired_at = NOW()
-             WHERE device_id = $1 AND is_expired = false",
-        )
-        .bind(device_id)
-        .execute(db)
-        .await?;
-        sqlx::query(
-            "UPDATE kyber_one_time_pre_keys
-             SET is_expired = true, expired_at = NOW()
-             WHERE device_id = $1 AND is_expired = false",
-        )
-        .bind(device_id)
-        .execute(db)
-        .await?;
-        tracing::info!(device_id = %device_id, "Soft-expired stale OTPK pool (hybrid, replace_existing=true)");
-    }
-
-    // Insert classic pre-keys
-    for prekey in prekeys {
-        sqlx::query(
-            r#"
-            INSERT INTO one_time_prekeys (device_id, key_id, public_key)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (device_id, key_id) DO NOTHING
-            "#,
-        )
-        .bind(device_id)
-        .bind(prekey.key_id as i32)
-        .bind(&prekey.public_key)
-        .execute(db)
-        .await?;
-    }
-
-    // Insert hybrid-signed Kyber OTPKs
-    for kk in hybrid_kyber_pre_keys {
-        sqlx::query(
-            r#"
-            INSERT INTO kyber_one_time_pre_keys (device_id, key_id, public_key, signature)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (device_id, key_id) DO NOTHING
-            "#,
-        )
-        .bind(device_id)
-        .bind(kk.key_id as i32)
-        .bind(&kk.public_key)
-        .bind(&kk.signature)
+        .bind(kk.created_at as i64)
+        .bind(&kk.hybrid_signature)
         .execute(db)
         .await?;
     }
@@ -933,21 +928,20 @@ pub async fn get_prekey_count(db: &PgPool, device_id: &str) -> Result<(u32, Date
 }
 
 /// Upload or replace the Kyber signed pre-key for a device.
-/// Validates key size (1184 bytes) and signature size (64 bytes) before writing.
+/// Checked by [`check_kyber_prekey_v2`] before writing: 1568 bytes, a signed `created_at` no
+/// older than `KYBER_SPK_MAX_AGE_SECS`, the Ed25519 signature over the v2 sign-message.
 pub async fn upload_kyber_signed_prekey(
     db: &PgPool,
     device_id: &str,
     key_id: u32,
     public_key: &[u8],
     signature: &[u8],
-    // Optional hybrid (ML-DSA) signature over public_key (suite 0x10). When provided it is
+    created_at: u64,
+    // Optional hybrid (ML-DSA) signature over the same v2 sign-message. When provided it is
     // verified against the device's hybrid identity key and stored ATOMICALLY with the rotated
     // Kyber SPK. None preserves the legacy clear-and-re-set-separately behaviour.
     hybrid_sig: Option<&[u8]>,
 ) -> Result<u32> {
-    validate_kyber_public_key(public_key)?;
-    validate_ed25519_signature(signature)?;
-
     let (verifying_key, hybrid_identity_key): (Vec<u8>, Option<Vec<u8>>) = sqlx::query_as(
         "SELECT verifying_key, hybrid_identity_key FROM devices WHERE device_id = $1 AND is_active = true",
     )
@@ -956,21 +950,18 @@ pub async fn upload_kyber_signed_prekey(
     .await
     .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
 
-    // Suite 0x10 = HybridKyber1024X25519
-    verify_prekey_signature(&verifying_key, 0x10, public_key, signature)?;
+    check_kyber_prekey_v2(
+        &verifying_key,
+        public_key,
+        created_at,
+        signature,
+        now_secs(),
+        Some(KYBER_SPK_MAX_AGE_SECS),
+    )?;
 
     // Verify the hybrid Kyber SPK signature now so it can be written in the same UPDATE (atomic).
     if let Some(sig) = hybrid_sig {
-        validate_hybrid_signature(sig)?;
-        let hybrid_key = hybrid_identity_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "kyber_signed_pre_key_hybrid_signature provided but device has no hybrid identity key"
-            )
-        })?;
-        construct_crypto::pqc::verify_hybrid_kyber_key_signature(hybrid_key, 0x10, public_key, sig)
-            .map_err(|e| {
-                anyhow::anyhow!("Kyber SPK hybrid signature verification failed: {}", e)
-            })?;
+        check_kyber_prekey_hybrid_v2(hybrid_identity_key.as_deref(), public_key, created_at, sig)?;
     }
 
     let new_epoch: i32 = sqlx::query_scalar(
@@ -981,6 +972,7 @@ pub async fn upload_kyber_signed_prekey(
             kyber_signed_pre_key_signature = $4,
             -- Atomic with rotation: store the verified hybrid signature when sent ($5), else clear.
             kyber_signed_pre_key_hybrid_signature = $5,
+            kyber_signed_pre_key_created_at = $6,
             key_updated_at                 = NOW(),
             kyber_spk_uploaded_at          = NOW(),
             kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
@@ -993,59 +985,7 @@ pub async fn upload_kyber_signed_prekey(
     .bind(key_id as i32)
     .bind(signature)
     .bind(hybrid_sig)
-    .fetch_one(db)
-    .await?;
-
-    Ok(new_epoch as u32)
-}
-
-/// Upload or replace the Kyber signed pre-key with a **hybrid signature**.
-///
-/// Validates ML-KEM-1024 public key size (1184 bytes) and hybrid signature
-/// size (3373 bytes). Verifies both Ed25519 and ML-DSA-65 signatures.
-pub async fn upload_kyber_signed_prekey_hybrid(
-    db: &PgPool,
-    device_id: &str,
-    key_id: u32,
-    public_key: &[u8],
-    hybrid_signature: &[u8],
-) -> Result<u32> {
-    validate_kyber_public_key(public_key)?;
-    validate_hybrid_signature(hybrid_signature)?;
-
-    let hybrid_verifying_key: Vec<u8> = sqlx::query_scalar(
-        "SELECT verifying_key FROM devices WHERE device_id = $1 AND is_active = true",
-    )
-    .bind(device_id)
-    .fetch_one(db)
-    .await
-    .map_err(|_| anyhow::anyhow!("Failed to fetch device verifying key"))?;
-
-    // Suite 0x10 = HybridKyber1024X25519
-    construct_crypto::pqc::verify_hybrid_kyber_key_signature(
-        &hybrid_verifying_key,
-        0x10,
-        public_key,
-        hybrid_signature,
-    )?;
-
-    let new_epoch: i32 = sqlx::query_scalar(
-        r#"
-        UPDATE devices
-        SET kyber_signed_pre_key           = $2,
-            kyber_signed_pre_key_id        = $3,
-            kyber_signed_pre_key_signature = $4,
-            key_updated_at                 = NOW(),
-            kyber_spk_uploaded_at          = NOW(),
-            kyber_spk_rotation_epoch       = COALESCE(kyber_spk_rotation_epoch, 0) + 1
-        WHERE device_id = $1 AND is_active = true
-        RETURNING kyber_spk_rotation_epoch
-        "#,
-    )
-    .bind(device_id)
-    .bind(public_key)
-    .bind(key_id as i32)
-    .bind(hybrid_signature)
+    .bind(created_at as i64)
     .fetch_one(db)
     .await?;
 
@@ -1133,7 +1073,8 @@ pub async fn store_hybrid_identity(
     // Fetch the device's Ed25519 identity and current signed pre-keys for verification.
     let row = sqlx::query_as::<_, HybridVerifyRow>(
         r#"
-        SELECT verifying_key, signed_prekey_public, kyber_signed_pre_key
+        SELECT verifying_key, signed_prekey_public, kyber_signed_pre_key,
+               kyber_signed_pre_key_created_at
         FROM devices
         WHERE device_id = $1 AND is_active = true
         "#,
@@ -1196,11 +1137,14 @@ pub async fn store_hybrid_identity(
     //    treatment as the classic SPK signature above.
     let kyber_hybrid_sig_to_persist: Option<&[u8]> = match &upload.kyber_pre_key_hybrid_signature {
         Some(sig) if validate_hybrid_signature(sig).is_ok() => {
-            match row.kyber_signed_pre_key.as_ref() {
-                Some(kyber)
-                    if construct_crypto::pqc::verify_hybrid_kyber_key_signature(
+            match (
+                row.kyber_signed_pre_key.as_ref(),
+                row.kyber_signed_pre_key_created_at,
+            ) {
+                (Some(kyber), Some(created_at))
+                    if construct_crypto::pqc::verify_hybrid_kyber_prekey_signature_v2(
                         &upload.hybrid_identity_key,
-                        0x10,
+                        created_at.max(0) as u64,
                         kyber,
                         sig,
                     )
@@ -1308,7 +1252,7 @@ pub async fn rotate_signed_prekey(
     spk_hybrid_sig: Option<&[u8]>,
 ) -> Result<(DateTime<Utc>, u32)> {
     // Verify Classic SPK signature before archiving or updating.
-    // Kyber SPK is verified in upload_kyber_signed_prekey via verify_prekey_signature(0x10).
+    // Kyber SPK is verified in upload_kyber_signed_prekey via check_kyber_prekey_v2 (0x11).
     // suite_id 0x01 = ClassicX25519 (see verify_prekey_signature header comment).
     let (verifying_key_bytes, hybrid_identity_key): (Vec<u8>, Option<Vec<u8>>) =
         sqlx::query_as(
@@ -1545,6 +1489,8 @@ struct DeviceRow {
     kyber_signed_pre_key: Option<Vec<u8>>,
     kyber_signed_pre_key_id: Option<i32>,
     kyber_signed_pre_key_signature: Option<Vec<u8>>,
+    // Signed creation time of the Kyber SPK (migration 071)
+    kyber_signed_pre_key_created_at: Option<i64>,
     // SPK timestamp and epoch columns (nullable, added in migration 031)
     spk_uploaded_at: Option<DateTime<Utc>>,
     spk_rotation_epoch: i32,
@@ -1570,8 +1516,10 @@ struct OneTimePreKeyRow {
 struct KyberOneTimePreKeyRow {
     key_id: i32,
     public_key: Vec<u8>,
-    #[allow(dead_code)]
     signature: Vec<u8>,
+    // Migration 071. Nullable in the schema; every row written since carries both.
+    created_at: Option<i64>,
+    hybrid_signature: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1594,6 +1542,7 @@ struct HybridVerifyRow {
     verifying_key: Vec<u8>,
     signed_prekey_public: Vec<u8>,
     kyber_signed_pre_key: Option<Vec<u8>>,
+    kyber_signed_pre_key_created_at: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1753,7 +1702,7 @@ mod tests {
 
     #[test]
     fn test_validate_kyber_public_key_correct_size_accepted() {
-        let key = vec![0xAB_u8; KYBER_PUBLIC_KEY_SIZE]; // exactly 1184 bytes
+        let key = vec![0xAB_u8; KYBER_PUBLIC_KEY_SIZE]; // exactly 1568 bytes
         assert!(validate_kyber_public_key(&key).is_ok());
     }
 
@@ -1762,12 +1711,13 @@ mod tests {
         let short = vec![0u8; 32]; // X25519 size — must be rejected
         let err = validate_kyber_public_key(&short).unwrap_err();
         assert!(
-            err.to_string().contains("1184"),
+            err.to_string().contains("1568"),
             "error must mention expected size"
         );
 
-        let long = vec![0u8; 1568]; // ciphertext size — not a valid pubkey
-        assert!(validate_kyber_public_key(&long).is_err());
+        // The ML-KEM-768 size every pre-v2 client uploaded: no longer a Kyber key here.
+        let ml_kem_768 = vec![0u8; 1184];
+        assert!(validate_kyber_public_key(&ml_kem_768).is_err());
 
         assert!(validate_kyber_public_key(&[]).is_err());
     }
@@ -1787,22 +1737,136 @@ mod tests {
 
     #[test]
     fn test_kyber_public_key_size_constant() {
-        // Sanity: ML-KEM-1024 spec mandates 1184 bytes
-        assert_eq!(KYBER_PUBLIC_KEY_SIZE, 1184);
+        // FIPS 203: an ML-KEM-1024 encapsulation key is 1568 bytes, as is its ciphertext.
+        assert_eq!(KYBER_PUBLIC_KEY_SIZE, 1568);
         assert_eq!(KYBER_CIPHERTEXT_SIZE, 1568);
         assert_eq!(ED25519_SIGNATURE_SIZE, 64);
     }
 
+    // ── PQXDH v2 Kyber prekey checks (no DB) ─────────────────────────────────
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// A device as a PQXDH v2 core signs its keys: Ed25519 identity plus hybrid identity.
+    struct SigningDevice {
+        ed25519: SigningKey,
+        hybrid_sk: Vec<u8>,
+        hybrid_pk: Vec<u8>,
+    }
+
+    impl SigningDevice {
+        fn new() -> Self {
+            let (hybrid_sk, hybrid_pk) = construct_crypto::pqc::generate_hybrid_signature_keypair();
+            Self {
+                ed25519: SigningKey::from_bytes(&[9u8; 32]),
+                hybrid_sk,
+                hybrid_pk,
+            }
+        }
+
+        fn verifying_key(&self) -> Vec<u8> {
+            self.ed25519.verifying_key().to_bytes().to_vec()
+        }
+
+        fn kyber_key(&self, key_id: u32, created_at: u64) -> KyberOneTimePreKey {
+            let public_key = vec![key_id as u8; KYBER_PUBLIC_KEY_SIZE];
+            let message =
+                construct_crypto::pqc::build_kyber_prekey_sign_message_v2(created_at, &public_key);
+            KyberOneTimePreKey {
+                key_id,
+                signature: self.ed25519.sign(&message).to_bytes().to_vec(),
+                hybrid_signature: construct_crypto::pqc::hybrid_sign(&self.hybrid_sk, &message)
+                    .unwrap(),
+                public_key,
+                created_at,
+            }
+        }
+    }
+
+    fn check(device: &SigningDevice, k: &KyberOneTimePreKey, max_age: Option<u64>) -> Result<()> {
+        check_kyber_prekey_v2(
+            &device.verifying_key(),
+            &k.public_key,
+            k.created_at,
+            &k.signature,
+            NOW,
+            max_age,
+        )
+    }
+
     #[test]
-    fn test_kyber_otpk_construction() {
-        let key = KyberOneTimePreKey {
-            key_id: 42,
-            public_key: vec![0u8; KYBER_PUBLIC_KEY_SIZE],
-            signature: vec![0u8; ED25519_SIGNATURE_SIZE],
-        };
-        assert_eq!(key.key_id, 42);
-        assert_eq!(key.public_key.len(), KYBER_PUBLIC_KEY_SIZE);
-        assert_eq!(key.signature.len(), ED25519_SIGNATURE_SIZE);
+    fn test_a_v2_kyber_prekey_passes_both_checks() {
+        let device = SigningDevice::new();
+        let k = device.kyber_key(1, NOW - 3600);
+        check(&device, &k, Some(KYBER_SPK_MAX_AGE_SECS)).unwrap();
+        check_kyber_prekey_hybrid_v2(
+            Some(&device.hybrid_pk),
+            &k.public_key,
+            k.created_at,
+            &k.hybrid_signature,
+        )
+        .unwrap();
+    }
+
+    /// The server cannot move a key's time: `created_at` is under both signatures.
+    #[test]
+    fn test_a_changed_created_at_breaks_both_signatures() {
+        let device = SigningDevice::new();
+        let mut k = device.kyber_key(1, NOW - 3600);
+        k.created_at += 1;
+        assert!(check(&device, &k, None).is_err());
+        assert!(
+            check_kyber_prekey_hybrid_v2(
+                Some(&device.hybrid_pk),
+                &k.public_key,
+                k.created_at,
+                &k.hybrid_signature
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_a_v1_kyber_signature_is_refused() {
+        let device = SigningDevice::new();
+        let mut k = device.kyber_key(1, NOW - 3600);
+        let v1 = construct_crypto::pqc::build_prekey_sign_message(0x10, &k.public_key);
+        k.signature = device.ed25519.sign(&v1).to_bytes().to_vec();
+        assert!(check(&device, &k, None).is_err());
+    }
+
+    #[test]
+    fn test_kyber_prekey_times_are_checked() {
+        let device = SigningDevice::new();
+        // No time at all: a pre-v2 upload.
+        assert!(check(&device, &device.kyber_key(1, 0), None).is_err());
+        // Too far ahead of the server clock.
+        let ahead = device.kyber_key(1, NOW + KYBER_CREATED_AT_MAX_SKEW_SECS + 1);
+        assert!(check(&device, &ahead, None).is_err());
+        // A signed pre-key older than an initiator accepts; a one-time key of that age is fine.
+        let old = device.kyber_key(1, NOW - KYBER_SPK_MAX_AGE_SECS - 1);
+        assert!(check(&device, &old, Some(KYBER_SPK_MAX_AGE_SECS)).is_err());
+        check(&device, &old, None).unwrap();
+    }
+
+    #[test]
+    fn test_a_kyber_prekey_hybrid_signature_needs_a_hybrid_identity() {
+        let device = SigningDevice::new();
+        let k = device.kyber_key(1, NOW);
+        assert!(
+            check_kyber_prekey_hybrid_v2(None, &k.public_key, k.created_at, &k.hybrid_signature)
+                .is_err()
+        );
+        let (_, other) = construct_crypto::pqc::generate_hybrid_signature_keypair();
+        assert!(
+            check_kyber_prekey_hybrid_v2(
+                Some(&other),
+                &k.public_key,
+                k.created_at,
+                &k.hybrid_signature
+            )
+            .is_err()
+        );
     }
 
     // ── Hybrid PQ identity cross-signature (no DB) ───────────────────────────
@@ -1877,6 +1941,10 @@ mod tests {
             kyber_pre_key_signature: None,
             kyber_one_time_pre_key: None,
             kyber_one_time_pre_key_id: None,
+            kyber_pre_key_created_at: None,
+            kyber_one_time_pre_key_signature: None,
+            kyber_one_time_pre_key_created_at: None,
+            kyber_one_time_pre_key_hybrid_signature: None,
             spk_uploaded_at: spk_age_days.map(|d| now - chrono::Duration::days(d as i64)),
             spk_rotation_epoch: 0,
             kyber_spk_uploaded_at: kyber_spk_age_days
@@ -2224,5 +2292,133 @@ mod tests {
         );
 
         cleanup_device(&db, &device_id).await;
+    }
+
+    // ── PQXDH v2 Kyber keys through the database ────────────────────────────
+
+    /// A device row with everything the bundle query reads. `insert_test_device` above predates
+    /// the NOT NULL key columns and fails on today's schema.
+    async fn insert_signing_device(
+        db: &PgPool,
+        device: &SigningDevice,
+        with_hybrid_identity: bool,
+    ) -> (String, uuid::Uuid) {
+        let user_id = uuid::Uuid::new_v4();
+        let device_id = uuid::Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO devices (device_id, user_id, server_hostname, verifying_key,
+                                 identity_public, signed_prekey_public, hybrid_identity_key)
+            VALUES ($1, $2, 'test', $3, $4, $5, $6)
+            "#,
+        )
+        .bind(&device_id)
+        .bind(user_id)
+        .bind(device.verifying_key())
+        .bind(uuid::Uuid::new_v4().as_bytes().to_vec())
+        .bind(vec![1u8; 32])
+        .bind(with_hybrid_identity.then(|| device.hybrid_pk.clone()))
+        .execute(db)
+        .await
+        .expect("Failed to insert test device");
+        (device_id, user_id)
+    }
+
+    /// Upload → bundle, for the fields PQXDH v2 added: what the device signed comes back exactly,
+    /// and it verifies the way an initiator will verify it.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_pqxdh_v2_kyber_keys_round_trip_through_the_bundle() {
+        let db = get_test_db().await;
+        let device = SigningDevice::new();
+        let (device_id, user_id) = insert_signing_device(&db, &device, true).await;
+        let now = now_secs();
+
+        let spk = device.kyber_key(1, now - 60);
+        upload_kyber_signed_prekey(
+            &db,
+            &device_id,
+            spk.key_id,
+            &spk.public_key,
+            &spk.signature,
+            spk.created_at,
+            Some(&spk.hybrid_signature),
+        )
+        .await
+        .unwrap();
+
+        let otpk = device.kyber_key(7, now - 30);
+        upload_prekeys(&db, &device_id, &[], false, std::slice::from_ref(&otpk))
+            .await
+            .unwrap();
+
+        // A key without a signed time is a pre-v2 upload, and nothing is stored for it.
+        let mut unsigned_time = device.kyber_key(8, now);
+        unsigned_time.created_at = 0;
+        assert!(
+            upload_prekeys(&db, &device_id, &[], false, &[unsigned_time])
+                .await
+                .is_err()
+        );
+
+        let bundle = get_prekey_bundle(&db, &user_id.to_string(), Some(&device_id), None, true)
+            .await
+            .unwrap()
+            .expect("bundle");
+
+        assert_eq!(
+            bundle.kyber_pre_key.as_deref(),
+            Some(spk.public_key.as_slice())
+        );
+        assert_eq!(bundle.kyber_pre_key_created_at, Some(spk.created_at));
+        assert_eq!(
+            bundle.kyber_pre_key_hybrid_signature.as_deref(),
+            Some(spk.hybrid_signature.as_slice())
+        );
+        assert_eq!(bundle.kyber_one_time_pre_key_id, Some(otpk.key_id));
+        assert_eq!(
+            bundle.kyber_one_time_pre_key_created_at,
+            Some(otpk.created_at)
+        );
+
+        let served_otpk = bundle.kyber_one_time_pre_key.unwrap();
+        let created_at = bundle.kyber_one_time_pre_key_created_at.unwrap();
+        construct_crypto::pqc::verify_kyber_prekey_signature_v2(
+            &bundle.verifying_key,
+            created_at,
+            &served_otpk,
+            &bundle.kyber_one_time_pre_key_signature.unwrap(),
+        )
+        .unwrap();
+        construct_crypto::pqc::verify_hybrid_kyber_prekey_signature_v2(
+            bundle.hybrid_identity_key.as_deref().unwrap(),
+            created_at,
+            &served_otpk,
+            &bundle.kyber_one_time_pre_key_hybrid_signature.unwrap(),
+        )
+        .unwrap();
+
+        // Consumed: the next bundle has no one-time key left to give.
+        let next = get_prekey_bundle(&db, &user_id.to_string(), Some(&device_id), None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.kyber_one_time_pre_key.is_none());
+        assert!(next.kyber_one_time_pre_key_signature.is_none());
+    }
+
+    /// A Kyber one-time key needs the hybrid identity it is signed with, on the row.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_kyber_one_time_keys_need_a_hybrid_identity() {
+        let db = get_test_db().await;
+        let device = SigningDevice::new();
+        let (device_id, _) = insert_signing_device(&db, &device, false).await;
+        let otpk = device.kyber_key(7, now_secs());
+        assert!(
+            upload_prekeys(&db, &device_id, &[], false, &[otpk])
+                .await
+                .is_err()
+        );
     }
 }

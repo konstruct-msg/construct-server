@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 pub enum CryptoSuite {
     #[default]
     ClassicX25519 = 0x01,
+    /// A capability label stored as `"0x10"` in `users.crypto_suites` / `devices.crypto_suites`.
+    /// It is not the byte Kyber prekeys are signed under — that is `0x11` since PQXDH v2
+    /// (`construct_crypto::pqc::KYBER_PREKEY_SIGN_SUITE_V2`) — and it is not renumbered with it:
+    /// the value is persisted and sent by clients at registration, and nothing verifies against it.
     HybridKyber1024X25519 = 0x10,
 }
 
