@@ -699,6 +699,7 @@ dependencies = [
  "chrono",
  "construct-config",
  "construct-crypto",
+ "construct-types",
  "crypto-agility",
  "prost",
  "serde",

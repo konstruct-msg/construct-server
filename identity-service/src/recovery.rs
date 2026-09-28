@@ -113,23 +113,23 @@ pub async fn set_recovery_key(
         );
     }
 
-    // 7. Store recovery key (DB trigger enforces immutability) and optional backup
-    if let Some(backup) = encrypted_backup {
-        sqlx::query(
-            "UPDATE users SET recovery_public_key = $1, recovery_encrypted_backup = $2 WHERE id = $3",
-        )
-        .bind(recovery_public_key)
-        .bind(backup)
-        .bind(user_id)
-        .execute(db)
-        .await?;
-    } else {
-        sqlx::query("UPDATE users SET recovery_public_key = $1 WHERE id = $2")
-            .bind(recovery_public_key)
-            .bind(user_id)
-            .execute(db)
-            .await?;
-    }
+    // 7. Store recovery key (DB trigger enforces immutability), optional backup, and the address
+    // the key names — in one statement, so an account never has one without the other
+    // (construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address").
+    let (key_type, route_id) = construct_db::account_address_columns(recovery_public_key);
+    sqlx::query(
+        "UPDATE users SET recovery_public_key = $1, \
+             recovery_encrypted_backup = COALESCE($2, recovery_encrypted_backup), \
+             identity_public_key = $1, identity_key_type = $3, route_id = $4 \
+         WHERE id = $5",
+    )
+    .bind(recovery_public_key)
+    .bind(encrypted_backup)
+    .bind(key_type)
+    .bind(&route_id)
+    .bind(user_id)
+    .execute(db)
+    .await?;
 
     // 8. Return fingerprint
     let fingerprint = key_fingerprint(recovery_public_key);
@@ -311,4 +311,75 @@ struct RecoveryKeyRow {
     id: Uuid,
     recovery_public_key: Option<Vec<u8>>,
     last_recovery_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// Local Postgres from `ops/docker-compose.dev.yml`; the test skips without it.
+    async fn try_db() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:password@127.0.0.1:5432/construct_test".to_string()
+        });
+        let pool = PgPool::connect(&url).await.ok()?;
+        sqlx::migrate!("../shared/migrations")
+            .run(&pool)
+            .await
+            .ok()?;
+        Some(pool)
+    }
+
+    /// Setting the recovery key writes the address it names in the same statement
+    /// (construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address").
+    #[tokio::test]
+    async fn setting_the_recovery_key_writes_the_account_address() {
+        let Some(db) = try_db().await else {
+            eprintln!("recovery address test: postgres unavailable — skipping");
+            return;
+        };
+        let user_id: Uuid =
+            sqlx::query_scalar("INSERT INTO users (id) VALUES (gen_random_uuid()) RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let public = signing.verifying_key().to_bytes();
+        let timestamp = Utc::now().timestamp();
+        let signature =
+            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
+
+        set_recovery_key(
+            &db,
+            user_id,
+            &public,
+            &signature.to_bytes(),
+            timestamp,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (identity, key_type, route_id): (Option<Vec<u8>>, i16, Option<String>) =
+            sqlx::query_as(
+                "SELECT identity_public_key, identity_key_type, route_id FROM users WHERE id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(identity.as_deref(), Some(public.as_slice()));
+        assert_eq!(key_type, 1, "Ed25519");
+        let found = construct_db::get_user_by_route_id(&db, route_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .expect("the address resolves to the account");
+        assert_eq!(found.id, user_id);
+
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&db)
+            .await;
+    }
 }

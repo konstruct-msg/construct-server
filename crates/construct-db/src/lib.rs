@@ -345,6 +345,63 @@ pub async fn get_user_by_identity_pubkey(
     Ok(user)
 }
 
+/// Make an account's address its recovery key: `identity_public_key`, `identity_key_type` and
+/// `route_id` (`RouteId::of_account`). Written in the same statement as the recovery key by
+/// recovery setup, and by `backfill_account_addresses` for accounts that set it before this
+/// existed. See construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address".
+pub fn account_address_columns(recovery_public_key: &[u8]) -> (i16, String) {
+    (
+        construct_types::IDENTITY_KEY_TYPE_ED25519,
+        construct_types::RouteId::of_account(recovery_public_key)
+            .as_str()
+            .to_string(),
+    )
+}
+
+/// Give every account that has a recovery key the address that key names, where it has none or
+/// another. Idempotent; returns how many accounts changed.
+///
+/// Migration 064 copied the recovery key into `identity_public_key` but left `route_id` NULL
+/// ("backfilled on next activity or by background job" — neither existed), and accounts that set
+/// their recovery key after it got neither, so no `ed25519:` address resolved. The hash is
+/// computed here rather than in SQL so that one function, `RouteId::of_account`, defines it.
+pub async fn backfill_account_addresses(pool: &DbPool) -> Result<u64> {
+    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+        r#"
+        SELECT id, recovery_public_key FROM users
+        WHERE recovery_public_key IS NOT NULL
+          AND (route_id IS NULL
+               OR identity_public_key IS DISTINCT FROM recovery_public_key
+               OR identity_key_type IS DISTINCT FROM $1)
+        "#,
+    )
+    .bind(construct_types::IDENTITY_KEY_TYPE_ED25519)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list accounts without an address")?;
+
+    let mut changed = 0;
+    for (id, recovery_public_key) in rows {
+        let (key_type, route_id) = account_address_columns(&recovery_public_key);
+        changed += sqlx::query(
+            r#"
+            UPDATE users
+            SET identity_public_key = recovery_public_key, identity_key_type = $2, route_id = $3
+            WHERE id = $1 AND recovery_public_key = $4
+            "#,
+        )
+        .bind(id)
+        .bind(key_type)
+        .bind(&route_id)
+        .bind(&recovery_public_key)
+        .execute(pool)
+        .await
+        .context("Failed to write an account address")?
+        .rows_affected();
+    }
+    Ok(changed)
+}
+
 /// Find a user by their route_id (64 hex chars, Epic E).
 pub async fn get_user_by_route_id(pool: &DbPool, route_id: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>(
@@ -975,12 +1032,14 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
 ///
 /// # Returns
 /// Tuple of (User, Device)
+///
+/// The account's address (`identity_public_key`, `route_id`) is not set here: it is the recovery
+/// key's, written when recovery is set up (`account_address_columns` below). A key the client
+/// chose at registration was accepted until 2026-09-28 and never sent by any client.
 pub async fn create_user_with_first_device(
     pool: &DbPool,
     username_hash: Option<&[u8]>,
     device_data: CreateDeviceData,
-    identity_public_key: Option<&[u8]>,
-    route_id: Option<&str>,
 ) -> Result<(User, Device)> {
     // Start transaction
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -989,15 +1048,13 @@ pub async fn create_user_with_first_device(
     //    Plaintext username is never stored — only the HMAC hash.
     let user = sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username_hash, primary_device_id, identity_public_key, route_id)
-        VALUES (gen_random_uuid(), $1, NULL, $2, $3)
+        INSERT INTO users (id, username_hash, primary_device_id)
+        VALUES (gen_random_uuid(), $1, NULL)
         RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
                   route_id, last_recovery_at, primary_device_id
         "#,
     )
     .bind(username_hash)
-    .bind(identity_public_key)
-    .bind(route_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {

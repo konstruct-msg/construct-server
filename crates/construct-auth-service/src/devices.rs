@@ -489,39 +489,17 @@ pub async fn register_device_core(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
 
-    // 6b. Validate identity_public_key if provided
-    let identity_pubkey = if let Some(ref key) = identity_public_key {
-        let key_type = identity_key_type.unwrap_or(1);
-        let expected_len = match key_type {
-            1 => 32,   // Ed25519
-            2 => 1952, // ML-DSA-65
-            3 => 1984, // Hybrid Ed25519+ML-DSA
-            other => {
-                return Err(AppError::Validation(format!(
-                    "Unsupported identity_key_type: {}. Supported: 1 (Ed25519), 2 (ML-DSA-65), 3 (Hybrid)",
-                    other
-                )));
-            }
-        };
-        if key.len() != expected_len {
-            return Err(AppError::Validation(format!(
-                "identity_public_key must be {} bytes for type {}, got {}",
-                expected_len,
-                key_type,
-                key.len()
-            )));
-        }
-        Some(key.as_slice())
-    } else {
-        None
-    };
-
-    // 6c. Compute route_id from identity_public_key if provided (without consuming identity_pubkey)
-    let route_id: Option<construct_types::RouteId> = identity_pubkey.as_ref().map(|key| {
-        let key_type = identity_key_type.unwrap_or(1) as i16;
-        construct_types::RouteId::compute(key, key_type)
-    });
-    let route_id_str: Option<&str> = route_id.as_ref().map(|r| r.as_str());
+    // 6b. The account's address is its recovery key, set with it (identity-service
+    // `setup_recovery`), not a key the client names here. No client ever sent one; a request that
+    // does is refused rather than stored beside an address that would then name another key.
+    // construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address".
+    if identity_public_key.is_some() || identity_key_type.is_some() {
+        return Err(AppError::Validation(
+            "identity_public_key is not accepted at registration: an account's address is its \
+             recovery key"
+                .to_string(),
+        ));
+    }
 
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();
@@ -562,8 +540,6 @@ pub async fn register_device_core(
         &app_context.db_pool,
         username_hash_opt.as_deref(),
         device_data,
-        identity_pubkey,
-        route_id_str,
     )
     .await
     .map_err(|e| {

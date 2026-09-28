@@ -57,7 +57,7 @@ impl UserId {
             if key.len() != 32 {
                 return Err(UserIdError::InvalidIdentityKey(encoded_key.to_string()));
             }
-            let route_id = RouteId::compute(&key, 1);
+            let route_id = RouteId::of_account(&key);
             return Ok(UserId::Identity {
                 identity_public_key: key,
                 route_id,
@@ -213,7 +213,22 @@ impl std::error::Error for UserIdError {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteId(String);
 
+/// `identity_key_type` of an Ed25519 key.
+pub const IDENTITY_KEY_TYPE_ED25519: i16 = 1;
+
 impl RouteId {
+    /// The address of an account: the `route_id` of its **recovery key**
+    /// (construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address").
+    ///
+    /// The recovery key is the one key an account has rather than a device: it survives the loss
+    /// of every device and a move to another server, and it cannot change once set
+    /// (`check_recovery_key_immutable`), so neither can the address. An `ed25519:<hex>` address
+    /// names it; registration and recovery setup store what this computes. One function for all
+    /// three, so the three cannot drift apart.
+    pub fn of_account(recovery_public_key: &[u8]) -> Self {
+        Self::compute(recovery_public_key, IDENTITY_KEY_TYPE_ED25519)
+    }
+
     /// Compute a RouteId from an identity public key and its algorithm type.
     ///
     /// # Algorithm types
@@ -332,6 +347,47 @@ mod tests {
         let federated = UserId::parse("550e8400-e29b-41d4-a716-446655440000@server.com").unwrap();
         assert!(federated.is_from_domain("server.com"));
         assert!(!federated.is_from_domain("other.com"));
+    }
+
+    /// Known answer computed outside this crate (Python `hashlib`): `SHA-256(0x0001 || key)`.
+    /// The address a client derives and the route_id the server stored must be the same bytes.
+    #[test]
+    fn a_key_address_names_the_accounts_route_id() {
+        let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let address = UserId::parse(&format!("ed25519:{key_hex}")).unwrap();
+        let expected = "a1ad370bf8dfbc15b16ad2f83aeab93c34c4bbc62577d87ac9d1ac5334e4c603";
+        assert_eq!(address.route_id().unwrap().as_str(), expected);
+        assert_eq!(
+            RouteId::of_account(&hex::decode(key_hex).unwrap()).as_str(),
+            expected
+        );
+        assert!(
+            address.uuid().is_none(),
+            "a key address has no UUID until resolved"
+        );
+        assert!(address.is_local() && !address.is_federated());
+        assert_eq!(address.to_string(), format!("ed25519:{key_hex}"));
+        let upper = UserId::parse(&format!("ed25519:{}", key_hex.to_uppercase())).unwrap();
+        assert_eq!(
+            upper.route_id(),
+            address.route_id(),
+            "hex case does not change the address"
+        );
+    }
+
+    #[test]
+    fn a_key_address_that_is_not_32_bytes_of_hex_is_refused() {
+        for bad in [
+            "ed25519:",
+            "ed25519:zz",
+            "ed25519:0001",
+            &format!("ed25519:{}", "00".repeat(33)),
+        ] {
+            assert!(
+                matches!(UserId::parse(bad), Err(UserIdError::InvalidIdentityKey(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
