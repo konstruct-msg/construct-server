@@ -2987,6 +2987,17 @@ async fn main() -> Result<()> {
         .context("Failed to apply database migrations")?;
     info!("Database migrations applied");
 
+    // Accounts whose recovery key predates its address being written with it. Idempotent; a
+    // failure leaves those addresses unresolvable, not the service unusable.
+    match construct_db::backfill_account_addresses(&db_pool).await {
+        Ok(0) => {}
+        Ok(n) => info!(
+            accounts = n,
+            "account addresses backfilled from recovery keys"
+        ),
+        Err(e) => tracing::warn!(error = %e, "account address backfill failed"),
+    }
+
     info!("Connecting to Redis...");
     let queue = Arc::new(Mutex::new(
         MessageQueue::new(&config)

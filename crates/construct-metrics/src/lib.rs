@@ -443,6 +443,20 @@ pub static MSG_SEALED_INGRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_SEALED_INGRESS_TOTAL metric")
 });
 
+/// Sealed envelopes addressed by key (`ed25519:<hex>`), by whether the key named an account here.
+/// Label `result` = `resolved` | `unresolved`. An unresolved one is answered like a send to an
+/// unknown UUID — accepted and dropped — so this counter is the only place the difference shows.
+pub static MSG_SEALED_KEY_ADDRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_sealed_key_address_total",
+            "Sealed sends addressed by account key, by whether the key resolved to an account"
+        ),
+        &["result"]
+    )
+    .expect("Failed to register MSG_SEALED_KEY_ADDRESS_TOTAL metric")
+});
+
 /// Authenticated legacy sealed envelopes refused after the unauthenticated transport cutover.
 pub static MSG_SEALED_LEGACY_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(opts!(
@@ -799,6 +813,9 @@ pub fn init_registry() {
         MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
     }
     Lazy::force(&MSG_SEALED_LEGACY_REJECTED_TOTAL);
+    for result in ["resolved", "unresolved"] {
+        MSG_SEALED_KEY_ADDRESS_TOTAL.with_label_values(&[result]);
+    }
     // All three children up front, same reason as the two above: the label set is
     // closed, and every question asked of this counter is a ratio. `unknown_device`
     // in particular is expected to be zero for long stretches, and a zero that is

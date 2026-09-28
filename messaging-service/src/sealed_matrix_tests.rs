@@ -363,6 +363,26 @@ fn seal_token_for_server(token: &[u8; 32], server_secret: &X25519StaticSecret) -
     sealed
 }
 
+/// A local sealed envelope whose recipient is named by `address` (a UUID or `ed25519:<hex>`).
+fn build_sealed_envelope_to(
+    address: &str,
+    delivery_tag: &[u8],
+) -> core_proto::SealedSenderEnvelope {
+    let inner = core_proto::SealedInner {
+        recipient_user_id: address.to_string(),
+        delivery_tag: delivery_tag.to_vec(),
+        sender_cert_ciphertext: vec![0u8; 48],
+        encrypted_payload: b"fake-e2ee-payload".to_vec(),
+        ..core_proto::SealedInner::default()
+    };
+    core_proto::SealedSenderEnvelope {
+        recipient_server: String::new(),
+        sealed_inner: inner.encode_to_vec(),
+        forwarding_token: vec![],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
 fn build_sealed_envelope(
     recipient: &uuid::Uuid,
     delivery_tag: &[u8],
@@ -405,6 +425,98 @@ async fn receipt_sender_exists(conn: &mut redis::aio::ConnectionManager, message
         .await
         .unwrap_or(0);
     n > 0
+}
+
+// ── K1/K2: an account addressed by its key (decisions/pubkey-as-identity.md) ─
+
+/// An account that set its recovery key before the address was written with it — the state every
+/// production account was in — becomes reachable by `ed25519:<recovery key>` once the backfill
+/// runs, and the sealed envelope lands in that account's mailbox.
+#[tokio::test]
+#[serial]
+async fn k1_a_key_address_reaches_the_account_after_the_backfill() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let db = &h.ctx.db_pool;
+    let recovery_key = random_bytes32();
+    // Set the old way: the key alone, no address.
+    let user_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (id, recovery_public_key) VALUES (gen_random_uuid(), $1) RETURNING id",
+    )
+    .bind(recovery_key.as_slice())
+    .fetch_one(&**db)
+    .await
+    .expect("create an account with a recovery key");
+
+    assert!(construct_db::backfill_account_addresses(db).await.unwrap() >= 1);
+    assert_eq!(
+        construct_db::backfill_account_addresses(db).await.unwrap(),
+        0,
+        "the backfill is idempotent"
+    );
+
+    let address = format!("ed25519:{}", hex::encode(recovery_key));
+    let mut conn = h.ctx.redis_conn.clone();
+    let before = stream_len(&mut conn, &user_id).await;
+    let resp = dispatch_sealed_sender(
+        &h.ctx,
+        &build_sealed_envelope_to(&address, &random_bytes32()),
+    )
+    .await
+    .expect("a key address of an account here delivers");
+    assert!(resp.success);
+    assert!(
+        stream_len(&mut conn, &user_id).await > before,
+        "delivered to the account the key names"
+    );
+
+    let _: () = redis::cmd("DEL")
+        .arg(format!("delivery:offline:{user_id}"))
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(());
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&**db)
+        .await;
+}
+
+/// A key no account here has is answered as a send to an unknown UUID is — accepted — so an
+/// unauthenticated sender cannot learn from the reply which keys have accounts. Only the counter
+/// tells the two apart.
+#[tokio::test]
+#[serial]
+async fn k2_an_unknown_key_address_is_accepted_and_not_disclosed() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let unresolved = || {
+        construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
+            .with_label_values(&["unresolved"])
+            .get()
+    };
+    let before = unresolved();
+    let address = format!("ed25519:{}", hex::encode(random_bytes32()));
+    let resp = dispatch_sealed_sender(
+        &h.ctx,
+        &build_sealed_envelope_to(&address, &random_bytes32()),
+    )
+    .await
+    .expect("an unknown key address is not an error the sender sees");
+    assert!(resp.success);
+    assert!(!resp.message_id.is_empty(), "shaped like any accepted send");
+    assert_eq!(unresolved(), before + 1);
+
+    // A malformed address is the sender's format error, not a disclosure, and stays refused.
+    assert!(
+        dispatch_sealed_sender(
+            &h.ctx,
+            &build_sealed_envelope_to("ed25519:zz", &random_bytes32())
+        )
+        .await
+        .is_err()
+    );
 }
 
 // ── I1: warn + no token still delivers ───────────────────────────────────────

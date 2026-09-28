@@ -238,19 +238,40 @@ pub(crate) async fn dispatch_sealed_sender(
         anyhow::bail!("SealedInner.recipient_user_id is required");
     }
 
-    // Self-sovereign addresses carry the recipient's Ed25519 public key. Derive
-    // the same RouteId used at registration, resolve it to the internal UUID,
-    // then keep all delivery and recipient-bound credential logic UUID-based.
+    // A key address names the recipient's account by its recovery key (`RouteId::of_account`).
+    // Resolve it to the internal UUID, then keep all delivery and recipient-bound credential
+    // logic UUID-based.
     let recipient_id = if recipient_address.starts_with("ed25519:") {
         let parsed = construct_server_shared::UserId::parse(&recipient_address)
             .map_err(|e| anyhow::anyhow!("Invalid sealed recipient address: {e}"))?;
         let Some(route_id) = parsed.route_id() else {
             anyhow::bail!("Sealed recipient address did not produce a route_id");
         };
-        let recipient = construct_db::get_user_by_route_id(&context.db_pool, route_id.as_str())
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No local user for sealed recipient route_id"))?;
-        recipient.id.to_string()
+        match construct_db::get_user_by_route_id(&context.db_pool, route_id.as_str()).await? {
+            Some(recipient) => {
+                construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
+                    .with_label_values(&["resolved"])
+                    .inc();
+                recipient.id.to_string()
+            }
+            None => {
+                // Answered exactly as a send to an unknown UUID is — accepted — so that an
+                // unauthenticated sender cannot use this path to learn which keys have accounts
+                // here. It is dropped instead of delivered: there is no mailbox to write to.
+                construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
+                    .with_label_values(&["unresolved"])
+                    .inc();
+                return Ok(proto::SendMessageResponse {
+                    message_id,
+                    message_number: 0,
+                    server_timestamp: chrono::Utc::now().timestamp_millis(),
+                    success: true,
+                    error: None,
+                    rate_limit_challenge: None,
+                    attempt_id: None,
+                });
+            }
+        }
     } else {
         recipient_address
     };

@@ -3,7 +3,7 @@ pub use construct_crypto::{
     UploadableKeyBundle,
 };
 pub use construct_error::AppError;
-pub use construct_types::{ChatMessage, ClientMessage, ServerMessage, UserId};
+pub use construct_types::{ChatMessage, ClientMessage, RouteId, ServerMessage, UserId};
 
 pub use construct_apns as apns;
 pub use construct_auth as auth;
