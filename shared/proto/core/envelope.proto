@@ -230,22 +230,25 @@ enum ContentType {
   // Server forwards opaquely (treat identically to E2EE_SIGNAL).
   CONTENT_TYPE_SESSION_READY = 26;
 
-  // INTAKE_KEY — the recipient hands a contact the 32-byte `intake_key` its account
-  // accepts, so that contact's envelopes can carry an intake tag instead of buying a
-  // Privacy Pass token (see SealedInner.intake_tag_sealed).
+  // CONTACT_CARD (was INTAKE_KEY until 2026-09-28) — what an account hands each contact about
+  // itself: a `ContactCard` (below) with the `intake_key` its account accepts, so that contact's
+  // envelopes can carry an intake tag instead of buying a Privacy Pass token (see
+  // SealedInner.intake_tag_sealed), and its `account_address`, so that contact can name it by
+  // key rather than by server id.
   //
-  // Payload is a framed side channel inside the ciphertext, and it has to be: the key is
-  // a secret, and a credential readable by the relay is a credential the relay can use.
+  // Payload is a framed side channel inside the ciphertext, and it has to be: the key is a
+  // secret, and a credential readable by the relay is a credential the relay can use.
   // knst_byte5 = true for that reason, sealed_inner_content_type = false for the same one.
   //
-  // Sent on contact establishment, on rotation (which is how a contact is revoked), and
-  // lazily to contacts that predate the mechanism — the first send to a peer that has no
-  // key of ours carries one. Existing contacts are not backfilled in a sweep: a hundred
-  // contacts would mean a hundred control messages at once, each of which would itself
-  // need paying for, so the graph migrates as it is used and pays nothing extra.
+  // Sent to each device of a contact once: when we first hear from it, and when we first write
+  // to it — whichever comes first — and again on rotation (which is how a contact is revoked).
+  // Existing contacts are not backfilled in a sweep; each gets its card the next time the two
+  // devices talk. A payload of exactly 32 bytes is a bare intake key from a build before the
+  // card: any card with a field is longer.
   //
   // Server forwards opaquely (treat identically to E2EE_SIGNAL).
-  CONTENT_TYPE_INTAKE_KEY = 27;
+  // decisions/contact-card-carries-the-address-back.md
+  CONTENT_TYPE_CONTACT_CARD = 27;
 
   // DECRYPTION_ERROR — "I could not read your message", from the device that failed to the
   // device that wrote it. Replaces SESSION_RESET (21).
@@ -259,6 +262,8 @@ enum ContentType {
   //
   // Sealed-sender envelope; the server forwards it opaquely.
   CONTENT_TYPE_DECRYPTION_ERROR = 28;
+
+  reserved "CONTENT_TYPE_INTAKE_KEY";
 
   // Reserved for future types
   reserved 3 to 9, 15 to 19, 29 to 100;
@@ -616,4 +621,19 @@ message OwnDeviceCopy {
 
   // The core's wire payload (construct-core wire_payload.rs), exactly as for any message.
   bytes wire_payload = 2;
+}
+
+// The payload of CONTENT_TYPE_CONTACT_CARD (27): what an account hands a contact about itself,
+// inside the ciphertext. Either field may be absent — a client that mints no intake key sends
+// the address alone, a device that does not know its account's address sends the key alone.
+//
+// The two fields live differently: `intake_key` rotates (that is how a contact is revoked),
+// `account_address` never changes for the life of the account. A receiver pins the first address
+// it hears for an account and treats a different one as a security event, never as an update;
+// an address from a signed invite outranks one from a card.
+message ContactCard {
+  // 32 bytes. See SealedInner.intake_tag_sealed.
+  bytes intake_key = 1;
+  // 32 bytes: the account's Ed25519 recovery public key (route_id = SHA-256(0x0001 || key)).
+  bytes account_address = 2;
 }
