@@ -356,6 +356,12 @@ impl MessagingService for MessagingGrpcService {
         // ── Sealed Sender path ──────────────────────────────────────────────
         if let Some(sealed) = &envelope.sealed_sender {
             require_legacy_sealed_sender_auth(authed_user_id)?;
+            if self.context.config.messaging.reject_legacy_sealed_sender {
+                construct_metrics::MSG_SEALED_LEGACY_REJECTED_TOTAL.inc();
+                return Err(Status::failed_precondition(
+                    "sealed_sender must use SendSealedMessage",
+                ));
+            }
             // The cutover gate (55.1a). Both doors lead to `dispatch_sealed_sender`, so the
             // distinction exists only here — counting inside the dispatch would answer a
             // different question than the one the flip turns on.
