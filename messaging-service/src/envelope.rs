@@ -233,10 +233,27 @@ pub(crate) async fn dispatch_sealed_sender(
     let sealed_inner = proto_core::SealedInner::decode(sealed.sealed_inner.as_ref())
         .map_err(|e| anyhow::anyhow!("Failed to decode SealedInner: {}", e))?;
 
-    let recipient_id = sealed_inner.recipient_user_id.clone();
-    if recipient_id.is_empty() {
+    let recipient_address = sealed_inner.recipient_user_id.clone();
+    if recipient_address.is_empty() {
         anyhow::bail!("SealedInner.recipient_user_id is required");
     }
+
+    // Self-sovereign addresses carry the recipient's Ed25519 public key. Derive
+    // the same RouteId used at registration, resolve it to the internal UUID,
+    // then keep all delivery and recipient-bound credential logic UUID-based.
+    let recipient_id = if recipient_address.starts_with("ed25519:") {
+        let parsed = construct_server_shared::UserId::parse(&recipient_address)
+            .map_err(|e| anyhow::anyhow!("Invalid sealed recipient address: {e}"))?;
+        let Some(route_id) = parsed.route_id() else {
+            anyhow::bail!("Sealed recipient address did not produce a route_id");
+        };
+        let recipient = construct_db::get_user_by_route_id(&context.db_pool, route_id.as_str())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No local user for sealed recipient route_id"))?;
+        recipient.id.to_string()
+    } else {
+        recipient_address
+    };
 
     // ── Privacy Pass token redemption (stealth-sealed-sender-v2 Phase 1) ───
     // Gate cheapest-first, before the delivery-tag check and dispatch. See
