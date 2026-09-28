@@ -39,7 +39,7 @@ fn test_federated_id_format_works() {
         "Should be recognized as federated user"
     );
     assert_eq!(user_id.domain(), Some("server.com"));
-    assert_eq!(user_id.uuid(), &uuid);
+    assert_eq!(user_id.uuid(), Some(&uuid));
     assert_eq!(user_id.to_string(), federated_id);
 }
 
@@ -275,11 +275,11 @@ fn test_user_id_uuid_extraction() {
 
     // Local format
     let local_id = UserId::parse(&uuid.to_string()).unwrap();
-    assert_eq!(*local_id.uuid(), uuid);
+    assert_eq!(*local_id.uuid().unwrap(), uuid);
 
     // Federated format
     let federated_id = UserId::parse(&format!("{}@example.com", uuid)).unwrap();
-    assert_eq!(*federated_id.uuid(), uuid);
+    assert_eq!(*federated_id.uuid().unwrap(), uuid);
 }
 
 #[test]

@@ -443,6 +443,15 @@ pub static MSG_SEALED_INGRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_SEALED_INGRESS_TOTAL metric")
 });
 
+/// Authenticated legacy sealed envelopes refused after the unauthenticated transport cutover.
+pub static MSG_SEALED_LEGACY_REJECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_msg_sealed_legacy_rejected_total",
+        "Sealed sends refused on authenticated SendMessage after the transport cutover"
+    ))
+    .expect("Failed to register MSG_SEALED_LEGACY_REJECTED_TOTAL metric")
+});
+
 /// Mailbox writes for cutover gates.
 /// Label: `target` = `user` | `device`.
 pub static MSG_MAILBOX_WRITE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -789,6 +798,7 @@ pub fn init_registry() {
     for ingress in ["sealed_rpc", "legacy_send_message"] {
         MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
     }
+    Lazy::force(&MSG_SEALED_LEGACY_REJECTED_TOTAL);
     // All three children up front, same reason as the two above: the label set is
     // closed, and every question asked of this counter is a ratio. `unknown_device`
     // in particular is expected to be zero for long stretches, and a zero that is

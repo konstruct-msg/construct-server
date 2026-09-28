@@ -186,7 +186,12 @@ enum ContentType {
   // Key exchange initiation (X3DH handshake)
   CONTENT_TYPE_KEY_EXCHANGE = 20;
 
-  // Session reset request
+  // Session reset request (END_SESSION).
+  //
+  // RETIRED 2026-09-27, replaced by DECRYPTION_ERROR (28): a teardown command names no state, so
+  // a stale one could not be told from a live one and had to be rationed by time windows
+  // (construct-docs decisions/sessions-renew-by-sending.md, variant B). Kept so a copy from a
+  // build that still sends it is recognised and dropped silently; nothing sends it.
   CONTENT_TYPE_SESSION_RESET = 21;
 
   // KEY_SYNC — server-triggered silent key renegotiation (Matrix-inspired).
@@ -202,6 +207,9 @@ enum ContentType {
   // Server is opaque to payload — E2EE is fully preserved.
   CONTENT_TYPE_SENDER_SYNC = 23;
 
+  // RETIRED 2026-09-27 with 25 and 26: a session opens from any message carrying the handshake
+  // header (decisions/sessions-renew-by-sending.md, variant A). Kept for recognition only.
+  //
   // SESSION_RESET_INIT — atomic END_SESSION + new X3DH session init in a single
   // delivery. The encrypted_payload carries the full EncryptedRatchetMessage with
   // msgNum=0 under the new INITIATOR session. Eliminates the ordering race of the
@@ -239,8 +247,21 @@ enum ContentType {
   // Server forwards opaquely (treat identically to E2EE_SIGNAL).
   CONTENT_TYPE_INTAKE_KEY = 27;
 
+  // DECRYPTION_ERROR — "I could not read your message", from the device that failed to the
+  // device that wrote it. Replaces SESSION_RESET (21).
+  //
+  // The payload is a box sealed to the recipient's identity key (the core's
+  // `seal_decryption_error`) around the unread message's ratchet key and id, and an optional
+  // hint. Not ratchet-encrypted, and cannot be: the ratchet is what failed. The ratchet key is the
+  // point — the recipient retires its current state only if the key is that state's, so an error
+  // that is stale (redelivered, reordered, about a state already replaced) is recognised exactly
+  // and does nothing. Built and opened only in construct-core, so both platforms agree.
+  //
+  // Sealed-sender envelope; the server forwards it opaquely.
+  CONTENT_TYPE_DECRYPTION_ERROR = 28;
+
   // Reserved for future types
-  reserved 3 to 9, 15 to 19, 28 to 100;
+  reserved 3 to 9, 15 to 19, 29 to 100;
 }
 
 // MessagePriority - Delivery priority
@@ -575,4 +596,24 @@ message SenderCertificate {
 
   // Reserved for future cert fields (e.g., PQ signature, capabilities)
   reserved 8 to 15;
+}
+
+// OwnDeviceCopy — Envelope.encrypted_payload of every SENDER_SYNC (content_type 23).
+//
+// A copy to one of our own devices goes unsealed (the relay already knows the pair is
+// (me, me)), so it has no SealedInner to carry the sender certificate in. The receiving
+// sibling needs the certificate anyway: a first message opens a session with the identity
+// key the certificate names, once the core has checked the server's signature
+// (construct-docs/decisions/first-message-opens-without-the-server.md). Without it a sibling
+// could open a copy only by fetching the sender's bundle.
+//
+// In the clear, like the rest of this envelope: it names our own account and device to the
+// server that issued it.
+message OwnDeviceCopy {
+  // The sending device's current certificate. Absent only when the sender could not obtain
+  // one; a copy on an existing session still opens, a first message does not.
+  SenderCertificate sender_certificate = 1;
+
+  // The core's wire payload (construct-core wire_payload.rs), exactly as for any message.
+  bytes wire_payload = 2;
 }
