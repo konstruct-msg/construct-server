@@ -1088,6 +1088,8 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "ed25519-dalek",
+ "hex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

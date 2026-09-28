@@ -283,8 +283,6 @@ pub async fn register_device_core(
     device_id: String,
     keys: DevicePublicKeysBinary,
     pow_solution: PowSolution,
-    identity_public_key: Option<Vec<u8>>,
-    identity_key_type: Option<u32>,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     // Salted hash of the client IP (hash_client_ip) — used only for anti-abuse keying
     // and logging. The raw address is never stored: the PoW challenge record's
@@ -488,18 +486,6 @@ pub async fn register_device_core(
         .mark_pow_challenge_used(&pow_solution.challenge)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
-
-    // 6b. The account's address is its recovery key, set with it (identity-service
-    // `setup_recovery`), not a key the client names here. No client ever sent one; a request that
-    // does is refused rather than stored beside an address that would then name another key.
-    // construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address".
-    if identity_public_key.is_some() || identity_key_type.is_some() {
-        return Err(AppError::Validation(
-            "identity_public_key is not accepted at registration: an account's address is its \
-             recovery key"
-                .to_string(),
-        ));
-    }
 
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();

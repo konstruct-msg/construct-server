@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -27,26 +26,27 @@ pub const INVITE_TTL_MIN_SECONDS: u32 = 60;
 /// The extra hour absorbs clock skew between machines.
 pub const INVITE_BURN_RETENTION_SECONDS: i64 = INVITE_TTL_SECONDS + 3_600;
 
-/// Invite token object for one-time contact sharing (v1–v5)
+/// The only invite version accepted (since 2026-09-28).
+pub const INVITE_VERSION: u32 = 5;
+
+/// Length of `addr`: an Ed25519 public key.
+pub const INVITE_ADDR_LEN: usize = 32;
+
+/// A device-minted invite, v5 — the only version.
 ///
-/// Cryptographically signed by the user's Identity Key; QR / deep link encoded.
-///
-/// Protocol versions:
-/// - v1: userId only (backwards compatible)
-/// - v2: userId + deviceId
-/// - v3: userId + deviceId + username
-/// - v4: userId + deviceId + username, **no ephKey** (pure signed capability)
-/// - v5: v4 + signed client `ttl` (server effective = min(INVITE_TTL_SECONDS, ttl))
+/// v1–v4 were refused from 2026-09-28 (construct-docs
+/// `decisions/invite-carries-the-account-address.md`): invites live 5 minutes (QR) or 12 hours
+/// (link), there was no installed base of older builds, and nobody had yet minted a v5, so its
+/// layout could still change without a v6.
 ///
 /// Security properties:
 /// - One-time use (jti burn)
-/// - Bounded TTL (server max; v5 may only shorten)
-/// - Ed25519 authenticity over the canonical string
-/// - Federation-ready (server FQDN)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// - Bounded TTL (server max; `ttl` may only shorten)
+/// - Ed25519 authenticity over the canonical string, by the issuing device
+/// - `addr` names the issuing account's address (its recovery key) under that signature
+#[derive(Debug, Clone)]
 pub struct InviteToken {
-    /// Protocol version: 1–5
+    /// Protocol version. Only [`INVITE_VERSION`] is accepted.
     pub v: u32,
 
     /// Unique invite ID (JWT jti) - prevents replay attacks
@@ -55,41 +55,28 @@ pub struct InviteToken {
     /// User UUID who created this invite
     pub uuid: Uuid,
 
-    /// Device ID (v2+) - 32-char lowercase hex string
-    /// None for v1 invites (backwards compat)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub device_id: Option<String>,
+    /// Issuing device — 32-char lowercase hex. Its verifying key checks `sig`.
+    pub device_id: String,
 
     /// Server FQDN (e.g., "konstruct.cc") for federation
     pub server: String,
 
-    /// Ephemeral X25519 public key (Base64 encoded) — **v1–v3 only**.
-    /// Empty string on v4+ (field dropped from canonical string).
-    #[serde(default)]
-    pub eph_key: String,
-
     /// Unix timestamp when this invite was created
     pub ts: i64,
 
-    /// Ed25519 signature over canonical form
-    /// v1: (v, jti, uuid, server, ephKey, ts)
-    /// v2: (v, jti, uuid, deviceId, server, ephKey, ts)
-    /// v3: (v, jti, uuid, deviceId, server, ephKey, ts, username)
-    /// v4: (v, jti, uuid, deviceId, server, ts, username)
-    /// v5: (v, jti, uuid, deviceId, server, ts, username, ttl)
-    /// Signed with user's long-term Identity Key
+    /// Ed25519 signature (base64) over [`Self::canonical_string`], by the issuing device.
     pub sig: String,
 
-    /// Username of the sender (v3+) - for display purposes
-    /// Empty string if not set. Signed as part of canonical string.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Username of the sender, for display. Empty when not set. Signed.
     pub username: Option<String>,
 
-    /// Client-stated maximum age in seconds (**v5 required**).
-    /// Covered by the signature. Server uses `min(INVITE_TTL_SECONDS, ttl)`.
-    /// Absent on v1–v4 → effective TTL is `INVITE_TTL_SECONDS`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<u32>,
+    /// Client-stated maximum age in seconds. Signed. Server uses
+    /// `min(INVITE_TTL_SECONDS, ttl)`.
+    pub ttl: u32,
+
+    /// The issuing account's address: its Ed25519 recovery public key. Signed.
+    /// `accept_invite` refuses an invite whose `addr` is not the account's recovery key.
+    pub addr: Vec<u8>,
 }
 
 /// Validation errors for invite tokens
@@ -98,23 +85,11 @@ pub enum InviteValidationError {
     #[error("Unsupported version: {0}")]
     UnsupportedVersion(u32),
 
-    #[error("Invalid JTI format")]
-    InvalidJTI,
-
-    #[error("Invalid user UUID format")]
-    InvalidUserUUID,
-
     #[error("Invalid device ID format (must be 32-char lowercase hex)")]
     InvalidDeviceID,
 
-    #[error("Missing device ID for v2 invite")]
-    MissingDeviceID,
-
     #[error("Invalid server FQDN")]
     InvalidServer,
-
-    #[error("Invalid ephemeral key")]
-    InvalidEphemeralKey,
 
     #[error("Invalid timestamp")]
     InvalidTimestamp,
@@ -128,109 +103,43 @@ pub enum InviteValidationError {
     #[error("Invalid signature format")]
     InvalidSignature,
 
-    #[error("Missing ttl for v5 invite")]
-    MissingTtl,
-
-    #[error("Invalid ttl (must be non-zero and >= 60 seconds)")]
+    #[error("Invalid ttl (must be >= 60 seconds)")]
     InvalidTtl,
+
+    #[error("Invalid address (must be a 32-byte Ed25519 public key)")]
+    InvalidAddress,
 }
 
 impl InviteToken {
-    /// Create canonical string for signature verification.
+    /// The signed canonical string: `v|jti|uuid|deviceId|server|ts|username|ttl|hex(addr)`.
     ///
-    /// Format depends on protocol version:
-    /// - v1: `v|jti|uuid|server|ephKey|ts`
-    /// - v2: `v|jti|uuid|deviceId|server|ephKey|ts`
-    /// - v3: `v|jti|uuid|deviceId|server|ephKey|ts|username`
-    /// - v4: `v|jti|uuid|deviceId|server|ts|username` (no ephKey)
-    /// - v5: `v|jti|uuid|deviceId|server|ts|username|ttl`
-    ///
-    /// Unknown versions return `UnsupportedVersion` (never fall through to v4).
-    /// Must match iOS `InviteObject.canonicalString` / Android — including that
-    /// iOS must use explicit `case 4` / `case 5`, not `default` = v4 shape.
+    /// Must match iOS `InviteObject.canonicalString` and Android byte for byte — fixed by
+    /// construct-protos `conformance/knst_invite.json`, which `tests::conformance_vector` holds
+    /// this function to. UUIDs lowercase hyphenated, `ttl` decimal, `addr` lowercase hex.
     pub fn canonical_string(&self) -> Result<String, InviteValidationError> {
-        match self.v {
-            1 => Ok(format!(
-                "{}|{}|{}|{}|{}|{}",
-                self.v, self.jti, self.uuid, self.server, self.eph_key, self.ts
-            )),
-            2 => {
-                let device_id = self
-                    .device_id
-                    .as_ref()
-                    .ok_or(InviteValidationError::MissingDeviceID)?;
-                Ok(format!(
-                    "{}|{}|{}|{}|{}|{}|{}",
-                    self.v, self.jti, self.uuid, device_id, self.server, self.eph_key, self.ts
-                ))
-            }
-            3 => {
-                let device_id = self
-                    .device_id
-                    .as_ref()
-                    .ok_or(InviteValidationError::MissingDeviceID)?;
-                let username = self.username.as_deref().unwrap_or("");
-                Ok(format!(
-                    "{}|{}|{}|{}|{}|{}|{}|{}",
-                    self.v,
-                    self.jti,
-                    self.uuid,
-                    device_id,
-                    self.server,
-                    self.eph_key,
-                    self.ts,
-                    username
-                ))
-            }
-            4 => {
-                let device_id = self
-                    .device_id
-                    .as_ref()
-                    .ok_or(InviteValidationError::MissingDeviceID)?;
-                let username = self.username.as_deref().unwrap_or("");
-                Ok(format!(
-                    "{}|{}|{}|{}|{}|{}|{}",
-                    self.v, self.jti, self.uuid, device_id, self.server, self.ts, username
-                ))
-            }
-            5 => {
-                let device_id = self
-                    .device_id
-                    .as_ref()
-                    .ok_or(InviteValidationError::MissingDeviceID)?;
-                let username = self.username.as_deref().unwrap_or("");
-                let ttl = self.ttl.ok_or(InviteValidationError::MissingTtl)?;
-                // Decimal integer as rendered (e.g. "300") — part of the protocol.
-                Ok(format!(
-                    "{}|{}|{}|{}|{}|{}|{}|{}",
-                    self.v, self.jti, self.uuid, device_id, self.server, self.ts, username, ttl
-                ))
-            }
-            other => Err(InviteValidationError::UnsupportedVersion(other)),
+        if self.v != INVITE_VERSION {
+            return Err(InviteValidationError::UnsupportedVersion(self.v));
         }
+        Ok(format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.v,
+            self.jti,
+            self.uuid,
+            self.device_id,
+            self.server,
+            self.ts,
+            self.username.as_deref().unwrap_or(""),
+            self.ttl,
+            hex::encode(&self.addr)
+        ))
     }
 
-    /// Effective redeem window in seconds: `min(INVITE_TTL_SECONDS, token.ttl)` for v5;
-    /// `INVITE_TTL_SECONDS` for v1–v4.
-    pub fn effective_ttl(&self) -> Result<i64, InviteValidationError> {
-        match self.v {
-            1..=4 => Ok(INVITE_TTL_SECONDS),
-            5 => {
-                let ttl = self.ttl.ok_or(InviteValidationError::MissingTtl)?;
-                if ttl == 0 || ttl < INVITE_TTL_MIN_SECONDS {
-                    return Err(InviteValidationError::InvalidTtl);
-                }
-                Ok(INVITE_TTL_SECONDS.min(ttl as i64))
-            }
-            other => Err(InviteValidationError::UnsupportedVersion(other)),
-        }
+    /// Effective redeem window in seconds: `min(INVITE_TTL_SECONDS, ttl)`.
+    pub fn effective_ttl(&self) -> i64 {
+        INVITE_TTL_SECONDS.min(self.ttl as i64)
     }
 
     /// Whether `now - ts` exceeds `ttl_seconds`.
-    ///
-    /// Callers should pass [`Self::effective_ttl`] (or the server max for legacy paths).
-    /// There is no single default TTL for all invite artifacts: links use
-    /// [`INVITE_TTL_SECONDS`] (12 h); v5 QR mints typically use 300 s.
     pub fn is_expired(&self, ttl_seconds: i64) -> bool {
         let now = Utc::now().timestamp();
         (now - self.ts) > ttl_seconds
@@ -244,54 +153,30 @@ impl InviteToken {
 
     /// Validate invite structure (format checks only, not signature).
     pub fn validate(&self) -> Result<(), InviteValidationError> {
-        if !matches!(self.v, 1..=5) {
+        if self.v != INVITE_VERSION {
             return Err(InviteValidationError::UnsupportedVersion(self.v));
         }
 
-        // Device ID validation (required for v2+)
-        if self.v >= 2 {
-            match &self.device_id {
-                None => return Err(InviteValidationError::MissingDeviceID),
-                Some(device_id) => {
-                    if device_id.len() != 32 {
-                        return Err(InviteValidationError::InvalidDeviceID);
-                    }
-                    if !device_id
-                        .chars()
-                        .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                    {
-                        return Err(InviteValidationError::InvalidDeviceID);
-                    }
-                }
-            }
+        if self.device_id.len() != 32
+            || !self
+                .device_id
+                .chars()
+                .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        {
+            return Err(InviteValidationError::InvalidDeviceID);
         }
 
         if self.server.is_empty() || !self.server.contains('.') {
             return Err(InviteValidationError::InvalidServer);
         }
 
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-        // Ephemeral key: required (32B) for v1–v3; must be empty for v4+
-        if self.v <= 3 {
-            match STANDARD.decode(&self.eph_key) {
-                Ok(bytes) if bytes.len() == 32 => {}
-                _ => return Err(InviteValidationError::InvalidEphemeralKey),
-            }
-        } else if !self.eph_key.is_empty() {
-            return Err(InviteValidationError::InvalidEphemeralKey);
+        // Overshoot is not an error — `effective_ttl` clamps it.
+        if self.ttl < INVITE_TTL_MIN_SECONDS {
+            return Err(InviteValidationError::InvalidTtl);
         }
 
-        // v5: ttl required, non-zero, >= floor (overshoot clamped later in effective_ttl)
-        if self.v == 5 {
-            match self.ttl {
-                None => return Err(InviteValidationError::MissingTtl),
-                Some(0) => return Err(InviteValidationError::InvalidTtl),
-                Some(t) if t < INVITE_TTL_MIN_SECONDS => {
-                    return Err(InviteValidationError::InvalidTtl);
-                }
-                Some(_) => {}
-            }
+        if self.addr.len() != INVITE_ADDR_LEN {
+            return Err(InviteValidationError::InvalidAddress);
         }
 
         let now = Utc::now().timestamp();
@@ -299,6 +184,7 @@ impl InviteToken {
             return Err(InviteValidationError::InvalidTimestamp);
         }
 
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         match STANDARD.decode(&self.sig) {
             Ok(bytes) if bytes.len() == 64 => {}
             _ => return Err(InviteValidationError::InvalidSignature),
@@ -311,9 +197,7 @@ impl InviteToken {
     pub fn validate_with_expiry(&self) -> Result<(), InviteValidationError> {
         self.validate()?;
 
-        let ttl_seconds = self.effective_ttl()?;
-
-        if self.is_expired(ttl_seconds) {
+        if self.is_expired(self.effective_ttl()) {
             return Err(InviteValidationError::Expired);
         }
 
@@ -343,146 +227,100 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-    fn sample_v4(ts: i64) -> InviteToken {
-        InviteToken {
-            v: 4,
-            jti: Uuid::nil(),
-            uuid: Uuid::nil(),
-            device_id: Some("4e1f9dbe209c1bedb33ee32dda5a28f0".to_string()),
-            server: "konstruct.cc".to_string(),
-            eph_key: String::new(),
-            ts,
-            sig: STANDARD.encode([0u8; 64]),
-            username: Some("alice".to_string()),
-            ttl: None,
-        }
-    }
-
-    fn sample_v5(ts: i64, ttl: Option<u32>) -> InviteToken {
+    fn sample(ts: i64, ttl: u32) -> InviteToken {
         InviteToken {
             v: 5,
             jti: Uuid::nil(),
             uuid: Uuid::nil(),
-            device_id: Some("4e1f9dbe209c1bedb33ee32dda5a28f0".to_string()),
+            device_id: "4e1f9dbe209c1bedb33ee32dda5a28f0".to_string(),
             server: "konstruct.cc".to_string(),
-            eph_key: String::new(),
             ts,
             sig: STANDARD.encode([0u8; 64]),
             username: Some("alice".to_string()),
             ttl,
+            addr: vec![0xab; 32],
+        }
+    }
+
+    /// construct-protos `conformance/knst_invite.json`, case `with_username`. iOS and Android
+    /// build the same string from the same fields; if this reddens, all three disagree about
+    /// which bytes are signed, and every invite fails at redeem as "invalid signature".
+    #[test]
+    fn conformance_vector() {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let invite = InviteToken {
+            v: 5,
+            jti: Uuid::parse_str("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap(),
+            uuid: Uuid::parse_str("14f28d31-5b2a-4c1e-9a3d-6f0e2b7c8d90").unwrap(),
+            device_id: "6f5e37ac1b2c3d4e5f60718293a4b5c6".to_string(),
+            server: "konstruct.cc".to_string(),
+            ts: 1_790_000_000,
+            sig: String::new(),
+            username: Some("alice".to_string()),
+            ttl: 300,
+            addr: hex::decode("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+                .unwrap(),
+        };
+        let canonical = invite.canonical_string().unwrap();
+        assert_eq!(
+            canonical,
+            "5|7c9e6679-7425-40de-944b-e07fc1f90ae7|14f28d31-5b2a-4c1e-9a3d-6f0e2b7c8d90|6f5e37ac1b2c3d4e5f60718293a4b5c6|konstruct.cc|1790000000|alice|300|3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+        );
+
+        let vk: [u8; 32] =
+            hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let sig: [u8; 64] = hex::decode(VECTOR_SIGNATURE).unwrap().try_into().unwrap();
+        VerifyingKey::from_bytes(&vk)
+            .unwrap()
+            .verify(canonical.as_bytes(), &Signature::from_bytes(&sig))
+            .expect("the vector's signature verifies over this canonical string");
+    }
+
+    const VECTOR_SIGNATURE: &str = "d243215959c9c7bdc3f4f089e678972299f8f1e3f95194217d3c3c197ff39eb967a60043e18f523103717b16cccfeb0ec2ddeea0d91fdee2f81412a781bb9f04";
+
+    /// Mutation: sign without `addr` (drop it from the format) — the address would then ride
+    /// unsigned, and anyone relaying the invite could redirect the contact.
+    #[test]
+    fn the_address_is_signed() {
+        let a = sample(1_738_156_800, 300);
+        let mut b = a.clone();
+        b.addr = vec![0xcd; 32];
+        assert_ne!(a.canonical_string().unwrap(), b.canonical_string().unwrap());
+    }
+
+    #[test]
+    fn only_v5_is_accepted() {
+        for v in [1, 2, 3, 4, 6] {
+            let mut invite = sample(Utc::now().timestamp(), 300);
+            invite.v = v;
+            assert!(matches!(
+                invite.validate(),
+                Err(InviteValidationError::UnsupportedVersion(_))
+            ));
+            assert!(invite.canonical_string().is_err());
         }
     }
 
     #[test]
-    fn test_canonical_string_v1() {
-        let invite = InviteToken {
-            v: 1,
-            jti: Uuid::parse_str("25a5e378-c873-4e4b-a16a-a8d299386d3d").unwrap(),
-            uuid: Uuid::parse_str("af70cf9a-b176-4df3-b6bf-00196a6f173e").unwrap(),
-            device_id: None,
-            server: "konstruct.cc".to_string(),
-            eph_key: "test_key_base64".to_string(),
-            ts: 1675209600,
-            sig: "test_sig".to_string(),
-            username: None,
-            ttl: None,
-        };
-
-        let canonical = invite.canonical_string().unwrap();
-        assert_eq!(
-            canonical,
-            "1|25a5e378-c873-4e4b-a16a-a8d299386d3d|af70cf9a-b176-4df3-b6bf-00196a6f173e|konstruct.cc|test_key_base64|1675209600"
-        );
+    fn an_address_that_is_not_32_bytes_is_refused() {
+        for len in [0, 31, 33] {
+            let mut invite = sample(Utc::now().timestamp(), 300);
+            invite.addr = vec![1; len];
+            assert!(matches!(
+                invite.validate(),
+                Err(InviteValidationError::InvalidAddress)
+            ));
+        }
     }
 
     #[test]
-    fn test_canonical_string_v4_no_eph() {
-        let invite = sample_v4(1_738_156_800);
-        let canonical = invite.canonical_string().unwrap();
-        assert_eq!(
-            canonical,
-            "4|00000000-0000-0000-0000-000000000000|00000000-0000-0000-0000-000000000000|4e1f9dbe209c1bedb33ee32dda5a28f0|konstruct.cc|1738156800|alice"
-        );
-        assert!(invite.validate().is_ok());
-    }
-
-    #[test]
-    fn test_canonical_string_v5_appends_ttl() {
-        let invite = sample_v5(1_738_156_800, Some(300));
-        let canonical = invite.canonical_string().unwrap();
-        assert_eq!(
-            canonical,
-            "5|00000000-0000-0000-0000-000000000000|00000000-0000-0000-0000-000000000000|4e1f9dbe209c1bedb33ee32dda5a28f0|konstruct.cc|1738156800|alice|300"
-        );
-        assert!(invite.validate().is_ok());
-        assert_eq!(invite.effective_ttl().unwrap(), 300);
-    }
-
-    #[test]
-    fn test_canonical_string_v2() {
-        let invite = InviteToken {
-            v: 2,
-            jti: Uuid::parse_str("25a5e378-c873-4e4b-a16a-a8d299386d3d").unwrap(),
-            uuid: Uuid::parse_str("af70cf9a-b176-4df3-b6bf-00196a6f173e").unwrap(),
-            device_id: Some("4e1f9dbe209c1bedb33ee32dda5a28f0".to_string()),
-            server: "konstruct.cc".to_string(),
-            eph_key: "test_key_base64".to_string(),
-            ts: 1675209600,
-            sig: "test_sig".to_string(),
-            username: None,
-            ttl: None,
-        };
-
-        let canonical = invite.canonical_string().unwrap();
-        assert_eq!(
-            canonical,
-            "2|25a5e378-c873-4e4b-a16a-a8d299386d3d|af70cf9a-b176-4df3-b6bf-00196a6f173e|4e1f9dbe209c1bedb33ee32dda5a28f0|konstruct.cc|test_key_base64|1675209600"
-        );
-    }
-
-    #[test]
-    fn test_canonical_string_unsupported_version_is_err() {
-        let invite = InviteToken {
-            v: 99,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "konstruct.cc".to_string(),
-            eph_key: String::new(),
-            ts: Utc::now().timestamp(),
-            sig: String::new(),
-            username: None,
-            ttl: None,
-        };
-        assert!(matches!(
-            invite.canonical_string(),
-            Err(InviteValidationError::UnsupportedVersion(99))
-        ));
-    }
-
-    #[test]
-    fn test_is_expired() {
-        let old_invite = InviteToken {
-            v: 1,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "test.com".to_string(),
-            eph_key: "key".to_string(),
-            ts: Utc::now().timestamp() - 400,
-            sig: "sig".to_string(),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(old_invite.is_expired(300));
-        assert!(!old_invite.is_expired(500));
-    }
-
-    #[test]
-    fn test_v5_short_ttl_expires_while_max_would_not() {
-        let invite = sample_v5(Utc::now().timestamp() - 400, Some(300));
-        assert!(invite.is_expired(invite.effective_ttl().unwrap()));
+    fn short_ttl_expires_while_max_would_not() {
+        let invite = sample(Utc::now().timestamp() - 400, 300);
+        assert!(invite.is_expired(invite.effective_ttl()));
         assert!(!invite.is_expired(INVITE_TTL_SECONDS));
         assert!(matches!(
             invite.validate_with_expiry(),
@@ -491,170 +329,36 @@ mod tests {
     }
 
     #[test]
-    fn test_v5_overshoot_clamped_to_server_max() {
-        let invite = sample_v5(Utc::now().timestamp(), Some(100_000));
-        assert_eq!(invite.effective_ttl().unwrap(), INVITE_TTL_SECONDS);
+    fn overshoot_is_clamped_to_server_max() {
+        let invite = sample(Utc::now().timestamp(), 100_000);
+        assert_eq!(invite.effective_ttl(), INVITE_TTL_SECONDS);
         assert!(invite.validate_with_expiry().is_ok());
     }
 
     #[test]
-    fn test_v5_ttl_zero_and_below_floor() {
-        assert!(matches!(
-            sample_v5(Utc::now().timestamp(), Some(0)).validate(),
-            Err(InviteValidationError::InvalidTtl)
-        ));
-        assert!(matches!(
-            sample_v5(Utc::now().timestamp(), Some(59)).validate(),
-            Err(InviteValidationError::InvalidTtl)
-        ));
-        assert!(matches!(
-            sample_v5(Utc::now().timestamp(), None).validate(),
-            Err(InviteValidationError::MissingTtl)
-        ));
+    fn ttl_below_floor_is_refused() {
+        for ttl in [0, 59] {
+            assert!(matches!(
+                sample(Utc::now().timestamp(), ttl).validate(),
+                Err(InviteValidationError::InvalidTtl)
+            ));
+        }
     }
 
     #[test]
-    fn test_v4_still_uses_server_max_ttl() {
-        let invite = sample_v4(Utc::now().timestamp());
-        assert_eq!(invite.effective_ttl().unwrap(), INVITE_TTL_SECONDS);
-        assert!(invite.validate_with_expiry().is_ok());
+    fn a_future_timestamp_is_caught() {
+        assert!(sample(Utc::now().timestamp() + 200, 300).is_future());
     }
 
     #[test]
-    fn test_is_future() {
-        let future_invite = InviteToken {
-            v: 1,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "test.com".to_string(),
-            eph_key: "key".to_string(),
-            ts: Utc::now().timestamp() + 200,
-            sig: "sig".to_string(),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(future_invite.is_future());
-    }
-
-    #[test]
-    fn test_validate_v1_success() {
-        let invite = InviteToken {
-            v: 1,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(invite.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_v2_success() {
-        let invite = InviteToken {
-            v: 2,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: Some("4e1f9dbe209c1bedb33ee32dda5a28f0".to_string()),
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(invite.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_v2_missing_device_id() {
-        let invite = InviteToken {
-            v: 2,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(matches!(
-            invite.validate(),
-            Err(InviteValidationError::MissingDeviceID)
-        ));
-    }
-
-    #[test]
-    fn test_validate_invalid_device_id_length() {
-        let invite = InviteToken {
-            v: 2,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: Some("tooshort".to_string()),
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(matches!(
-            invite.validate(),
-            Err(InviteValidationError::InvalidDeviceID)
-        ));
-    }
-
-    #[test]
-    fn test_validate_invalid_device_id_uppercase() {
-        let invite = InviteToken {
-            v: 2,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: Some("4E1F9DBE209C1BEDB33EE32DDA5A28F0".to_string()),
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(matches!(
-            invite.validate(),
-            Err(InviteValidationError::InvalidDeviceID)
-        ));
-    }
-
-    #[test]
-    fn test_validate_unsupported_version() {
-        let invite = InviteToken {
-            v: 99,
-            jti: Uuid::new_v4(),
-            uuid: Uuid::new_v4(),
-            device_id: None,
-            server: "konstruct.cc".to_string(),
-            eph_key: STANDARD.encode([0u8; 32]),
-            ts: Utc::now().timestamp(),
-            sig: STANDARD.encode([0u8; 64]),
-            username: None,
-            ttl: None,
-        };
-
-        assert!(matches!(
-            invite.validate(),
-            Err(InviteValidationError::UnsupportedVersion(99))
-        ));
+    fn device_id_must_be_lowercase_hex_of_32() {
+        for bad in ["tooshort", "4E1F9DBE209C1BEDB33EE32DDA5A28F0"] {
+            let mut invite = sample(Utc::now().timestamp(), 300);
+            invite.device_id = bad.to_string();
+            assert!(matches!(
+                invite.validate(),
+                Err(InviteValidationError::InvalidDeviceID)
+            ));
+        }
     }
 }

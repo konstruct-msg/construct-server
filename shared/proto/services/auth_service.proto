@@ -175,14 +175,12 @@ message RegisterDeviceRequest {
   DevicePublicKeys public_keys = 3;
   PowSolution pow_solution = 4;
 
-  // Identity public key for global user identity (Epic E).
-  // Used to derive route_id = SHA-256(identity_key_type || identity_public_key)
-  // for DHT-based routing. Optional for backward compatibility.
-  optional bytes identity_public_key = 5;
-
-  // Key algorithm type: 1=Ed25519 (32 bytes), 2=ML-DSA-65 (1952 bytes),
-  // 3=Hybrid Ed25519+ML-DSA (1984 bytes). Defaults to 1 (Ed25519).
-  optional uint32 identity_key_type = 6;
+  // 5 and 6 were `identity_public_key` / `identity_key_type`: a client-chosen key
+  // for the account's address. The address is the account's recovery key, set by
+  // SetRecoveryKey and never chosen at registration; nothing ever sent these.
+  // See construct-docs decisions/pubkey-as-identity.md, "Which key is the address".
+  reserved 5, 6;
+  reserved "identity_public_key", "identity_key_type";
 }
 
 message AuthenticateDeviceRequest {
