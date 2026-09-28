@@ -410,7 +410,9 @@ message SealedSenderEnvelope {
 // ciphertext size. Not allowed for routing/UI: content kind, priority, TTL
 // (those belong inside the E2E payload — see content_type deprecation note).
 message SealedInner {
-  // Recipient user ID (local to destination server)
+  // Recipient address at the destination server: a legacy UUID or
+  // `ed25519:<64 hex chars>` identity public key. The destination derives
+  // route_id and resolves it to the internal UUID before delivery.
   string recipient_user_id = 1;
 
   // Random anti-replay tag (32 bytes)

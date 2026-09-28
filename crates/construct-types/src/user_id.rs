@@ -2,9 +2,10 @@
 // Federated User ID Module
 // ============================================================================
 //
-// Supports two formats:
+// Supports three formats:
 // 1. Local:     "550e8400-e29b-41d4-a716-446655440000" (UUID only)
 // 2. Federated: "550e8400-e29b-41d4-a716-446655440000@server.com" (UUID@domain)
+// 3. Key address: "ed25519:<64 hex chars>" (identity public key)
 //
 // This maintains backward compatibility with existing clients while enabling
 // federation support.
@@ -13,13 +14,18 @@
 use std::fmt;
 use uuid::Uuid;
 
-/// Represents a user ID that can be either local or federated
+/// A user address. UUID remains the database key; key addresses resolve through `RouteId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserId {
-    /// The UUID part of the user ID
-    pub uuid: Uuid,
-    /// The domain part (None for local users)
-    pub domain: Option<String>,
+pub enum UserId {
+    Local(Uuid),
+    Federated {
+        uuid: Uuid,
+        domain: String,
+    },
+    Identity {
+        identity_public_key: Vec<u8>,
+        route_id: RouteId,
+    },
 }
 
 impl UserId {
@@ -28,6 +34,7 @@ impl UserId {
     /// # Formats
     /// - Local: "550e8400-e29b-41d4-a716-446655440000"
     /// - Federated: "550e8400-e29b-41d4-a716-446655440000@server.com"
+    /// - Identity: "ed25519:<64 hex chars>" (the public key, not the derived route_id)
     ///
     /// # Examples
     /// ```
@@ -42,6 +49,19 @@ impl UserId {
     pub fn parse(s: &str) -> Result<Self, UserIdError> {
         if s.is_empty() {
             return Err(UserIdError::Empty);
+        }
+
+        if let Some(encoded_key) = s.strip_prefix("ed25519:") {
+            let key = hex::decode(encoded_key)
+                .map_err(|_| UserIdError::InvalidIdentityKey(encoded_key.to_string()))?;
+            if key.len() != 32 {
+                return Err(UserIdError::InvalidIdentityKey(encoded_key.to_string()));
+            }
+            let route_id = RouteId::compute(&key, 1);
+            return Ok(UserId::Identity {
+                identity_public_key: key,
+                route_id,
+            });
         }
 
         // Check if this is a federated ID (contains @)
@@ -64,44 +84,55 @@ impl UserId {
             let uuid = Uuid::parse_str(uuid_part)
                 .map_err(|_| UserIdError::InvalidUuid(uuid_part.to_string()))?;
 
-            Ok(UserId {
+            Ok(UserId::Federated {
                 uuid,
-                domain: Some(domain_part.to_string()),
+                domain: domain_part.to_string(),
             })
         } else {
             // Local format: just UUID
             let uuid = Uuid::parse_str(s).map_err(|_| UserIdError::InvalidUuid(s.to_string()))?;
 
-            Ok(UserId { uuid, domain: None })
+            Ok(UserId::Local(uuid))
         }
     }
 
     /// Check if this is a local user (no domain)
     pub fn is_local(&self) -> bool {
-        self.domain.is_none()
+        matches!(self, UserId::Local(_) | UserId::Identity { .. })
     }
 
     /// Check if this is a federated user
     pub fn is_federated(&self) -> bool {
-        self.domain.is_some()
+        matches!(self, UserId::Federated { .. })
     }
 
     /// Get the domain if this is a federated user
     pub fn domain(&self) -> Option<&str> {
-        self.domain.as_deref()
+        match self {
+            UserId::Federated { domain, .. } => Some(domain),
+            _ => None,
+        }
     }
 
     /// Get the UUID part
-    pub fn uuid(&self) -> &Uuid {
-        &self.uuid
+    pub fn uuid(&self) -> Option<&Uuid> {
+        match self {
+            UserId::Local(uuid) | UserId::Federated { uuid, .. } => Some(uuid),
+            UserId::Identity { .. } => None,
+        }
+    }
+
+    /// Get the derived route identifier for a key address.
+    pub fn route_id(&self) -> Option<&RouteId> {
+        match self {
+            UserId::Identity { route_id, .. } => Some(route_id),
+            _ => None,
+        }
     }
 
     /// Check if this user belongs to a specific domain
     pub fn is_from_domain(&self, domain: &str) -> bool {
-        match &self.domain {
-            Some(d) => d == domain,
-            None => false,
-        }
+        matches!(self, UserId::Federated { domain: d, .. } if d == domain)
     }
 
     /// Basic domain validation
@@ -129,9 +160,13 @@ impl UserId {
 
 impl fmt::Display for UserId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.domain {
-            Some(domain) => write!(f, "{}@{}", self.uuid, domain),
-            None => write!(f, "{}", self.uuid),
+        match self {
+            UserId::Local(uuid) => write!(f, "{uuid}"),
+            UserId::Federated { uuid, domain } => write!(f, "{uuid}@{domain}"),
+            UserId::Identity {
+                identity_public_key,
+                ..
+            } => write!(f, "ed25519:{}", hex::encode(identity_public_key)),
         }
     }
 }
@@ -143,6 +178,7 @@ pub enum UserIdError {
     EmptyDomain,
     InvalidUuid(String),
     InvalidDomain(String),
+    InvalidIdentityKey(String),
 }
 
 impl std::fmt::Display for UserIdError {
@@ -152,6 +188,9 @@ impl std::fmt::Display for UserIdError {
             UserIdError::EmptyDomain => write!(f, "Domain cannot be empty"),
             UserIdError::InvalidUuid(s) => write!(f, "Invalid UUID format: {}", s),
             UserIdError::InvalidDomain(s) => write!(f, "Invalid domain format: {}", s),
+            UserIdError::InvalidIdentityKey(s) => {
+                write!(f, "Invalid Ed25519 identity key hex: {}", s)
+            }
         }
     }
 }
@@ -301,9 +340,9 @@ mod tests {
         let expected_uuid = Uuid::parse_str(uuid_str).unwrap();
 
         let local = UserId::parse(uuid_str).unwrap();
-        assert_eq!(*local.uuid(), expected_uuid);
+        assert_eq!(*local.uuid().unwrap(), expected_uuid);
 
         let federated = UserId::parse(&format!("{}@server.com", uuid_str)).unwrap();
-        assert_eq!(*federated.uuid(), expected_uuid);
+        assert_eq!(*federated.uuid().unwrap(), expected_uuid);
     }
 }
