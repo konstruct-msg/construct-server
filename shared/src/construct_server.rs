@@ -15,7 +15,6 @@ pub use construct_federation as federation;
 pub mod health;
 pub use construct_message as message;
 pub mod metrics;
-pub mod models;
 pub mod notification_service;
 pub mod sentinel_service;
 pub use construct_pow as pow;

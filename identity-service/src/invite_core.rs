@@ -38,32 +38,11 @@ pub async fn verify_invite_signature(
     pool: &DbPool,
     invite: &InviteToken,
 ) -> Result<(), InviteSignatureError> {
-    let verifying_key_bytes = if invite.v >= 2 {
-        let device_id = invite
-            .device_id
-            .as_ref()
-            .ok_or(InviteSignatureError::InvalidSignature(
-                "v2/v3 invite missing device_id".to_string(),
-            ))?;
-
-        let device = construct_db::get_device_by_id(pool, device_id)
-            .await
-            .map_err(|e| InviteSignatureError::DatabaseError(e.to_string()))?
-            .ok_or(InviteSignatureError::DeviceNotFound)?;
-
-        device.verifying_key
-    } else {
-        let devices = construct_db::get_devices_by_user_id(pool, &invite.uuid)
-            .await
-            .map_err(|e| InviteSignatureError::DatabaseError(e.to_string()))?;
-
-        let device = devices
-            .into_iter()
-            .next()
-            .ok_or(InviteSignatureError::DeviceNotFound)?;
-
-        device.verifying_key
-    };
+    let device = construct_db::get_device_by_id(pool, &invite.device_id)
+        .await
+        .map_err(|e| InviteSignatureError::DatabaseError(e.to_string()))?
+        .ok_or(InviteSignatureError::DeviceNotFound)?;
+    let verifying_key_bytes = device.verifying_key;
 
     tracing::debug!(
         verifying_key_base64 = %BASE64.encode(&verifying_key_bytes),
@@ -145,7 +124,7 @@ pub async fn accept_invite(
 ) -> Result<AcceptInviteOutput> {
     let invite = input.invite;
 
-    // v5: effective_ttl = min(INVITE_TTL_SECONDS, token.ttl); v1–v4: server max.
+    // effective_ttl = min(INVITE_TTL_SECONDS, token.ttl).
     // Never hardcode INVITE_TTL_SECONDS alone for expiry (INVITE_LIST_REVOKE §4).
     if let Err(e) = invite.validate_with_expiry() {
         tracing::warn!(
@@ -161,13 +140,10 @@ pub async fn accept_invite(
             InviteValidationError::FutureTimestamp => {
                 AppError::Validation("Invalid invite timestamp".to_string()).into()
             }
-            InviteValidationError::MissingDeviceID => {
-                AppError::Validation("Invalid v2 invite: missing device ID".to_string()).into()
-            }
             InviteValidationError::InvalidDeviceID => {
                 AppError::Validation("Invalid device ID format".to_string()).into()
             }
-            InviteValidationError::MissingTtl | InviteValidationError::InvalidTtl => {
+            InviteValidationError::InvalidTtl => {
                 AppError::Validation(format!("Invalid invite ttl: {}", e)).into()
             }
             _ => AppError::Validation(format!("Invalid invite: {}", e)).into(),
@@ -201,11 +177,34 @@ pub async fn accept_invite(
     let jti_uuid = invite.jti;
     let creator_user_id = invite.uuid;
 
+    // The signature above binds `addr` to the issuing device, so the redeemer will trust it — and
+    // address every later message to it. An address that is not this account's would swallow
+    // those messages without a word: an unknown address is accepted and dropped by design, so a
+    // sealed sender cannot probe which keys have accounts. This is the one place that can say so
+    // aloud, before the contact exists. The server already knows the account's key; checking it
+    // learns nothing.
+    let creator = construct_db::get_user_by_id(&context.db_pool, &creator_user_id)
+        .await
+        .context("Failed to load the invite's account")?
+        .ok_or(AppError::PublicKeyNotFound)?;
+    if !invite_address_matches(creator.recovery_public_key.as_deref(), &invite.addr) {
+        tracing::warn!(
+            jti = %invite.jti,
+            creator = %creator_user_id,
+            has_recovery_key = creator.recovery_public_key.is_some(),
+            "Invite address is not the account's recovery key"
+        );
+        return Err(AppError::Validation(
+            "Invite address does not match the account's recovery key".to_string(),
+        )
+        .into());
+    }
+
     let burned = construct_db::burn_used_invite(
         &context.db_pool,
         &jti_uuid,
         &creator_user_id,
-        invite.device_id.as_deref(),
+        Some(invite.device_id.as_str()),
         INVITE_BURN_RETENTION_SECONDS,
     )
     .await
@@ -249,10 +248,17 @@ pub async fn accept_invite(
 
     Ok(AcceptInviteOutput {
         user_id: creator_user_id.to_string(),
-        device_id: invite.device_id.clone(),
+        device_id: Some(invite.device_id.clone()),
         server: invite.server.clone(),
         message: format!("Successfully added user {}", creator_user_id),
     })
+}
+
+/// Whether an invite's `addr` names the account it claims to come from.
+///
+/// An account without a recovery key has no address, so no invite from it can name one.
+pub(crate) fn invite_address_matches(recovery_public_key: Option<&[u8]>, addr: &[u8]) -> bool {
+    recovery_public_key == Some(addr)
 }
 
 pub struct RevokeInviteInput {
@@ -314,3 +320,18 @@ pub async fn revoke_invite(
 // ListInvites removed: issuance is not recorded server-side. A successful empty
 // list was indistinguishable from "user has no invites" and invited clients to
 // build a false server-backed list. Clients list from a local mint journal.
+
+#[cfg(test)]
+mod address_tests {
+    use super::invite_address_matches;
+
+    /// Mutation: return true unconditionally — a wrong address would then be accepted, and every
+    /// message to it dropped without a word.
+    #[test]
+    fn only_the_accounts_recovery_key_is_its_address() {
+        let key = [7u8; 32];
+        assert!(invite_address_matches(Some(&key), &key));
+        assert!(!invite_address_matches(Some(&key), &[8u8; 32]));
+        assert!(!invite_address_matches(None, &key));
+    }
+}

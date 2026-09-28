@@ -4,8 +4,9 @@ package shared.proto.services.v1;
 
 // InviteService — one-time contact invites (device-minted v4/v5).
 //
-// Product path: the client mints and signs the invite. Links use the server
-// max TTL (INVITE_TTL_SECONDS = 43200); QR codes use v5 with ttl=300. The
+// Product path: the client mints and signs the invite. v5 is the only version
+// (since 2026-09-28): links use the server max TTL (INVITE_TTL_SECONDS = 43200),
+// QR codes ttl=300, and every invite names the account's address (`addr`). The
 // server first learns a jti when it is redeemed (AcceptInvite → burn) or
 // revoked (RevokeInvite → pre-burn). No server-side issuance ledger / ListInvites
 // (INVITE_LIST_REVOKE_SERVER_SPEC, server-influence-minimization).
@@ -30,16 +31,19 @@ service InviteService {
 // AcceptInvite Messages
 // ============================================================================
 
-// Запрос на принятие invite token
+// Accept a device-minted invite.
 message AcceptInviteRequest {
-  // Полный invite token (закодированный MessagePack/Base64 с QR-кода)
-  // Содержит: jti, uuid, device_id, server, ts, eph_pub, sig
   InviteToken invite = 1;
 }
 
-// Структура invite token (MessagePack encoded)
+// A device-minted invite, as the redeemer forwards it. The on-device transport is
+// the compact binary "CIv1" layout; this message carries the same fields.
+//
+// Signed canonical string (v5, the only version accepted):
+//   v|jti|uuid|device_id|server|ts|un|ttl|hex(addr)
+// Vectors: conformance/knst_invite.json.
 message InviteToken {
-  // Версия протокола (1 = legacy user_id only, 2 = device_id)
+  // Protocol version. Only 5 is accepted.
   int32 v = 1;
 
   // JWT ID для one-time use tracking
@@ -57,7 +61,7 @@ message InviteToken {
   // Unix timestamp создания
   int64 ts = 6;
 
-  // Ephemeral X25519 public key (32 bytes, base64)
+  // v1–v3 only (an unused ephemeral key). Always empty on v5.
   string eph_pub = 7;
 
   // Ed25519 signature (64 bytes, base64)
@@ -71,6 +75,16 @@ message InviteToken {
   // min(INVITE_TTL_SECONDS, ttl). Absent on v1–v4 → server max. Reject 0 and
   // ttl < 60. See INVITE_LIST_REVOKE_SERVER_SPEC §4.
   optional uint32 ttl = 10;
+
+  // v5: the issuing account's address — its 32-byte Ed25519 recovery public key
+  // (route_id = SHA-256(0x0001 || addr)). Required. Covered by the signature
+  // (canonical ends with |hex(addr)), so the redeemer learns the address from the
+  // issuer's device and not from the server. The server refuses an invite whose
+  // addr is not the account's recovery key: a wrong address would otherwise
+  // swallow every message sent to it without a word, since an unknown address is
+  // accepted and dropped by design.
+  // See construct-docs decisions/invite-carries-the-account-address.md.
+  bytes addr = 11;
 }
 
 // Ответ после успешного принятия invite

@@ -339,8 +339,6 @@ impl AuthService for IdentityGrpcService {
                         nonce: pow_solution.nonce,
                         hash: pow_solution.hash,
                     },
-                    identity_public_key: req.identity_public_key,
-                    identity_key_type: req.identity_key_type,
                 },
             )
             .await
@@ -2683,20 +2681,35 @@ impl InviteService for IdentityGrpcService {
             .invite
             .ok_or_else(|| Status::invalid_argument("Missing invite token"))?;
 
+        // v5 is the only version: every field below is required, and `eph_pub` (v1–v3) must be
+        // empty. A field v5 does not carry is refused here rather than ignored, so an older
+        // client's invite fails as "unsupported" and not as a signature over different bytes.
+        if invite_token.v != crypto_agility::INVITE_VERSION as i32 {
+            return Err(Status::invalid_argument(format!(
+                "Unsupported invite version: {}",
+                invite_token.v
+            )));
+        }
+        if !invite_token.eph_pub.is_empty() {
+            return Err(Status::invalid_argument("v5 invite must not carry eph_pub"));
+        }
         let invite = crypto_agility::InviteToken {
             v: invite_token.v as u32,
             jti: uuid::Uuid::parse_str(&invite_token.jti)
                 .map_err(|_| Status::invalid_argument("Invalid jti UUID"))?,
             uuid: uuid::Uuid::parse_str(&invite_token.uuid)
                 .map_err(|_| Status::invalid_argument("Invalid user UUID"))?,
-            device_id: invite_token.device_id,
+            device_id: invite_token
+                .device_id
+                .ok_or_else(|| Status::invalid_argument("Invite missing device_id"))?,
             server: invite_token.server,
-            eph_key: invite_token.eph_pub,
             ts: invite_token.ts,
             sig: invite_token.sig,
             username: invite_token.un,
-            // v5 signed client max-age; absent on v1–v4 → server default in effective_ttl.
-            ttl: invite_token.ttl,
+            ttl: invite_token
+                .ttl
+                .ok_or_else(|| Status::invalid_argument("Invite missing ttl"))?,
+            addr: invite_token.addr,
         };
 
         let creator_user_id = invite.uuid;

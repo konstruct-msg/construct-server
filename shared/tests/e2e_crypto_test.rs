@@ -202,8 +202,6 @@ async fn register_user_with_crypto(
                 nonce,
                 hash,
             }),
-            identity_public_key: None,
-            identity_key_type: None,
         })
         .await
         .expect("RegisterDevice")
