@@ -93,17 +93,36 @@ pub(crate) fn intake_epoch(unix_seconds: u64) -> u64 {
     unix_seconds / INTAKE_EPOCH_SECONDS
 }
 
-/// Redis key for one account's tag in one epoch.
+/// Most tags one account may have live for one epoch — one per device that mints a key.
+///
+/// A set, not a single value, since 2026-09-29: each device of an account mints its own intake key
+/// and publishes its own tags, and a single `SET` let the last device to publish silently revoke
+/// every other device's key for everyone holding it (`decisions/contact-traffic-is-vouched-not-
+/// purchased.md`, "Multi-device sync"). The cap bounds what one account can make this store hold.
+pub(crate) const MAX_TAGS_PER_EPOCH: usize = 32;
+
+/// Redis key for the set of one account's tags in one epoch.
 ///
 /// The account id is hashed rather than embedded. A Redis keyspace scan would otherwise enumerate
 /// every account that has published, which is a user list this service has no reason to hand out —
 /// the same reasoning that has `pp:unit:` hash its inputs instead of concatenating them.
 pub(crate) fn tag_key(recipient_user_id: &str, epoch: u64) -> String {
+    format!("intake:v2:{}", account_epoch_digest(recipient_user_id, epoch))
+}
+
+/// The single-tag string key used before 2026-09-29. Read, never written: a tag published under it
+/// stays acceptable until it expires (at most `MAX_PUBLISHED_EPOCHS` + grace), so a deploy does not
+/// charge a day of contact traffic that was already vouched. Remove once those keys are gone.
+pub(crate) fn legacy_tag_key(recipient_user_id: &str, epoch: u64) -> String {
+    format!("intake:{}", account_epoch_digest(recipient_user_id, epoch))
+}
+
+fn account_epoch_digest(recipient_user_id: &str, epoch: u64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(recipient_user_id.trim().to_ascii_lowercase().as_bytes());
     hasher.update(b"|");
     hasher.update(epoch.to_be_bytes());
-    format!("intake:{}", hex::encode(hasher.finalize()))
+    hex::encode(hasher.finalize())
 }
 
 /// Seconds a tag published for `epoch` should live, given `now_epoch`.
@@ -187,19 +206,33 @@ pub(crate) async fn check_intake_credential(
     }
 
     for epoch in acceptable_epochs(intake_epoch(now_unix)) {
-        let key = tag_key(recipient_user_id, epoch);
-        let stored: redis::RedisResult<Option<Vec<u8>>> =
-            redis::cmd("GET").arg(&key).query_async(conn).await;
-        match stored {
-            Ok(Some(bytes)) if tag_matches(&presented, &bytes) => return IntakeCheck::Vouched,
-            Ok(_) => {}
-            Err(e) => {
+        let members: redis::RedisResult<Vec<Vec<u8>>> = redis::cmd("SMEMBERS")
+            .arg(tag_key(recipient_user_id, epoch))
+            .query_async(conn)
+            .await;
+        let legacy: redis::RedisResult<Option<Vec<u8>>> = redis::cmd("GET")
+            .arg(legacy_tag_key(recipient_user_id, epoch))
+            .query_async(conn)
+            .await;
+        match (members, legacy) {
+            (Ok(members), Ok(legacy)) => {
+                if any_tag_matches(&presented, members.iter().chain(legacy.iter())) {
+                    return IntakeCheck::Vouched;
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
                 tracing::warn!(error = %e, "intake tag lookup unavailable — falling back to the token path");
                 return IntakeCheck::Unavailable;
             }
         }
     }
     IntakeCheck::Unrecognised
+}
+
+/// Does `presented` match any of `stored`? Every member is compared — no early return on a match
+/// either — so the time taken says nothing about which device's key a tag came from.
+pub(crate) fn any_tag_matches<'a>(presented: &[u8], stored: impl Iterator<Item = &'a Vec<u8>>) -> bool {
+    stored.fold(false, |found, candidate| tag_matches(presented, candidate) | found)
 }
 
 /// Store one published tag, or say why it was not stored.
@@ -221,11 +254,19 @@ pub(crate) async fn store_published_tag(
         return Ok(false);
     };
     let key = tag_key(recipient_user_id, epoch);
-    redis::cmd("SET")
-        .arg(&key)
-        .arg(tag)
-        .arg("EX")
-        .arg(ttl)
+    let present: usize = redis::cmd("SCARD").arg(&key).query_async(conn).await?;
+    if present >= MAX_TAGS_PER_EPOCH {
+        let already: bool = redis::cmd("SISMEMBER").arg(&key).arg(tag).query_async(conn).await?;
+        if !already {
+            return Ok(false);
+        }
+    }
+    // Added beside the other devices' tags, never over them. EXPIRE is re-applied on every
+    // publish; the TTL depends only on the epoch and today, so every device sets the same one.
+    redis::pipe()
+        .atomic()
+        .cmd("SADD").arg(&key).arg(tag).ignore()
+        .cmd("EXPIRE").arg(&key).arg(ttl).ignore()
         .query_async::<()>(conn)
         .await?;
     Ok(true)
@@ -310,6 +351,32 @@ mod tests {
             tag_key("FFEEDDC6-14F2-4D02-A66A-CAF0D8DFEDA8", 20_707),
             "Uuid::to_string stopped being the canonical spelling tag_key normalises to"
         );
+    }
+
+    /// Two devices of one account publish two keys' tags; a contact holding either is vouched.
+    /// Mutation: compare only the first member (the old single-value store) — this reddens.
+    #[test]
+    fn a_tag_from_any_device_of_the_account_is_vouched() {
+        let first = vec![1u8; INTAKE_TAG_LEN];
+        let second = vec![2u8; INTAKE_TAG_LEN];
+        let stored = [first.clone(), second.clone()];
+        assert!(any_tag_matches(&second, stored.iter()));
+        assert!(any_tag_matches(&first, stored.iter()));
+        assert!(!any_tag_matches(&[3u8; INTAKE_TAG_LEN], stored.iter()));
+    }
+
+    #[test]
+    fn a_wrong_length_member_matches_nothing_even_itself() {
+        let short = vec![7u8; INTAKE_TAG_LEN - 1];
+        assert!(!any_tag_matches(&short, [short.clone()].iter()));
+    }
+
+    /// The set lives under its own key: `SADD` onto a pre-set string key is WRONGTYPE.
+    #[test]
+    fn the_set_key_is_not_the_legacy_string_key() {
+        let a = "ffeeddc6-14f2-4d02-a66a-caf0d8dfeda8";
+        assert_ne!(tag_key(a, 20_707), legacy_tag_key(a, 20_707));
+        assert!(!legacy_tag_key(a, 20_707).contains("ffeeddc6"));
     }
 
     #[test]
