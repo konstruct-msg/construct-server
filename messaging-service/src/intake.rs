@@ -107,7 +107,10 @@ pub(crate) const MAX_TAGS_PER_EPOCH: usize = 32;
 /// every account that has published, which is a user list this service has no reason to hand out —
 /// the same reasoning that has `pp:unit:` hash its inputs instead of concatenating them.
 pub(crate) fn tag_key(recipient_user_id: &str, epoch: u64) -> String {
-    format!("intake:v2:{}", account_epoch_digest(recipient_user_id, epoch))
+    format!(
+        "intake:v2:{}",
+        account_epoch_digest(recipient_user_id, epoch)
+    )
 }
 
 /// The single-tag string key used before 2026-09-29. Read, never written: a tag published under it
@@ -231,8 +234,13 @@ pub(crate) async fn check_intake_credential(
 
 /// Does `presented` match any of `stored`? Every member is compared — no early return on a match
 /// either — so the time taken says nothing about which device's key a tag came from.
-pub(crate) fn any_tag_matches<'a>(presented: &[u8], stored: impl Iterator<Item = &'a Vec<u8>>) -> bool {
-    stored.fold(false, |found, candidate| tag_matches(presented, candidate) | found)
+pub(crate) fn any_tag_matches<'a>(
+    presented: &[u8],
+    stored: impl Iterator<Item = &'a Vec<u8>>,
+) -> bool {
+    stored.fold(false, |found, candidate| {
+        tag_matches(presented, candidate) | found
+    })
 }
 
 /// Store one published tag, or say why it was not stored.
@@ -256,7 +264,11 @@ pub(crate) async fn store_published_tag(
     let key = tag_key(recipient_user_id, epoch);
     let present: usize = redis::cmd("SCARD").arg(&key).query_async(conn).await?;
     if present >= MAX_TAGS_PER_EPOCH {
-        let already: bool = redis::cmd("SISMEMBER").arg(&key).arg(tag).query_async(conn).await?;
+        let already: bool = redis::cmd("SISMEMBER")
+            .arg(&key)
+            .arg(tag)
+            .query_async(conn)
+            .await?;
         if !already {
             return Ok(false);
         }
@@ -265,8 +277,14 @@ pub(crate) async fn store_published_tag(
     // publish; the TTL depends only on the epoch and today, so every device sets the same one.
     redis::pipe()
         .atomic()
-        .cmd("SADD").arg(&key).arg(tag).ignore()
-        .cmd("EXPIRE").arg(&key).arg(ttl).ignore()
+        .cmd("SADD")
+        .arg(&key)
+        .arg(tag)
+        .ignore()
+        .cmd("EXPIRE")
+        .arg(&key)
+        .arg(ttl)
+        .ignore()
         .query_async::<()>(conn)
         .await?;
     Ok(true)
