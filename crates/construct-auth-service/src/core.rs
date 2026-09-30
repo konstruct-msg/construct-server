@@ -74,7 +74,30 @@ pub async fn refresh_tokens(
             AppError::Auth("Invalid or expired refresh token".to_string())
         })?;
 
-    // 2. Create the new tokens BEFORE touching Redis so that if token generation
+    // 2. The device the token names must still be registered and active. Revoking or
+    //    signing out a device deactivates its row, but until 2026-09-30 nothing here read
+    //    that: a removed device refreshed forever, and once its `revoked_device:` marker
+    //    expired with the access-token TTL, messaging accepted it again. Same answer as
+    //    `AuthenticateDevice`, so the client reads one signal for "this device was removed"
+    //    and wipes itself (construct-docs `decisions/sign-out-wipes-the-device.md`).
+    //    Fail closed: a refresh we cannot check is not granted.
+    if let Some(device_id) = claims.device_id.as_deref() {
+        let active = construct_db::get_device_by_id(&app_context.db_pool, device_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Refresh: device lookup failed — fail closed");
+                AppError::internal("Cannot verify device")
+            })?
+            .map(|device| device.is_active);
+        if let Some(reason) = refresh_refusal(active) {
+            AUTH_FAILURES_TOTAL
+                .with_label_values(&["refresh_device_inactive"])
+                .inc();
+            return Err(AppError::auth(reason));
+        }
+    }
+
+    // 3. Create the new tokens BEFORE touching Redis so that if token generation
     //    fails we haven't consumed the old token yet.
     let user_id = Uuid::parse_str(&claims.sub)
         .map_err(|_| AppError::Validation("Invalid user ID in refresh token".to_string()))?;
@@ -95,7 +118,7 @@ pub async fn refresh_tokens(
             AppError::Unknown(e)
         })?;
 
-    // 3. Atomically consume the old token and store the new one in a single
+    // 4. Atomically consume the old token and store the new one in a single
     //    Redis Lua script — eliminates the crash window between DEL and SET.
     let refresh_ttl_seconds =
         app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
@@ -135,7 +158,7 @@ pub async fn refresh_tokens(
         }
     };
 
-    // 4. Defense-in-depth: verify user_id in Redis matches JWT sub
+    // 5. Defense-in-depth: verify user_id in Redis matches JWT sub
     if user_id_from_token != claims.sub {
         tracing::error!(
             jti = %claims.jti,
@@ -218,6 +241,16 @@ pub async fn authenticate_device(
         input.signature,
     )
     .await
+}
+
+/// Why a refresh is refused for the device its token names: `active` is that device's row —
+/// `None` when there is none. Worded as `AuthenticateDevice` words it, since clients match it.
+pub(crate) fn refresh_refusal(active: Option<bool>) -> Option<&'static str> {
+    match active {
+        None => Some("Device not found"),
+        Some(false) => Some("Device is inactive"),
+        Some(true) => None,
+    }
 }
 
 pub async fn logout_user(
@@ -515,5 +548,26 @@ mod deactivation_guard_tests {
              refuses the primary device because deactivation is unrecoverable — re-read that \
              rationale before deleting this test"
         );
+    }
+}
+
+#[cfg(test)]
+mod refresh_refusal_tests {
+    use super::refresh_refusal;
+
+    #[test]
+    fn an_active_device_refreshes() {
+        assert_eq!(refresh_refusal(Some(true)), None);
+    }
+
+    /// Mutation: let an inactive device through — a removed device lives forever again.
+    #[test]
+    fn a_removed_device_is_refused_with_the_authenticate_device_wording() {
+        assert_eq!(refresh_refusal(Some(false)), Some("Device is inactive"));
+    }
+
+    #[test]
+    fn an_unknown_device_is_refused() {
+        assert_eq!(refresh_refusal(None), Some("Device not found"));
     }
 }
