@@ -115,8 +115,8 @@ Boot log should show `count=2` (or more).
 
 ### 2c. Signed relay manifest
 
-Relay inventory in repo: `tools/relays.json`. The **published** artifact is not that
-file — see §2f-C for the procedure. In short: `sign` is the wrong verb for the live
+The relay inventory lives in private ops only — `tools/relays.json` was removed from this
+repo on 2026-09-07 (`3c7f49a`). The **published** artifact is the signed manifest — see §2f-C for the procedure. In short: `sign` is the wrong verb for the live
 manifest; hand-edit the merged manifest and `resign` it.
 
 Client accepts alternates only if `{addr, spki}` matches seed **or** this signed manifest
@@ -160,7 +160,7 @@ echo | openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/
   | openssl dgst -sha256 -r 2>/dev/null | awk '{print $1}'
 ```
 
-This hex must match `VEIL_RELAYS`, `tools/relays.json`, and the client seed/manifest. Do not copy an old pin from `relays.json` if the cert was re-issued without `--reuse-key`.
+This hex must match `VEIL_RELAYS`, the private-ops inventory, and the client seed/manifest. Do not copy an old pin from the inventory if the cert was re-issued without `--reuse-key`.
 
 Confirm on the VPS that `ISSUER_PUBKEY` is the public half of home `VEIL_ISSUER_SEED` (`8a0ee71c…` for the production issuer). Wrong pubkey → cover still opens, AUTH never leaves cover.
 
@@ -172,7 +172,7 @@ On the **home** server `/opt/construct/secrets/app.env`, set `VEIL_RELAYS` to **
 docker compose -f ops/docker-compose.prod.yml up -d --force-recreate veil
 docker logs construct-veil-1 2>&1 | tail -40
 # expect: Configured VEIL fronts  count=2
-# expect: both host:port keys listed
+# expect: two opaque 8-hex front labels (core::front_label — the log never prints host:port)
 ```
 
 `restart` is not enough (env_file). `count=1` → malformed record or recreate skipped. Do **not** list `ams.konstruct.cc` (plain Caddy) here.
@@ -197,7 +197,7 @@ Procedure — edit `construct-landing/.well-known/construct-server` (source of t
 LANDING=~/Code/construct-landing/.well-known/construct-server
 PUB=8a0ee71cd95f86a9f6877211accefaff6bb97f3051b3b2141f1c71690b9a2dcf
 
-# 1. Hand-edit $LANDING: veil.relays[] from tools/relays.json, veil.primary to a LIVE
+# 1. Hand-edit $LANDING: veil.relays[] from the private-ops inventory, veil.primary to a LIVE
 #    front, veil.deprecated_ids for retired ids. Bump "version" (string) and set
 #    "signed_at" (ISO-8601 UTC). Touch nothing else.
 
@@ -207,7 +207,7 @@ python3 tools/sign_relay_manifest.py resign "$LANDING" --key tools/relay_signing
 python3 tools/sign_relay_manifest.py verify  "$LANDING" --pubkey "$PUB"
 # expect: Relays: N  and  ✅ Signature VALID
 
-# 3. Mirror the signed file byte-for-byte, keep tools/relays.json in step.
+# 3. Mirror the signed file byte-for-byte, keep the private-ops inventory in step.
 cp "$LANDING" .well-known/construct-server
 ```
 
@@ -277,7 +277,7 @@ A 60-day tester link is the wrong TTL for this door; hours, then throw the B2 aw
 
 ### Option A — Revive / re-home `<retired-front>` (fastest if infra exists)
 
-**Pros:** domain already in `tools/relays.json` (`ams-het-1`); NL/Hetzner diversity vs RU primary; same issuer model.
+**Pros:** domain already in the relay inventory (`ams-het-1`); NL/Hetzner diversity vs RU primary; same issuer model.
 
 **Cons (2026-08-05):** live TLS probe failed — the name is not a working veil-front right now. Client also retired **obfs4** AMS (`ice.ams…`); a **new** veil-front hostname is fine, do not resurrect obfs4.
 
@@ -285,7 +285,7 @@ A 60-day tester link is the wrong TTL for this door; hours, then throw the B2 aw
 1. Deploy `construct-veil` prod stack on a reachable AMS VPS (`deploy/docker-compose.prod.yml`).
 2. `DOMAIN=<retired-front>` (or a fresh subdomain), LE cert with `--reuse-key`.
 3. `ISSUER_PUBKEY=8a0ee71c…`, backend `ams.konstruct.cc:443` (or current home).
-4. DNS A/AAAA → VPS; `spki` into `VEIL_RELAYS` + `relays.json` + client seed.
+4. DNS A/AAAA → VPS; `spki` into `VEIL_RELAYS` + the private-ops inventory + client seed.
 
 ### Option B — New VPS, new domain (recommended for real resilience)
 

@@ -478,10 +478,11 @@ services:
       - internal
     # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
 
-  # ─── SALAMANDER QUIC endpoint (construct-transport) ──────────────────────────
-  # Receives obfuscated QUIC (SALAMANDER) on UDP 443, de-obfuscates and forwards
-  # plain h2c to caddy:8080. Standard HTTP/3 (Caddy native) is NOT used — all
-  # client QUIC traffic uses SALAMANDER obfuscation for anti-DPI.
+  # ─── QUIC endpoint (construct-transport) ─────────────────────────────────────
+  # Receives plain QUIC on UDP 443 and forwards h2c to caddy:8080. Standard HTTP/3
+  # (Caddy native) is NOT used. SALAMANDER obfuscation (QUIC_OBF_PSK) was tried and
+  # dropped: it adds nothing on an open network, and where TSPU blocks unrecognised
+  # UDP neither form gets through (construct-docs decisions/quic-plain-vs-obfuscated.md).
   quic:
     image: ghcr.io/konstruct-msg/construct-transport:latest
     restart: unless-stopped
