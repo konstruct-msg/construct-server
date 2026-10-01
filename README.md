@@ -28,16 +28,16 @@ not inject trusted user identity headers.
 | Service | Binary | Port | Role |
 | --- | --- | --- | --- |
 | `caddy` | external | 443 TCP / 8080 h2c | Edge TLS and gRPC routing |
-| `quic` | external | 443 UDP | Obfuscated QUIC transport to Caddy h2c |
-| `gateway` | `gateway` | HTTP 3000 / proxy 9443 | Health, well-known, federation S2S, veil/obfs4 proxy |
+| `quic` | external | 443 UDP | Plain QUIC transport to Caddy h2c |
+| `gateway` | `gateway` | HTTP 3000 / proxy 9443 | Health, well-known (incl. the federation key), veil/obfs4 proxy |
 | `identity` | `identity-service` | 50051 | Auth, device, device-link, user, invite, token issuance |
-| `messaging` | `messaging-service` | 50053 | Send, stream, sealed sender, Privacy Pass redemption, APNs, Sentinel |
+| `messaging` | `messaging-service` | 50053 (+ HTTP 8083) | Send, stream, sealed sender, Privacy Pass redemption, APNs, Sentinel; federation S2S on 8083 |
 | `media` | `media-service` | 50056 | Encrypted media upload/download |
 | `veil` | `veil-service` | 50056 | VEIL capability issuer; separate deployment surface |
 | `key` | `key-service` | 50057 | X3DH and ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS groups and broadcast channels |
 | `signaling` | `signaling-service` | 50060 | WebRTC signaling |
-| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay |
+| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay; built, not deployed or used |
 
 Data stores:
 
@@ -45,7 +45,8 @@ Data stores:
   HMACs, and delivery receipt routing state.
 - Redis stores offline mailbox streams, wakeup pub/sub channels, rate limits,
   PoW challenges, token-spend state, replay guards, and token blocklist entries.
-- Message content is not written to PostgreSQL.
+- 1:1 message content is not written to PostgreSQL. MLS group messages and
+  channel posts are, as ciphertext (`mls_ciphertext`, `channel_posts.ciphertext`).
 
 ## Message Delivery
 
@@ -102,7 +103,7 @@ server-side tokens. Which layers are post-quantum is in the protocol book:
 | Device identity | Ed25519 |
 | Classic prekeys | X25519 |
 | Kyber prekeys | ML-KEM-1024 (signed and one-time), beside the X25519 prekeys; used by PQXDH v2 |
-| Prekey signatures | Ed25519, strict RFC 8032 verification; Kyber prekeys also carry an Ed25519 + ML-DSA-65 hybrid signature |
+| Prekey signatures | Ed25519 (`ed25519-dalek` `verify`, not `verify_strict`); Kyber prekeys also carry an Ed25519 + ML-DSA-65 hybrid signature |
 | Sender certificates | Ed25519, signed by the server — not post-quantum (protocol book `PQC-2`) |
 | Access tokens | PASETO v4.public; legacy RS256 JWT accepted |
 | Anonymous anti-abuse | Privacy Pass VOPRF over ristretto255 |
@@ -120,9 +121,11 @@ construct-server/
   group-service/         MLS and broadcast channels
   signaling-service/     WebRTC signaling
   veil-service/          VEIL capability issuer
-  masque-service/        MASQUE-lite relay
+  masque-service/        MASQUE-lite relay (not deployed)
   shared/                protobufs, migrations, shared tests
   crates/                shared Rust crates
+  fuzz/                  cargo-fuzz targets (sealed sender, Privacy Pass)
+  tools/                 relay-manifest signing (sign_relay_manifest.py)
   ops/                   Docker Compose, Caddy, monitoring, deployment config
   scripts/               local checks and operational scripts
 ```
