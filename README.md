@@ -94,14 +94,16 @@ Delivery invariants:
 
 Client-side encryption is outside this repository. The server stores and routes
 encrypted envelopes, verifies uploaded key material, and issues or redeems
-server-side tokens.
+server-side tokens. Which layers are post-quantum is in the protocol book:
+[Threat Model — Post-quantum coverage](https://konstruct-msg.github.io/construct-protocol/01-threat-model.html#post-quantum-coverage).
 
 | Area | Implementation |
 | --- | --- |
 | Device identity | Ed25519 |
 | Classic prekeys | X25519 |
-| Hybrid prekeys | ML-KEM-768 plus X25519 |
-| Prekey signatures | Ed25519, strict RFC 8032 verification |
+| Kyber prekeys | ML-KEM-1024 (signed and one-time), beside the X25519 prekeys; used by PQXDH v2 |
+| Prekey signatures | Ed25519, strict RFC 8032 verification; Kyber prekeys also carry an Ed25519 + ML-DSA-65 hybrid signature |
+| Sender certificates | Ed25519, signed by the server — not post-quantum (protocol book `PQC-2`) |
 | Access tokens | PASETO v4.public; legacy RS256 JWT accepted |
 | Anonymous anti-abuse | Privacy Pass VOPRF over ristretto255 |
 | Groups | MLS, RFC 9420 |
