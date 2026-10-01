@@ -28,7 +28,7 @@ not inject trusted user identity headers.
 | Service | Binary | Port | Role |
 | --- | --- | --- | --- |
 | `caddy` | external | 443 TCP / 8080 h2c | Edge TLS and gRPC routing |
-| `quic` | external | 443 UDP | Obfuscated QUIC transport to Caddy h2c |
+| `quic` | external | 443 UDP | Plain QUIC transport to Caddy h2c |
 | `gateway` | `gateway` | HTTP 3000 / proxy 9443 | Health, well-known (incl. the federation key), veil/obfs4 proxy |
 | `identity` | `identity-service` | 50051 | Auth, device, device-link, user, invite, token issuance |
 | `messaging` | `messaging-service` | 50053 (+ HTTP 8083) | Send, stream, sealed sender, Privacy Pass redemption, APNs, Sentinel; federation S2S on 8083 |
@@ -37,7 +37,7 @@ not inject trusted user identity headers.
 | `key` | `key-service` | 50057 | X3DH and ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS groups and broadcast channels |
 | `signaling` | `signaling-service` | 50060 | WebRTC signaling |
-| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay |
+| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay; built, not deployed or used |
 
 Data stores:
 
@@ -121,7 +121,7 @@ construct-server/
   group-service/         MLS and broadcast channels
   signaling-service/     WebRTC signaling
   veil-service/          VEIL capability issuer
-  masque-service/        MASQUE-lite relay
+  masque-service/        MASQUE-lite relay (not deployed)
   shared/                protobufs, migrations, shared tests
   crates/                shared Rust crates
   fuzz/                  cargo-fuzz targets (sealed sender, Privacy Pass)

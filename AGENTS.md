@@ -21,7 +21,7 @@ See `ops/docker-compose.prod.yml`. Ports / roles:
 | `key` | `key-service` | 50057 | X3DH + ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS + broadcast channels |
 | `signaling` | `signaling-service` | 50060 | WebRTC signaling |
-| `masque` | `masque-service` | WS 9200 | MASQUE-lite (not behind Caddy) |
+| `masque` | `masque-service` | WS 9200 | MASQUE-lite (not behind Caddy); built, not deployed or used |
 
 `auth-service` / `user-service` / notification / sentinel as separate deployables are
 **gone** — merged into identity or messaging.
