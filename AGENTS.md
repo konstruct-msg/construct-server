@@ -13,9 +13,9 @@ See `ops/docker-compose.prod.yml`. Ports / roles:
 |---|---|---|---|
 | `caddy` | external | 443 / 8080 | Edge TLS; gRPC route by proto path |
 | `quic` | external | 443/UDP | Plain QUIC → caddy:8080 |
-| `gateway` | `gateway` | HTTP 3000 / 9443 | health, well-known, federation S2S; veil/obfs4 → caddy:8080 |
+| `gateway` | `gateway` | HTTP 3000 / 9443 | health, well-known (publishes the federation key); veil/obfs4 → caddy:8080 |
 | `identity` | `identity-service` | 50051 | Auth + Device + DeviceLink + User + Invite; PoW; PP issuance; sender certs |
-| `messaging` | `messaging-service` | 50053 | send/stream, sealed+PP redeem, Redis mailbox, APNs, Sentinel (in-process) |
+| `messaging` | `messaging-service` | 50053 (+ HTTP 8083) | send/stream, sealed+PP redeem, Redis mailbox, APNs, Sentinel (in-process); `/federation/v1/*` S2S on 8083 |
 | `media` | `media-service` | 50056 | Encrypted media gRPC; volume `media-data`; 7d TTL. Also `StickerService`: public packs, **no TTL**, published by `sticker-publish` (never via the request path) |
 | `veil` | `veil-service` | 50056 | VEIL capability issuance (separate deploy) |
 | `key` | `key-service` | 50057 | X3DH + ML-KEM prekeys |
@@ -94,8 +94,8 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 | `msg:dedup:{message_id}` | String | Send idempotency (set **after** mailbox XADD) |
 | `user:{user}:server_instance_id` | String | Active MessageStream owner (O(1) routing) |
 | `delivery_queue:{instance}` | List | Leftover delivery-worker registry. **Tests only** — prod never writes or polls it |
-| `rate_limit:{scope}:{id}` | String | Sliding window |
-| `pow_challenge:{token}` | String | PoW challenge |
+| `rate:{scope}:{id}` | String | Sliding window (`rate:msg:`, `rate:ip:`, `rate:login:`, …; also `ratelimit:{user}:{action}`) |
+| `pow:ch:{challenge}` | String | PoW challenge (+ `pow:ipch:{ip}` / `pow:ipreg:{ip}` ZSets, per-IP limits) |
 | `rate:pp_tokens:{user}:{hour}` | Counter | PP issuance cap |
 | `spent:{sha256(nonce)}` | String | PP double-spend (30d) |
 | `pp:unit:{sha256(spend_id\|recipient)}` | String | Paid multi-chunk unit (2h; recipient-bound) |
@@ -119,7 +119,7 @@ list). Routing is `GET user:{user}:server_instance_id`.
   headers alone are never trusted.
 - **Caddy does not inject `x-user-id`.** Gateway `:9443` is veil/obfs4 proxy only, not JWT.
   Each service validates via `construct-auth::AuthManager`. File: `ops/Caddyfile`.
-  `flush_interval -1` is **MessageStream only**. Unary MessagingService RPCs must
+  `flush_interval -1` is for the streaming RPCs only (**MessageStream**, `SignalingService`). Unary MessagingService RPCs must
   not flush immediately — that emits DATA+END_STREAM and grpc-swift reports
   "EOS alongside a data frame" instead of `privacy_pass:…`. Recreate caddy after
   Caddyfile edits (`up -d --force-recreate caddy`); it is a single-file bind mount.
@@ -197,9 +197,10 @@ Redis/internal errors. IDs are **32-char hex device ids**, not user UUIDs.
 ## Identity (Epic E) — short
 
 Additive: `identity_public_key` + `identity_key_type` + `route_id`
-(`SHA-256(type || key)`, hex) alongside UUID. E.1/E.2 done; **E.3 pending**
-(`UserId::parse` dual addressing + `dispatch_sealed_sender` route_id resolution —
-still UUID-only). Details: migration 064, `construct-types` / `construct-db`.
+(`SHA-256(type || key)`, hex) alongside UUID. E.1–E.3 done: `UserId::parse` accepts
+`ed25519:<hex>` key addresses, and `dispatch_sealed_sender` resolves one route_id → UUID
+(`get_user_by_route_id`) before delivery — since 2026-09-28 (`51240bc`); everything after the
+resolution stays UUID-based. Details: migration 064, `construct-types` / `construct-db`.
 
 ---
 
@@ -256,11 +257,13 @@ See `.grok/rules/no-direct-main.md`.
 ```bash
 cargo build                     # or: cargo build -p messaging-service
 cargo test
-cargo fmt && cargo clippy       # pre-commit enforces both
+cargo fmt && cargo clippy       # the pre-push hook checks both
 ```
 
-Commit tip: `cargo fmt && git add -A && git commit` so the hook does not reformat
-and fail the commit.
+There is no pre-commit hook. `.githooks/pre-push` runs `cargo fmt --all -- --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, the observability and
+Redis-timeout checks and the front-coordinates guard; it does not reformat. Run
+`cargo fmt` before committing so the push is not refused.
 
 **`cargo test` does not exercise the offline mailbox.** Redis round-trip tests are
 `#[ignore]` — a green suite says nothing about delivery (how 2026-08-18 loss shipped).
@@ -275,12 +278,13 @@ cargo test -p construct-queue --lib -- --ignored mailbox
 
 ## Known debt (skim)
 
-- `to_app_context()` leaves APNs / token_encryption `None` outside messaging.
+- `AppContext` APNs / token_encryption: identity's `to_app_context()` sets them (when
+  `APNS_*` is configured); the construct-auth-service and messaging adapters leave them
+  `None` — messaging pushes through `notification_core`, not `AppContext`.
 - `delivery_queue:{instance}` / `register_server_instance` / `poll_delivery_queue`
   are leftover from delivery-worker; not called in production.
 - Signaling: Redis call state OK; in-memory `user_channels` empty after restart
   (clients reconnect — acceptable).
-- Epic E.3 pending (above).
 
 ---
 

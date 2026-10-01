@@ -80,9 +80,8 @@ queries, and the empty reply was indistinguishable from "that metric does not ex
 
 ## Dev Setup
 
-```bash
-./scripts/dev-setup.sh   # Set up local development environment
-```
+Local PostgreSQL and Redis: `docker compose -f ops/docker-compose.dev.yml up -d` (see the
+root README, "Local Development").
 
 ## Version Management
 
