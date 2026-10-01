@@ -42,8 +42,10 @@ Cross-pin the peer SPKI (no public CA needed for S2S):
 FP_B=$(openssl s_client -connect relay.b.local:443 -servername relay.b.local </dev/null 2>/dev/null \
        | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -hex \
        | awk '{print $2}')
-echo "FEDERATION_PINNED_CERTS=relay.b.local:$FP_B" >> /opt/construct/.env
-# mirror on host B for relay.a.local, then `up -d` again.
+echo "FEDERATION_PINNED_CERTS=relay.b.local:$FP_B" >> /opt/construct/secrets/app.env
+# mirror on host B for relay.a.local, then `up -d --force-recreate` (env_file is read
+# at create; /opt/construct/.env only feeds compose ${VAR} substitution, and no
+# FEDERATION_* var is substituted there).
 ```
 
 ## 2. Scriptable checks

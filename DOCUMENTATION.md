@@ -1,6 +1,6 @@
 # Konstruct Server: Developer Documentation
 
-**Last Updated:** 2026-07-17  
+**Last Updated:** 2026-10-01  
 **Status:** Living Document
 
 ---
@@ -31,14 +31,14 @@ Caddy :443   (edge TLS termination, Let's Encrypt; routes by /shared.proto.servi
   │
   ├─► identity-service    :50051  (AuthService, DeviceService, DeviceLinkService,
   │                                 UserService, InviteService — merged)
-  ├─► messaging-service   :50053  (MessagingService, MessageGateway,
-  │                                 NotificationService, SentinelService — merged)
+  ├─► messaging-service   :50053  (MessagingService, NotificationService,
+  │                                 SentinelService — merged; HTTP :8083 federation S2S)
   ├─► media-service       :50056  (MediaService, StickerService)
   ├─► veil-service        :50056  (VeilService — separate deployment)
   ├─► key-service         :50057  (KeyService)
   ├─► group-service       :50058  (MlsService, ChannelService)
   ├─► signaling-service   :50060  (SignalingService — WebRTC call signaling)
-  └─► gateway             :3000   (HTTP: /health, /.well-known, /federation; veil/obfs4 proxy :9443)
+  └─► gateway             :3000   (HTTP: /health, /.well-known incl. the federation key; veil/obfs4 proxy :9443)
 
 Non-gRPC services (not routed through Caddy):
   └─► masque-service      :9200   (WebSocket MASQUE-lite QUIC datagram relay)
@@ -46,8 +46,8 @@ Non-gRPC services (not routed through Caddy):
 
 **Shared infrastructure:**
 - **Redis Streams** — message delivery transport: per-user/per-device offline stream (`delivery:offline:{user_id}[:{device_id}]`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`).
-- **PostgreSQL** — users, devices, keys, `delivery_pending` (receipt routing hashes only — **message content is never stored in PostgreSQL**)
-- **Proto definitions** — `shared/proto/services/*.proto` (12 service protos), `shared/proto/core/`, `shared/proto/messaging/`, `shared/proto/signaling/`
+- **PostgreSQL** — users, devices, keys, `delivery_pending` (receipt routing hashes only). **1:1 message content is never stored in PostgreSQL**; MLS group messages (`mls_ciphertext`) and channel posts (`channel_posts.ciphertext`) are, as ciphertext
+- **Proto definitions** — `shared/proto/services/*.proto` (13 service protos), `shared/proto/core/`, `shared/proto/messaging/`, `shared/proto/signaling/`
 
 ---
 
@@ -56,7 +56,7 @@ Non-gRPC services (not routed through Caddy):
 ### Binary entry points
 
 Each service is an independent Rust binary. `main()` in each service:
-1. Loads `Config::from_env()` (crate `construct-config`)
+1. Loads `Config::from_env_for(SecretNeeds::<SERVICE>)` (crate `construct-config`) — only the secrets that service uses are required
 2. Creates a DB pool (`construct-db`) and Redis connection
 3. Builds a tonic gRPC server and binds to its port
 
@@ -70,7 +70,7 @@ Each service is an independent Rust binary. `main()` in each service:
 | group-service | `group-service/src/main.rs` | 50058 | `PORT` (metrics: `METRICS_PORT` 8097) |
 | signaling-service | `signaling-service/src/main.rs` | 50060 | *(PORT env var)* |
 | masque-service | `masque-service/src/main.rs` | — (WS :9200) | `MASQUE_LISTEN_ADDR` |
-| gateway | `gateway/src/main.rs` | — (HTTP :3000) | `PORT` |
+| gateway | `gateway/src/main.rs` | — (HTTP; code default 8080, compose sets 3000) | `PORT` |
 
 ### Required environment variables (all services)
 
@@ -87,7 +87,7 @@ See `crates/construct-config/src/lib.rs` for the full list and defaults.
 | Binary | gRPC services exposed |
 |--------|----------------------|
 | identity-service | `AuthService`, `DeviceService`, `DeviceLinkService`, `UserService`, `InviteService` |
-| messaging-service | `MessagingService`, `MessageGateway`, `NotificationService`, `SentinelService` |
+| messaging-service | `MessagingService`, `NotificationService`, `SentinelService` (plus HTTP :8083 for `/federation/v1/*`) |
 | media-service | `MediaService`, `StickerService` (public, unauthenticated) |
 | key-service | `KeyService` |
 | group-service | `MlsService`, `ChannelService` |
@@ -108,13 +108,16 @@ Proto sources: `shared/proto/services/`
 ```
 Client → AuthService::RegisterDevice
   └─► identity-service/src/main.rs  (tonic handler dispatch)
-      └─► crates/construct-auth-service/src/core.rs
-          pub async fn register_device(...)
-            ├─ verify PoW challenge (construct-pow)
-            ├─ verify prekey signatures (Ed25519, construct-crypto)
-            ├─ INSERT INTO devices (construct-db)
-            ├─ INSERT otpks + signed prekey (construct-db)
-            └─ issue JWT access + refresh tokens (construct-auth)
+      └─► crates/construct-auth-service/src/core.rs  register_device (pass-through)
+          └─► crates/construct-auth-service/src/devices.rs
+              register_device_core(...)
+                ├─ verify the signed prekey's Ed25519 signature (construct-crypto)
+                ├─ device-exists check
+                ├─ verify PoW challenge
+                ├─ create_user_with_first_device: INSERT users + devices
+                │    (the device row carries the signed prekey; no OTPKs here —
+                │     they arrive through KeyService::UploadPreKeys)
+                └─ issue access + refresh tokens (PASETO v4.public, construct-auth)
 ```
 
 ### 2. Pre-Key Upload (after registration)
@@ -124,10 +127,11 @@ Client → KeyService::UploadPreKeys
   └─► key-service/src/main.rs
       └─► key-service/src/core.rs
           pub async fn upload_prekeys(...)
-            ├─ verify Ed25519 signatures on each key
-            │   formula: sign("KonstruktX3DH-v1" || [0x00, suite_id] || pubkey_bytes)
-            ├─ INSERT INTO one_time_prekeys (suite 1 = X25519 OTPKs)
-            └─ INSERT kyber prekeys (suite 2 = ML-KEM-768+X25519 hybrid)
+            ├─ INSERT INTO one_time_prekeys (X25519 OTPKs — unsigned, as in X3DH)
+            └─ Kyber prekeys (ML-KEM-1024, PQXDH v2), each checked before it is stored:
+                 check_kyber_prekey_v2        — size + Ed25519 over the v2 message
+                 check_kyber_prekey_hybrid_v2 — Ed25519 + ML-DSA-65 hybrid signature
+               → kyber_one_time_pre_keys (one-time) / devices.kyber_signed_pre_key (signed)
 ```
 
 ### 3. Fetch Pre-Key Bundle (X3DH initiation)
@@ -137,7 +141,7 @@ Client → KeyService::GetPreKeyBundle
   └─► key-service/src/core.rs
       pub async fn get_prekey_bundle(...)
         ├─ SELECT identity_key, signed_prekey, spk_signature FROM devices
-        ├─ SELECT + DELETE one one_time_prekey (soft-delete via deleted_at)
+        ├─ DELETE … RETURNING one one_time_prekey (hard delete — consumed once)
         └─ return KeyBundle proto
 ```
 
@@ -148,10 +152,10 @@ Client → MessagingService::SendMessage
   └─► messaging-service/src/grpc.rs
       async fn send_message(...)
         ├─ extract message_id from envelope.message_id (echo back to client)
-        ├─ idempotency check: SETNX Redis key
+        ├─ idempotency check: EXISTS msg:dedup:{message_id} (set with SET EX 24h only
+        │    after the mailbox XADD — check-then-set, not SETNX)
         └─► messaging-service/src/core.rs
-            pub async fn dispatch_envelope(...)
-              ├─ check recipient domain (local vs federated)
+            pub async fn dispatch_envelope(...)   (local only — federation is the sealed path, §7)
               ├─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
               └─ store receipt routing hash in delivery_pending (PostgreSQL, async, non-critical)
                   NOTE: message content is NEVER written to PostgreSQL
@@ -187,7 +191,9 @@ Client → MessagingService::MessageStream
 Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY_RECEIPT)
   └─► messaging-service/src/receipts.rs
       pub(crate) async fn relay_delivery_receipt(...)
-        ├─ compute routing hash (recipient → original sender)
+        ├─ find the original sender: DirectReceipt.recipient_user_id when the client
+        │    filled it (fast path); otherwise the routing hash → Redis cache →
+        │    delivery_pending (legacy path)
         ├─ XADD delivery:offline:{sender_user_id}  (receipt rides the sender's own stream)
         └─ original sender's stream picks it up → green checkmark
 ```
@@ -198,17 +204,23 @@ Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY
 Client sends SealedSenderEnvelope
   └─► messaging-service/src/envelope.rs
       pub(crate) async fn dispatch_sealed_sender(...)
-        ├─ delivery_tag replay guard (spent_tag.rs — sealed:exact/sealed:seen Redis keys)
-        ├─ Privacy Pass token redemption (token_redeem.rs)
+        ├─ [recipient_server ≠ ours] → crates/construct-federation: forward
+        │    sealed_inner opaquely to the recipient's home server. Nothing below runs
+        │    on this branch — the home server checks it
+        ├─ decode SealedInner; resolve the recipient (an `ed25519:<hex>` key address
+        │    → route_id → UUID via get_user_by_route_id)
+        ├─ intake credential check (intake.rs) — contact traffic vouched by the
+        │    recipient may owe no token (construct-docs
+        │    decisions/contact-traffic-is-vouched-not-purchased.md)
+        ├─ Privacy Pass token redemption (token_redeem.rs), when a token is owed
         │    policy: MSG_STEALTH_TOKEN_POLICY = off | warn | enforce
         │    - unseal (X25519 to server key) → verify VOPRF (TOKEN_ISSUER_KEY)
         │    - double-spend: SET spent:{sha256(nonce)} NX EX 30d
         │    - enforce rejection → FAILED_PRECONDITION "privacy_pass:{label}"
         │      (labels: missing_token/invalid_token/double_spent/decrypt_failed/
         │       redis_error/not_configured; client retries once, never de-anonymizes)
-        ├─ [local recipient] → dispatch_envelope (same server)
-        └─ [remote recipient] → crates/construct-federation
-            forward sealed_inner opaquely to recipient's home server
+        ├─ delivery_tag replay guard (spent_tag.rs — sealed:exact/sealed:seen Redis keys)
+        └─ local delivery → mailbox
 ```
 
 Token issuance lives in **identity-service** (`IssueTokens`, authed): hourly cap
@@ -264,7 +276,7 @@ his client subscribes with `since_cursor` — the Redis stream ID of the last me
    (paging/cancel races; multi-device shared mailbox). See construct-docs
    `decisions/minimal-server-delivery.md` (Accepted).
 
-Capacity backstops: `MAXLEN ~` on XADD (100 new / 10_000 standard) and hourly age sweep
+Capacity backstops: `MAXLEN ~` on XADD (`MSG_QUEUE_MAXLEN_STANDARD`, default 10_000) and hourly age sweep
 (~30 days — not the stale “7-day TTL” wording). A short session re-delivers; the client
 dedups by `message_id`. Worst case is redelivery, not unrecoverable drop from a bad cursor.
 
@@ -287,43 +299,36 @@ storms and full offline-stream redelivery.
 
 ## Cryptography Reference
 
-### Crypto Suites
+### Prekeys
 
-| Suite ID | Name | Keys | Status |
-|----------|------|------|--------|
-| `1` | ClassicX25519 | Ed25519 identity + X25519 prekeys | ✅ Active |
-| `2` | PQHybridKyber | Ed25519 identity + ML-KEM-768⊕X25519 prekeys | ✅ Active |
+The server stores and serves prekeys; the key agreement itself (PQXDH v2) is client-side
+and specified in the protocol book, not here.
 
-Clients negotiate the suite during registration. Hybrid PQC (`2`) is available and used when both parties support it.
+| Key | Algorithm | Signed? | Where |
+|-----|-----------|---------|-------|
+| Signed prekey | X25519 | Ed25519, suite byte `0x01` | `devices.signed_prekey` |
+| One-time prekeys | X25519 | no (as in X3DH) | `one_time_prekeys` |
+| Signed Kyber prekey | ML-KEM-1024 (1568-byte public key) | Ed25519 v2 + hybrid Ed25519/ML-DSA-65 | `devices.kyber_signed_pre_key` |
+| One-time Kyber prekeys | ML-KEM-1024 | Ed25519 v2 + hybrid Ed25519/ML-DSA-65 | `kyber_one_time_pre_keys` |
+
+ML-KEM-768 Kyber keys were dropped by migration 071; a key of any other size is refused.
 
 ### Prekey Signature Scheme
 
-All prekeys (SPK, OTPKs) are signed with the device's Ed25519 signing key:
-
 ```
-signature = Ed25519.sign(
-    device_signing_key,
-    "KonstruktX3DH-v1" || [0x00, suite_id] || public_key_bytes
-)
+classic SPK:  Ed25519.sign(device_signing_key,
+                  "KonstruktX3DH-v1" || [0x00, 0x01] || public_key)
+
+Kyber (v2):   Ed25519.sign(device_signing_key,
+                  "KonstruktX3DH-v1" || [0x00, 0x11] || created_at (u64 BE) || public_key)
+              + a hybrid Ed25519 + ML-DSA-65 signature under the device's hybrid identity key
 ```
 
-- Suite `1` = Classical X25519 SPK
-- Suite `2` = Hybrid ML-KEM-768+X25519 (PQHybridKyber)
+Suite byte `0x10` (the v1 Kyber message, no `created_at`) is no longer accepted, so an old
+key cannot pass as a new one (`crates/construct-crypto/src/pqc/hybrid.rs`).
 
-Verification uses `ed25519-dalek v2.1` (RFC 8032 strict mode).
-
-### X3DH Key Agreement (client-side)
-
-```
-Alice initiates with Bob's key bundle:
-
-DH1 = ECDH(IK_A_priv,  SPK_B_pub)
-DH2 = ECDH(EK_A_priv,  IK_B_pub)
-DH3 = ECDH(EK_A_priv,  SPK_B_pub)
-DH4 = ECDH(EK_A_priv,  OPK_B_pub)  // if one-time prekey available
-
-SK = HKDF-SHA256(salt=0xFF×32, ikm=DH1||DH2||DH3||DH4, info="ConstructX3DH")
-```
+Verification is `ed25519-dalek` 2.2 `Verifier::verify` — not `verify_strict`, so weak
+(small-order) public keys are not rejected by this check.
 
 ### Auth Tokens (PASETO + legacy JWT)
 
@@ -348,27 +353,27 @@ Issued by `AuthService::GetSenderCertificate` (via identity-service):
 
 ## Database Schema
 
-Migrations live in `shared/migrations/`. Current latest: `064_identity_public_key.sql`.
+Migrations live in `shared/migrations/`. Current latest: `071_pqxdh_v2_kyber_1024.sql`.
 
 Key tables:
 
 | Table | Purpose |
 |-------|---------|
 | `users` | User records: `id`, `username_hash`, `identity_public_key`, `identity_key_type`, `route_id`, recovery keys |
-| `devices` | Device records: `user_id`, `identity_public`, `signed_prekey`, `verifying_key`, `crypto_suites`, `supports_pq_ratchet` |
+| `devices` | Device records: `user_id`, `identity_public`, `signed_prekey`, `verifying_key`, `crypto_suites`, `supports_pq_ratchet`, `kyber_signed_pre_key*` |
 | `device_tokens` | Push notification tokens (APNs/FCM), per-device |
-| `one_time_prekeys` | X25519 OTPKs; soft-deleted (`deleted_at`) on consumption |
-| `kyber_prekeys` | ML-KEM-768 OTPKs; same soft-delete pattern |
+| `one_time_prekeys` | X25519 OTPKs; hard-deleted when a bundle consumes one; `is_expired` / `expired_at` mark keys superseded by a `replace_existing` upload |
+| `kyber_one_time_pre_keys` | ML-KEM-1024 one-time prekeys, with `created_at` and `hybrid_signature` |
 | `delivery_pending` | Receipt routing: `message_hash → sender_id` (30-day TTL). **Not message storage** — only used to route delivery receipts back to the original sender. |
 | `media_files` | Upload metadata (actual bytes on CDN/local storage) |
 | `sticker_blobs` / `sticker_packs` | Public sticker packs, content-addressed (sha256 / pack_id), **no TTL** — a pack must resolve for as long as any message references it. Migration 070. |
 | `user_blocks` | Block list entries |
 | `invites` | Invite tokens (used for invite-only onboarding) |
 | `contact_requests` | Contact request state |
-| `mls_groups` | MLS group state |
-| `channels` | Broadcast channel definitions |
+| `mls_groups` | MLS group state; group application messages are stored as `mls_ciphertext` |
+| `channels` / `channel_posts` | Broadcast channels; posts stored as `ciphertext` |
 
-> **Message content is never stored in PostgreSQL.** Messages travel messaging-service → Redis Stream → client. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
+> **1:1 message content is never stored in PostgreSQL.** Those messages travel messaging-service → Redis Stream → client. Group (MLS) messages and channel posts are the exception: stored as ciphertext in group-service's tables. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
 
 Run migrations:
 ```bash
@@ -391,7 +396,7 @@ docker compose -f ops/docker-compose.dev.yml up -d
 
 ```bash
 cargo test --lib                            # all unit tests
-cargo test -p messaging-service             # single service (11 tests)
+cargo test -p messaging-service             # single service
 cargo test -p construct-auth-service        # auth crate unit tests
 cargo test -p identity-service              # identity service unit tests
 cargo test -p construct-sentinel-service    # sentinel crate unit tests
@@ -412,24 +417,17 @@ Most integration tests are gated with `#[ignore]` and skipped in CI unless the f
 cargo test -p construct-server-shared -- --ignored   # run skipped integration tests
 ```
 
-### Pre-deploy check
-
-```bash
-./scripts/pre_deploy_check.sh
-# Runs: cargo check, cargo test --lib
-```
-
 ### cargo check / clippy
 
 ```bash
 cargo check --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-A `pre-commit` hook runs `cargo fmt` automatically. If it fails, run:
-```bash
-cargo fmt --all
-```
+The `pre-push` hook (`.githooks/pre-push`, enabled by `git config core.hooksPath .githooks`)
+checks `cargo fmt --all -- --check`, the clippy line above, `scripts/check-observability.py`,
+`scripts/check-redis-timeouts.sh` and the front-coordinates guard. It does not reformat;
+run `cargo fmt --all` and push again. There is no pre-commit hook.
 
 ---
 
@@ -500,13 +498,12 @@ SELECT message_hash, sender_id, expires_at FROM delivery_pending ORDER BY expire
 -- One-time prekey counts per device
 SELECT device_id, COUNT(*) as available
 FROM one_time_prekeys
-WHERE deleted_at IS NULL
+WHERE is_expired = false
 GROUP BY device_id;
 
--- Kyber prekey counts
+-- Kyber one-time prekey counts
 SELECT device_id, COUNT(*) as available
-FROM kyber_prekeys
-WHERE deleted_at IS NULL
+FROM kyber_one_time_pre_keys
 GROUP BY device_id;
 ```
 
@@ -525,7 +522,7 @@ docker logs construct-caddy --tail 50
 3. **Wakeup** — `SUBSCRIBE inbox:wakeup:<recipient_user_id>` confirms the real-time wakeup fired
 4. **Receipt** — `XRANGE delivery:offline:<sender_user_id> - +` confirms the delivery receipt arrived
 
-> Messages are **never** in PostgreSQL. If a message is missing, check the Redis Stream.
+> 1:1 messages are **never** in PostgreSQL. If one is missing, check the Redis Stream.
 
 ---
 
@@ -534,10 +531,10 @@ docker logs construct-caddy --tail 50
 ### ✅ Fully implemented
 
 **Transport & Auth:**
-- gRPC-first architecture (REST only for health, discovery, notification registration, federation S2S)
+- gRPC-first architecture (HTTP only for health, metrics, discovery, federation S2S)
 - Caddy edge routing by proto path prefix (h2c backends, Let's Encrypt TLS)
 - Identity service merge: `AuthService`, `DeviceService`, `DeviceLinkService`, `UserService`, `InviteService` in one binary
-- Passwordless device auth (Ed25519 + JWT RS256)
+- Passwordless device auth (Ed25519 device key; PASETO v4.public tokens, legacy RS256 JWT still verified)
 - Proof-of-Work anti-spam on registration
 - Invite-code-only onboarding
 - Device linking via join request flow
@@ -547,14 +544,14 @@ docker logs construct-caddy --tail 50
 **Key Management:**
 - X3DH key bundles (identity key, signed prekey, OTPKs)
 - Ed25519 prekey signatures (scheme: `KonstruktX3DH-v1` prologue)
-- One-time prekey soft-delete (consumed atomically)
-- ML-KEM-768 hybrid prekeys (suite ID 2 `PQHybridKyber`)
+- One-time prekeys consumed atomically (`DELETE … FOR UPDATE SKIP LOCKED`)
+- ML-KEM-1024 Kyber prekeys, signed and one-time (PQXDH v2; Ed25519 + hybrid ML-DSA-65 signatures)
 - SPK rotation with age tracking
 
 **Messaging:**
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
-- Idempotency via Redis SETNX
+- Idempotency via Redis `msg:dedup:{message_id}` (24 h, set after the mailbox write)
 - Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`; `since_cursor` = read offset only — **no client XTRIM**; retention via `MAXLEN ~` + age sweep ~30d)
 - Dual-read mailbox (device + user merge when token has `device_id`; cutover flag `MSG_MAILBOX_USER_WRITE`)
 - Delivery receipts routed back to sender
@@ -607,15 +604,15 @@ cannot fan out to other users. Empty `token_spend_id` keeps legacy per-envelope 
 
 **Cryptographic identity:**
 - `identity_public_key` + `identity_key_type` + `RouteId` (SHA-256(type ‖ key))
+- Dual addressing in `UserId::parse` (`ed25519:<hex>`); a sealed envelope addressed by key is
+  resolved RouteId → UUID on the recipient's server (`dispatch_sealed_sender`)
 
 ### Stub / partial
 
 - MLS group messaging (`group-service` — RFC 9420, partial)
 - Broadcast channels (`group-service`)
 - WebRTC call signaling (`signaling-service`)
-- MASQUE-lite WS relay (`masque-service` — transport / DPI resistance)
-- Dual addressing in `UserId::parse` (`ed25519:<hex>` format)
-- Cross-server sealed sender routing via RouteId → UUID → relay resolution
+- MASQUE-lite WS relay (`masque-service` — transport / DPI resistance; not in `ops/docker-compose.prod.yml`)
 
 ---
 
