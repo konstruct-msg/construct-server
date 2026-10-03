@@ -90,6 +90,9 @@ pub struct PreKeyBundle {
     /// KT inclusion proof for the hybrid identity key (leaf kind 1). `None` when the device
     /// has no hybrid key or the KT log is not populated (dev/test).
     pub hybrid_kt_proof: Option<crate::kt::KtProof>,
+    /// The tree head both proofs are relative to, signed by the delegated hybrid key. `None`
+    /// without one.
+    pub kt_tree_head: Option<crate::kt::SignedTreeHead>,
 
     /// Capability flag: device supports SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
     pub supports_pq_ratchet: bool,
@@ -361,6 +364,7 @@ pub async fn get_prekey_bundle(
     user_id: &str,
     device_id: Option<&str>,
     bundle_signing_key: Option<&SigningKey>,
+    kt_head_signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
     // When false, serve an SPK-only bundle without consuming a one-time pre-key. Used by the
     // OTPK-drain guard: above the drain threshold we degrade to SPK-only (forward-secrecy
     // reduced but session init still works) instead of rejecting — this preserves availability
@@ -510,35 +514,43 @@ pub async fn get_prekey_bundle(
         signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
         kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
         hybrid_kt_proof: None,
+        kt_tree_head: None,
         supports_pq_ratchet: device.supports_pq_ratchet,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
     if let Some(sk) = bundle_signing_key {
-        match crate::kt::build_kt_proof(db, &bundle.device_id, &bundle.identity_key, sk).await {
-            Ok(proof) => bundle.kt_proof = Some(proof),
-            Err(e) => {
-                tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
-            }
-        }
-        bundle.hybrid_kt_proof = build_hybrid_kt_proof_if_present(db, &bundle, sk).await;
+        attach_kt_proofs(db, &mut bundle, sk, kt_head_signer).await;
     }
     warn_if_spk_aging(&bundle);
     Ok(Some(bundle))
 }
 
-/// Build the hybrid KT inclusion proof when the device has a hybrid identity key.
-/// Returns `None` (logged) on absence or error — KT is defense-in-depth, never fatal.
-async fn build_hybrid_kt_proof_if_present(
+/// Attach the KT proofs and their signed head. KT is defense-in-depth, never fatal: a failure is
+/// logged and the bundle goes without proofs.
+async fn attach_kt_proofs(
     db: &PgPool,
-    bundle: &PreKeyBundle,
+    bundle: &mut PreKeyBundle,
     signing_key: &SigningKey,
-) -> Option<crate::kt::KtProof> {
-    let hybrid_key = bundle.hybrid_identity_key.as_ref()?;
-    match crate::kt::build_hybrid_kt_proof(db, &bundle.device_id, hybrid_key, signing_key).await {
-        Ok(proof) => Some(proof),
+    head_signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
+) {
+    match crate::kt::build_kt_proofs(
+        db,
+        &bundle.device_id,
+        &bundle.identity_key,
+        bundle.hybrid_identity_key.as_deref(),
+        signing_key,
+        head_signer,
+        Utc::now().timestamp(),
+    )
+    .await
+    {
+        Ok(proofs) => {
+            bundle.kt_proof = Some(proofs.identity);
+            bundle.hybrid_kt_proof = proofs.hybrid;
+            bundle.kt_tree_head = proofs.head;
+        }
         Err(e) => {
-            tracing::warn!(error = %e, device_id = %bundle.device_id, "Hybrid KT proof generation failed");
-            None
+            tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
         }
     }
 }
@@ -561,6 +573,7 @@ pub async fn get_prekey_bundles(
     user_id: &str,
     device_ids: Option<&[String]>,
     bundle_signing_key: Option<&SigningKey>,
+    kt_head_signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
     // See `get_prekey_bundle`: false ⇒ SPK-only bundles (drain guard), no OTPK consumed.
     consume_otpk: bool,
 ) -> Result<PreKeyBundleSet> {
@@ -711,17 +724,12 @@ pub async fn get_prekey_bundles(
             signed_prekey_hybrid_signature: device.signed_prekey_hybrid_signature,
             kyber_pre_key_hybrid_signature: device.kyber_signed_pre_key_hybrid_signature,
             hybrid_kt_proof: None,
+            kt_tree_head: None,
             supports_pq_ratchet: device.supports_pq_ratchet,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
         if let Some(sk) = bundle_signing_key {
-            match crate::kt::build_kt_proof(db, &bundle.device_id, &bundle.identity_key, sk).await {
-                Ok(proof) => bundle.kt_proof = Some(proof),
-                Err(e) => {
-                    tracing::warn!(error = %e, device_id = %bundle.device_id, "KT proof generation failed")
-                }
-            }
-            bundle.hybrid_kt_proof = build_hybrid_kt_proof_if_present(db, &bundle, sk).await;
+            attach_kt_proofs(db, &mut bundle, sk, kt_head_signer).await;
         }
         warn_if_spk_aging(&bundle);
         bundles.push(bundle);
@@ -1957,6 +1965,7 @@ mod tests {
             signed_prekey_hybrid_signature: None,
             kyber_pre_key_hybrid_signature: None,
             hybrid_kt_proof: None,
+            kt_tree_head: None,
             supports_pq_ratchet: false,
         }
     }
@@ -2361,10 +2370,17 @@ mod tests {
                 .is_err()
         );
 
-        let bundle = get_prekey_bundle(&db, &user_id.to_string(), Some(&device_id), None, true)
-            .await
-            .unwrap()
-            .expect("bundle");
+        let bundle = get_prekey_bundle(
+            &db,
+            &user_id.to_string(),
+            Some(&device_id),
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("bundle");
 
         assert_eq!(
             bundle.kyber_pre_key.as_deref(),
@@ -2399,10 +2415,17 @@ mod tests {
         .unwrap();
 
         // Consumed: the next bundle has no one-time key left to give.
-        let next = get_prekey_bundle(&db, &user_id.to_string(), Some(&device_id), None, true)
-            .await
-            .unwrap()
-            .unwrap();
+        let next = get_prekey_bundle(
+            &db,
+            &user_id.to_string(),
+            Some(&device_id),
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(next.kyber_one_time_pre_key.is_none());
         assert!(next.kyber_one_time_pre_key_signature.is_none());
     }

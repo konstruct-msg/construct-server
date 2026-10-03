@@ -271,6 +271,10 @@ services:
       # must be 64 hex chars"). Same footgun already fixed for the VEIL keys below.
     volumes:
       - /opt/construct/secrets:/secrets:ro
+      # Delegations of the hybrid server keys, one *.delegation per key, from the offline root
+      # ceremony (public; SERVER_TRUST_DIR default). A directory, not files: a single-file
+      # bind mount keeps the old inode when the file is replaced.
+      - /opt/construct/server-trust:/etc/construct/server-trust:ro
     networks:
       - internal
 
@@ -328,6 +332,10 @@ services:
       # USERNAME_HMAC_SECRET comes from env_file (app.env) — do NOT re-list as ${VAR}.
     volumes:
       - /opt/construct/secrets:/secrets:ro
+      # Delegations of the hybrid server keys, one *.delegation per key, from the offline root
+      # ceremony (public; SERVER_TRUST_DIR default). A directory, not files: a single-file
+      # bind mount keeps the old inode when the file is replaced.
+      - /opt/construct/server-trust:/etc/construct/server-trust:ro
     networks:
       - internal
 
@@ -474,6 +482,10 @@ services:
       - "9443:9443"
     volumes:
       - /opt/construct/secrets:/secrets:ro
+      # Delegations of the hybrid server keys, one *.delegation per key, from the offline root
+      # ceremony (public; SERVER_TRUST_DIR default). A directory, not files: a single-file
+      # bind mount keeps the old inode when the file is replaced.
+      - /opt/construct/server-trust:/etc/construct/server-trust:ro
     networks:
       - internal
     # Legacy plain-obfs4 is still reachable on direct port 9443 (host-exposed).
