@@ -48,6 +48,10 @@ pub mod delivery_ack;
 #[cfg(feature = "pqc")]
 pub mod pqc;
 
+/// Signing with server keys the offline root delegated (sender certificates, KT tree heads)
+#[cfg(feature = "pqc")]
+pub mod server_trust;
+
 // Re-export commonly used types
 #[cfg(feature = "e2ee")]
 pub use e2e::{

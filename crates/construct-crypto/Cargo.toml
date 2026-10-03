@@ -14,6 +14,7 @@ delivery-ack = []   # Privacy-preserving delivery acknowledgments
 pqc = ["post-quantum"]  # Post-quantum cryptography
 post-quantum = [
     "dep:ml-dsa",
+    "dep:construct-server-trust",
     "dep:rand_core",
 ]
 
@@ -43,6 +44,10 @@ hex = "0.4"
 # RustCrypto `ml-dsa` (maintained) — replaced the archived PQClean-based
 # pqcrypto-mldsa/pqcrypto-traits crates (RUSTSEC-2026-0162/0166).
 ml-dsa = { version = "0.1.1", optional = true }
+# The bytes of a server signature — delegations from the offline root, labels, key ids — shared
+# with construct-core and the root tool (decisions/server-keys-rooted-offline-and-hybrid.md).
+construct-server-trust = { git = "https://github.com/konstruct-msg/construct-core", rev = "ee84058d387af35d24f9aba0fe73316a234a76ba", optional = true }
+zeroize = { workspace = true }
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 
 # Serialization
@@ -65,3 +70,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
+
+# Makes a server key for the offline root to delegate; lists what is delegated.
+[[bin]]
+name = "server-trust-key"
+required-features = ["pqc"]
