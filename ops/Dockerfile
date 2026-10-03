@@ -1,5 +1,12 @@
 # Build stage
-FROM rust:1.90-slim-bookworm AS builder
+# The compiler version is rust-toolchain.toml's — CI reads it and passes it here; there is no
+# default, so a build that forgets it fails at this line instead of compiling with something else.
+# Until 2026-10-03 this line carried its own version, 1.90, while the toolchain file said 1.98:
+# every PR check ran under 1.98 and passed, and the release build on main failed the first time a
+# dependency declared rust-version 1.96 (construct-server-trust). By hand:
+#   docker build -f ops/Dockerfile --build-arg RUST_VERSION=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml) .
+ARG RUST_VERSION
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 WORKDIR /app
 
