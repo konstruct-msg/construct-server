@@ -586,9 +586,18 @@ fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Spawns a background task — exits automatically when the receiver is dropped
-/// (i.e. the gRPC stream closes). Automatically reconnects on Redis connection loss
-/// so the fallback 5s poll is never triggered in normal operation.
+/// Spawns a background task that ends with the gRPC stream it serves. Automatically
+/// reconnects on Redis connection loss so the fallback 5s poll is never triggered in
+/// normal operation.
+///
+/// **It must notice the stream closing on its own.** Until 2026-10-03 it noticed only by
+/// failing to forward a wakeup, which needs a publish on the user's channel after the
+/// stream had gone. A client that reconnected without receiving a message left its
+/// pub/sub connection open: one per reconnect, for the life of the process. Production
+/// messaging reached 1006 such connections in 34 hours (661 on one channel), hit its
+/// 1024-descriptor limit and failed every send with "Too many open files". Every wait
+/// in this task — on a message, on a connect, on a retry delay — now also waits on
+/// [`mpsc::Sender::closed`].
 ///
 /// **Race-condition protection**: sends a synthetic wakeup signal immediately after
 /// each successful SUBSCRIBE. This triggers an extra `poll_messages` call that catches
@@ -610,20 +619,31 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
         };
 
         // Reconnect loop: on any connection/subscribe failure, wait briefly and retry.
-        // Exits only when the gRPC stream closes (tx.send fails → receiver dropped).
+        // Exits when the gRPC stream closes (receiver dropped), whatever it is waiting on.
         loop {
-            let pubsub = match client.get_async_pubsub().await {
+            let connected = tokio::select! {
+                p = client.get_async_pubsub() => p,
+                _ = tx.closed() => return,
+            };
+            let mut pubsub = match connected {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(error = %e, channel = %channel, "inbox_wakeup: pub/sub connect failed, retrying in 2s");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    if !retry_delay(&tx).await {
+                        return;
+                    }
                     continue;
                 }
             };
-            let mut pubsub = pubsub;
-            if let Err(e) = pubsub.subscribe(&channel).await {
+            let subscribed = tokio::select! {
+                r = pubsub.subscribe(&channel) => r,
+                _ = tx.closed() => return,
+            };
+            if let Err(e) = subscribed {
                 tracing::warn!(error = %e, channel = %channel, "inbox_wakeup: subscribe failed, retrying in 2s");
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                if !retry_delay(&tx).await {
+                    return;
+                }
                 continue;
             }
             tracing::debug!(channel = %channel, "inbox_wakeup: subscribed");
@@ -635,24 +655,52 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
                 return; // stream closed
             }
 
-            let mut stream = pubsub.into_on_message();
-            loop {
-                match stream.next().await {
-                    Some(_) => {
-                        if tx.send(()).await.is_err() {
-                            // gRPC stream closed — receiver dropped, stop wakeup task
-                            return;
-                        }
-                    }
-                    None => {
-                        // pub/sub connection dropped — break inner loop to reconnect
-                        tracing::debug!(channel = %channel, "inbox_wakeup: connection lost, reconnecting");
-                        break;
-                    }
+            match forward_wakeups(pubsub.into_on_message(), &tx).await {
+                WakeupEnd::StreamClosed => return,
+                WakeupEnd::ConnectionLost => {
+                    tracing::debug!(channel = %channel, "inbox_wakeup: connection lost, reconnecting");
                 }
             }
         }
     });
+}
+
+/// Why [`forward_wakeups`] returned.
+#[derive(Debug, PartialEq, Eq)]
+enum WakeupEnd {
+    /// The gRPC stream is gone: the task ends, and its pub/sub connection with it.
+    StreamClosed,
+    /// The pub/sub connection dropped while the stream is alive: reconnect.
+    ConnectionLost,
+}
+
+/// Forwards each pub/sub message as a wakeup until the stream closes or the
+/// connection drops — whichever comes first, with no message needed to notice either.
+async fn forward_wakeups<S>(mut messages: S, tx: &mpsc::Sender<()>) -> WakeupEnd
+where
+    S: tokio_stream::Stream + Unpin,
+{
+    loop {
+        tokio::select! {
+            msg = messages.next() => match msg {
+                Some(_) => {
+                    if tx.send(()).await.is_err() {
+                        return WakeupEnd::StreamClosed;
+                    }
+                }
+                None => return WakeupEnd::ConnectionLost,
+            },
+            _ = tx.closed() => return WakeupEnd::StreamClosed,
+        }
+    }
+}
+
+/// The 2 s pause before a reconnect attempt. False when the stream closed during it.
+async fn retry_delay(tx: &mpsc::Sender<()>) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => true,
+        _ = tx.closed() => false,
+    }
 }
 
 /// Poll for new messages from Redis Streams
@@ -855,6 +903,45 @@ pub(crate) async fn poll_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The leak of 2026-10-03: a stream that closes while its user's channel is quiet
+    /// must release the subscription at once, not at the next publish. Mutation: drop
+    /// the `tx.closed()` arm — the forwarder waits on a message that never comes and
+    /// the timeout fires.
+    #[tokio::test]
+    async fn wakeup_forwarder_ends_when_the_stream_closes_on_a_quiet_channel() {
+        let (tx, rx) = mpsc::channel::<()>(4);
+        let quiet = tokio_stream::pending::<()>();
+        let forwarder = tokio::spawn(async move { forward_wakeups(quiet, &tx).await });
+        drop(rx);
+        let end = tokio::time::timeout(std::time::Duration::from_secs(1), forwarder)
+            .await
+            .expect("forwarder must notice the closed stream without a message")
+            .unwrap();
+        assert_eq!(end, WakeupEnd::StreamClosed);
+    }
+
+    /// Messages are forwarded while the stream lives, and a dropped connection is
+    /// reported as such so the task reconnects rather than ending.
+    #[tokio::test]
+    async fn wakeup_forwarder_forwards_then_reports_a_lost_connection() {
+        let (tx, mut rx) = mpsc::channel::<()>(4);
+        let end = forward_wakeups(tokio_stream::iter([(), ()]), &tx).await;
+        assert_eq!(end, WakeupEnd::ConnectionLost);
+        assert_eq!(rx.recv().await, Some(()));
+        assert_eq!(rx.recv().await, Some(()));
+    }
+
+    /// A reconnect pause ends early, and says so, when the stream closes during it.
+    #[tokio::test]
+    async fn retry_delay_ends_when_the_stream_closes() {
+        let (tx, rx) = mpsc::channel::<()>(1);
+        drop(rx);
+        let r = tokio::time::timeout(std::time::Duration::from_millis(500), retry_delay(&tx))
+            .await
+            .expect("the pause must not outlive the stream");
+        assert!(!r);
+    }
 
     /// Exclusive XREAD-style filter: entries with id strictly greater than `since`.
     /// When `since` is `None`, Redis uses start id `"0"` and returns the whole stream.
