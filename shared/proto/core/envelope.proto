@@ -263,10 +263,20 @@ enum ContentType {
   // Sealed-sender envelope; the server forwards it opaquely.
   CONTENT_TYPE_DECRYPTION_ERROR = 28;
 
+  // PROFILE — the sender's display name and avatar, as a `ProfileShare` (below), to a contact it
+  // shares its profile with. Until 2026-10-02 a profile had no type: each client recognised it by
+  // whether the plaintext parsed as a hand-written binary layout (version byte 0x01, u16 LE
+  // lengths) that iOS and Android each wrote and read on their own. Readers keep accepting that
+  // layout on an untyped message for one release; nothing sends it.
+  //
+  // Framed side channel inside the ciphertext: knst_byte5 = true, sealed_inner_content_type =
+  // false. Server forwards opaquely. decisions/profile-share-is-a-typed-versioned-state.md
+  CONTENT_TYPE_PROFILE = 29;
+
   reserved "CONTENT_TYPE_INTAKE_KEY";
 
   // Reserved for future types
-  reserved 3 to 9, 15 to 19, 29 to 100;
+  reserved 3 to 9, 15 to 19, 30 to 100;
 }
 
 // MessagePriority - Delivery priority
@@ -619,8 +629,19 @@ message SenderCertificate {
   // iOS StealthSenderService.buildCertPayload).
   bytes server_signature = 7;
 
-  // Reserved for future cert fields (e.g., PQ signature, capabilities)
-  reserved 8 to 15;
+  // Id of the server key that made server_signature_hybrid: SHA-256("konstruct/v1/kid" ‖ key)[0..16].
+  // The key itself reaches the client as a delegation signed by the offline root, served in
+  // /.well-known (construct-docs/decisions/server-keys-rooted-offline-and-hybrid.md).
+  bytes server_kid = 8;
+
+  // Hybrid Ed25519 ‖ ML-DSA-65 signature (3373 bytes) by that key over
+  //   "konstruct/v1/sender-cert" ‖ server_kid ‖ BE16(len) user_id ‖ BE16(len) domain
+  //   ‖ BE16(len) identity_key ‖ BE16(len) device_id ‖ BE64(issued_at) ‖ BE64(expires_at)
+  // — construct-server-trust `sender_cert_body`, vectors in conformance/knst_server_trust.json.
+  // Sent beside server_signature while clients move; server_signature goes once none reads it.
+  bytes server_signature_hybrid = 9;
+
+  reserved 10 to 15;
 }
 
 // OwnDeviceCopy — Envelope.encrypted_payload of every SENDER_SYNC (content_type 23).
@@ -651,6 +672,39 @@ message OwnDeviceCopy {
 // `account_address` never changes for the life of the account. A receiver pins the first address
 // it hears for an account and treats a different one as a security event, never as an update;
 // an address from a signed invite outranks one from a card.
+// The payload of CONTENT_TYPE_PROFILE (29): who the sender is to this contact, by its own account.
+//
+// A receiver keeps the `edited_at_ms` it last applied for the sender and ignores a profile that is
+// not newer — whole, name and avatar together — so a resend, a redelivery or a reordered queue
+// cannot put an older name back. Equal is not newer: the same profile twice is applied once.
+//
+// `avatar` has three states, and the third is the reason it is a oneof:
+//   set     — download this, replace the avatar;
+//   removed — the sender has no avatar now: clear it;
+//   absent  — the avatar did not change in this profile (or the sender could not upload it):
+//             keep what is held.
+// A `set` whose key is not 32 bytes is read as absent.
+message ProfileShare {
+  string display_name = 1;
+  // When the sender last changed its name or avatar, ms since the epoch, by the sender's clock.
+  // Not the send time: a profile sent again carries the same value.
+  uint64 edited_at_ms = 2;
+  oneof avatar {
+    AvatarRef avatar_set = 3;
+    bool avatar_removed = 4;
+  }
+}
+
+// An avatar in the media store, encrypted under `media_key`. Lives as long as any other media
+// (MEDIA_FILE_TTL_SECONDS); a receiver that finds it gone keeps the avatar it has.
+message AvatarRef {
+  string media_id = 1;
+  string media_url = 2;
+  // 32 bytes, AES-256.
+  bytes media_key = 3;
+  string mime_type = 4;
+}
+
 message ContactCard {
   // 32 bytes. See SealedInner.intake_tag_sealed.
   bytes intake_key = 1;

@@ -83,6 +83,8 @@ COPY --from=builder --chmod=+x /app/target/release/messaging-service /usr/local/
 COPY --from=builder --chmod=+x /app/target/release/media-service /usr/local/bin/media-service
 # Operator tool, not a service: signs a built sticker pack and inserts it (media-service/src/bin).
 COPY --from=builder --chmod=+x /app/target/release/sticker-publish /usr/local/bin/sticker-publish
+# Makes a hybrid server key for the offline root to delegate (decisions/server-keys-rooted-offline-and-hybrid.md)
+COPY --from=builder --chmod=+x /app/target/release/server-trust-key /usr/local/bin/server-trust-key
 COPY --from=builder --chmod=+x /app/target/release/key-service /usr/local/bin/key-service
 COPY --from=builder --chmod=+x /app/target/release/group-service /usr/local/bin/group-service
 COPY --from=builder --chmod=+x /app/target/release/signaling-service /usr/local/bin/signaling-service

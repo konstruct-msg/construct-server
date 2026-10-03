@@ -257,64 +257,135 @@ pub async fn db_get_all_leaves(db: &PgPool) -> Result<Vec<[u8; 32]>> {
 // Build KtProof for a device
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Build a complete `KtProof` for `device_id`.
+/// The proofs a bundle carries and the one tree head they are relative to.
+#[derive(Debug, Clone)]
+pub struct KtProofs {
+    pub identity: KtProof,
+    /// `None` when the device has no hybrid identity key.
+    pub hybrid: Option<KtProof>,
+    /// The head signed by the delegated hybrid key; `None` without one (or if it cannot sign).
+    pub head: Option<SignedTreeHead>,
+}
+
+/// A tree head signed by a key the offline root delegated (`SignedTreeHead` in key_service.proto).
+#[derive(Debug, Clone)]
+pub struct SignedTreeHead {
+    pub tree_size: u64,
+    pub root_hash: [u8; 32],
+    pub kid: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+/// Build both proofs for a device from **one** snapshot of the log, and sign its head.
 ///
-/// 1. Computes the leaf hash.
-/// 2. Ensures the leaf exists in the log (idempotent).
-/// 3. Loads all leaves and generates the inclusion proof.
-/// 4. Signs the Signed Tree Head with `signing_key`.
-pub async fn build_kt_proof(
+/// 1. Ensures the identity leaf and, when present, the hybrid leaf exist (idempotent).
+/// 2. Loads the tree once, so both proofs are relative to the same size and root — until
+///    2026-10-03 each proof ensured its leaf and loaded the tree on its own, so a hybrid leaf
+///    appended by the second call gave the two proofs different heads.
+/// 3. Signs that head with the Ed25519 bundle key (in both proofs, as before) and, with a
+///    delegated key, once more as a `SignedTreeHead`
+///    (decisions/server-keys-rooted-offline-and-hybrid.md).
+pub async fn build_kt_proofs(
     db: &PgPool,
     device_id: &str,
     identity_key: &[u8],
+    hybrid_identity_key: Option<&[u8]>,
     signing_key: &SigningKey,
-) -> Result<KtProof> {
-    let lhash = leaf_hash(device_id, identity_key);
-    build_proof_for_leaf(db, device_id, LEAF_KIND_IDENTITY, lhash, signing_key).await
+    head_signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
+    now: i64,
+) -> Result<KtProofs> {
+    let identity_index = db_ensure_leaf(
+        db,
+        device_id,
+        LEAF_KIND_IDENTITY,
+        leaf_hash(device_id, identity_key),
+    )
+    .await?;
+    let hybrid_index = match hybrid_identity_key {
+        Some(key) => Some(
+            db_ensure_leaf(
+                db,
+                device_id,
+                LEAF_KIND_HYBRID,
+                hybrid_leaf_hash(device_id, key),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let all_leaves = db_get_all_leaves(db).await?;
+    proofs_from_snapshot(
+        &all_leaves,
+        identity_index,
+        hybrid_index,
+        signing_key,
+        head_signer,
+        now,
+    )
 }
 
-/// Build a `KtProof` for a device's HYBRID identity key (leaf kind 1).
-/// Mirrors `build_kt_proof` but commits to `hybrid_identity_key` via `hybrid_leaf_hash`.
-/// The proof is relative to the same tree (and STH) as the identity proof.
-pub async fn build_hybrid_kt_proof(
-    db: &PgPool,
-    device_id: &str,
-    hybrid_identity_key: &[u8],
+/// The pure half of `build_kt_proofs`: proofs and heads over a loaded tree.
+pub fn proofs_from_snapshot(
+    all_leaves: &[[u8; 32]],
+    identity_index: u64,
+    hybrid_index: Option<u64>,
     signing_key: &SigningKey,
-) -> Result<KtProof> {
-    let lhash = hybrid_leaf_hash(device_id, hybrid_identity_key);
-    build_proof_for_leaf(db, device_id, LEAF_KIND_HYBRID, lhash, signing_key).await
-}
-
-/// Shared proof construction: ensure the leaf exists, load the full tree, build the
-/// inclusion proof, and sign the tree head.
-async fn build_proof_for_leaf(
-    db: &PgPool,
-    device_id: &str,
-    leaf_kind: i16,
-    lhash: [u8; 32],
-    signing_key: &SigningKey,
-) -> Result<KtProof> {
+    head_signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
+    now: i64,
+) -> Result<KtProofs> {
     use ed25519_dalek::Signer;
 
-    let leaf_index = db_ensure_leaf(db, device_id, leaf_kind, lhash).await?;
-    let all_leaves = db_get_all_leaves(db).await?;
     let tree_size = all_leaves.len() as u64;
+    let proof_at = |index: u64| -> Result<(Vec<Vec<u8>>, [u8; 32])> {
+        let (hashes, root) =
+            generate_inclusion_proof(all_leaves, index as usize).ok_or_else(|| {
+                anyhow::anyhow!("inclusion proof generation failed for index {index}")
+            })?;
+        Ok((hashes.into_iter().map(|h| h.to_vec()).collect(), root))
+    };
 
-    let (proof_hashes_raw, root_arr) = generate_inclusion_proof(&all_leaves, leaf_index as usize)
-        .ok_or_else(|| {
-        anyhow::anyhow!("inclusion proof generation failed for index {leaf_index}")
-    })?;
-
-    let signable = tree_head_signable(tree_size, &root_arr);
-    let signature = signing_key.sign(&signable);
-
-    Ok(KtProof {
+    let (identity_hashes, root) = proof_at(identity_index)?;
+    let ed25519_head = signing_key
+        .sign(&tree_head_signable(tree_size, &root))
+        .to_bytes()
+        .to_vec();
+    let proof = |leaf_index: u64, proof_hashes: Vec<Vec<u8>>| KtProof {
         leaf_index,
         tree_size,
-        root_hash: root_arr.to_vec(),
-        proof_hashes: proof_hashes_raw.into_iter().map(|h| h.to_vec()).collect(),
-        tree_head_signature: signature.to_bytes().to_vec(),
+        root_hash: root.to_vec(),
+        proof_hashes,
+        tree_head_signature: ed25519_head.clone(),
+    };
+
+    let hybrid = match hybrid_index {
+        Some(index) => {
+            let (hashes, hybrid_root) = proof_at(index)?;
+            debug_assert_eq!(hybrid_root, root, "one snapshot, one root");
+            Some(proof(index, hashes))
+        }
+        None => None,
+    };
+
+    let head = head_signer.and_then(|signer| {
+        let body = construct_crypto::server_trust::kt_head_body(tree_size, &root);
+        match signer.sign(&body, now) {
+            Ok(signature) => Some(SignedTreeHead {
+                tree_size,
+                root_hash: root,
+                kid: signer.kid().to_vec(),
+                signature,
+            }),
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "hybrid tree head signature failed — Ed25519 head only");
+                None
+            }
+        }
+    });
+
+    Ok(KtProofs {
+        identity: proof(identity_index, identity_hashes),
+        hybrid,
+        head,
     })
 }
 
@@ -407,5 +478,85 @@ mod tests {
                 "i={i}"
             );
         }
+    }
+
+    // ── One snapshot, one head (decisions/server-keys-rooted-offline-and-hybrid.md) ──────────
+
+    fn head_signer() -> (construct_crypto::server_trust::DelegatedSigner, Vec<u8>) {
+        use construct_crypto::pqc::hybrid::{hybrid_sign, hybrid_signature_keypair_from_seeds};
+        use construct_crypto::server_trust::{DelegatedSigner, Delegation, Purpose};
+        let (root_sk, root_pk) = hybrid_signature_keypair_from_seeds(&[1; 32], &[2; 32]);
+        let (_, key) = hybrid_signature_keypair_from_seeds(&[5; 32], &[5; 32]);
+        let mut d = Delegation {
+            purpose: Purpose::KtHead,
+            not_before: 1_000,
+            not_after: 2_000,
+            public_key: key.clone(),
+            root_signature: Vec::new(),
+        };
+        d.root_signature = hybrid_sign(&root_sk, &d.signable()).unwrap();
+        let signer = DelegatedSigner::new(Purpose::KtHead, &[5; 64], &[d], &[root_pk]).unwrap();
+        (signer, key)
+    }
+
+    fn as_arrays(v: &[Vec<u8>]) -> Vec<[u8; 32]> {
+        v.iter().map(|h| h.as_slice().try_into().unwrap()).collect()
+    }
+
+    #[test]
+    fn both_proofs_and_the_head_share_one_snapshot() {
+        let tree = leaves(11);
+        let ed = SigningKey::from_bytes(&[9; 32]);
+        let (signer, key) = head_signer();
+        let p = proofs_from_snapshot(&tree, 3, Some(10), &ed, Some(&signer), 1_500).unwrap();
+        let hybrid = p.hybrid.as_ref().unwrap();
+        let head = p.head.as_ref().unwrap();
+        let root: [u8; 32] = p.identity.root_hash.as_slice().try_into().unwrap();
+
+        assert_eq!(p.identity.tree_size, 11);
+        assert_eq!(hybrid.tree_size, 11);
+        assert_eq!(hybrid.root_hash, p.identity.root_hash);
+        assert_eq!(head.tree_size, 11);
+        assert_eq!(head.root_hash, root);
+        assert_eq!(p.identity.tree_head_signature, hybrid.tree_head_signature);
+        assert!(verify_inclusion(
+            &tree[3],
+            &as_arrays(&p.identity.proof_hashes),
+            3,
+            11,
+            &root
+        ));
+        assert!(verify_inclusion(
+            &tree[10],
+            &as_arrays(&hybrid.proof_hashes),
+            10,
+            11,
+            &root
+        ));
+
+        let signed = construct_crypto::server_trust::server_signable(
+            construct_crypto::server_trust::Purpose::KtHead,
+            &construct_crypto::server_trust::kid_of(&key),
+            &construct_crypto::server_trust::kt_head_body(11, &root),
+        );
+        assert_eq!(
+            head.kid,
+            construct_crypto::server_trust::kid_of(&key).to_vec()
+        );
+        assert!(
+            construct_crypto::pqc::hybrid::verify_hybrid_signature(&key, &signed, &head.signature)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn without_a_signer_or_inside_no_window_there_is_no_hybrid_head() {
+        let tree = leaves(4);
+        let ed = SigningKey::from_bytes(&[9; 32]);
+        let p = proofs_from_snapshot(&tree, 0, None, &ed, None, 1_500).unwrap();
+        assert!(p.head.is_none() && p.hybrid.is_none());
+        let (signer, _) = head_signer();
+        let late = proofs_from_snapshot(&tree, 0, None, &ed, Some(&signer), 2_001).unwrap();
+        assert!(late.head.is_none(), "a lapsed delegation must not sign");
     }
 }

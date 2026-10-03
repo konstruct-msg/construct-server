@@ -77,6 +77,10 @@ struct KeyServiceContext {
     /// Base64-encoded verifying key for `/.well-known/construct-server`.
     /// `None` when bundle signing is disabled.
     bundle_verifying_key_b64: Option<String>,
+    /// The hybrid key the offline root delegated for KT tree heads: `SERVER_TRUST_KT_HEAD_KEY`
+    /// and its delegation in `SERVER_TRUST_DIR`. With it every bundle also carries a
+    /// `SignedTreeHead`; without it the Ed25519 head alone, as before.
+    kt_head_signer: Option<Arc<construct_crypto::server_trust::DelegatedSigner>>,
     /// Verifies Bearer access tokens for upload/mutation RPCs.
     auth: Arc<construct_auth::AuthManager>,
 }
@@ -147,10 +151,37 @@ impl KeyServiceContext {
         );
         info!("JWT/PASETO verification enabled for key-service upload paths");
 
+        let kt_head_signer = match construct_crypto::server_trust::DelegatedSigner::from_env(
+            construct_crypto::server_trust::Purpose::KtHead,
+        ) {
+            Ok(Some(signer)) => {
+                info!(
+                    kid = %hex::encode(signer.kid()),
+                    not_after = signer.not_after(),
+                    "delegated hybrid key loaded — KT tree heads carry the hybrid signature too"
+                );
+                Some(Arc::new(signer))
+            }
+            Ok(None) => {
+                info!(
+                    "SERVER_TRUST_KT_HEAD_KEY not set — KT tree heads carry the Ed25519 signature only"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "delegated KT tree-head key unusable — Ed25519 head only until it is fixed"
+                );
+                None
+            }
+        };
+
         Ok(Self {
             db,
             notification_client,
             redis,
+            kt_head_signer,
             bundle_verifying_key_b64: bundle_signing_key
                 .as_ref()
                 .map(|sk| BASE64.encode(Ed25519VerifyingKey::from(sk).to_bytes())),
@@ -450,6 +481,7 @@ impl KeyService for KeyGrpcService {
             &req.user_id,
             req.device_id.as_deref(),
             self.context.bundle_signing_key.as_ref(),
+            self.context.kt_head_signer.as_deref(),
             consume_otpk,
         )
         .await
@@ -528,6 +560,7 @@ impl KeyService for KeyGrpcService {
                     verifying_key: b.verifying_key,
                     kt_proof: b.kt_proof.map(to_proto_kt_proof),
                     hybrid_kt_proof: b.hybrid_kt_proof.map(to_proto_kt_proof),
+                    tree_head: b.kt_tree_head.map(to_proto_tree_head),
                 });
                 if let Some(notif_client) = self.context.notification_client.clone() {
                     let db = self.context.db.clone();
@@ -1049,6 +1082,7 @@ impl KeyService for KeyGrpcService {
             &req.user_id,
             device_ids,
             self.context.bundle_signing_key.as_ref(),
+            self.context.kt_head_signer.as_deref(),
             consume_otpk,
         )
         .await
@@ -1133,6 +1167,7 @@ impl KeyService for KeyGrpcService {
                 kt_proof: b.kt_proof.map(to_proto_kt_proof),
                 verifying_key: b.verifying_key,
                 hybrid_kt_proof: b.hybrid_kt_proof.map(to_proto_kt_proof),
+                tree_head: b.kt_tree_head.map(to_proto_tree_head),
             })
             .collect();
 
@@ -1174,6 +1209,16 @@ impl KeyService for KeyGrpcService {
 // ============================================================================
 
 /// Sends a `replenish_prekeys` blind notification to `user_id` when their
+/// Map an internal `kt::SignedTreeHead` to the proto `SignedTreeHead`.
+fn to_proto_tree_head(h: crate::kt::SignedTreeHead) -> proto::SignedTreeHead {
+    proto::SignedTreeHead {
+        tree_size: h.tree_size,
+        root_hash: h.root_hash.to_vec(),
+        kid: h.kid,
+        signature: h.signature,
+    }
+}
+
 /// Map an internal `kt::KtProof` to the proto `KtInclusionProof` (identity or hybrid leaf).
 fn to_proto_kt_proof(p: crate::kt::KtProof) -> proto::KtInclusionProof {
     proto::KtInclusionProof {
