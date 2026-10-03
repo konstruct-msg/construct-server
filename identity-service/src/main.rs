@@ -113,6 +113,12 @@ struct IdentityGrpcService {
     /// whose public half clients never see. Falls back to the federation
     /// signer when unset (single-key dev setups).
     cert_signing_key: Option<ed25519_dalek::SigningKey>,
+    /// The hybrid key the offline root delegated for sender certificates
+    /// (`SERVER_TRUST_SENDER_CERT_KEY` + its delegation in `SERVER_TRUST_DIR`). When set, every
+    /// certificate also carries `server_kid` + `server_signature_hybrid`, which clients check
+    /// through the pinned root rather than through a key this server publishes. Absent → the
+    /// Ed25519 signature alone, as before (decisions/server-keys-rooted-offline-and-hybrid.md).
+    cert_hybrid_signer: Option<std::sync::Arc<construct_crypto::server_trust::DelegatedSigner>>,
 }
 
 /// Pending device-link join request, held in Redis between `SubmitJoinRequest`
@@ -250,6 +256,101 @@ fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Stat
     auth.strip_prefix("Bearer ")
         .map(|s| s.to_string())
         .ok_or_else(|| Status::unauthenticated("authorization must be Bearer token"))
+}
+
+/// `(server_kid, server_signature_hybrid)` for a certificate, or two empty fields when there is
+/// no delegated key or it cannot sign now (logged — the Ed25519 signature still goes out, and a
+/// client that has moved to the hybrid one refuses this certificate, which is what should happen
+/// to a key whose delegation lapsed).
+fn hybrid_cert_signature(
+    signer: Option<&construct_crypto::server_trust::DelegatedSigner>,
+    user_id: &str,
+    domain: &str,
+    identity_key: &[u8],
+    device_id: &str,
+    issued_at: i64,
+    expires_at: i64,
+) -> (Vec<u8>, Vec<u8>) {
+    let Some(signer) = signer else {
+        return (Vec::new(), Vec::new());
+    };
+    let signed = construct_crypto::server_trust::sender_cert_body(
+        user_id,
+        domain,
+        identity_key,
+        device_id,
+        issued_at,
+        expires_at,
+    )
+    .map_err(anyhow::Error::from)
+    .and_then(|body| signer.sign(&body, issued_at));
+    match signed {
+        Ok(signature) => (signer.kid().to_vec(), signature),
+        Err(e) => {
+            tracing::error!(
+                error = %format!("{e:#}"),
+                "hybrid sender-certificate signature failed — issuing the Ed25519 signature only"
+            );
+            (Vec::new(), Vec::new())
+        }
+    }
+}
+
+#[cfg(test)]
+mod hybrid_cert_tests {
+    use super::hybrid_cert_signature;
+    use construct_crypto::pqc::hybrid::{
+        hybrid_sign, hybrid_signature_keypair_from_seeds, verify_hybrid_signature,
+    };
+    use construct_crypto::server_trust::{
+        DelegatedSigner, Delegation, Purpose, kid_of, sender_cert_body, server_signable,
+    };
+
+    const T0: i64 = 1_800_000_000;
+
+    fn signer() -> (DelegatedSigner, Vec<u8>) {
+        let (root_sk, root_pk) = hybrid_signature_keypair_from_seeds(&[1; 32], &[2; 32]);
+        let seeds = [7u8; 64];
+        let (_, key) = hybrid_signature_keypair_from_seeds(&[7; 32], &[7; 32]);
+        let mut d = Delegation {
+            purpose: Purpose::SenderCert,
+            not_before: T0,
+            not_after: T0 + 90 * 86_400,
+            public_key: key.clone(),
+            root_signature: Vec::new(),
+        };
+        d.root_signature = hybrid_sign(&root_sk, &d.signable()).unwrap();
+        let s = DelegatedSigner::new(Purpose::SenderCert, &seeds, &[d], &[root_pk]).unwrap();
+        (s, key)
+    }
+
+    #[test]
+    fn a_certificate_carries_a_hybrid_signature_over_its_own_fields() {
+        let (s, key) = signer();
+        let (kid, sig) =
+            hybrid_cert_signature(Some(&s), "u", "konstruct.cc", &[9; 32], "d", T0 + 5, T0 + 9);
+        assert_eq!(kid, kid_of(&key).to_vec());
+        let body = sender_cert_body("u", "konstruct.cc", &[9; 32], "d", T0 + 5, T0 + 9).unwrap();
+        let signed = server_signable(Purpose::SenderCert, &kid_of(&key), &body);
+        assert!(verify_hybrid_signature(&key, &signed, &sig).is_ok());
+        let other = sender_cert_body("u", "konstruct.cc", &[9; 32], "e", T0 + 5, T0 + 9).unwrap();
+        let other = server_signable(Purpose::SenderCert, &kid_of(&key), &other);
+        assert!(verify_hybrid_signature(&key, &other, &sig).is_err());
+    }
+
+    #[test]
+    fn no_signer_or_a_lapsed_delegation_leaves_both_fields_empty() {
+        assert_eq!(
+            hybrid_cert_signature(None, "u", "d", &[9; 32], "d", T0, T0 + 1),
+            (Vec::new(), Vec::new())
+        );
+        let (s, _) = signer();
+        let late = T0 + 91 * 86_400;
+        assert_eq!(
+            hybrid_cert_signature(Some(&s), "u", "d", &[9; 32], "d", late, late + 1),
+            (Vec::new(), Vec::new())
+        );
+    }
 }
 
 /// Canonical `SenderCertificate.server_signature` payload — stealth-sealed-sender-v2
@@ -829,8 +930,17 @@ impl AuthService for IdentityGrpcService {
         .ok_or_else(|| Status::not_found("device not found or inactive"))?;
 
         let now = chrono::Utc::now().timestamp();
-        let expires_at = now + 86400;
+        let expires_at = now + construct_crypto::server_trust::SENDER_CERT_MAX_LIFETIME_SECS;
         let domain = self.context.config.federation.instance_domain.clone();
+        let (server_kid, server_signature_hybrid) = hybrid_cert_signature(
+            self.cert_hybrid_signer.as_deref(),
+            user_id,
+            &domain,
+            &identity_key,
+            &device_id,
+            now,
+            expires_at,
+        );
 
         let sign_payload = build_sender_cert_sign_payload(
             user_id,
@@ -856,6 +966,8 @@ impl AuthService for IdentityGrpcService {
             issued_at: now,
             expires_at,
             server_signature: signature,
+            server_kid,
+            server_signature_hybrid,
         };
 
         tracing::info!(user_id = %user_id, expires_at = %expires_at, "Issued sender certificate");
@@ -3198,6 +3310,32 @@ async fn main() -> Result<()> {
         }
     };
 
+    let cert_hybrid_signer = match construct_crypto::server_trust::DelegatedSigner::from_env(
+        construct_crypto::server_trust::Purpose::SenderCert,
+    ) {
+        Ok(Some(signer)) => {
+            info!(
+                kid = %hex::encode(signer.kid()),
+                not_after = signer.not_after(),
+                "delegated hybrid key loaded — sender certificates carry the hybrid signature too"
+            );
+            Some(std::sync::Arc::new(signer))
+        }
+        Ok(None) => {
+            info!(
+                "SERVER_TRUST_SENDER_CERT_KEY not set — sender certificates carry the Ed25519 signature only"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %format!("{e:#}"),
+                "delegated sender-certificate key unusable — Ed25519 signature only until it is fixed"
+            );
+            None
+        }
+    };
+
     // Cross-service consistency guard (sealed-sender-resilience C′): if the deployment also
     // hands this service the gateway's published bundle key (BUNDLE_SIGNING_PUBLIC_KEY, what
     // clients verify certs/KT against), assert the key we SIGN with equals it. A mismatch is
@@ -3234,6 +3372,7 @@ async fn main() -> Result<()> {
             token_issuance_young_max_per_hour,
             token_issuance_maturity_hours,
             cert_signing_key,
+            cert_hybrid_signer,
         };
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)

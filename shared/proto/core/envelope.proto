@@ -619,8 +619,19 @@ message SenderCertificate {
   // iOS StealthSenderService.buildCertPayload).
   bytes server_signature = 7;
 
-  // Reserved for future cert fields (e.g., PQ signature, capabilities)
-  reserved 8 to 15;
+  // Id of the server key that made server_signature_hybrid: SHA-256("konstruct/v1/kid" ‖ key)[0..16].
+  // The key itself reaches the client as a delegation signed by the offline root, served in
+  // /.well-known (construct-docs/decisions/server-keys-rooted-offline-and-hybrid.md).
+  bytes server_kid = 8;
+
+  // Hybrid Ed25519 ‖ ML-DSA-65 signature (3373 bytes) by that key over
+  //   "konstruct/v1/sender-cert" ‖ server_kid ‖ BE16(len) user_id ‖ BE16(len) domain
+  //   ‖ BE16(len) identity_key ‖ BE16(len) device_id ‖ BE64(issued_at) ‖ BE64(expires_at)
+  // — construct-server-trust `sender_cert_body`, vectors in conformance/knst_server_trust.json.
+  // Sent beside server_signature while clients move; server_signature goes once none reads it.
+  bytes server_signature_hybrid = 9;
+
+  reserved 10 to 15;
 }
 
 // OwnDeviceCopy — Envelope.encrypted_payload of every SENDER_SYNC (content_type 23).

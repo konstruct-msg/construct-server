@@ -142,6 +142,11 @@ message GetPreKeyBundleResponse {
   // hybrid_identity_key). Clients SHOULD verify this when the hybrid key is present.
   optional KtInclusionProof hybrid_kt_proof = 21;
 
+  // The one tree head both proofs above are relative to, signed by a delegated server key. Both
+  // proofs are built from the same snapshot of the log, so their tree_size and root_hash equal
+  // this head's. Sent beside the Ed25519 tree_head_signature in each proof while clients move.
+  optional SignedTreeHead tree_head = 22;
+
   // Reserved for future fields
   reserved 4 to 10;
 }
@@ -170,6 +175,24 @@ message KtInclusionProof {
   // Ed25519 signature over: "ConstructKT-v1" || tree_size (8 BE) || root_hash (32)
   // Signed with the server's bundle signing key (same key as bundle_signature).
   bytes tree_head_signature = 5;
+}
+
+// A Key Transparency tree head signed by a server key the offline root delegated
+// (construct-docs/decisions/server-keys-rooted-offline-and-hybrid.md). The same message will
+// answer a consistency-proof request.
+message SignedTreeHead {
+  uint64 tree_size = 1;
+
+  // Merkle root (32 bytes, SHA-256)
+  bytes root_hash = 2;
+
+  // Id of the signing key: SHA-256("konstruct/v1/kid" ‖ key)[0..16]
+  bytes kid = 3;
+
+  // Hybrid Ed25519 ‖ ML-DSA-65 (3373 bytes) over
+  //   "konstruct/v1/kt-head" ‖ kid ‖ BE64(tree_size) ‖ root_hash
+  // — construct-server-trust `kt_head_body`, vectors in conformance/knst_server_trust.json.
+  bytes signature = 4;
 }
 
 // Pre-key bundle for X3DH key agreement
@@ -366,6 +389,9 @@ message DevicePreKeyBundle {
 
   // Key Transparency inclusion proof for this device's hybrid identity key (leaf kind 1).
   optional KtInclusionProof hybrid_kt_proof = 6;
+
+  // The tree head this device's two proofs are relative to, as GetPreKeyBundleResponse.tree_head.
+  optional SignedTreeHead tree_head = 7;
 }
 
 // ============================================================================

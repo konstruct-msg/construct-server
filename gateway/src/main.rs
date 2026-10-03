@@ -52,6 +52,45 @@ struct GatewayState {
     /// an app release.
     token_issuer_public: Option<String>,
     token_issuer_key_version: u32,
+    /// The delegations of the server's hybrid keys, read from `SERVER_TRUST_DIR` — each signed by
+    /// the offline root, so serving them gives this server no say over which keys clients accept
+    /// (decisions/server-keys-rooted-offline-and-hybrid.md). Cached: the directory changes once a
+    /// quarter, `/.well-known` is read on every connect.
+    server_trust: Arc<ServerTrustCache>,
+}
+
+/// `SERVER_TRUST_DIR`, read at most once per `SERVER_TRUST_REFRESH`.
+struct ServerTrustCache {
+    dir: std::path::PathBuf,
+    cached: tokio::sync::RwLock<Option<(std::time::Instant, Vec<String>)>>,
+}
+
+const SERVER_TRUST_REFRESH: std::time::Duration = std::time::Duration::from_secs(300);
+
+impl ServerTrustCache {
+    /// Base64 of every delegation a client may still need. A directory that cannot be read
+    /// serves nothing and logs — clients then keep the delegations they cached.
+    async fn delegations(&self) -> Vec<String> {
+        if let Some((at, list)) = self.cached.read().await.as_ref()
+            && at.elapsed() < SERVER_TRUST_REFRESH
+        {
+            return list.clone();
+        }
+        use base64::Engine as _;
+        let now = chrono::Utc::now().timestamp();
+        let list = match construct_crypto::server_trust::load_delegations(&self.dir) {
+            Ok(all) => construct_crypto::server_trust::servable_delegations(all, now)
+                .iter()
+                .map(|d| base64::engine::general_purpose::STANDARD.encode(d.encode()))
+                .collect(),
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "SERVER_TRUST_DIR unreadable — serving no delegations");
+                Vec::new()
+            }
+        };
+        *self.cached.write().await = Some((std::time::Instant::now(), list.clone()));
+        list
+    }
 }
 
 /// Derive the X25519 token-encryption public key from an optional base64 seed.
@@ -174,6 +213,10 @@ async fn main() -> Result<()> {
         federation_public_key,
         token_issuer_public,
         token_issuer_key_version,
+        server_trust: Arc::new(ServerTrustCache {
+            dir: construct_crypto::server_trust::trust_dir(),
+            cached: tokio::sync::RwLock::new(None),
+        }),
     };
 
     // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
@@ -500,6 +543,13 @@ async fn well_known_construct_server(
     // Expose bundle verification key when configured so clients can verify server-signed bundles.
     if let Some(vk) = &state.bundle_verification_key {
         body["bundle_verification_key"] = json!(vk);
+    }
+
+    // Delegations of the server's hybrid signing keys. Roots are never served: a client takes
+    // them from its own build, which is the point.
+    let delegations = state.server_trust.delegations().await;
+    if !delegations.is_empty() {
+        body["server_trust"] = json!({ "delegations": delegations });
     }
 
     // The Privacy Pass issuer commitment, so a client can verify the batched DLEQ proof against

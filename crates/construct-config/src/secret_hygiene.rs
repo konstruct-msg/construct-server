@@ -34,6 +34,8 @@ const QUOTE_SENSITIVE: &[&str] = &[
     "TOKEN_ISSUER_KEY",
     "BUNDLE_SIGNING_KEY",
     "BUNDLE_SIGNING_PUBLIC_KEY",
+    "SERVER_TRUST_SENDER_CERT_KEY",
+    "SERVER_TRUST_KT_HEAD_KEY",
     "APNS_DEVICE_TOKEN_ENCRYPTION_KEY",
     "USERNAME_HMAC_SECRET",
     "CONTACT_HMAC_SECRET",
@@ -184,6 +186,13 @@ pub fn validate() -> Result<()> {
     }
     if let Some(v) = present("BUNDLE_SIGNING_PUBLIC_KEY") {
         require_base64_len("BUNDLE_SIGNING_PUBLIC_KEY", &v, 32)?;
+    }
+    // Delegated hybrid server keys: the two 32-byte seeds (Ed25519 ‖ ML-DSA-65) of the key the
+    // offline root delegated for one purpose (decisions/server-keys-rooted-offline-and-hybrid.md).
+    for name in ["SERVER_TRUST_SENDER_CERT_KEY", "SERVER_TRUST_KT_HEAD_KEY"] {
+        if let Some(v) = present(name) {
+            require_base64_len(name, &v, 64)?;
+        }
     }
     if let Some(v) = present("TOKEN_ISSUER_KEY") {
         require_hex_len("TOKEN_ISSUER_KEY", &v, 32)?;
