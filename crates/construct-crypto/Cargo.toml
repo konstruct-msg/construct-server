@@ -46,7 +46,7 @@ hex = "0.4"
 ml-dsa = { version = "0.1.1", optional = true }
 # The bytes of a server signature — delegations from the offline root, labels, key ids — shared
 # with construct-core and the root tool (decisions/server-keys-rooted-offline-and-hybrid.md).
-construct-server-trust = { git = "https://github.com/konstruct-msg/construct-core", rev = "4949b534e9f784265a0fec4a5c3758198c545abc", optional = true }
+construct-server-trust = { git = "https://github.com/konstruct-msg/construct-core", rev = "ee84058d387af35d24f9aba0fe73316a234a76ba", optional = true }
 zeroize = { workspace = true }
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 
