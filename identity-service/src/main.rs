@@ -382,6 +382,29 @@ fn extract_user_id_from_metadata(
     construct_server_shared::auth_utils::extract_user_id(auth_manager, metadata)
 }
 
+/// The account a request acts for: always the token's. A request field that names an account
+/// (`user_id`, `blocker_user_id`) is accepted only when empty or equal to it.
+///
+/// Until 2026-10-04 the UserService handlers read the account from that field. The field stays in
+/// the protos for the clients that fill it; it no longer decides anything.
+fn acting_user(
+    authed: uuid::Uuid,
+    claimed: &str,
+    field: &'static str,
+) -> Result<uuid::Uuid, Status> {
+    if claimed.is_empty() {
+        return Ok(authed);
+    }
+    let claimed = uuid::Uuid::parse_str(claimed)
+        .map_err(|_| Status::invalid_argument(format!("invalid {field}")))?;
+    if claimed != authed {
+        return Err(Status::permission_denied(format!(
+            "{field} does not match the authenticated user"
+        )));
+    }
+    Ok(authed)
+}
+
 // ============================================================================
 // AuthService implementation
 // ============================================================================
@@ -1924,6 +1947,8 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::GetUserProfileRequest>,
     ) -> Result<Response<proto::GetUserProfileResponse>, Status> {
+        // Any account may look another up; nobody unauthenticated may.
+        extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
         let user_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
@@ -1955,9 +1980,9 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::UpdateUserProfileRequest>,
     ) -> Result<Response<proto::UpdateUserProfileResponse>, Status> {
+        let authed = extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
-        let user_id = uuid::Uuid::parse_str(&req.user_id)
-            .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+        let user_id = acting_user(authed, &req.user_id, "user_id")?;
 
         let normalized_username = req.username.and_then(|u| {
             let trimmed = u.trim().to_lowercase();
@@ -2037,6 +2062,8 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::GetUserCapabilitiesRequest>,
     ) -> Result<Response<proto::GetUserCapabilitiesResponse>, Status> {
+        // Any account may ask about a peer's suites; nobody unauthenticated may.
+        extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
         let user_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
@@ -2069,9 +2096,9 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::BlockUserRequest>,
     ) -> Result<Response<proto::BlockUserResponse>, Status> {
+        let authed = extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
-        let blocker_id = uuid::Uuid::parse_str(&req.blocker_user_id)
-            .map_err(|_| Status::invalid_argument("invalid blocker_user_id"))?;
+        let blocker_id = acting_user(authed, &req.blocker_user_id, "blocker_user_id")?;
         let blocked_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
 
@@ -2121,9 +2148,9 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::UnblockUserRequest>,
     ) -> Result<Response<proto::UnblockUserResponse>, Status> {
+        let authed = extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
-        let blocker_id = uuid::Uuid::parse_str(&req.blocker_user_id)
-            .map_err(|_| Status::invalid_argument("invalid blocker_user_id"))?;
+        let blocker_id = acting_user(authed, &req.blocker_user_id, "blocker_user_id")?;
         let blocked_id = uuid::Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user_id"))?;
 
@@ -2142,9 +2169,9 @@ impl UserService for IdentityGrpcService {
         &self,
         request: Request<proto::GetBlockedUsersRequest>,
     ) -> Result<Response<proto::GetBlockedUsersResponse>, Status> {
+        let authed = extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let req = request.into_inner();
-        let user_id = uuid::Uuid::parse_str(&req.user_id)
-            .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+        let user_id = acting_user(authed, &req.user_id, "user_id")?;
 
         let blocked_users =
             construct_server_shared::db::get_blocked_users(&self.context.db_pool, &user_id)
@@ -3594,5 +3621,40 @@ mod tests {
         assert_eq!(payload, expected);
         // No colon separators anywhere in the payload (old variant 2 used ':').
         assert!(!payload.contains(&b':'));
+    }
+}
+
+#[cfg(test)]
+mod acting_user_tests {
+    use super::acting_user;
+
+    fn id(n: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(n)
+    }
+
+    #[test]
+    fn an_empty_field_acts_for_the_token() {
+        assert_eq!(acting_user(id(1), "", "user_id").unwrap(), id(1));
+    }
+
+    #[test]
+    fn the_same_account_in_the_field_is_accepted() {
+        assert_eq!(
+            acting_user(id(1), &id(1).to_string(), "user_id").unwrap(),
+            id(1)
+        );
+    }
+
+    /// Mutation: return `claimed` instead of refusing — acting for another account passes.
+    #[test]
+    fn another_account_in_the_field_is_refused() {
+        let status = acting_user(id(1), &id(2).to_string(), "blocker_user_id").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn a_malformed_field_is_refused() {
+        let status = acting_user(id(1), "not-a-uuid", "user_id").unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

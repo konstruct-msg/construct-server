@@ -12,6 +12,23 @@ use uuid::Uuid;
 use crate::context::MessagingServiceContext;
 use crate::notification_core;
 
+/// Refuses a call that came in through the edge.
+///
+/// `SendBlindNotification`, `SendVoipIncomingCall` and `SendKeyRotationWake` push to whatever
+/// account the request names. They are server-to-server: group, key, identity and signaling call
+/// them over the internal network, after deciding a push is due. Until 2026-10-04 the edge routed
+/// the whole service, these three included.
+///
+/// The edge closes these three paths itself (`ops/Caddyfile`); this is the second wall. Every
+/// request Caddy proxies carries `X-Forwarded-For`, and no internal caller sets it — so its
+/// presence means the request crossed the edge, whatever the edge was configured to do.
+fn internal_only(metadata: &tonic::metadata::MetadataMap) -> Result<(), Status> {
+    if metadata.contains_key("x-forwarded-for") {
+        return Err(Status::permission_denied("internal method"));
+    }
+    Ok(())
+}
+
 /// gRPC implementation of NotificationService — runs on messaging's gRPC port
 pub struct NotificationGrpcService {
     pub context: Arc<MessagingServiceContext>,
@@ -38,6 +55,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::SendBlindNotificationRequest>,
     ) -> Result<Response<proto::SendBlindNotificationResponse>, Status> {
+        internal_only(request.metadata())?;
         let req = request.into_inner();
 
         let user_id = Uuid::parse_str(&req.user_id)
@@ -215,6 +233,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::SendVoipIncomingCallRequest>,
     ) -> Result<Response<proto::SendVoipIncomingCallResponse>, Status> {
+        internal_only(request.metadata())?;
         let req = request.into_inner();
 
         let user_id = Uuid::parse_str(&req.user_id)
@@ -263,6 +282,7 @@ impl NotificationService for NotificationGrpcService {
         &self,
         request: Request<proto::SendKeyRotationWakeRequest>,
     ) -> Result<Response<proto::SendKeyRotationWakeResponse>, Status> {
+        internal_only(request.metadata())?;
         let req = request.into_inner();
 
         let user_id = Uuid::parse_str(&req.user_id)
@@ -278,5 +298,25 @@ impl NotificationService for NotificationGrpcService {
         Ok(Response::new(proto::SendKeyRotationWakeResponse {
             success: output.success,
         }))
+    }
+}
+
+#[cfg(test)]
+mod internal_only_tests {
+    use super::internal_only;
+    use tonic::metadata::MetadataMap;
+
+    #[test]
+    fn an_internal_call_passes() {
+        assert!(internal_only(&MetadataMap::new()).is_ok());
+    }
+
+    /// Mutation: drop the check — a call proxied by the edge passes and this fails.
+    #[test]
+    fn a_call_through_the_edge_is_refused() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+        let status = internal_only(&metadata).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 }
