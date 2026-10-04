@@ -73,6 +73,11 @@ pub(crate) async fn consume_key_package(
     svc: &GroupServiceImpl,
     request: Request<proto::ConsumeKeyPackageRequest>,
 ) -> Result<Response<proto::ConsumeKeyPackageResponse>, Status> {
+    // Taking a peer's KeyPackage is what adding them to a group needs, so any account may — but
+    // only an account. Until 2026-10-04 this checked no token. An authenticated account can still
+    // drain a peer; that is the OTPK drain's shape (pre-release hardening item 5) and is answered
+    // there.
+    extract_user_id(svc, request.metadata())?;
     let req = request.into_inner();
 
     let user_id =

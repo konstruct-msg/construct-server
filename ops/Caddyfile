@@ -91,6 +91,18 @@ ams.konstruct.cc {
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
 	}
+	# Server-to-server only: they push to whatever account the request names, and group, key,
+	# identity and signaling call them on the internal network. Exact paths sort ahead of the
+	# service wildcard below; messaging refuses them too when X-Forwarded-For is present.
+	handle /shared.proto.services.v1.NotificationService/SendBlindNotification {
+		respond 404
+	}
+	handle /shared.proto.services.v1.NotificationService/SendVoipIncomingCall {
+		respond 404
+	}
+	handle /shared.proto.services.v1.NotificationService/SendKeyRotationWake {
+		respond 404
+	}
 	handle /shared.proto.services.v1.NotificationService/* {
 		reverse_proxy h2c://messaging:50053
 	}
@@ -164,6 +176,18 @@ ams.konstruct.cc {
 	import messaging_grpc
 	handle /construct.message_gateway.v1.MessageGateway/* {
 		reverse_proxy h2c://messaging:50053
+	}
+	# Server-to-server only: they push to whatever account the request names, and group, key,
+	# identity and signaling call them on the internal network. Exact paths sort ahead of the
+	# service wildcard below; messaging refuses them too when X-Forwarded-For is present.
+	handle /shared.proto.services.v1.NotificationService/SendBlindNotification {
+		respond 404
+	}
+	handle /shared.proto.services.v1.NotificationService/SendVoipIncomingCall {
+		respond 404
+	}
+	handle /shared.proto.services.v1.NotificationService/SendKeyRotationWake {
+		respond 404
 	}
 	handle /shared.proto.services.v1.NotificationService/* {
 		reverse_proxy h2c://messaging:50053
