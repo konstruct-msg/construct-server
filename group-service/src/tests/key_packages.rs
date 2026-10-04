@@ -330,3 +330,67 @@ async fn test_get_pending_invites_cross_device_rejected() {
         "Expected PermissionDenied or NotFound, got {code:?}"
     );
 }
+
+/// Without a token nothing is taken: the KeyPackage is still there for the next caller.
+///
+/// Mutation: drop the `extract_user_id` check from `consume_key_package` — the anonymous call
+/// succeeds and this fails.
+#[tokio::test]
+async fn test_consume_key_package_requires_a_token() {
+    let db = get_test_db().await;
+    let (target_user_id, target_device_id, _) = create_test_device(&db).await;
+
+    let kp_bytes = b"anonymous-must-not-take-this".to_vec();
+    let kp_ref: Vec<u8> = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&kp_bytes);
+        h.finalize().to_vec()
+    };
+    let now = chrono::Utc::now();
+    sqlx::query(
+        r#"INSERT INTO group_key_packages
+               (user_id, device_id, key_package, key_package_ref, published_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
+    )
+    .bind(target_user_id)
+    .bind(&target_device_id)
+    .bind(&kp_bytes)
+    .bind(&kp_ref)
+    .bind(now)
+    .bind(now + chrono::Duration::days(30))
+    .execute(db.as_ref())
+    .await
+    .expect("Failed to insert KeyPackage");
+
+    let service = GroupServiceImpl {
+        db: db.clone(),
+        hub: GroupHub::new(),
+        notification_client: None,
+        redis: get_test_redis().await,
+        auth: super::test_helpers::TEST_AUTH.clone(),
+    };
+
+    let result = service
+        .consume_key_package(Request::from_parts(
+            tonic::metadata::MetadataMap::new(),
+            tonic::Extensions::default(),
+            proto::ConsumeKeyPackageRequest {
+                user_id: target_user_id.to_string(),
+                preferred_device_id: None,
+            },
+        ))
+        .await;
+    assert_eq!(result.unwrap_err().code(), tonic::Code::Unauthenticated);
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM group_key_packages WHERE user_id = $1")
+            .bind(target_user_id)
+            .fetch_one(db.as_ref())
+            .await
+            .expect("count");
+    assert_eq!(
+        remaining, 1,
+        "an anonymous call must not consume the KeyPackage"
+    );
+}
