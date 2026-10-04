@@ -317,7 +317,10 @@ async fn main() -> Result<()> {
             auth: grpc_auth,
         };
         if let Err(e) = construct_server_shared::grpc_server(ka, ka_to)
-            .add_service(VeilServiceServer::new(service))
+            .add_service(
+                VeilServiceServer::new(service)
+                    .max_decoding_message_size(construct_server_shared::decode_limits::VEIL),
+            )
             .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
             .await
         {

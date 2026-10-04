@@ -9,7 +9,6 @@ mod tests;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tonic::transport::Server;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -112,11 +111,28 @@ async fn main() -> anyhow::Result<()> {
         auth,
     };
 
-    Server::builder()
-        .add_service(MlsServiceServer::new(svc.clone()))
-        .add_service(ChannelServiceServer::new(svc))
-        .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-        .await?;
+    // The shared builder, like every other service: until 2026-10-05 this was a bare
+    // `Server::builder()` with no stream or header limits and no keepalive.
+    construct_server_shared::grpc_server(
+        std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(45),
+        std::env::var("GRPC_KEEPALIVE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5),
+    )
+    .add_service(
+        MlsServiceServer::new(svc.clone())
+            .max_decoding_message_size(construct_server_shared::decode_limits::GROUP),
+    )
+    .add_service(
+        ChannelServiceServer::new(svc)
+            .max_decoding_message_size(construct_server_shared::decode_limits::GROUP),
+    )
+    .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
+    .await?;
 
     Ok(())
 }

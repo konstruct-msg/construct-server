@@ -18,6 +18,14 @@
 		# onto that listener → TLS -1200 on every URLSession fetch (e.g.
 		# ServerKeyManager's well-known fetch for the stealth token key).
 		protocols h1 h2
+		# Pre-release hardening item 3. Headers are read before anything else; Go's default
+		# allows 1 MiB of them and no deadline. No body limit here on purpose: Caddy counts
+		# the whole request body, and MessageStream is one long-lived body. Each service
+		# bounds its own messages (`decode_limits` in construct-utils).
+		max_header_size 64KB
+		timeouts {
+			read_header 10s
+		}
 	}
 }
 
