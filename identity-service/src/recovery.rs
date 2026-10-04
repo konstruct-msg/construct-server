@@ -99,8 +99,16 @@ pub async fn set_recovery_key(
             .await?
             .flatten();
 
-    if existing.is_some() {
-        anyhow::bail!("Recovery key already set and cannot be changed");
+    // The same key again is the same setup again: a client that registered its key silently
+    // and lost the answer retries with it (construct-docs
+    // `decisions/recovery-key-backup-is-deferred-not-skipped.md`, review point 1). The signature
+    // above already proved the caller holds it. Any other key is still refused.
+    match existing {
+        Some(stored) if stored == recovery_public_key => {
+            return Ok(key_fingerprint(recovery_public_key));
+        }
+        Some(_) => anyhow::bail!("Recovery key already set and cannot be changed"),
+        None => {}
     }
 
     // 6. Validate optional encrypted backup size before write
@@ -376,6 +384,58 @@ mod address_tests {
             .unwrap()
             .expect("the address resolves to the account");
         assert_eq!(found.id, user_id);
+
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&db)
+            .await;
+    }
+
+    fn signed_setup(signing: &SigningKey, user_id: Uuid) -> ([u8; 32], [u8; 64], i64) {
+        let timestamp = Utc::now().timestamp();
+        let signature =
+            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
+        (
+            signing.verifying_key().to_bytes(),
+            signature.to_bytes(),
+            timestamp,
+        )
+    }
+
+    /// A retry with the key already set answers like the first call; another key is refused.
+    ///
+    /// Mutation: bail on any existing key — the retry fails and this reddens.
+    #[tokio::test]
+    async fn the_same_key_again_is_accepted_and_another_is_refused() {
+        let Some(db) = try_db().await else {
+            eprintln!("recovery retry test: postgres unavailable — skipping");
+            return;
+        };
+        let user_id: Uuid =
+            sqlx::query_scalar("INSERT INTO users (id) VALUES (gen_random_uuid()) RETURNING id")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+
+        let (public, signature, timestamp) = signed_setup(&signing, user_id);
+        let first = set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+            .await
+            .unwrap();
+        let (public, signature, timestamp) = signed_setup(&signing, user_id);
+        let again = set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+            .await
+            .expect("the same key again is accepted");
+        assert_eq!(first, again);
+
+        let other = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let (public, signature, timestamp) = signed_setup(&other, user_id);
+        assert!(
+            set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+                .await
+                .is_err(),
+            "another key is still refused"
+        );
 
         let _ = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user_id)
