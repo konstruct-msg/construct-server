@@ -761,6 +761,65 @@ pub async fn get_prekey_bundles(
 /// atomically deleted before the new batch is inserted (stale pool recovery).
 /// If `kyber_pre_keys` is non-empty, those are also inserted into `kyber_one_time_pre_keys`.
 /// Returns `(classic_count, kyber_count)`.
+/// One-time keys of each kind (classic, Kyber) one `UploadPreKeys` may carry. Clients send 50–100.
+pub const MAX_PREKEYS_PER_UPLOAD: usize = 200;
+/// Active one-time keys of each kind a device may hold. Clients keep about a hundred.
+pub const MAX_STORED_PREKEYS: i64 = 1000;
+
+/// Why an upload is refused before anything is written.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UploadRefusal {
+    /// More keys in this request than one upload may carry.
+    TooManyInRequest,
+    /// The device would hold more active keys than it may.
+    TooManyStored,
+}
+
+/// Whether an upload of `new_*` keys fits, given what the device holds now. `replace_existing`
+/// expires what it holds first, so then only the new keys count.
+///
+/// Until 2026-10-05 neither was bounded: the only ceiling on one request was gRPC's 4 MiB, and
+/// a device could keep adding keys to its rows without end.
+pub fn upload_allowed(
+    held_classic: i64,
+    held_kyber: i64,
+    new_classic: usize,
+    new_kyber: usize,
+    replace_existing: bool,
+) -> std::result::Result<(), UploadRefusal> {
+    if new_classic > MAX_PREKEYS_PER_UPLOAD || new_kyber > MAX_PREKEYS_PER_UPLOAD {
+        return Err(UploadRefusal::TooManyInRequest);
+    }
+    let (held_classic, held_kyber) = if replace_existing {
+        (0, 0)
+    } else {
+        (held_classic, held_kyber)
+    };
+    if held_classic + new_classic as i64 > MAX_STORED_PREKEYS
+        || held_kyber + new_kyber as i64 > MAX_STORED_PREKEYS
+    {
+        return Err(UploadRefusal::TooManyStored);
+    }
+    Ok(())
+}
+
+/// Active one-time keys the device holds now, classic and Kyber.
+pub async fn active_prekey_counts(db: &PgPool, device_id: &str) -> Result<(i64, i64)> {
+    let classic: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+    let kyber: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kyber_one_time_pre_keys WHERE device_id = $1 AND is_expired = false",
+    )
+    .bind(device_id)
+    .fetch_one(db)
+    .await?;
+    Ok((classic, kyber))
+}
+
 pub async fn upload_prekeys(
     db: &PgPool,
     device_id: &str,
@@ -2500,6 +2559,56 @@ mod tests {
             upload_prekeys(&db, &device_id, &[], false, &[otpk])
                 .await
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod upload_allowed_tests {
+    use super::*;
+
+    #[test]
+    fn an_ordinary_upload_fits() {
+        assert_eq!(upload_allowed(20, 20, 100, 50, false), Ok(()));
+    }
+
+    /// Mutation: drop the per-request check — a 201-key request passes.
+    #[test]
+    fn too_many_in_one_request_is_refused() {
+        let over = MAX_PREKEYS_PER_UPLOAD + 1;
+        assert_eq!(
+            upload_allowed(0, 0, over, 0, false),
+            Err(UploadRefusal::TooManyInRequest)
+        );
+        assert_eq!(
+            upload_allowed(0, 0, 0, over, true),
+            Err(UploadRefusal::TooManyInRequest)
+        );
+    }
+
+    /// Mutation: drop the stored check — a device grows its rows without end.
+    #[test]
+    fn a_device_cannot_hold_more_than_the_ceiling() {
+        assert_eq!(
+            upload_allowed(MAX_STORED_PREKEYS - 10, 0, 11, 0, false),
+            Err(UploadRefusal::TooManyStored)
+        );
+        assert_eq!(
+            upload_allowed(MAX_STORED_PREKEYS - 10, 0, 10, 0, false),
+            Ok(())
+        );
+        assert_eq!(
+            upload_allowed(0, MAX_STORED_PREKEYS, 0, 1, false),
+            Err(UploadRefusal::TooManyStored)
+        );
+    }
+
+    /// Replacing expires what is held first, so a full device can still start over.
+    #[test]
+    fn a_replacing_upload_counts_only_the_new_keys() {
+        assert_eq!(
+            upload_allowed(MAX_STORED_PREKEYS, MAX_STORED_PREKEYS, 100, 100, true),
+            Ok(())
         );
     }
 }

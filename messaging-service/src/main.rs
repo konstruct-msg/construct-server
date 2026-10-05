@@ -252,10 +252,11 @@ async fn main() -> Result<()> {
         let messaging_svc = MessagingServiceServer::new(MessagingGrpcService {
             context: grpc_context.clone(),
         })
-        .max_decoding_message_size(512 * 1024); // 512 KB — ~100× real message
+        .max_decoding_message_size(construct_server_shared::decode_limits::MESSAGING);
         let notification_svc = NotificationServiceServer::new(NotificationGrpcService {
             context: grpc_context.clone(),
-        });
+        })
+        .max_decoding_message_size(construct_server_shared::decode_limits::NOTIFICATION);
         // SentinelService runs on the same gRPC port as MessagingService +
         // NotificationService — clients that used to hit sentinel:50059
         // now hit messaging:50053 for the same proto contract.
@@ -265,7 +266,8 @@ async fn main() -> Result<()> {
                 .clone()
                 .expect("SentinelCore initialized in main"),
             auth: grpc_context.auth_manager.clone(),
-        });
+        })
+        .max_decoding_message_size(construct_server_shared::decode_limits::SENTINEL);
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
                 .add_service(messaging_svc)

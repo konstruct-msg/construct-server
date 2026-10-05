@@ -23,5 +23,5 @@ pub use construct_rate_limit as rate_limit;
 pub use construct_utils as utils;
 
 pub use construct_utils::net::{
-    grpc_server, mptcp_incoming, mptcp_or_tcp_listener, shutdown_signal,
+    decode_limits, grpc_server, mptcp_incoming, mptcp_or_tcp_listener, shutdown_signal,
 };

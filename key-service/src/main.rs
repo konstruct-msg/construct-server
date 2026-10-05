@@ -42,6 +42,9 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 /// Map a DB crypto_suite string to the proto CryptoSuite enum value.
+/// Device ids one `GetPreKeyBundles` may name.
+const MAX_BUNDLE_DEVICES: usize = 64;
+
 fn proto_crypto_suite(s: &str) -> i32 {
     match s {
         "Curve25519+Ed25519" | "X25519_CHACHA20" => CryptoSuite::ClassicX25519Chacha20 as i32,
@@ -640,6 +643,33 @@ impl KeyService for KeyGrpcService {
             ));
         }
 
+        // Bounded before anything is converted, verified or written.
+        let (held_classic, held_kyber) =
+            core::active_prekey_counts(&self.context.db, &req.device_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        match core::upload_allowed(
+            held_classic,
+            held_kyber,
+            req.pre_keys.len(),
+            req.kyber_pre_keys.len(),
+            req.replace_existing,
+        ) {
+            Ok(()) => {}
+            Err(core::UploadRefusal::TooManyInRequest) => {
+                return Err(Status::invalid_argument(format!(
+                    "at most {} one-time keys of each kind per upload",
+                    core::MAX_PREKEYS_PER_UPLOAD
+                )));
+            }
+            Err(core::UploadRefusal::TooManyStored) => {
+                return Err(Status::resource_exhausted(format!(
+                    "a device holds at most {} active one-time keys of each kind",
+                    core::MAX_STORED_PREKEYS
+                )));
+            }
+        }
+
         // Convert proto prekeys to core types
         let prekeys: Vec<core::OneTimePreKey> = req
             .pre_keys
@@ -1033,6 +1063,13 @@ impl KeyService for KeyGrpcService {
 
         if req.user_id.is_empty() {
             return Err(Status::invalid_argument("user_id is required"));
+        }
+        // An account has units of devices. Unbounded, this list was the only limit on what an
+        // unauthenticated caller could make the server look up per request (4 MiB of ids).
+        if req.device_ids.len() > MAX_BUNDLE_DEVICES {
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_BUNDLE_DEVICES} device_ids per request"
+            )));
         }
 
         // Per-target rate limit (same bucketing as the single-bundle path).
@@ -1467,7 +1504,10 @@ async fn main() -> Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(5),
     )
-    .add_service(KeyServiceServer::new(grpc_service))
+    .add_service(
+        KeyServiceServer::new(grpc_service)
+            .max_decoding_message_size(construct_server_shared::decode_limits::KEY),
+    )
     .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal());
 
     // OTPK inventory across the fleet, refreshed every 60s.

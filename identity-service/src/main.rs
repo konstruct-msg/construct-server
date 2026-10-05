@@ -375,6 +375,8 @@ fn build_sender_cert_sign_payload(
     payload
 }
 
+const IDENTITY_DECODE: usize = construct_server_shared::decode_limits::IDENTITY;
+
 fn extract_user_id_from_metadata(
     auth_manager: &Arc<construct_server_shared::auth::AuthManager>,
     metadata: &tonic::metadata::MetadataMap,
@@ -3403,11 +3405,23 @@ async fn main() -> Result<()> {
         };
         if let Err(e) =
             construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-                .add_service(AuthServiceServer::new(svc.clone()))
-                .add_service(DeviceServiceServer::new(svc.clone()))
-                .add_service(DeviceLinkServiceServer::new(svc.clone()))
-                .add_service(UserServiceServer::new(svc.clone()))
-                .add_service(InviteServiceServer::new(svc))
+                .add_service(
+                    AuthServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
+                )
+                .add_service(
+                    DeviceServiceServer::new(svc.clone())
+                        .max_decoding_message_size(IDENTITY_DECODE),
+                )
+                .add_service(
+                    DeviceLinkServiceServer::new(svc.clone())
+                        .max_decoding_message_size(IDENTITY_DECODE),
+                )
+                .add_service(
+                    UserServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
+                )
+                .add_service(
+                    InviteServiceServer::new(svc).max_decoding_message_size(IDENTITY_DECODE),
+                )
                 .serve_with_incoming_shutdown(
                     grpc_incoming,
                     construct_server_shared::shutdown_signal(),
