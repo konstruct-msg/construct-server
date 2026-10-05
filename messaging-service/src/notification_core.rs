@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use construct_config::{ApnsEnvironment, ApnsEnvironments};
+use construct_server_shared::apns::types::AlertData;
 use construct_server_shared::{
     AppError,
     apns::{ApnsSendError, DeviceTokenEncryption},
@@ -170,6 +171,30 @@ pub(crate) fn verdict_after_rejection(declared_environments: usize) -> Rejection
     }
 }
 
+/// The banner a blind push carries, if its activity is one a person should see.
+///
+/// Until 2026-10-05 every blind push was a background push (`content-available`, priority 5)
+/// and the banner was the app's own, posted after iOS woke it to fetch. iOS wakes an app for
+/// such a push at its discretion: throttled, deferred in Low Power Mode, never after the app
+/// was swiped away. On TestFlight builds that meant no banner at all, while APNs accepted
+/// every push. A banner the system shows itself does not depend on the wake.
+///
+/// The alert names keys, not text: the device writes "New message" in the reader's language,
+/// and the server learns nothing it did not already — the push's time and recipient. The same
+/// generic text the app's own banner used, so the lock screen says nothing more than before.
+/// Key-maintenance wakes and everything else stay background pushes.
+fn blind_alert(activity_type: Option<&str>) -> Option<AlertData> {
+    let loc_key = match activity_type? {
+        "new_message" => "construct_new_message",
+        "contact_request_received" => "contact_request_received_body",
+        _ => return None,
+    };
+    Some(AlertData::Localized {
+        title_loc_key: "construct_app_name",
+        loc_key,
+    })
+}
+
 /// Send blind notification (privacy-preserving push)
 pub async fn send_blind_notification(
     context: &NotificationServiceContext,
@@ -252,11 +277,24 @@ pub async fn send_blind_notification(
             ApnsPayload, ApsData, ConstructData, NotificationPriority, PushType,
         };
 
+        // A device that asked for silent pushes keeps getting only those.
+        let alert = if filter == "silent" {
+            None
+        } else {
+            blind_alert(input.activity_type.as_deref())
+        };
+        // Visible pushes still carry content-available (the builder adds it), so a wake the
+        // system does grant still fetches; the app's banner then replaces this one.
+        let (push_type, priority) = if alert.is_some() {
+            (PushType::Visible, NotificationPriority::High)
+        } else {
+            (PushType::Silent, NotificationPriority::Low)
+        };
         let payload = ApnsPayload {
             aps: ApsData {
                 content_available: Some(1u8),
-                alert: None,
-                sound: None,
+                sound: alert.as_ref().map(|_| "default".to_string()),
+                alert,
                 badge: input.badge_count.map(|b| b as u32),
             },
             construct: input.activity_type.as_ref().map(|activity| ConstructData {
@@ -265,9 +303,6 @@ pub async fn send_blind_notification(
             }),
             construct_call: None,
         };
-        let push_type = PushType::Silent;
-        let priority = NotificationPriority::Low;
-
         const MAX_ATTEMPTS: u32 = 3;
         let mut succeeded_on: Option<ApnsEnvironment> = None;
         // Only condemn the token once EVERY declared environment has rejected it. A row
@@ -1213,5 +1248,65 @@ mod rejection_verdict_tests {
     #[test]
     fn no_environment_tried_never_deletes() {
         assert_eq!(verdict_after_rejection(0), RejectionVerdict::Widen);
+    }
+}
+
+#[cfg(test)]
+mod blind_alert_tests {
+    use super::*;
+
+    fn keys(activity: &str) -> Option<(&'static str, &'static str)> {
+        match blind_alert(Some(activity))? {
+            AlertData::Localized {
+                title_loc_key,
+                loc_key,
+            } => Some((title_loc_key, loc_key)),
+            AlertData::Text { .. } => panic!("a blind alert never carries server-written text"),
+        }
+    }
+
+    /// Mutation: return `None` for new_message — messages go back to background pushes and
+    /// TestFlight banners disappear again.
+    #[test]
+    fn a_message_is_a_banner() {
+        assert_eq!(
+            keys("new_message"),
+            Some(("construct_app_name", "construct_new_message"))
+        );
+        assert_eq!(
+            keys("contact_request_received"),
+            Some(("construct_app_name", "contact_request_received_body"))
+        );
+    }
+
+    /// A key-maintenance wake that showed a banner would put "New message" on the lock screen
+    /// for something that is not one.
+    #[test]
+    fn maintenance_wakes_stay_silent() {
+        for activity in [
+            "replenish_prekeys",
+            "republish_hybrid_prekeys",
+            "rotate_keys",
+            "replenish_key_packages",
+            "group_dissolved",
+            "contact_request_accepted",
+            "invite_accepted",
+        ] {
+            assert!(blind_alert(Some(activity)).is_none(), "{activity}");
+        }
+        assert!(blind_alert(None).is_none());
+    }
+
+    /// What APNs receives: keys under the names Apple reads, no text of ours.
+    #[test]
+    fn the_alert_serializes_as_apple_keys() {
+        let json = serde_json::to_value(blind_alert(Some("new_message"))).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "title-loc-key": "construct_app_name",
+                "loc-key": "construct_new_message"
+            })
+        );
     }
 }
