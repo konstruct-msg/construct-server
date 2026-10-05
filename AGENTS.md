@@ -59,7 +59,9 @@ stream → SUBSCRIBE inbox:wakeup:{user}
 
 1. **`since_cursor` = read offset only** (Subscribe + GetPendingMessages). Never `XTRIM`
    from a client-asserted cursor — silent-loss class (paging/cancel + multi-device).
-2. **Retention** = `MAXLEN ~` on XADD + hourly age sweep (~30d). ADR:
+2. **Retention** = `MAXLEN ~` on XADD + hourly age sweep (`construct_queue::MAILBOX_MAX_AGE_DAYS`,
+   30 d; the landing's privacy policy states it). Account deletion also deletes the mailboxes
+   (`MessageQueue::delete_mailbox`). ADR:
    construct-docs `decisions/minimal-server-delivery.md` (Accepted).
 3. **Wake push:** skip APNs silent `new_message` when
    `user:{user_id}:server_instance_id` is set. Online = `inbox:wakeup` only

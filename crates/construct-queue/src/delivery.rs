@@ -621,6 +621,39 @@ impl<'a> DeliveryManager<'a> {
         Ok(result)
     }
 
+    /// Delete `user_id`'s user stream and every `{user_id}:{device}` stream.
+    /// Returns the number of keys removed.
+    pub(crate) async fn delete_mailbox(&mut self, user_id: &str) -> Result<u64> {
+        let mut keys = vec![format!(
+            "{}:offline:{}",
+            self.delivery_queue_prefix, user_id
+        )];
+        let pattern = format!("{}:offline:{}:*", self.delivery_queue_prefix, user_id);
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, found): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100u64)
+                .query_async(self.client.connection_mut())
+                .await
+                .context("SCAN failed during delete_mailbox")?;
+            keys.extend(found);
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+        let deleted: u64 = redis::cmd("DEL")
+            .arg(&keys)
+            .query_async(self.client.connection_mut())
+            .await
+            .context("DEL failed during delete_mailbox")?;
+        Ok(deleted)
+    }
+
     /// Trim all offline message streams to remove entries older than `max_age_seconds`.
     ///
     /// Uses Redis SCAN to find all stream keys matching the offline queue pattern,

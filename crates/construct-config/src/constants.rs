@@ -13,7 +13,6 @@ pub(crate) const DEFAULT_HEARTBEAT_INTERVAL_SECS: i64 = 180;
 pub(crate) const DEFAULT_SERVER_REGISTRY_TTL_SECS: i64 = 270;
 
 // Default TTL values
-pub(crate) const DEFAULT_MESSAGE_TTL_DAYS: i64 = 7;
 // Access token TTL: 24 hours. Reduces the window during which a revoked token
 // remains usable after logout (services verify crypto-only without blocklist lookup).
 // Override with ACCESS_TOKEN_TTL_HOURS env var.

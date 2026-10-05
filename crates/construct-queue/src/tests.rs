@@ -771,3 +771,47 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
 
     clear_mailbox(&mut queue, user, &[d1, d2]).await;
 }
+
+/// Account deletion empties every mailbox of the account — the user stream and each
+/// device stream — and no one else's. Mutation: drop the SCAN for device streams and
+/// the device mailbox survives; widen the pattern and the neighbour's goes too.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_delete_removes_every_stream_of_the_account_and_no_other() {
+    let (gone, neighbour) = ("test_mailbox_delete_user", "test_mailbox_delete_user2");
+    let (d1, d2) = ("test_mbx_del_a", "test_mbx_del_b");
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, gone, &[d1, d2]).await;
+    clear_mailbox(&mut queue, neighbour, &[d1]).await;
+
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), gone.into());
+    queue
+        .write_message_to_device_streams(gone, &[d1.to_string(), d2.to_string()], &env)
+        .await
+        .expect("dispatch");
+    let other =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), neighbour.into());
+    queue
+        .write_message_to_device_streams(neighbour, &[d1.to_string()], &other)
+        .await
+        .expect("dispatch neighbour");
+
+    let deleted = queue.delete_mailbox(gone).await.expect("delete");
+    assert_eq!(deleted, 3, "user stream + two device streams");
+
+    let prefix = queue.delivery_queue_prefix.clone();
+    for key in [
+        format!("{prefix}:offline:{gone}"),
+        format!("{prefix}:offline:{gone}:{d1}"),
+        format!("{prefix}:offline:{gone}:{d2}"),
+    ] {
+        assert_eq!(stream_len(&mut queue, &key).await, 0, "{key} survived");
+    }
+    assert_eq!(
+        stream_len(&mut queue, &format!("{prefix}:offline:{neighbour}:{d1}")).await,
+        1,
+        "another account's mailbox was touched"
+    );
+
+    clear_mailbox(&mut queue, neighbour, &[d1]).await;
+}

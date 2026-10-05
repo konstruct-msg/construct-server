@@ -24,11 +24,22 @@ mod tokens;
 
 pub use pow::PowChallengeRecord;
 
+/// How long a message may sit in a mailbox: the hourly age sweep
+/// (`trim_streams_by_age`) deletes anything older. Delivery deletes nothing —
+/// retention is this sweep plus `MAXLEN ~` on XADD (construct-docs
+/// `decisions/minimal-server-delivery.md`). The privacy policy states this number
+/// and the landing's `check-claims.py` reads it from here.
+///
+/// It used to be a literal in messaging-service while `MESSAGE_TTL_DAYS=7` sat in
+/// every env file, read into config and used by nothing — so anyone reading the
+/// config was told a week.
+pub const MAILBOX_MAX_AGE_DAYS: u64 = 30;
+
 #[cfg(test)]
 mod tests;
 
 use anyhow::Result;
-use construct_config::{Config, SECONDS_PER_DAY};
+use construct_config::Config;
 use construct_redis::RedisClient;
 
 /// Message Queue - Redis-only Storage (No Database Persistence)
@@ -54,10 +65,6 @@ use construct_redis::RedisClient;
 #[derive(Clone)]
 pub struct MessageQueue {
     client: RedisClient,
-    /// TTL for queued messages in seconds (configured via message_ttl_days)
-    /// After this period, undelivered messages are automatically deleted by Redis
-    #[allow(dead_code)]
-    message_ttl_seconds: i64,
     offline_queue_prefix: String,
     delivery_queue_prefix: String,
     /// Reference to config for Redis key prefixes (needed for key generation)
@@ -81,15 +88,9 @@ impl MessageQueue {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to Redis: {}", e))?;
 
-        let message_ttl_seconds = config.message_ttl_days * SECONDS_PER_DAY;
-        tracing::info!(
-            "Message queue TTL: {} days ({} seconds)",
-            config.message_ttl_days,
-            message_ttl_seconds
-        );
+        tracing::info!("Mailbox retention: {} days", MAILBOX_MAX_AGE_DAYS);
         Ok(Self {
             client,
-            message_ttl_seconds,
             offline_queue_prefix: config.offline_queue_prefix.clone(),
             delivery_queue_prefix: config.delivery_queue_prefix.clone(),
             config: config.clone(),
@@ -953,7 +954,7 @@ impl MessageQueue {
     /// Trim all offline message streams to remove entries older than `max_age_seconds`.
     ///
     /// Delegates to `DeliveryManager::trim_streams_by_age`. Intended to be called from
-    /// a periodic background task (e.g., every hour) to enforce the 30-day queue TTL.
+    /// a periodic background task (every hour) to enforce `MAILBOX_MAX_AGE_DAYS`.
     pub async fn trim_streams_by_age(&mut self, max_age_seconds: u64) -> Result<u64> {
         delivery::DeliveryManager::new(
             &mut self.client,
@@ -961,6 +962,21 @@ impl MessageQueue {
             self.delivery_queue_prefix.clone(),
         )
         .trim_streams_by_age(max_age_seconds)
+        .await
+    }
+
+    /// Delete every mailbox of `user_id` — the user stream and each per-device
+    /// stream — for account deletion. Returns how many streams existed.
+    ///
+    /// Without this a deleted account's queued messages stayed until the age sweep,
+    /// up to `MAILBOX_MAX_AGE_DAYS`, though the account and its keys were gone.
+    pub async fn delete_mailbox(&mut self, user_id: &str) -> Result<u64> {
+        delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .delete_mailbox(user_id)
         .await
     }
 

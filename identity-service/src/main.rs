@@ -2225,9 +2225,28 @@ impl UserService for IdentityGrpcService {
             }
         }
 
-        construct_server_shared::db::delete_user_account(&self.context.db_pool, &user_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to delete account: {}", e)))?;
+        construct_server_shared::db::delete_user_account(
+            &self.context.db_pool,
+            &user_id,
+            &self.context.config.security.contact_hmac_secret,
+        )
+        .await
+        .map_err(|e| Status::internal(format!("Failed to delete account: {}", e)))?;
+
+        // The mailboxes are in Redis, not in the transaction above. A failure here is
+        // logged, not returned: the account is already gone, a retry would answer
+        // "user not found", and the age sweep removes what is left within
+        // MAILBOX_MAX_AGE_DAYS.
+        {
+            let mut queue = self.context.queue.lock().await;
+            match queue.delete_mailbox(&user_id.to_string()).await {
+                Ok(streams) => tracing::info!(streams, "Account deletion: mailboxes deleted"),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "Account deletion: mailboxes NOT deleted; the age sweep will remove them"
+                ),
+            }
+        }
 
         tracing::info!(
             target: "audit",
