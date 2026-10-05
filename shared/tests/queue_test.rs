@@ -33,7 +33,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         health_port: 8081,
         heartbeat_interval_secs: 60_i64,
         server_registry_ttl_secs: 120_i64,
-        message_ttl_days: 7,
         dedup_safety_margin_hours: 24,
         access_token_ttl_hours: 1,
         session_ttl_days: 30,

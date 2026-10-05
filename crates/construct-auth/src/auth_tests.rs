@@ -93,7 +93,6 @@ mod auth_tests {
             health_port: 8081,
             heartbeat_interval_secs: 60,
             server_registry_ttl_secs: 120,
-            message_ttl_days: 7,
             dedup_safety_margin_hours: 2,
             access_token_ttl_hours: ttl_hours,
             session_ttl_days: 30,

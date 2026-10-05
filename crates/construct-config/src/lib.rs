@@ -90,7 +90,6 @@ pub struct Config {
     pub health_port: u16,
     pub heartbeat_interval_secs: i64,
     pub server_registry_ttl_secs: i64,
-    pub message_ttl_days: i64,
 
     /// Deduplication key safety margin in hours
     /// Added to the message dedup window to prevent edge-case race conditions
@@ -290,10 +289,6 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_SERVER_REGISTRY_TTL_SECS),
 
-            message_ttl_days: std::env::var("MESSAGE_TTL_DAYS")
-                .ok()
-                .and_then(|d| d.parse().ok())
-                .unwrap_or(DEFAULT_MESSAGE_TTL_DAYS),
             dedup_safety_margin_hours: std::env::var("DEDUP_SAFETY_MARGIN_HOURS")
                 .ok()
                 .and_then(|h| h.parse().ok())

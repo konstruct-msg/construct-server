@@ -262,9 +262,23 @@ pub async fn find_discoverable_user_by_username_hash(
 /// keys and push tokens deleted, which is what makes it unusable. Its device_id
 /// remains in the log, referring to nothing.
 ///
+/// **Contact links go too, both directions.** `contact_links` is keyed by
+/// `contact_link_hmac` and has no foreign key to `users`, so nothing cascaded to
+/// it: until 2026-10-05 every deletion left the account's edges — its own and
+/// every contact's edge pointing at it — in the table, and in every backup after
+/// it, while the privacy policy said they were removed. The rows are found by the
+/// account's HMAC, which is why the secret is a parameter.
+///
+/// Not here: the account's Redis mailboxes. They are not in this database; the
+/// caller clears them (`MessageQueue::delete_mailbox`).
+///
 /// Everything runs in one transaction: a partial account deletion is worse than
 /// a failed one, because it looks finished.
-pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
+pub async fn delete_user_account(
+    pool: &DbPool,
+    user_id: &Uuid,
+    contact_hmac_secret: &[u8],
+) -> Result<()> {
     let mut tx = pool.begin().await.context("Failed to begin deletion")?;
 
     let devices: Vec<String> =
@@ -314,6 +328,13 @@ pub async fn delete_user_account(pool: &DbPool, user_id: &Uuid) -> Result<()> {
         .await
         .context("Failed to delete account devices")?;
     }
+
+    let own_hmac = contact_link_hmac(contact_hmac_secret, user_id);
+    sqlx::query("DELETE FROM contact_links WHERE user_hmac = $1 OR peer_hmac = $1")
+        .bind(&own_hmac[..])
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete contact links")?;
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
@@ -1915,5 +1936,98 @@ mod tests {
             "migration 068 must cap sealed_metadata at {SEALED_METADATA_MAX_BYTES} bytes \
              to match SEALED_METADATA_MAX_BYTES; looked for `{needle}`"
         );
+    }
+}
+
+/// Account deletion against a real database. Needs Postgres with the migrations
+/// applied; CI's `cargo test` does not run ignored tests, so run it by hand:
+///
+///   DATABASE_URL=postgres://… cargo test -p construct-db --lib -- --ignored deletion
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    const SECRET: &[u8] = b"deletion-test-contact-hmac-secret";
+
+    async fn pool() -> DbPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect")
+    }
+
+    async fn user(pool: &DbPool) -> Uuid {
+        sqlx::query_scalar("INSERT INTO users DEFAULT VALUES RETURNING id")
+            .fetch_one(pool)
+            .await
+            .expect("insert user")
+    }
+
+    async fn link(pool: &DbPool, from: &Uuid, to: &Uuid) {
+        add_contact_link(
+            pool,
+            &contact_link_hmac(SECRET, from),
+            &contact_link_hmac(SECRET, to),
+        )
+        .await
+        .expect("insert link");
+    }
+
+    async fn links_touching(pool: &DbPool, id: &Uuid) -> i64 {
+        let h = contact_link_hmac(SECRET, id);
+        sqlx::query_scalar(
+            "SELECT count(*) FROM contact_links WHERE user_hmac = $1 OR peer_hmac = $1",
+        )
+        .bind(&h[..])
+        .fetch_one(pool)
+        .await
+        .expect("count")
+    }
+
+    /// The deleted account's edges go in both directions; a third account's edge
+    /// with someone else stays. Mutation: drop the `contact_links` DELETE, or its
+    /// `OR peer_hmac` half — the first or second assertion reddens.
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn deletion_removes_contact_links_both_ways_and_only_those() {
+        let pool = pool().await;
+        let (gone, friend, other) = (user(&pool).await, user(&pool).await, user(&pool).await);
+        link(&pool, &gone, &friend).await;
+        link(&pool, &friend, &gone).await;
+        link(&pool, &friend, &other).await;
+        link(&pool, &other, &friend).await;
+        assert!(
+            are_mutual_contacts(
+                &pool,
+                &contact_link_hmac(SECRET, &gone),
+                &contact_link_hmac(SECRET, &friend)
+            )
+            .await
+            .unwrap()
+        );
+
+        delete_user_account(&pool, &gone, SECRET)
+            .await
+            .expect("delete");
+
+        assert_eq!(
+            links_touching(&pool, &gone).await,
+            0,
+            "the account's links remain"
+        );
+        assert_eq!(
+            links_touching(&pool, &other).await,
+            2,
+            "another account's links were touched"
+        );
+        assert!(get_user_by_id(&pool, &gone).await.unwrap().is_none());
+
+        for id in [friend, other] {
+            delete_user_account(&pool, &id, SECRET)
+                .await
+                .expect("cleanup");
+        }
     }
 }
