@@ -70,9 +70,18 @@ pub struct ApsData {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AlertData {
-    pub title: String,
-    pub body: String,
+#[serde(untagged)]
+pub enum AlertData {
+    /// Text the server wrote. Lands on the lock screen in whatever language the server chose.
+    Text { title: String, body: String },
+    /// Keys into the app's `Localizable.strings`; the device writes the text itself, in the
+    /// reader's language. The keys are the app's, so renaming one there blanks the banner here.
+    Localized {
+        #[serde(rename = "title-loc-key")]
+        title_loc_key: &'static str,
+        #[serde(rename = "loc-key")]
+        loc_key: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,7 +154,7 @@ impl ApnsPayload {
         Self {
             aps: ApsData {
                 content_available: None,
-                alert: Some(AlertData {
+                alert: Some(AlertData::Text {
                     title: sender_name.to_string(),
                     body: "New message".to_string(), // Generic, no content!
                 }),

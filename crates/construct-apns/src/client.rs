@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use super::types::{ApnsPayload, NotificationPriority, PushType};
+use super::types::{AlertData, ApnsPayload, NotificationPriority, PushType};
 use construct_config::{ApnsConfig, ApnsEnvironment};
 
 /// Error type returned by APNs send operations.
@@ -189,16 +189,26 @@ impl ApnsClient {
                     .build(device_token, options)
             }
             PushType::Visible => {
-                // Use alert title/body from payload; fall back to generic strings (privacy-safe).
-                let (title, body) = if let Some(ref alert) = payload.aps.alert {
-                    (alert.title.as_str(), alert.body.as_str())
-                } else {
-                    ("Construct", "New message")
+                // Alert from payload; fall back to generic strings (privacy-safe).
+                let builder = match payload.aps.alert {
+                    Some(AlertData::Localized {
+                        title_loc_key,
+                        loc_key,
+                    }) => DefaultNotificationBuilder::new()
+                        .title_loc_key(title_loc_key)
+                        .loc_key(loc_key),
+                    Some(AlertData::Text {
+                        ref title,
+                        ref body,
+                    }) => DefaultNotificationBuilder::new()
+                        .title(title.as_str())
+                        .body(body.as_str()),
+                    None => DefaultNotificationBuilder::new()
+                        .title("Konstruct")
+                        .body("New message"),
                 };
                 let sound = payload.aps.sound.as_deref().unwrap_or("default");
-                let mut builder = DefaultNotificationBuilder::new()
-                    .title(title)
-                    .body(body)
+                let mut builder = builder
                     .sound(sound)
                     .content_available() // wake app even for visible alerts (lock screen + killed)
                     .mutable_content(); // lets iOS notification extension process it in foreground
