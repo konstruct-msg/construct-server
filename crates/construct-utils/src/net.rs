@@ -109,4 +109,42 @@ pub fn grpc_server(
         .initial_connection_window_size(4 * 1024 * 1024) // 4 MB (default 64 KB)
         .initial_stream_window_size(2 * 1024 * 1024) // 2 MB (default 64 KB)
         .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        // tonic passes `None` here by default, which reads as no limit at all — one
+        // connection could open streams until memory ran out. A client holds one
+        // MessageStream and a handful of unary calls at a time.
+        .max_concurrent_streams(Some(MAX_CONCURRENT_STREAMS))
+        // h2's default is 16 MiB of headers per request, decoded before any handler runs.
+        // gRPC metadata here is a bearer token and a few ids.
+        .http2_max_header_list_size(Some(MAX_HEADER_LIST_BYTES))
+}
+
+/// Streams one HTTP/2 connection may have open at once.
+pub const MAX_CONCURRENT_STREAMS: u32 = 128;
+/// Bytes of request headers (gRPC metadata) accepted per request.
+pub const MAX_HEADER_LIST_BYTES: u32 = 64 * 1024;
+
+/// Largest request message each service decodes, set on its `*Server` with
+/// `max_decoding_message_size`. tonic's default is 4 MiB per message, applied before any
+/// handler — and so before authentication on the calls that have none. Each value is the
+/// largest legitimate request with room to spare (pre-release hardening item 3,
+/// construct-docs `security/pre-release-hardening.md`).
+pub mod decode_limits {
+    /// Registration is under 10 KiB (keys and one hybrid signature); the recovery bundle is
+    /// capped at 4 KiB.
+    pub const IDENTITY: usize = 256 * 1024;
+    /// `UploadPreKeys` at its count cap: 200 Kyber one-time keys at ~1.65 KiB plus 200 classic
+    /// ones, the Kyber signed pre-key and its hybrid signature — about 0.4 MiB.
+    pub const KEY: usize = 1024 * 1024;
+    /// One sealed or identified message; ~100× a real one. Unchanged from before.
+    pub const MESSAGING: usize = 512 * 1024;
+    /// Device and VoIP tokens, ids, a badge count.
+    pub const NOTIFICATION: usize = 64 * 1024;
+    /// A report may carry the message it is about, so the same ceiling as messaging.
+    pub const SENTINEL: usize = 512 * 1024;
+    /// MLS key packages, commits and channel posts.
+    pub const GROUP: usize = 1024 * 1024;
+    /// SDP offers and answers, ICE candidates.
+    pub const SIGNALING: usize = 256 * 1024;
+    /// Capability and voucher requests.
+    pub const VEIL: usize = 64 * 1024;
 }
