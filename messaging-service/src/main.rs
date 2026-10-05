@@ -294,7 +294,13 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 let mut queue = queue_clone.lock().await;
-                match queue.trim_streams_by_age(30 * 24 * 3600).await {
+                match queue
+                    .trim_streams_by_age(
+                        construct_queue::MAILBOX_MAX_AGE_DAYS
+                            * construct_config::SECONDS_PER_DAY as u64,
+                    )
+                    .await
+                {
                     Ok(n) => {
                         if n > 0 {
                             tracing::info!(trimmed = n, "Queue TTL: trimmed old messages");
