@@ -314,42 +314,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // The same 30 days, applied to the Postgres side of the same promise.
-    //
-    // `delivery_pending` is the DB fallback for receipt routing: core.rs inserts a
-    // row per message with `expires_at = NOW() + 30 days`, and until 2026-08-13
-    // nothing ever deleted one. 4710 rows on the server, 4416 already expired,
-    // the oldest due to go on 2026-04-15 — four months of receipt-routing hashes
-    // kept because the expiry was written down and never enforced.
-    //
-    // The rows are written here with raw SQL, so they are swept here with raw
-    // SQL rather than a separate crate for one DELETE.
-    {
-        let pool = Arc::clone(&context.db_pool);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                match sqlx::query("DELETE FROM delivery_pending WHERE expires_at < NOW()")
-                    .execute(&*pool)
-                    .await
-                {
-                    Ok(r) if r.rows_affected() > 0 => {
-                        tracing::info!(
-                            deleted = r.rows_affected(),
-                            "Swept expired delivery_pending"
-                        )
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "delivery_pending sweep failed (non-critical)")
-                    }
-                }
-            }
-        });
-    }
-
     // HTTP: health/metrics + federation S2S only.
     // Client APIs are gRPC (MessagingService, NotificationService, MediaService).
     let app = Router::new()

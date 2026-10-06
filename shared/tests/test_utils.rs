@@ -39,7 +39,6 @@ use construct_server_shared::{
 use construct_utils::log_safe_id;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_core::Stream;
-use hmac::{Hmac, Mac, digest::KeyInit};
 use rand_core::OsRng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1163,11 +1162,6 @@ async fn dispatch_envelope_for_test(
         );
     }
 
-    if !sender_id.is_empty()
-        && let Err(e) = queue.store_message_sender(message_id, sender_id).await
-    {
-        tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
-    }
     drop(queue);
 
     let elapsed = t_start.elapsed();
@@ -1179,37 +1173,5 @@ async fn dispatch_envelope_for_test(
         "Message dispatched"
     );
 
-    if !sender_id.is_empty() {
-        let hash_salt = app_context.config.logging.hash_salt.clone();
-        let msg_id = message_id.clone();
-        let snd_id = sender_id.clone();
-        let pool = app_context.db_pool.clone();
-        tokio::spawn(async move {
-            let message_hash = receipt_routing_hash(&msg_id, &hash_salt);
-            let result = sqlx::query(
-                "INSERT INTO delivery_pending (message_hash, sender_id, expires_at) \
-                 VALUES ($1, $2, NOW() + INTERVAL '30 days') \
-                 ON CONFLICT (message_hash) DO NOTHING",
-            )
-            .bind(&message_hash)
-            .bind(&snd_id)
-            .execute(&*pool)
-            .await;
-            if let Err(e) = result {
-                tracing::warn!(error = %e, message_id = %msg_id, "Failed to persist receipt sender to DB (non-critical)");
-            }
-        });
-    }
-
     Ok(())
-}
-
-fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
-    type HmacSha256 = Hmac<Sha256>;
-    // Keep in sync with messaging-service `core::receipt_routing_hash`: never
-    // substitute a fixed "fallback" HMAC key.
-    let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
-        .expect("HMAC-SHA256 accepts arbitrary-length keys");
-    mac.update(message_id.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
 }

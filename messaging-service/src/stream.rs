@@ -7,7 +7,7 @@ use tonic::Status;
 use crate::context::MessagingServiceContext;
 use crate::core;
 use crate::envelope::{convert_envelope_to_proto, dispatch_sealed_sender};
-use crate::receipts::{build_receipt_response, relay_delivery_receipt};
+use crate::receipts::build_receipt_response;
 use crate::sealed_ip::{SealedIpDecision, check_sealed_ip_limit};
 use construct_server_shared::shared::proto::services::v1 as proto;
 
@@ -164,9 +164,7 @@ pub(crate) async fn handle_stream_request(
                 // Prefer client-provided message_id for idempotency; generate only as fallback.
                 use construct_server_shared::shared::proto::core::v1 as proto_core;
                 let message_id = match &envelope.message_id_type {
-                    Some(proto_core::envelope::MessageIdType::MessageId(id))
-                        if !id.is_empty() =>
-                    {
+                    Some(proto_core::envelope::MessageIdType::MessageId(id)) if !id.is_empty() => {
                         id.clone()
                     }
                     _ => uuid::Uuid::new_v4().to_string(),
@@ -200,16 +198,10 @@ pub(crate) async fn handle_stream_request(
                     // through (mirrors the previous gRPC-client fail-open
                     // behaviour when sentinel-service was unreachable).
                     let (allowed, reason, retry_after) = match sentinel
-                        .check_send_permission(
-                            sender_device_id,
-                            target,
-                            Some(&uid.to_string()),
-                        )
+                        .check_send_permission(sender_device_id, target, Some(&uid.to_string()))
                         .await
                     {
-                        Ok(perm) => {
-                            (perm.allowed, perm.denial_reason, perm.retry_after_seconds)
-                        }
+                        Ok(perm) => (perm.allowed, perm.denial_reason, perm.retry_after_seconds),
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
@@ -223,7 +215,11 @@ pub(crate) async fn handle_stream_request(
                     if !allowed {
                         let (error_code, retryable, retry_after_ms) = if retry_after > 0 {
                             tracing::info!(sender = %uid, retry_after_secs = retry_after, reason = %reason, "Sentinel: stream send denied (rate limited)");
-                            (proto::ErrorCode::RateLimit, true, Some((retry_after * 1000).into()))
+                            (
+                                proto::ErrorCode::RateLimit,
+                                true,
+                                Some((retry_after * 1000).into()),
+                            )
                         } else {
                             tracing::info!(sender = %uid, reason = %reason, "Sentinel: stream send denied (banned or blocked)");
                             (proto::ErrorCode::Blocked, false, None)
@@ -249,15 +245,24 @@ pub(crate) async fn handle_stream_request(
 
                 // ── Rate limiting (same policy as send_message gRPC) ────────
                 if let Ok(mut redis_conn) = context.redis_conn().await {
-                    let trust =
-                        crate::trust::get_trust_level(&mut redis_conn, &context.db_pool, *uid, &context.config.messaging)
-                            .await;
+                    let trust = crate::trust::get_trust_level(
+                        &mut redis_conn,
+                        &context.db_pool,
+                        *uid,
+                        &context.config.messaging,
+                    )
+                    .await;
 
-                    if let Err(pow_level) =
-                        crate::trust::check_hourly_rate(&mut redis_conn, &uid.to_string(), trust.hourly_limit(&context.config.messaging), &context.config.messaging)
-                            .await
+                    if let Err(pow_level) = crate::trust::check_hourly_rate(
+                        &mut redis_conn,
+                        &uid.to_string(),
+                        trust.hourly_limit(&context.config.messaging),
+                        &context.config.messaging,
+                    )
+                    .await
                     {
-                        let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
+                        let (challenge, expires_at) =
+                            crate::trust::make_challenge(pow_level, &context.config.messaging);
                         tracing::info!(
                             sender = %uid,
                             pow_level,
@@ -266,7 +271,10 @@ pub(crate) async fn handle_stream_request(
                         let error = proto::MessageError {
                             message_id: message_id.clone(),
                             error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: format!("Rate limit exceeded — solve PoW level {}", pow_level),
+                            error_message: format!(
+                                "Rate limit exceeded — solve PoW level {}",
+                                pow_level
+                            ),
                             retryable: true,
                             retry_after_ms: None,
                         };
@@ -286,11 +294,17 @@ pub(crate) async fn handle_stream_request(
                     }
 
                     if let Some(fanout_limit) = trust.fanout_limit(&context.config.messaging)
-                        && let Err(pow_level) =
-                            crate::trust::check_fanout_rate(&mut redis_conn, &uid.to_string(), &recipient_id, fanout_limit, &context.config.messaging)
-                                .await
+                        && let Err(pow_level) = crate::trust::check_fanout_rate(
+                            &mut redis_conn,
+                            &uid.to_string(),
+                            &recipient_id,
+                            fanout_limit,
+                            &context.config.messaging,
+                        )
+                        .await
                     {
-                        let (challenge, expires_at) = crate::trust::make_challenge(pow_level, &context.config.messaging);
+                        let (challenge, expires_at) =
+                            crate::trust::make_challenge(pow_level, &context.config.messaging);
                         tracing::info!(
                             sender = %uid,
                             pow_level,
@@ -299,7 +313,10 @@ pub(crate) async fn handle_stream_request(
                         let error = proto::MessageError {
                             message_id: message_id.clone(),
                             error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: format!("Fanout limit exceeded — solve PoW level {}", pow_level),
+                            error_message: format!(
+                                "Fanout limit exceeded — solve PoW level {}",
+                                pow_level
+                            ),
                             retryable: true,
                             retry_after_ms: None,
                         };
@@ -322,15 +339,16 @@ pub(crate) async fn handle_stream_request(
                 use construct_server_shared::message::types::{
                     MessageEnvelope, ProtoEnvelopeContext,
                 };
-                let msg_envelope =
-                    MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
-                        sender_id: uid.to_string(),
-                        recipient_id,
-                        message_id: message_id.clone(),
-                        encrypted_payload: envelope.encrypted_payload.to_vec(),
-                        content_type: envelope.content_type,
-                        recipient_device: core::named_recipient_device(envelope.recipient_device.as_ref()),
-                    });
+                let msg_envelope = MessageEnvelope::from_proto_envelope(&ProtoEnvelopeContext {
+                    sender_id: uid.to_string(),
+                    recipient_id,
+                    message_id: message_id.clone(),
+                    encrypted_payload: envelope.encrypted_payload.to_vec(),
+                    content_type: envelope.content_type,
+                    recipient_device: core::named_recipient_device(
+                        envelope.recipient_device.as_ref(),
+                    ),
+                });
 
                 let app_context = Arc::new(context.to_app_context());
                 match core::dispatch_envelope(
@@ -411,18 +429,10 @@ pub(crate) async fn handle_stream_request(
         // Subscribe/Unsubscribe: conversation_ids are intentionally not logged or stored
         // to avoid leaking the client's contact graph to the server.
         // All messages for this user are already routed to their Redis stream regardless.
-        Some(StreamReq::Receipt(receipt)) => {
-            if user_id.is_none() {
-                tracing::warn!("Receipt received but user_id is unknown — receipt dropped (missing auth metadata)");
-            } else if let Some(direct) = receipt.receipt_type.and_then(|r| {
-                if let construct_server_shared::shared::proto::signaling::v1::delivery_receipt::ReceiptType::Direct(d) = r {
-                    Some(d)
-                } else {
-                    None
-                }
-            }) && let Some(uid) = user_id {
-                relay_delivery_receipt(context, direct, uid.to_string()).await?;
-            }
+        // A plaintext receipt on the stream is not relayed (see `receipts.rs`): receipts travel
+        // end-to-end. Dropped without reading it, so nothing in it reaches a log.
+        Some(StreamReq::Receipt(_)) => {
+            tracing::debug!("Plaintext stream receipt dropped — receipts travel end-to-end");
         }
         Some(StreamReq::Subscribe(sub)) => {
             // conversation_ids are intentionally not logged or stored

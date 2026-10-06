@@ -51,7 +51,7 @@ async fn try_redis() -> Option<redis::aio::ConnectionManager> {
 async fn try_db_pool() -> Option<Arc<DbPool>> {
     match DbPool::connect(&database_url()).await {
         Ok(pool) => {
-            // Best-effort migrations so device lookup / delivery_pending exist.
+            // Best-effort migrations so device lookup exists.
             // Failure is non-fatal: sealed path degrades device fan-out to user stream.
             let _ = sqlx::migrate!("../shared/migrations").run(&pool).await;
             Some(Arc::new(pool))
@@ -659,6 +659,53 @@ async fn i4_delivery_tag_replay_is_silent_success() {
 
 // ── I5/I6: no receipt map + stream entry present for sealed ──────────────────
 
+// ── I7: a message that names its sender leaves no message → sender map ───────
+//
+// The map existed only to route a plaintext stream receipt back, and the server no longer relays
+// those (receipts.rs). Mutation: restore `store_message_sender` in `dispatch_envelope` — this
+// sees the key.
+
+#[tokio::test]
+#[serial]
+async fn i7_named_sender_leaves_no_sender_mapping() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let sender = uuid::Uuid::new_v4().to_string();
+    let recipient = uuid::Uuid::new_v4();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let envelope = construct_message::MessageEnvelope::new_direct_message(
+        message_id.clone(),
+        sender,
+        recipient.to_string(),
+        vec![0u8; 32],
+        0,
+        b"ciphertext".to_vec(),
+        String::new(),
+    );
+
+    let app_context = Arc::new(h.ctx.to_app_context());
+    crate::core::dispatch_envelope(&app_context, envelope, None)
+        .await
+        .expect("dispatch");
+
+    let mut conn = h.ctx.redis_conn.clone();
+    assert!(
+        stream_len(&mut conn, &recipient).await >= 1,
+        "the message must reach the stream, or the check below proves nothing"
+    );
+    assert!(
+        !receipt_sender_exists(&mut conn, &message_id).await,
+        "I7: no receipt:sender mapping for a message with a named sender"
+    );
+
+    let _: () = redis::cmd("DEL")
+        .arg(format!("delivery:offline:{recipient}"))
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(());
+}
+
 #[tokio::test]
 #[serial]
 async fn i5_i6_sealed_leaves_no_sender_mapping_but_writes_stream() {
@@ -683,58 +730,6 @@ async fn i5_i6_sealed_leaves_no_sender_mapping_but_writes_stream() {
         !receipt_sender_exists(&mut conn, &resp.message_id).await,
         "I5: no receipt:sender mapping for sealed"
     );
-
-    // Queue API agrees
-    {
-        let mut q = h.ctx.queue.lock().await;
-        let mapped = q
-            .get_message_sender(&resp.message_id)
-            .await
-            .expect("get_message_sender");
-        assert!(
-            mapped.is_none(),
-            "get_message_sender must be None for sealed (got {mapped:?})"
-        );
-    }
-
-    // delivery_pending only written when sender non-empty; give spawn a tick then check
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    if let Ok(row) = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM delivery_pending WHERE sender_id <> '' AND message_hash IS NOT NULL",
-    )
-    .fetch_one(&*h.ctx.db_pool)
-    .await
-    {
-        // We cannot easily compute message_hash without salt path; just ensure table is queryable.
-        let _ = row;
-    }
-    // Targeted: no row for this message's routing hash
-    let salt = &h.ctx.config.logging.hash_salt;
-    let message_hash = {
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac =
-            HmacSha256::new_from_slice(salt.as_bytes()).expect("hmac accepts any key length");
-        mac.update(resp.message_id.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
-    };
-    match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM delivery_pending WHERE message_hash = $1",
-    )
-    .bind(&message_hash)
-    .fetch_one(&*h.ctx.db_pool)
-    .await
-    {
-        Ok(count) => assert_eq!(
-            count, 0,
-            "I5: delivery_pending must not record sealed messages"
-        ),
-        Err(e) => {
-            // Table missing if migrations failed — non-fatal for matrix when only Redis is up.
-            eprintln!("sealed_matrix: delivery_pending check skipped ({e})");
-        }
-    }
 
     let _: () = redis::cmd("DEL")
         .arg(format!("delivery:offline:{recipient}"))
