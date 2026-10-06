@@ -223,12 +223,6 @@ pub async fn dispatch_envelope(
             .inc_by(device_ids.len() as u64);
     }
 
-    if !sender_id.is_empty()
-        && let Err(e) = queue.store_message_sender(message_id, sender_id).await
-    {
-        tracing::warn!(error = %e, message_id = %message_id, "Failed to store receipt sender mapping in Redis (non-critical)");
-    }
-
     // Presence check under the same lock as the stream write so we observe the
     // online flag set by an active MessageStream on this (or another) instance.
     // Redis error → treat as offline (fail-open: still send APNs wake).
@@ -263,29 +257,6 @@ pub async fn dispatch_envelope(
     MESSAGE_DELIVERY_TIME.observe(elapsed.as_secs_f64());
 
     // ── Non-critical background tasks ─────────────────────────────────────────
-    // DB fallback for receipt routing (survives Redis restarts).
-    if !sender_id.is_empty() {
-        let hash_salt = app_context.config.logging.hash_salt.clone();
-        let msg_id = message_id.clone();
-        let snd_id = sender_id.clone();
-        let pool = app_context.db_pool.clone();
-        tokio::spawn(async move {
-            let message_hash = receipt_routing_hash(&msg_id, &hash_salt);
-            let result = sqlx::query(
-                "INSERT INTO delivery_pending (message_hash, sender_id, expires_at) \
-                 VALUES ($1, $2, NOW() + INTERVAL '30 days') \
-                 ON CONFLICT (message_hash) DO NOTHING",
-            )
-            .bind(&message_hash)
-            .bind(&snd_id)
-            .execute(&*pool)
-            .await;
-            if let Err(e) = result {
-                tracing::warn!(error = %e, message_id = %msg_id, "Failed to persist receipt sender to DB (non-critical)");
-            }
-        });
-    }
-
     // Silent APNs only when the recipient has no live MessageStream. Online
     // recipients are woken via inbox:wakeup; pushing them causes reconnect storms.
     if let Some(notif_ctx) = notification_context {
@@ -325,29 +296,9 @@ pub async fn dispatch_envelope(
     Ok(())
 }
 
-/// Compute HMAC-SHA256(message_id, salt) as a hex string for delivery_pending lookups.
-/// UUIDs have 122 bits of entropy — brute force is impractical without the salt.
-///
-/// `salt` should come from configured `LOG_HASH_SALT` / `logging.hash_salt`.
-/// HMAC-SHA256 accepts any key length (including empty); we never substitute a
-/// fixed global key such as `"fallback"` — that would make hashes predictable
-/// across all deployments that hit a key-init failure path.
-pub fn receipt_routing_hash(message_id: &str, salt: &str) -> String {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-
-    let mut mac = HmacSha256::new_from_slice(salt.as_bytes())
-        .expect("HMAC-SHA256 accepts arbitrary-length keys");
-    mac.update(message_id.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_device_id, receipt_routing_hash, select_target_devices, should_send_wake_push,
-    };
+    use super::{normalize_device_id, select_target_devices, should_send_wake_push};
 
     #[test]
     fn an_empty_wire_device_id_is_no_device() {
@@ -436,45 +387,5 @@ mod tests {
     #[test]
     fn wake_push_sent_when_recipient_offline() {
         assert!(should_send_wake_push(false));
-    }
-
-    #[test]
-    fn receipt_hash_is_stable_for_same_inputs() {
-        let a = receipt_routing_hash("msg-1", "deploy-salt-alpha");
-        let b = receipt_routing_hash("msg-1", "deploy-salt-alpha");
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64); // sha256 hex
-    }
-
-    #[test]
-    fn receipt_hash_differs_when_salt_differs() {
-        let a = receipt_routing_hash("msg-1", "salt-a");
-        let b = receipt_routing_hash("msg-1", "salt-b");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn receipt_hash_does_not_use_literal_fallback_key() {
-        // The old bug substituted b"fallback" when key init "failed".
-        // With a real salt, the MAC must not equal HMAC(message, "fallback").
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-
-        let with_salt = receipt_routing_hash("msg-1", "production-salt");
-        let mut mac = HmacSha256::new_from_slice(b"fallback").unwrap();
-        mac.update(b"msg-1");
-        let with_fallback = hex::encode(mac.finalize().into_bytes());
-        assert_ne!(
-            with_salt, with_fallback,
-            "routing hash must not collapse to the fixed fallback key"
-        );
-    }
-
-    #[test]
-    fn empty_salt_still_computes_without_panic() {
-        // Empty salt is a misconfig, but must not panic or switch to a fixed key.
-        let h = receipt_routing_hash("msg-1", "");
-        assert_eq!(h.len(), 64);
     }
 }
