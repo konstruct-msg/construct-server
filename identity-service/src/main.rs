@@ -193,6 +193,9 @@ fn app_error_to_status(e: construct_error::AppError) -> Status {
     use construct_error::AppError;
     match &e {
         AppError::Auth(msg) => Status::unauthenticated(msg.clone()),
+        AppError::DeviceRefused(refusal) => {
+            construct_server_shared::auth_utils::device_refusal_status(*refusal)
+        }
         AppError::Validation(msg) => Status::invalid_argument(msg.clone()),
         AppError::NotFound(msg) => Status::not_found(msg.clone()),
         AppError::TooManyRequests(msg) => Status::resource_exhausted(msg.clone()),
@@ -1444,9 +1447,11 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
             "Device revoked"
         );
 
+        // The row as it was read above, before deactivation. Never the primary device — that
+        // was refused above — so no primary id is needed to report it.
         Ok(Response::new(proto::RevokeDeviceResponse {
             success: deactivated,
-            revoked_device: None,
+            revoked_device: Some(device_info(&device, claims.device_id.as_deref(), None)),
         }))
     }
 

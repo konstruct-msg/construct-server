@@ -411,6 +411,28 @@ message RevokeDeviceResponse {
   DeviceInfo revoked_device = 2;
 }
 
+// DeviceRefusal - why the server refused a device: AuthenticateDevice, RefreshToken, or an open
+// MessageStream ended under it.
+//
+// Carried on the UNAUTHENTICATED status, as the decimal number of the value in the trailing
+// metadata key `construct-device-refusal` (e.g. `construct-device-refusal: 1`). The status message
+// stays the human-readable text ("Device is inactive", "Device not found") and no client branches
+// on it: a client deciding anything — above all, whether to erase its data — reads this number.
+// A status without the key is "unspecified", and a client must not erase on it.
+enum DeviceRefusal {
+  // No reason given (must be 0). Not grounds for erasing anything.
+  DEVICE_REFUSAL_UNSPECIFIED = 0;
+
+  // The device's row was deactivated: RevokeDevice from another device of the account, or Logout
+  // of this device's session. Permanent — the server never reactivates a row — so this is the one
+  // refusal a client may answer by erasing what the account left on it.
+  DEVICE_REFUSAL_REMOVED = 1;
+
+  // The server has no row for this device. Not removal: an unapproved join request answers this
+  // too, and so would a server that lost its rows. Not grounds for erasing.
+  DEVICE_REFUSAL_NOT_FOUND = 2;
+}
+
 // UpdatePushTokenRequest - Update push token
 message UpdatePushTokenRequest {
   // Device ID

@@ -170,6 +170,18 @@ pub fn extract_user_and_device(
     Ok((caller.user_id, device_id))
 }
 
+/// The status the server refuses a device with: UNAUTHENTICATED, the text it always had, and the
+/// reason's number in the trailing metadata key `construct-device-refusal`. A client decides
+/// whether to erase itself from the number (construct-protos `DeviceRefusal`), never the text.
+pub fn device_refusal_status(refusal: construct_error::DeviceRefusal) -> Status {
+    let mut status = Status::unauthenticated(refusal.message());
+    status.metadata_mut().insert(
+        construct_error::DeviceRefusal::METADATA_KEY,
+        tonic::metadata::MetadataValue::from(refusal as i32),
+    );
+    status
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -448,5 +460,30 @@ mod tests {
         let meta = MetadataMap::new();
         let err = extract_user_id(&Arc::new(auth), &meta).expect_err("no auth");
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// The numbers are construct-protos `DeviceRefusal`'s. Mutation: swap `Removed` and
+    /// `NotFound` in construct-error — every client erases on "no row" and keeps a removed device.
+    #[test]
+    fn device_refusal_numbers_are_the_protos() {
+        use crate::shared::proto::services::v1::DeviceRefusal as Wire;
+        use construct_error::DeviceRefusal;
+        assert_eq!(DeviceRefusal::Removed as i32, Wire::Removed as i32);
+        assert_eq!(DeviceRefusal::NotFound as i32, Wire::NotFound as i32);
+    }
+
+    /// Mutation: drop the metadata insert — the status reads as before and no client erases.
+    #[test]
+    fn a_removed_device_is_refused_with_its_number() {
+        let status = device_refusal_status(construct_error::DeviceRefusal::Removed);
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        assert_eq!(status.message(), "Device is inactive");
+        assert_eq!(
+            status
+                .metadata()
+                .get(construct_error::DeviceRefusal::METADATA_KEY)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
     }
 }

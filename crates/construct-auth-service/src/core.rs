@@ -4,7 +4,7 @@ use crate::devices;
 use axum::Json;
 use chrono::Utc;
 use construct_context::AppContext;
-use construct_error::AppError;
+use construct_error::{AppError, DeviceRefusal};
 use construct_metrics::AUTH_FAILURES_TOTAL;
 use construct_utils::log_safe_id;
 use serde::Serialize;
@@ -89,11 +89,11 @@ pub async fn refresh_tokens(
                 AppError::internal("Cannot verify device")
             })?
             .map(|device| device.is_active);
-        if let Some(reason) = refresh_refusal(active) {
+        if let Some(refusal) = refresh_refusal(active) {
             AUTH_FAILURES_TOTAL
                 .with_label_values(&["refresh_device_inactive"])
                 .inc();
-            return Err(AppError::auth(reason));
+            return Err(AppError::DeviceRefused(refusal));
         }
     }
 
@@ -244,11 +244,12 @@ pub async fn authenticate_device(
 }
 
 /// Why a refresh is refused for the device its token names: `active` is that device's row —
-/// `None` when there is none. Worded as `AuthenticateDevice` words it, since clients match it.
-pub(crate) fn refresh_refusal(active: Option<bool>) -> Option<&'static str> {
+/// `None` when there is none. The same refusal `AuthenticateDevice` gives, so a client reads one
+/// signal for "this device was removed".
+pub(crate) fn refresh_refusal(active: Option<bool>) -> Option<DeviceRefusal> {
     match active {
-        None => Some("Device not found"),
-        Some(false) => Some("Device is inactive"),
+        None => Some(DeviceRefusal::NotFound),
+        Some(false) => Some(DeviceRefusal::Removed),
         Some(true) => None,
     }
 }
@@ -554,6 +555,7 @@ mod deactivation_guard_tests {
 #[cfg(test)]
 mod refresh_refusal_tests {
     use super::refresh_refusal;
+    use construct_error::DeviceRefusal;
 
     #[test]
     fn an_active_device_refreshes() {
@@ -562,12 +564,12 @@ mod refresh_refusal_tests {
 
     /// Mutation: let an inactive device through — a removed device lives forever again.
     #[test]
-    fn a_removed_device_is_refused_with_the_authenticate_device_wording() {
-        assert_eq!(refresh_refusal(Some(false)), Some("Device is inactive"));
+    fn a_removed_device_is_refused_as_removed() {
+        assert_eq!(refresh_refusal(Some(false)), Some(DeviceRefusal::Removed));
     }
 
     #[test]
     fn an_unknown_device_is_refused() {
-        assert_eq!(refresh_refusal(None), Some("Device not found"));
+        assert_eq!(refresh_refusal(None), Some(DeviceRefusal::NotFound));
     }
 }
