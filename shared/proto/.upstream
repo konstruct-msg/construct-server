@@ -4,4 +4,4 @@
 # truth. Editing one here is the drift this file exists to make visible: CI re-vendors this commit
 # and fails on any difference.
 repo=https://github.com/konstruct-msg/construct-protos.git
-commit=154f3f902b403999e20843b0e9cf5697f1bcdba2
+commit=43731bea024c156288f0bbbea8868e5d2c803930
