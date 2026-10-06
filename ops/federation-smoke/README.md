@@ -69,7 +69,7 @@ NODE_A_URL=https://relay.a.local NODE_B_URL=https://relay.b.local \
      sender** field;
    - the inbound request body carried **no** `from`/`to` (only `sealedInner` +
      `payloadHash` + `serverSignature`);
-   - `alice`'s UUID appears **nowhere** in node B's logs or `delivery_pending`.
+   - `alice`'s UUID appears **nowhere** in node B's logs.
 
    Scripted: `NODE_B_COMPOSE='-f ops/docker-compose.relay.yml -p nodeb' ALICE_UUID=<uuid>
    ops/federation-smoke/sender-blind-check.sh` asserts the delivery marker **and**

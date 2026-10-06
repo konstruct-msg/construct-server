@@ -46,7 +46,7 @@ Non-gRPC services (not routed through Caddy):
 
 **Shared infrastructure:**
 - **Redis Streams** — message delivery transport: per-user/per-device offline stream (`delivery:offline:{user_id}[:{device_id}]`); pub/sub wakeup channel (`inbox:wakeup:{user_id}`).
-- **PostgreSQL** — users, devices, keys, `delivery_pending` (receipt routing hashes only). **1:1 message content is never stored in PostgreSQL**; MLS group messages (`mls_ciphertext`) and channel posts (`channel_posts.ciphertext`) are, as ciphertext
+- **PostgreSQL** — users, devices, keys. **1:1 message content is never stored in PostgreSQL**; MLS group messages (`mls_ciphertext`) and channel posts (`channel_posts.ciphertext`) are, as ciphertext
 - **Proto definitions** — `shared/proto/services/*.proto` (13 service protos), `shared/proto/core/`, `shared/proto/messaging/`, `shared/proto/signaling/`
 
 ---
@@ -156,8 +156,7 @@ Client → MessagingService::SendMessage
         │    after the mailbox XADD — check-then-set, not SETNX)
         └─► messaging-service/src/core.rs
             pub async fn dispatch_envelope(...)   (local only — federation is the sealed path, §7)
-              ├─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
-              └─ store receipt routing hash in delivery_pending (PostgreSQL, async, non-critical)
+              └─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
                   NOTE: message content is NEVER written to PostgreSQL
 ```
 
@@ -187,16 +186,16 @@ Client → MessagingService::MessageStream
 
 ### 6. Delivery Receipt
 
-```
-Recipient sends receipt → MessagingService::SendMessage (CONTENT_TYPE_DELIVERY_RECEIPT)
-  └─► messaging-service/src/receipts.rs
-      pub(crate) async fn relay_delivery_receipt(...)
-        ├─ find the original sender: DirectReceipt.recipient_user_id when the client
-        │    filled it (fast path); otherwise the routing hash → Redis cache →
-        │    delivery_pending (legacy path)
-        ├─ XADD delivery:offline:{sender_user_id}  (receipt rides the sender's own stream)
-        └─ original sender's stream picks it up → green checkmark
-```
+A delivery receipt is an ordinary end-to-end message: the client puts it inside the
+ciphertext (KNST content type 14) and sends it like any other, so the server routes it
+without knowing it is a receipt or which message it answers.
+
+The server does not relay a plaintext `DirectReceipt` sent on the message stream: one is
+dropped unread (`stream.rs`). Until migration 072 it was routed back through a
+`message → sender` map kept 30 days in Redis (`receipt:sender:*`) and Postgres
+(`delivery_pending`); no client sends that kind any more, and the map is gone.
+`receipts.rs` still converts Receipt-type envelopes written before that, so a reader does
+not stall on them.
 
 ### 7. Sealed Sender Dispatch (+ Privacy Pass)
 
@@ -255,12 +254,8 @@ SendMessage RPC ──────────► grpc.rs::send_message
                                                               │
                                                     stream.send(Envelope) ──────► Bob client
                                                                                        │
-                                                        relay_delivery_receipt ◄───────┘
-                                                              │
-                                                    XADD delivery:offline:{alice_user}
-                                                    (+ per-device fan-out)
-                                                              │
-                                          Alice stream receives receipt ──────► ✅ delivered
+                                     Bob's receipt is a message to Alice (E2E, type 14) ┘
+                                     and takes the same path back
 ```
 
 **Offline delivery (retention-bounded, cursor = read offset).** If Bob is offline, messages
@@ -364,7 +359,6 @@ Key tables:
 | `device_tokens` | Push notification tokens (APNs/FCM), per-device |
 | `one_time_prekeys` | X25519 OTPKs; hard-deleted when a bundle consumes one; `is_expired` / `expired_at` mark keys superseded by a `replace_existing` upload |
 | `kyber_one_time_pre_keys` | ML-KEM-1024 one-time prekeys, with `created_at` and `hybrid_signature` |
-| `delivery_pending` | Receipt routing: `message_hash → sender_id` (30-day TTL). **Not message storage** — only used to route delivery receipts back to the original sender. |
 | `media_files` | Upload metadata (actual bytes on CDN/local storage) |
 | `sticker_blobs` / `sticker_packs` | Public sticker packs, content-addressed (sha256 / pack_id), **no TTL** — a pack must resolve for as long as any message references it. Migration 070. |
 | `user_blocks` | Block list entries |
@@ -373,7 +367,7 @@ Key tables:
 | `mls_groups` | MLS group state; group application messages are stored as `mls_ciphertext` |
 | `channels` / `channel_posts` | Broadcast channels; posts stored as `ciphertext` |
 
-> **1:1 message content is never stored in PostgreSQL.** Those messages travel messaging-service → Redis Stream → client. Group (MLS) messages and channel posts are the exception: stored as ciphertext in group-service's tables. The `delivery_pending` table only stores `HMAC(message_id, salt) → sender_id` to enable receipt routing.
+> **1:1 message content is never stored in PostgreSQL.** Those messages travel messaging-service → Redis Stream → client. Group (MLS) messages and channel posts are the exception: stored as ciphertext in group-service's tables.
 
 Run migrations:
 ```bash
@@ -491,9 +485,6 @@ psql postgres://postgres:password@localhost:5432/construct_test
 
 -- Active devices
 SELECT device_id, user_id, created_at FROM devices ORDER BY created_at DESC LIMIT 10;
-
--- Receipt routing table (NOT message storage)
-SELECT message_hash, sender_id, expires_at FROM delivery_pending ORDER BY expires_at DESC LIMIT 20;
 
 -- One-time prekey counts per device
 SELECT device_id, COUNT(*) as available
