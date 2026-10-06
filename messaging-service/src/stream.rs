@@ -745,7 +745,11 @@ pub(crate) async fn poll_messages(
             Ok(true) => {
                 tracing::info!("poll_messages: device was removed — ending its stream");
                 let _ = tx
-                    .send(Err(Status::unauthenticated("Device is inactive")))
+                    .send(Err(
+                        construct_server_shared::auth_utils::device_refusal_status(
+                            construct_error::DeviceRefusal::Removed,
+                        ),
+                    ))
                     .await;
                 anyhow::bail!("device removed while its stream was open");
             }

@@ -32,7 +32,7 @@ use std::sync::Arc;
 use construct_context::AppContext;
 use construct_crypto::hash_username;
 use construct_db::{self as db, CreateDeviceData};
-use construct_error::AppError;
+use construct_error::{AppError, DeviceRefusal};
 
 // ============================================================================
 // IP Extraction & Adaptive PoW
@@ -701,11 +701,11 @@ pub async fn authenticate_device_core(
     let device = db::get_device_by_id(&app_context.db_pool, &device_id)
         .await
         .map_err(|e| AppError::internal(format!("Database error: {}", e)))?
-        .ok_or_else(|| AppError::auth("Device not found"))?;
+        .ok_or(AppError::DeviceRefused(DeviceRefusal::NotFound))?;
 
     // 3. Verify device is active
     if !device.is_active {
-        return Err(AppError::auth("Device is inactive"));
+        return Err(AppError::DeviceRefused(DeviceRefusal::Removed));
     }
 
     // 4. Verify Ed25519 signature

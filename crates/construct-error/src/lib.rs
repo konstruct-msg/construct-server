@@ -52,6 +52,12 @@ pub enum AppError {
     #[error("Authentication error: {0}")]
     Auth(String),
 
+    /// The server refuses this device. Its own variant, not `Auth` with a message, because a
+    /// client erases its data on one of the reasons and must read it as a number — see
+    /// [`DeviceRefusal`].
+    #[error("Authentication error: {}", .0.message())]
+    DeviceRefused(DeviceRefusal),
+
     #[cfg(feature = "jwt")]
     #[error("JWT error: {0}")]
     Jwt(#[from] jsonwebtoken::errors::Error),
@@ -116,11 +122,37 @@ pub enum AppError {
     Unknown(#[from] anyhow::Error),
 }
 
+/// Why the server refuses a device: `DeviceRefusal` in construct-protos
+/// `services/auth_service.proto`, whose numbers these are (`construct-server-shared` asserts they
+/// agree). It travels as that number in the trailing metadata key [`DeviceRefusal::METADATA_KEY`]
+/// of the UNAUTHENTICATED status, because a client erases what the account left on it for
+/// `Removed` and for nothing else — and until 2026-10-06 it decided that by matching the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceRefusal {
+    /// The row was deactivated (RevokeDevice, or Logout of this device). Permanent.
+    Removed = 1,
+    /// No row. Not removal: an unapproved join request answers this too.
+    NotFound = 2,
+}
+
+impl DeviceRefusal {
+    pub const METADATA_KEY: &'static str = "construct-device-refusal";
+
+    /// The status text, as it read before the number existed — clients that predate the number
+    /// still match it.
+    pub fn message(self) -> &'static str {
+        match self {
+            DeviceRefusal::Removed => "Device is inactive",
+            DeviceRefusal::NotFound => "Device not found",
+        }
+    }
+}
+
 impl AppError {
     /// Get the HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
-            AppError::Auth(_) => StatusCode::UNAUTHORIZED,
+            AppError::Auth(_) | AppError::DeviceRefused(_) => StatusCode::UNAUTHORIZED,
             #[cfg(feature = "jwt")]
             AppError::Jwt(_) => StatusCode::UNAUTHORIZED,
             AppError::Csrf(_) => StatusCode::FORBIDDEN,
@@ -151,6 +183,7 @@ impl AppError {
     pub fn user_message(&self) -> String {
         match self {
             AppError::Auth(msg) => format!("Authentication failed: {}", msg),
+            AppError::DeviceRefused(r) => format!("Authentication failed: {}", r.message()),
             #[cfg(feature = "jwt")]
             AppError::Jwt(_) => "Invalid or expired token".to_string(),
             AppError::Csrf(_) => "CSRF validation failed".to_string(),
@@ -183,7 +216,7 @@ impl AppError {
     /// Get error code for programmatic error handling
     pub fn error_code(&self) -> &'static str {
         match self {
-            AppError::Auth(_) => "AUTH_ERROR",
+            AppError::Auth(_) | AppError::DeviceRefused(_) => "AUTH_ERROR",
             #[cfg(feature = "jwt")]
             AppError::Jwt(_) => "JWT_ERROR",
             AppError::Csrf(_) => "CSRF_ERROR",

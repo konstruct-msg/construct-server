@@ -150,8 +150,24 @@ message MediaMessage {
   // host part of file_url). Carried explicitly so it survives the wire round-trip.
   string media_id = 13;
 
+  // How the item is shown. A client that does not know a value shows the item as its
+  // media_type says, so a new presentation degrades to the ordinary bubble rather than to
+  // nothing — that is why this is a field of the item and not a separate MessageContent.
+  // construct-docs/decisions/video-notes-are-uncropped-and-expand.md
+  MediaPresentation presentation = 14;
+
   // Reserved for future media metadata
-  reserved 14 to 20;
+  reserved 15 to 20;
+}
+
+// MediaPresentation - how a media item is shown, beyond what its media_type implies.
+enum MediaPresentation {
+  // Not set: the ordinary bubble for the media_type (must be 0).
+  MEDIA_PRESENTATION_UNSPECIFIED = 0;
+
+  // A video note: a short video recorded in the chat, 3:4, shown uncropped, playing muted in
+  // the transcript and opening full screen with sound. media_type is VIDEO.
+  MEDIA_PRESENTATION_VIDEO_NOTE = 1;
 }
 
 // MediaAlbumMessage - one or more media items sent as a single message (album/grid).
