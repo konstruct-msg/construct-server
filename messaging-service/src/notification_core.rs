@@ -195,6 +195,17 @@ fn blind_alert(activity_type: Option<&str>) -> Option<AlertData> {
     })
 }
 
+/// Whether the alert goes to the app's notification service extension first
+/// (`mutable-content: 1`): only a message's alert. The extension decrypts what the push
+/// announces on the device and drops the alert when it is a protocol frame (a delivery receipt,
+/// a call signal) rather than a message — the server cannot tell the two apart, and must not
+/// (construct-docs `decisions/notification-extension-reads-only.md`). The flag is the same on
+/// every message push, so it says nothing about the one it is on; a build without the extension
+/// ignores it.
+fn extension_reads_it(activity_type: Option<&str>, is_alert: bool) -> Option<u8> {
+    (is_alert && activity_type == Some("new_message")).then_some(1)
+}
+
 /// Send blind notification (privacy-preserving push)
 pub async fn send_blind_notification(
     context: &NotificationServiceContext,
@@ -290,12 +301,14 @@ pub async fn send_blind_notification(
         } else {
             (PushType::Silent, NotificationPriority::Low)
         };
+        let mutable_content = extension_reads_it(input.activity_type.as_deref(), alert.is_some());
         let payload = ApnsPayload {
             aps: ApsData {
                 content_available: Some(1u8),
                 sound: alert.as_ref().map(|_| "default".to_string()),
                 alert,
                 badge: input.badge_count.map(|b| b as u32),
+                mutable_content,
             },
             construct: input.activity_type.as_ref().map(|activity| ConstructData {
                 notification_type: activity.clone(),
@@ -1295,6 +1308,37 @@ mod blind_alert_tests {
             assert!(blind_alert(Some(activity)).is_none(), "{activity}");
         }
         assert!(blind_alert(None).is_none());
+    }
+
+    /// Only a message's alert goes to the extension: a contact request is no sealed message to
+    /// decrypt, and a background push (the `silent` filter) has no alert to rewrite.
+    #[test]
+    fn only_a_message_alert_goes_to_the_extension() {
+        assert_eq!(extension_reads_it(Some("new_message"), true), Some(1));
+        assert_eq!(extension_reads_it(Some("new_message"), false), None);
+        assert_eq!(
+            extension_reads_it(Some("contact_request_received"), true),
+            None
+        );
+        assert_eq!(extension_reads_it(Some("rotate_keys"), false), None);
+        assert_eq!(extension_reads_it(None, true), None);
+    }
+
+    /// The flag under the name Apple reads; absent, not zero, when unset.
+    #[test]
+    fn the_flag_serializes_as_mutable_content() {
+        use construct_server_shared::apns::types::ApsData;
+        let aps = |mutable_content| ApsData {
+            content_available: Some(1),
+            alert: blind_alert(Some("new_message")),
+            sound: Some("default".to_string()),
+            badge: None,
+            mutable_content,
+        };
+        let json = serde_json::to_value(aps(Some(1))).unwrap();
+        assert_eq!(json["mutable-content"], 1);
+        let json = serde_json::to_value(aps(None)).unwrap();
+        assert!(json.get("mutable-content").is_none(), "{json}");
     }
 
     /// What APNs receives: keys under the names Apple reads, no text of ours.
