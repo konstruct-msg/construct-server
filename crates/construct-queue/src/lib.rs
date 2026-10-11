@@ -30,10 +30,16 @@ pub use pow::PowChallengeRecord;
 /// `decisions/minimal-server-delivery.md`). The privacy policy states this number
 /// and the landing's `check-claims.py` reads it from here.
 ///
-/// It used to be a literal in messaging-service while `MESSAGE_TTL_DAYS=7` sat in
-/// every env file, read into config and used by nothing — so anyone reading the
-/// config was told a week.
-pub const MAILBOX_MAX_AGE_DAYS: u64 = 30;
+/// Seven days, because that is what the clients are built for: the core
+/// (construct-core `crypto::keys::QUEUE_TTL_SECS`) keeps a retired session's envelope pair
+/// and a rotated signed prekey exactly long enough for a message written under them to
+/// wait this long. A message older than that can still be fetched but no longer opened.
+///
+/// Until 2026-10-11 this was 30. It had been a literal in messaging-service while
+/// `MESSAGE_TTL_DAYS=7` sat in every env file, read into config and used by nothing;
+/// on 2026-10-05 the literal won and became this constant. The week was the intended
+/// value all along, and the clients' key lifetimes were set against it.
+pub const MAILBOX_MAX_AGE_DAYS: u64 = 7;
 
 #[cfg(test)]
 mod tests;
