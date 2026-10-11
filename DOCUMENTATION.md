@@ -272,7 +272,7 @@ his client subscribes with `since_cursor` — the Redis stream ID of the last me
    `decisions/minimal-server-delivery.md` (Accepted).
 
 Capacity backstops: `MAXLEN ~` on XADD (`MSG_QUEUE_MAXLEN_STANDARD`, default 10_000) and hourly age sweep
-(~30 days — not the stale “7-day TTL” wording). A short session re-delivers; the client
+(7 days, `MAILBOX_MAX_AGE_DAYS` — the window the clients keep keys for). A short session re-delivers; the client
 dedups by `message_id`. Worst case is redelivery, not unrecoverable drop from a bad cursor.
 
 **Step 4 cutover:** `MSG_MAILBOX_USER_WRITE` (default `1`) still writes the legacy user
@@ -543,7 +543,7 @@ docker logs construct-caddy --tail 50
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
 - Idempotency via Redis `msg:dedup:{message_id}` (24 h, set after the mailbox write)
-- Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`; `since_cursor` = read offset only — **no client XTRIM**; retention via `MAXLEN ~` + age sweep ~30d)
+- Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`; `since_cursor` = read offset only — **no client XTRIM**; retention via `MAXLEN ~` + age sweep 7d)
 - Dual-read mailbox (device + user merge when token has `device_id`; cutover flag `MSG_MAILBOX_USER_WRITE`)
 - Delivery receipts routed back to sender
 - EditMessage RPC
