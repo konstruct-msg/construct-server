@@ -67,6 +67,12 @@ pub struct ApsData {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub badge: Option<u32>,
+
+    /// `mutable-content: 1` hands the alert to the app's notification service extension before
+    /// it is shown. Only an alert push may carry it; iOS ignores it on a background push.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "mutable-content")]
+    pub mutable_content: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +123,7 @@ impl ApnsPayload {
                 alert: None,
                 sound: None,
                 badge: None,
+                mutable_content: None,
             },
             construct: Some(ConstructData {
                 notification_type: "new_message".to_string(),
@@ -138,6 +145,7 @@ impl ApnsPayload {
                 alert: None,
                 sound: None,
                 badge: None,
+                mutable_content: None,
             },
             construct: Some(ConstructData {
                 notification_type: "rotate_keys".to_string(),
@@ -160,6 +168,7 @@ impl ApnsPayload {
                 }),
                 sound: Some("default".to_string()),
                 badge: Some(1),
+                mutable_content: None,
             },
             construct: Some(ConstructData {
                 notification_type: "new_message".to_string(),
@@ -185,6 +194,7 @@ impl ApnsPayload {
                 alert: None,
                 sound: None,
                 badge: None,
+                mutable_content: None,
             },
             construct: None,
             construct_call: Some(ConstructCallData {
