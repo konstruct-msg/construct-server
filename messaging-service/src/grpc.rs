@@ -51,6 +51,18 @@ fn heartbeat_ack_response() -> proto::MessageStreamResponse {
     }
 }
 
+/// One wait between server heartbeats: uniform in [2/3, 4/3] of `base` (20–40 s for 30 s).
+///
+/// The upper end stays far inside the clients' stale-stream watchdog (iOS: 3 × 25 s).
+fn jittered_heartbeat(base: std::time::Duration) -> std::time::Duration {
+    use rand::RngExt;
+    let ms = base.as_millis() as u64;
+    if ms == 0 {
+        return base;
+    }
+    std::time::Duration::from_millis(rand::rng().random_range(ms * 2 / 3..=ms * 4 / 3))
+}
+
 async fn send_initial_heartbeat_ack(
     tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
     stream_conn_id: uuid::Uuid,
@@ -135,14 +147,21 @@ impl MessagingService for MessagingGrpcService {
                 context.config.messaging.stream_poll_fallback_secs,
             ));
 
-            // Server-initiated keepalive: send a HeartbeatAck to the client every 30 s
-            // when the stream is otherwise idle. This keeps the H2 stream active so that
+            // Server-initiated keepalive: send a HeartbeatAck to the client about every
+            // `stream_heartbeat_interval_secs`. This keeps the H2 stream active so that
             // the HTTP/2 PING frames fire and NAT/firewalls/VEIL proxies do not silently
             // drop the connection. tonic 0.14 does not expose keepalive_while_idle, so
             // application-level traffic is the only way to maintain idle streams.
-            let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            //
+            // About, not exactly: each wait is drawn anew (`jittered_heartbeat`). A record
+            // every 30.0 s on an otherwise quiet connection is a period an observer can
+            // match without reading anything. Since 2026-10-13 this is the only periodic
+            // heartbeat on the stream — clients send one at open and no more.
+            let heartbeat_base = tokio::time::Duration::from_secs(
                 context.config.messaging.stream_heartbeat_interval_secs,
-            ));
+            );
+            let heartbeat_sleep = tokio::time::sleep(jittered_heartbeat(heartbeat_base));
+            tokio::pin!(heartbeat_sleep);
 
             // Wait for Subscribe (with optional since_cursor) before the first
             // offline XREAD. iOS sends Subscribe immediately after open; grace
@@ -300,10 +319,13 @@ impl MessagingService for MessagingGrpcService {
                     // Server-initiated keepalive: send a HeartbeatAck so the H2 stream
                     // stays active and tonic's keepalive PINGs are triggered even during
                     // periods with no user messages (idle chats, background app state).
-                    _ = heartbeat_interval.tick() => {
+                    _ = &mut heartbeat_sleep => {
                         if tx.send(Ok(heartbeat_ack_response())).await.is_err() {
                             break 'stream "heartbeat_tx_closed";
                         }
+                        heartbeat_sleep.as_mut().reset(
+                            tokio::time::Instant::now() + jittered_heartbeat(heartbeat_base),
+                        );
                     }
 
                     else => break 'stream "all_channels_closed",
@@ -1160,6 +1182,28 @@ async fn extract_authed_user_id(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heartbeat_waits_vary_and_stay_inside_two_thirds_to_four_thirds() {
+        let base = std::time::Duration::from_secs(30);
+        let waits: Vec<_> = (0..200).map(|_| super::jittered_heartbeat(base)).collect();
+        assert!(
+            waits
+                .iter()
+                .all(|w| *w >= std::time::Duration::from_secs(20)
+                    && *w <= std::time::Duration::from_secs(40))
+        );
+        let distinct: std::collections::HashSet<_> = waits.iter().collect();
+        assert!(distinct.len() > 50, "a fixed period is what this removes");
+    }
+
+    #[test]
+    fn a_zero_base_is_not_a_panic() {
+        assert_eq!(
+            super::jittered_heartbeat(std::time::Duration::ZERO),
+            std::time::Duration::ZERO
+        );
+    }
+
     use super::*;
 
     #[tokio::test]
