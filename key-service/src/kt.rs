@@ -182,6 +182,10 @@ pub fn tree_head_signable(tree_size: u64, root: &[u8; 32]) -> Vec<u8> {
 // Database helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Advisory lock taken by every append, so the next `tree_index` is read and written by one
+/// writer at a time (the bytes spell "KTLEAF").
+const KT_APPEND_LOCK: i64 = 0x4b54_4c45_4146;
+
 /// Append a leaf for `device_id` if the identity key has changed since the last entry.
 ///
 /// Behaviour:
@@ -190,30 +194,43 @@ pub fn tree_head_signable(tree_size: u64, root: &[u8; 32]) -> Vec<u8> {
 /// - Key rotation: appends a **new** row so the rotation is permanently recorded in
 ///   the append-only log, then returns the new 0-based index.
 ///
-/// Requires migration 047 (UNIQUE constraint on device_id dropped) and migration 054
-/// (`leaf_kind` column). `leaf_kind` selects the identity (0) or hybrid (1) leaf series for
-/// this device; both kinds coexist in the same Merkle tree (the returned index is the global
-/// 0-based tree position = id - 1).
+/// `leaf_kind` selects the identity (0) or hybrid (1) leaf series for this device; both kinds
+/// coexist in the same Merkle tree. The returned index is the leaf's stored `tree_index`
+/// (migration 073), the same column `db_get_all_leaves` orders the tree by. Until 2026-10-13 it
+/// was `id - 1`, which stops naming the leaf's position at the first hole in the `id` sequence;
+/// every later leaf was then proved at a position holding another leaf.
+///
+/// One transaction under `KT_APPEND_LOCK`: the next position is `max + 1`, which two concurrent
+/// appends would otherwise both take, and the "is this key already the latest leaf" check runs
+/// inside the lock so two first fetches of a new device append it once.
 pub async fn db_ensure_leaf(
     db: &PgPool,
     device_id: &str,
     leaf_kind: i16,
     lhash: [u8; 32],
 ) -> Result<u64> {
+    let mut tx = db.begin().await.context("kt_ensure_leaf: begin failed")?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(KT_APPEND_LOCK)
+        .execute(&mut *tx)
+        .await
+        .context("kt_ensure_leaf: lock failed")?;
+
     // Find the most recent leaf of this kind for this device (if any).
     let latest: Option<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, leaf_hash FROM kt_leaves WHERE device_id = $1 AND leaf_kind = $2 ORDER BY id DESC LIMIT 1",
+        "SELECT tree_index, leaf_hash FROM kt_leaves WHERE device_id = $1 AND leaf_kind = $2 ORDER BY tree_index DESC LIMIT 1",
     )
     .bind(device_id)
     .bind(leaf_kind)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await
     .context("kt_ensure_leaf: fetch latest failed")?;
 
-    if let Some((existing_id, existing_hash)) = latest {
+    if let Some((existing_index, existing_hash)) = latest {
         if existing_hash.as_slice() == lhash.as_slice() {
             // Same key — idempotent, return existing index.
-            return Ok((existing_id - 1) as u64);
+            tx.commit().await.context("kt_ensure_leaf: commit failed")?;
+            return Ok(existing_index as u64);
         }
         // Hash differs — key rotated; append new leaf and log the event.
         tracing::warn!(
@@ -223,27 +240,31 @@ pub async fn db_ensure_leaf(
         );
     }
 
-    // Insert new leaf (either first registration or key rotation).
-    let row: (i64,) = sqlx::query_as(
-        "INSERT INTO kt_leaves (device_id, leaf_hash, leaf_kind) VALUES ($1, $2, $3) RETURNING id",
+    // Insert new leaf (either first registration or key rotation) at the next position.
+    let (index,): (i64,) = sqlx::query_as(
+        "INSERT INTO kt_leaves (device_id, leaf_hash, leaf_kind, tree_index) \
+         VALUES ($1, $2, $3, (SELECT COALESCE(MAX(tree_index), -1) + 1 FROM kt_leaves)) \
+         RETURNING tree_index",
     )
     .bind(device_id)
     .bind(lhash.as_slice())
     .bind(leaf_kind)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await
     .context("kt_ensure_leaf: insert failed")?;
+    tx.commit().await.context("kt_ensure_leaf: commit failed")?;
 
-    Ok((row.0 - 1) as u64)
+    Ok(index as u64)
 }
 
-/// Load all leaves ordered by insertion order (id ASC).
+/// Load all leaves in tree order (`tree_index` ASC) — the order the proofs index into.
 /// Returns `Vec<[u8; 32]>`.
 pub async fn db_get_all_leaves(db: &PgPool) -> Result<Vec<[u8; 32]>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as("SELECT leaf_hash FROM kt_leaves ORDER BY id ASC")
-        .fetch_all(db)
-        .await
-        .context("kt_get_all_leaves: fetch failed")?;
+    let rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT leaf_hash FROM kt_leaves ORDER BY tree_index ASC")
+            .fetch_all(db)
+            .await
+            .context("kt_get_all_leaves: fetch failed")?;
 
     rows.into_iter()
         .map(|(h,)| {
