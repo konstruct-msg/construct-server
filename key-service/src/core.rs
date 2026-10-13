@@ -2561,6 +2561,98 @@ mod tests {
                 .is_err()
         );
     }
+    // ── Key Transparency leaf positions (require PostgreSQL) ──────────────────
+
+    /// A device row a leaf can reference — the schema as migrated today (`device_id` is 32
+    /// characters; `insert_test_device` above predates that and no longer inserts).
+    async fn insert_kt_test_device(db: &PgPool) -> String {
+        let device_id = uuid::Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            "INSERT INTO devices (device_id, server_hostname, verifying_key, identity_public, signed_prekey_public)
+             VALUES ($1, 'test', $2, $2, $2)",
+        )
+        .bind(&device_id)
+        .bind(device_id.as_bytes())
+        .execute(db)
+        .await
+        .expect("insert device");
+        device_id
+    }
+
+    /// Burn `n` values of the `kt_leaves.id` sequence — the hole a rolled-back insert leaves.
+    async fn burn_kt_ids(db: &PgPool, n: usize) {
+        for _ in 0..n {
+            sqlx::query("SELECT nextval(pg_get_serial_sequence('kt_leaves', 'id'))")
+                .execute(db)
+                .await
+                .expect("nextval");
+        }
+    }
+
+    /// A leaf appended after a hole in the `id` sequence is proved at its own position.
+    ///
+    /// Until migration 073 the index was `id - 1` and the tree was the leaves in `id` order, so
+    /// after a hole the proof named another leaf's position and every client rejected it
+    /// (`inclusionProofInvalid`, 2026-10-13). Mutation: return `id - 1` again — this fails.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_kt_leaf_after_a_sequence_hole_is_proved_at_its_own_position() {
+        let db = get_test_db().await;
+        let before = insert_kt_test_device(&db).await;
+        crate::kt::db_ensure_leaf(
+            &db,
+            &before,
+            crate::kt::LEAF_KIND_IDENTITY,
+            crate::kt::leaf_hash(&before, &[1u8; 32]),
+        )
+        .await
+        .unwrap();
+
+        burn_kt_ids(&db, 3).await;
+
+        let after = insert_kt_test_device(&db).await;
+        let key = [2u8; 32];
+        let leaf = crate::kt::leaf_hash(&after, &key);
+        let index = crate::kt::db_ensure_leaf(&db, &after, crate::kt::LEAF_KIND_IDENTITY, leaf)
+            .await
+            .unwrap();
+
+        let leaves = crate::kt::db_get_all_leaves(&db).await.unwrap();
+        assert_eq!(leaves[index as usize], leaf, "the index names this leaf");
+        let (proof, root) = crate::kt::generate_inclusion_proof(&leaves, index as usize).unwrap();
+        assert!(crate::kt::verify_inclusion(
+            &leaf,
+            &proof,
+            index as usize,
+            leaves.len(),
+            &root
+        ));
+    }
+
+    /// Two first fetches of a new device at once append its leaf once, at one position.
+    ///
+    /// Mutation: drop the advisory lock — the two appends race to the same `max + 1` and the
+    /// unique index refuses one, or the check-then-insert appends the leaf twice.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn test_kt_concurrent_first_fetches_append_one_leaf() {
+        let db = get_test_db().await;
+        let device = insert_kt_test_device(&db).await;
+        let leaf = crate::kt::leaf_hash(&device, &[3u8; 32]);
+
+        let (a, b) = tokio::join!(
+            crate::kt::db_ensure_leaf(&db, &device, crate::kt::LEAF_KIND_IDENTITY, leaf),
+            crate::kt::db_ensure_leaf(&db, &device, crate::kt::LEAF_KIND_IDENTITY, leaf),
+        );
+        assert_eq!(a.unwrap(), b.unwrap());
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM kt_leaves WHERE device_id = $1")
+            .bind(&device)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 }
 
 #[cfg(test)]
