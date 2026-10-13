@@ -302,7 +302,7 @@ impl SignalingService for SignalingServiceImpl {
                 "TURN credentials rate limit exceeded",
             ));
         }
-        let credentials = generate_turn_credentials(&user_id, &self.turn_secret, self.turn_ttl);
+        let credentials = generate_turn_credentials(&self.turn_secret, self.turn_ttl);
         Ok(Response::new(GetTurnCredentialsResponse {
             credentials: Some(credentials),
         }))
