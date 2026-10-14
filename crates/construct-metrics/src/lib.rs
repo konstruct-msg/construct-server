@@ -416,6 +416,20 @@ pub static MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy
     .expect("Failed to register MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL metric")
 });
 
+/// Mailbox reads that told the device its queue trimmed messages after its cursor, undelivered
+/// (decisions/mailbox-gap-is-reported.md). Labels: `path` = `stream` | `pending`. How often
+/// people come back to a mailbox that kept less than they missed.
+pub static MSG_MAILBOX_GAP_REPORTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_mailbox_gap_reported_total",
+            "Mailbox reads that reported entries trimmed after the reader's cursor"
+        ),
+        &["path"]
+    )
+    .expect("Failed to register MSG_MAILBOX_GAP_REPORTED_TOTAL metric")
+});
+
 /// Sealed sends accepted for dispatch, by the door they came in through.
 /// Labels: `ingress` = `sealed_rpc` (`SendSealedMessage`, unauthenticated) |
 /// `legacy_send_message` (a sealed payload on the authenticated `SendMessage`).
@@ -803,6 +817,7 @@ pub fn init_registry() {
     for path in ["stream", "pending"] {
         MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL.with_label_values(&[path]);
         MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL.with_label_values(&[path]);
+        MSG_MAILBOX_GAP_REPORTED_TOTAL.with_label_values(&[path]);
     }
     // Both children, not just the family. This label set is closed — a sealed send arrives by
     // one of exactly two doors — and the whole point of the counter is the *ratio* between them.

@@ -16,12 +16,14 @@
 mod cache;
 mod connection;
 mod delivery;
+mod gap;
 mod pow;
 mod rate_limiting;
 mod replay;
 mod sessions;
 mod tokens;
 
+pub use gap::MailboxGap;
 pub use pow::PowChallengeRecord;
 
 /// How long a message may sit in a mailbox: the hourly age sweep
@@ -901,6 +903,42 @@ impl MessageQueue {
             count,
             device_id,
         ))
+    }
+
+    /// Whether the mailbox read from `since` lost entries after it — the device's stream first,
+    /// then the user stream both are merged from (`read_mailbox_messages`). A missing stream is no
+    /// gap: nothing was ever written to it, or it went with the account.
+    pub async fn mailbox_gap(
+        &mut self,
+        user_id: &str,
+        device_id: Option<&str>,
+        since: &str,
+    ) -> Result<Option<MailboxGap>> {
+        let prefix = &self.delivery_queue_prefix;
+        let mut keys = Vec::new();
+        if let Some(device) = device_id.filter(|d| !d.is_empty()) {
+            keys.push(format!("{prefix}:offline:{user_id}:{device}"));
+        }
+        keys.push(format!("{prefix}:offline:{user_id}"));
+        for key in keys {
+            let reply: redis::RedisResult<redis::Value> = redis::cmd("XINFO")
+                .arg("STREAM")
+                .arg(&key)
+                .query_async(self.client.connection_mut())
+                .await;
+            match reply {
+                Ok(info) => {
+                    let stream = gap::parse_xinfo_stream(&info);
+                    let cap = self.config.messaging.queue_maxlen_standard.max(1) as u64;
+                    if let Some(found) = gap::mailbox_gap(since, &stream, cap) {
+                        return Ok(Some(found));
+                    }
+                }
+                Err(e) if e.to_string().to_lowercase().contains("no such key") => continue,
+                Err(e) => return Err(anyhow::Error::new(e).context("XINFO STREAM failed")),
+            }
+        }
+        Ok(None)
     }
 
     /// Returns true if this message_id was already dispatched (duplicate retry).

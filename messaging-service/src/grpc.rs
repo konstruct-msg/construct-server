@@ -1019,10 +1019,38 @@ impl MessagingService for MessagingGrpcService {
         // report has_more=false and stall offline catch-up.
         let has_more = mailbox_page_has_more(raw_page_len, limit);
 
+        // Said, not hidden: what the queue trimmed after this cursor never arrives
+        // (decisions/mailbox-gap-is-reported.md). Best effort — a failed check is no gap.
+        let gap = match since {
+            Some(cursor) => {
+                let mut queue = self.context.queue.lock().await;
+                match queue
+                    .mailbox_gap(&user_id, device_id.as_deref(), cursor)
+                    .await
+                {
+                    Ok(gap) => gap,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "mailbox gap check failed");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if gap.is_some() {
+            construct_metrics::MSG_MAILBOX_GAP_REPORTED_TOTAL
+                .with_label_values(&["pending"])
+                .inc();
+        }
+
         Ok(Response::new(proto::GetPendingMessagesResponse {
             messages,
             next_cursor,
             has_more,
+            gap: gap.map(|g| proto::MailboxGap {
+                after_cursor: g.after_cursor,
+                resumes_at: g.resumes_at,
+            }),
         }))
     }
 
