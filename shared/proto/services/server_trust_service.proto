@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package shared.proto.services.v1;
+
+// ServerTrustService — the server's public trust material over gRPC, so a client that must not
+// leave the VEIL tunnel still receives it (construct-docs decisions/veil-on-never-goes-direct.md).
+// Until this existed it travelled only as plain HTTPS `/.well-known/construct-server`, a request
+// a client with VEIL `on` may not make.
+//
+// Unauthenticated and read-only: a client asks before it has a session. Nothing here is trusted
+// for arriving here — the manifest is checked against a key in the client's build and the
+// delegations against roots in it, exactly as when the same bytes come over HTTPS.
+service ServerTrustService {
+  rpc GetServerTrust(GetServerTrustRequest) returns (GetServerTrustResponse);
+}
+
+message GetServerTrustRequest {}
+
+message GetServerTrustResponse {
+  // The signed manifest, byte for byte as signed — the file the project domain serves as
+  // `/.well-known/construct-server`: a JSON object with `signed_at` and
+  // `signature: "ed25519:<base64url>"`. The client verifies the signature and applies its
+  // freshness rule (never replace a newer cached manifest with an older one) as it does for the
+  // HTTP fetch. Empty when the server holds no manifest; the client keeps what it has.
+  bytes signed_manifest = 1;
+
+  // Delegations of the server's hybrid signing keys, each encoded as in `SERVER_TRUST_DIR` and
+  // signed by the offline root — the list `/.well-known` serves under
+  // `server_trust.delegations`, expired ones past their grace already left out. The client
+  // replaces its cached list with this one when it is non-empty, and its core keeps only those a
+  // root pinned in the build signed.
+  repeated bytes delegations = 2;
+}
