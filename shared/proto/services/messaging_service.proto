@@ -151,6 +151,9 @@ message MessageStreamResponse {
     // Only sent when both peers have DEVICE_CAPABILITIES_P2P_MESSAGING capability.
     // See: signaling/p2p.proto
     shared.proto.signaling.v1.P2PHandoffRequest p2p_handoff = 8;
+
+    // The mailbox lost messages after the Subscribe cursor; sent once, before the first delivery.
+    MailboxGap mailbox_gap = 23;
   }
 
   // Response ID (correlates to request_id)
@@ -570,6 +573,23 @@ message GetPendingMessagesResponse {
 
   // Whether more messages are available
   bool has_more = 3;
+
+  // Set when the mailbox no longer holds everything after `since_cursor` (see MailboxGap).
+  MailboxGap gap = 4;
+}
+
+// The device's mailbox lost messages it never delivered: the queue keeps them a limited time and
+// up to a limited count, and what it trimmed after the cursor the client asked from is gone.
+// The server cannot say whose messages they were — only the interval. The client tells the
+// person (construct-docs decisions/mailbox-gap-is-reported.md); it does not refetch.
+//
+// Set when the stream's largest deleted id is newer than the cursor. Deletions other than
+// trimming (a blocked sender's messages purged) count too; that over-reports, never hides.
+message MailboxGap {
+  // The cursor the client asked from: the last position it had.
+  string after_cursor = 1;
+  // The oldest position still held, where delivery resumes; empty when nothing is held.
+  string resumes_at = 2;
 }
 
 // ── KEY_SYNC ──────────────────────────────────────────────────────────────────
