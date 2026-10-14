@@ -45,6 +45,9 @@ RELAY_DOMAIN {
 	handle /shared.proto.services.v1.AuthService/* {
 		reverse_proxy h2c://identity:50051
 	}
+	handle /shared.proto.services.v1.ServerTrustService/* {
+		reverse_proxy h2c://identity:50051
+	}
 	handle /shared.proto.services.v1.DeviceService/* {
 		reverse_proxy h2c://identity:50051
 	}
@@ -96,6 +99,9 @@ RELAY_DOMAIN {
 		reverse_proxy gateway:3000
 	}
 	handle /shared.proto.services.v1.AuthService/* {
+		reverse_proxy h2c://identity:50051
+	}
+	handle /shared.proto.services.v1.ServerTrustService/* {
 		reverse_proxy h2c://identity:50051
 	}
 	handle /shared.proto.services.v1.DeviceService/* {
