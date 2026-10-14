@@ -467,6 +467,41 @@ pub(crate) async fn handle_stream_request(
                     // is MAXLEN + age sweep. See construct-docs
                     // decisions/minimal-server-delivery.md (Accepted — step 2).
                     apply_since_cursor(cursor, &mut catchup.last_stream_id);
+
+                    // Before the first delivery: the queue trimmed messages after this cursor
+                    // that will never arrive (decisions/mailbox-gap-is-reported.md). Once per
+                    // stream; best effort — a failed check is no gap.
+                    if !catchup.initial_catchup_done
+                        && let Some(uid) = *user_id
+                    {
+                        match stream_queue
+                            .mailbox_gap(&uid.to_string(), device_id, cursor)
+                            .await
+                        {
+                            Ok(Some(gap)) => {
+                                construct_metrics::MSG_MAILBOX_GAP_REPORTED_TOTAL
+                                    .with_label_values(&["stream"])
+                                    .inc();
+                                let response = proto::MessageStreamResponse {
+                                    response: Some(
+                                        proto::message_stream_response::Response::MailboxGap(
+                                            proto::MailboxGap {
+                                                after_cursor: gap.after_cursor,
+                                                resumes_at: gap.resumes_at,
+                                            },
+                                        ),
+                                    ),
+                                    response_id: None,
+                                    stream_cursor: None,
+                                    rate_limit_challenge: None,
+                                    attempt_id: None,
+                                };
+                                tx.send(Ok(response)).await?;
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(error = %e, "mailbox gap check failed"),
+                        }
+                    }
                 }
             }
 
