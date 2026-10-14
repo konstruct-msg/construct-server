@@ -661,6 +661,19 @@ impl<'a> DeliveryManager<'a> {
                 .context("SCAN failed")?;
 
             for key in keys {
+                // The newest entry this trim removes, read first: XTRIM does not move the
+                // stream's `max-deleted-entry-id` (only XDEL does), and that mark is how a
+                // reader learns it lost messages (`mailbox_gap`).
+                let newest_removed: Option<String> = redis::cmd("XREVRANGE")
+                    .arg(&key)
+                    .arg(format!("({minid}"))
+                    .arg("-")
+                    .arg("COUNT")
+                    .arg(1u64)
+                    .query_async::<redis::Value>(self.client.connection_mut())
+                    .await
+                    .ok()
+                    .and_then(|v| crate::gap::first_entry_id(&v));
                 let trimmed: i64 = redis::cmd("XTRIM")
                     .arg(&key)
                     .arg("MINID")
@@ -669,6 +682,12 @@ impl<'a> DeliveryManager<'a> {
                     .await
                     .unwrap_or(0);
                 total_trimmed += trimmed as u64;
+                if trimmed > 0
+                    && let Some(removed) = newest_removed
+                    && let Err(e) = self.record_deleted(&key, &removed).await
+                {
+                    tracing::warn!(error = %e, "mailbox trim not recorded — a gap there goes unreported");
+                }
             }
 
             cursor = next_cursor;
@@ -678,6 +697,41 @@ impl<'a> DeliveryManager<'a> {
         }
 
         Ok(total_trimmed)
+    }
+
+    /// Raise the stream's `max-deleted-entry-id` to `removed` (never lower it) with `XSETID`,
+    /// which needs the current last id: read just before, retried once if an XADD landed between.
+    async fn record_deleted(&mut self, key: &str, removed: &str) -> Result<()> {
+        for _ in 0..2 {
+            let info: redis::Value = redis::cmd("XINFO")
+                .arg("STREAM")
+                .arg(key)
+                .query_async(self.client.connection_mut())
+                .await
+                .context("XINFO STREAM failed")?;
+            let stream = crate::gap::parse_xinfo_stream(&info);
+            let Some(last) = stream.last_generated else {
+                return Ok(());
+            };
+            let already = stream
+                .max_deleted
+                .as_deref()
+                .and_then(crate::gap::stream_id);
+            if already >= crate::gap::stream_id(removed) {
+                return Ok(());
+            }
+            let set: redis::RedisResult<()> = redis::cmd("XSETID")
+                .arg(key)
+                .arg(&last)
+                .arg("MAXDELETEDID")
+                .arg(removed)
+                .query_async(self.client.connection_mut())
+                .await;
+            if set.is_ok() {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("XSETID did not take")
     }
 
     /// Purge all messages from `sender_id` out of `recipient_id`'s Redis streams.

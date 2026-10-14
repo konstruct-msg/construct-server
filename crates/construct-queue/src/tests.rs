@@ -35,6 +35,8 @@ fn get_test_config() -> Config {
         );
         std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
         std::env::set_var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY", "0".repeat(64));
+        // Required since the secret-hygiene check covers it; without it no Redis test here ran.
+        std::env::set_var("LOG_HASH_SALT", "test_log_hash_salt_unique_for_tests_only");
     }
 
     Config::from_env().expect("Failed to create test config")
@@ -814,4 +816,85 @@ async fn mailbox_delete_removes_every_stream_of_the_account_and_no_other() {
     );
 
     clear_mailbox(&mut queue, neighbour, &[d1]).await;
+}
+
+/// What a device that was away too long is told (decisions/mailbox-gap-is-reported.md): entries
+/// the age sweep trimmed after its cursor are a gap; entries it had already read, trimmed after,
+/// are not; a stream that never lost an entry is not, however old the cursor. The sweep records
+/// what it trims (XTRIM itself does not move `max-deleted-entry-id`).
+#[tokio::test]
+#[ignore] // Requires Redis 7 (XINFO STREAM, XSETID MAXDELETEDID)
+async fn mailbox_gap_names_what_the_age_sweep_trimmed_after_the_cursor() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let user = "test_mailbox_gap_user";
+    let device = "test_mailbox_gap_dev";
+    let mut queue = mailbox_queue(false).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+    let key = format!(
+        "{}:offline:{}:{}",
+        queue.delivery_queue_prefix, user, device
+    );
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    // Two a month old, two from now.
+    let stamps = [
+        1_700_000_000_000u64,
+        1_700_000_001_000,
+        now_ms - 2000,
+        now_ms - 1000,
+    ];
+    let mut ids = Vec::new();
+    for ms in stamps {
+        let id: String = redis::cmd("XADD")
+            .arg(&key)
+            .arg(format!("{ms}-0"))
+            .arg("payload")
+            .arg("x")
+            .query_async(queue.client.connection_mut())
+            .await
+            .expect("XADD failed");
+        ids.push(id);
+    }
+    let before = "1699999999999-0";
+    assert_eq!(
+        queue.mailbox_gap(user, Some(device), before).await.unwrap(),
+        None,
+        "nothing deleted yet: an old cursor alone is no gap"
+    );
+
+    let removed = queue
+        .trim_streams_by_age(crate::MAILBOX_MAX_AGE_DAYS * 86_400)
+        .await
+        .expect("age sweep failed");
+    assert!(removed >= 2);
+
+    let gap = queue
+        .mailbox_gap(user, Some(device), before)
+        .await
+        .unwrap()
+        .expect("trimmed after the cursor: a gap");
+    assert_eq!(gap.after_cursor, before);
+    assert_eq!(gap.resumes_at, ids[2]);
+
+    assert_eq!(
+        queue
+            .mailbox_gap(user, Some(device), &ids[1])
+            .await
+            .unwrap(),
+        None,
+        "a device that had read up to the last trimmed entry lost nothing"
+    );
+    assert_eq!(
+        queue
+            .mailbox_gap("test_mailbox_gap_nobody", Some("none"), before)
+            .await
+            .unwrap(),
+        None,
+        "no stream at all is no gap"
+    );
+
+    clear_mailbox(&mut queue, user, &[device]).await;
 }
