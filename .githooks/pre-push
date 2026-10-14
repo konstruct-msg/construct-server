@@ -22,6 +22,27 @@ cd "$(git rev-parse --show-toplevel)"
 
 fail=0
 
+# CI начинает с `cargo audit --deny warnings` (Security Audit) и роняет на нём всё
+# остальное, деплой тоже. 2026-10-14 так упал пуш: rustls 0.23.45 получил четыре
+# RUSTSEC в день пуша, а локально этого никто не проверял. База уязвимостей
+# обновляется независимо от кода — свежую находку ловит только запуск перед пушем.
+printf '\n[pre-push] cargo audit --deny warnings\n'
+if ! command -v cargo-audit >/dev/null 2>&1; then
+    fail=1
+    printf '\n  cargo-audit не установлен: cargo install cargo-audit --locked\n'
+elif ! audit_out=$(cargo audit --deny warnings 2>&1); then
+    if printf '%s' "$audit_out" | grep -q 'RUSTSEC-'; then
+        printf '%s\n' "$audit_out"
+        fail=1
+        printf '\n  обычно чинится: cargo update -p <крейт> --precise <версия из Solution>\n'
+    else
+        # Не находка, а сеть: база не скачалась. Проверить по уже скачанной —
+        # лучше старая база, чем никакой; пуш без сети не запрещается.
+        printf '  база уязвимостей не обновилась — проверка по локальной копии\n'
+        cargo audit --deny warnings --no-fetch || fail=1
+    fi
+fi
+
 printf '\n[pre-push] cargo fmt\n'
 if ! cargo fmt --all -- --check; then
     fail=1
