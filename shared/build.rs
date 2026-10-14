@@ -68,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/services/sentinel_service.proto",
         "proto/services/signaling_service.proto",
         "proto/services/veil_service.proto",
+        "proto/services/server_trust_service.proto",
     ];
 
     tonic_prost_build::configure()

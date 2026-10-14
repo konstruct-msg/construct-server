@@ -18,6 +18,10 @@
 //! - `SERVER_TRUST_DIR` (default `/etc/construct/server-trust`) — the delegations, one hex
 //!   `*.delegation` file each, as the root ceremony produced them. One directory for every
 //!   service: a signer picks the delegation of its own key, the gateway serves them all.
+//! - `construct-server.manifest` in the same directory (optional) — the signed manifest the
+//!   project domain serves as `/.well-known/construct-server`, byte for byte. Served by
+//!   `ServerTrustService` so a client that must stay inside the VEIL tunnel receives it too; this
+//!   server never reads its contents, the client checks the signature against its build.
 //! - `SERVER_TRUST_ROOTS` (optional) — comma-separated hex of the pinned roots. When set, a
 //!   delegation no root signed is refused at start, so a wrong file is found here rather than by
 //!   every client.
@@ -58,6 +62,20 @@ pub fn trust_dir() -> PathBuf {
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_TRUST_DIR))
+}
+
+/// The signed manifest's file name in the trust directory.
+pub const SIGNED_MANIFEST_FILE: &str = "construct-server.manifest";
+
+/// The signed manifest in `dir`, as stored; `None` when there is none. Not parsed: its signature
+/// is for clients to check, and a server that re-serialised it would break it.
+pub fn load_signed_manifest(dir: &Path) -> Result<Option<Vec<u8>>> {
+    let path = dir.join(SIGNED_MANIFEST_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Every `*.delegation` file in `dir`, decoded. A file that does not decode is an error: the

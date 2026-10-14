@@ -15,6 +15,7 @@
 mod context;
 mod invite_core;
 mod recovery;
+mod server_trust_rpc;
 
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
@@ -41,6 +42,7 @@ use construct_server_shared::shared::proto::services::v1::{
     device_link_service_server::DeviceLinkServiceServer,
     device_service_server::DeviceServiceServer,
     invite_service_server::{InviteService, InviteServiceServer},
+    server_trust_service_server::ServerTrustServiceServer,
     user_service_server::{UserService, UserServiceServer},
 };
 
@@ -3446,6 +3448,12 @@ async fn main() -> Result<()> {
                 .add_service(
                     InviteServiceServer::new(svc).max_decoding_message_size(IDENTITY_DECODE),
                 )
+                // Unauthenticated, like AuthService: a client asks before it has a session.
+                .add_service(ServerTrustServiceServer::new(
+                    server_trust_rpc::ServerTrustGrpc::new(
+                        construct_crypto::server_trust::trust_dir(),
+                    ),
+                ))
                 .serve_with_incoming_shutdown(
                     grpc_incoming,
                     construct_server_shared::shutdown_signal(),
@@ -3456,7 +3464,7 @@ async fn main() -> Result<()> {
         }
     });
     info!(
-        "Identity gRPC listening on {} (AuthService + DeviceService + DeviceLinkService + UserService + InviteService)",
+        "Identity gRPC listening on {} (AuthService + DeviceService + DeviceLinkService + UserService + InviteService + ServerTrustService)",
         grpc_bind_address
     );
 
