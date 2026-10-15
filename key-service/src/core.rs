@@ -765,6 +765,16 @@ pub async fn get_prekey_bundles(
 pub const MAX_PREKEYS_PER_UPLOAD: usize = 200;
 /// Active one-time keys of each kind a device may hold. Clients keep about a hundred.
 pub const MAX_STORED_PREKEYS: i64 = 1000;
+/// Replacing uploads one device may make per hour. Each retires everything the device held, and
+/// retired rows stay for 48 hours, so without a bound a device could grow the tables by a few
+/// hundred rows per call, without end. A client replaces when it has lost its private keys —
+/// once, at a launch — so a handful an hour is generous.
+pub const MAX_REPLACES_PER_HOUR: i64 = 6;
+
+/// Whether the `count`-th replacing upload of the current hour may go ahead.
+pub fn replace_allowed(count: i64) -> bool {
+    count <= MAX_REPLACES_PER_HOUR
+}
 
 /// Why an upload is refused before anything is written.
 #[derive(Debug, PartialEq, Eq)]
@@ -1689,7 +1699,6 @@ pub async fn otpk_inventory(db: &PgPool) -> Result<OtpkInventory> {
 
 /// Called on a schedule (e.g. every hour). The 48-hour window matches
 /// `signed_prekey_archive` and gives in-flight prekey messages time to arrive.
-#[allow(dead_code)]
 pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
     let result = sqlx::query(
         "DELETE FROM one_time_prekeys
@@ -1703,7 +1712,6 @@ pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
 
 /// Hard-delete Kyber OTPKs that were soft-expired more than 48 hours ago.
 /// Same retention policy as classic OTPKs.
-#[allow(dead_code)]
 pub async fn cleanup_expired_kyber_otpks(db: &PgPool) -> Result<u64> {
     let result = sqlx::query(
         "DELETE FROM kyber_one_time_pre_keys
@@ -2693,6 +2701,14 @@ mod upload_allowed_tests {
             upload_allowed(0, MAX_STORED_PREKEYS, 0, 1, false),
             Err(UploadRefusal::TooManyStored)
         );
+    }
+
+    /// Mutation: allow one more replace than the bound — this reddens.
+    #[test]
+    fn replacing_is_bounded_per_hour() {
+        assert!(replace_allowed(1));
+        assert!(replace_allowed(MAX_REPLACES_PER_HOUR));
+        assert!(!replace_allowed(MAX_REPLACES_PER_HOUR + 1));
     }
 
     /// Replacing expires what is held first, so a full device can still start over.
