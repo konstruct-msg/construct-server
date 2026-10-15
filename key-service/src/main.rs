@@ -670,6 +670,32 @@ impl KeyService for KeyGrpcService {
             }
         }
 
+        // A replacing upload retires everything held, and retired rows stay 48 hours: counted
+        // per device per hour. Fails closed — a replace is rare, and appending is not limited.
+        if req.replace_existing {
+            const LUA: &str = r#"
+                local count = redis.call('INCR', KEYS[1])
+                if count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+                return count
+            "#;
+            let mut redis = self.context.redis.clone();
+            let count: i64 = redis::Script::new(LUA)
+                .key(format!("prekey_replace:{}", req.device_id))
+                .arg(3600i64)
+                .invoke_async(&mut redis)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "Redis unavailable for the replace limit — failing closed");
+                    Status::unavailable("Service temporarily unavailable")
+                })?;
+            if !core::replace_allowed(count) {
+                return Err(Status::resource_exhausted(format!(
+                    "at most {} replacing uploads per hour",
+                    core::MAX_REPLACES_PER_HOUR
+                )));
+            }
+        }
+
         // Convert proto prekeys to core types
         let prekeys: Vec<core::OneTimePreKey> = req
             .pre_keys
@@ -793,10 +819,18 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::GetPreKeyCountRequest>,
     ) -> Result<Response<proto::GetPreKeyCountResponse>, Status> {
+        // A device's own health, asked by that device: until 2026-10-15 any caller could read
+        // any device's key count and last upload time without a token.
+        let authed_device_id = extract_authed_device_id(&request, &self.context.auth)?;
         let req = request.into_inner();
 
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
+        }
+        if req.device_id != authed_device_id {
+            return Err(Status::permission_denied(
+                "device_id does not match authenticated device",
+            ));
         }
 
         let (count, last_upload) = core::get_prekey_count(&self.context.db, &req.device_id)
@@ -921,10 +955,17 @@ impl KeyService for KeyGrpcService {
         &self,
         request: Request<proto::GetSignedPreKeyAgeRequest>,
     ) -> Result<Response<proto::GetSignedPreKeyAgeResponse>, Status> {
+        // As `get_pre_key_count`: the device's own signed-key age, not anyone's.
+        let authed_device_id = extract_authed_device_id(&request, &self.context.auth)?;
         let req = request.into_inner();
 
         if req.device_id.is_empty() {
             return Err(Status::invalid_argument("device_id is required"));
+        }
+        if req.device_id != authed_device_id {
+            return Err(Status::permission_denied(
+                "device_id does not match authenticated device",
+            ));
         }
 
         let result = core::get_signed_prekey_age(&self.context.db, &req.device_id)
@@ -1538,6 +1579,32 @@ async fn main() -> Result<()> {
                     // zeroing them: a failed query is not an empty fleet, and
                     // "0 devices exhausted" is the reassuring direction to lie in.
                     Err(e) => warn!("OTPK inventory poll failed: {e}"),
+                }
+            }
+        });
+    }
+
+    // Retired one-time keys (consumed, or replaced) are kept 48 hours for prekey messages still in
+    // flight, then deleted. The delete existed since the soft-expiry did, but nothing called it
+    // until 2026-10-15: retired rows were never removed.
+    {
+        let db = context.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match (
+                    core::cleanup_expired_otpks(&db).await,
+                    core::cleanup_expired_kyber_otpks(&db).await,
+                ) {
+                    (Ok(classic), Ok(kyber)) => {
+                        tracing::info!(classic, kyber, "retired one-time keys deleted")
+                    }
+                    (classic, kyber) => warn!(
+                        "retired one-time key cleanup failed: classic={:?} kyber={:?}",
+                        classic.err(),
+                        kyber.err()
+                    ),
                 }
             }
         });
