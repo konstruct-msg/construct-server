@@ -201,6 +201,9 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # Let's Encrypt certs + OCSP staples
+      # certbot --webroot for the host coturn's cert (turn.ams.konstruct.cc); Caddy
+      # serves /.well-known/acme-challenge/ from it. See the Caddyfile block.
+      - /var/lib/construct/acme-webroot:/srv/acme-webroot:ro
     depends_on:
       - identity
       - messaging
@@ -442,7 +445,10 @@ services:
       METRICS_PORT: "8091"
       # CONTACT_HMAC_SECRET + TURN_SECRET come from env_file (app.env) — do NOT re-list
       # as ${VAR} (unset interpolation blanks them, breaking HMAC + TURN credentials).
-      TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc,turn.msk.konstruct.cc}
+      # Further relays are added here in app.env, not in this file: which hosts
+      # carry calls is not public (TODO 156). turn.msk.konstruct.cc has no DNS
+      # record — listing it cost every ICE gathering a failed lookup.
+      TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc}
       TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
       NOTIFICATION_GRPC_ENDPOINT: "http://messaging:50053"
     volumes:
