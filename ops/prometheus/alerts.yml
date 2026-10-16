@@ -285,6 +285,41 @@ groups:
             port it actually serves /metrics on. PORT for most services, METRICS_PORT
             for group and signalling.
 
+  # ── Call relays ──────────────────────────────────────────────────────────────
+  #
+  # Since construct-ios #240 every call is relay-only: no relay, no call. The
+  # relays are coturn host services that no /metrics scrape sees, so these two
+  # rules read the blackbox probe (job turn_tls) instead. The expiry rule exists
+  # because the first relay's certificate ran out on 2026-09-25 and was found on
+  # 2026-10-16, by hand.
+  - name: call_relays
+    rules:
+      - alert: TurnRelayTlsDown
+        expr: probe_success{job="turn_tls"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Call relay {{ $labels.instance }} fails the TLS handshake"
+          description: >
+            Blackbox could not complete a TLS handshake with {{ $labels.instance }}
+            for 5 minutes: coturn down, port closed, SNI demux misrouted, or the
+            certificate invalid. Clients fall back to the other relay only while it
+            is up — with both failing nobody can call.
+
+      - alert: TurnRelayCertExpiresSoon
+        expr: probe_ssl_earliest_cert_expiry{job="turn_tls"} - time() < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Call relay {{ $labels.instance }} certificate expires in under 14 days"
+          description: >
+            Renewal has not happened. turn.ams: certbot --webroot through Caddy, deploy
+            hook sends coturn SIGUSR2 (ops/coturn/turnserver-prod.conf). The backup
+            relay: its host's renewal script copies the cert for coturn and signals it.
+            Check `certbot renew --dry-run` on the relay's host.
+
   # ── Cutover gates: the conditions the hardening ladder flips on ─────────────
   #
   # Each rung of decisions/harden-in-place-execution-plan.md is gated on a number,

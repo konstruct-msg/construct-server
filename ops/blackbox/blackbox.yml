@@ -1,0 +1,15 @@
+# Blackbox exporter — probes for what no /metrics endpoint can report.
+#
+# tls_connect: open a TCP connection, complete a TLS handshake with the target's
+# host as SNI and verify the chain the way a client would. Yields probe_success
+# and probe_ssl_earliest_cert_expiry. Used for the call relays' `turns:`
+# listeners: coturn is a host service outside every scrape, and on 2026-10-16
+# its certificate had been expired for three weeks with nothing to say so.
+modules:
+  tls_connect:
+    prober: tcp
+    timeout: 10s
+    tcp:
+      tls: true
+      tls_config:
+        insecure_skip_verify: false
