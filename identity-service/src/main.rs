@@ -2693,14 +2693,9 @@ impl UserService for IdentityGrpcService {
         let action = proto::ContactRequestAction::try_from(req.action)
             .map_err(|_| Status::invalid_argument("Invalid action"))?;
 
-        let db_status = match action {
-            proto::ContactRequestAction::Accept => "accepted",
-            proto::ContactRequestAction::DeclineBlock => "declined_blocked",
-            proto::ContactRequestAction::SpamBlock => "spam_blocked",
-            proto::ContactRequestAction::Unspecified => {
-                return Err(Status::invalid_argument("Action must be specified"));
-            }
-        };
+        if action == proto::ContactRequestAction::Unspecified {
+            return Err(Status::invalid_argument("Action must be specified"));
+        }
 
         let sec = &self.context.config.security;
 
@@ -2720,39 +2715,18 @@ impl UserService for IdentityGrpcService {
             None
         };
 
-        construct_db::respond_to_contact_request(
-            &self.context.db_pool,
-            request_id,
-            caller_id,
-            db_status,
-            &sec.contact_hmac_secret,
-        )
-        .await
-        .map_err(|e| Status::not_found(e.to_string()))?;
-
         if action == proto::ContactRequestAction::Accept {
             if let Some(sender_id) = from_user_id {
-                // Hashing Uuid::as_bytes() here (instead of the canonical string form)
-                // broke calls for request-flow contacts ("Calls allowed only for mutual
-                // contacts") — contact_link_hmac is the single source of the convention.
-                let caller_hmac =
-                    construct_db::contact_link_hmac(&sec.contact_hmac_secret, &caller_id);
-                let sender_hmac =
-                    construct_db::contact_link_hmac(&sec.contact_hmac_secret, &sender_id);
-                construct_server_shared::db::add_contact_link(
+                // Row scrub and both contact_links edges commit together.
+                construct_db::accept_contact_request(
                     &self.context.db_pool,
-                    &caller_hmac,
-                    &sender_hmac,
+                    request_id,
+                    caller_id,
+                    sender_id,
+                    &sec.contact_hmac_secret,
                 )
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-                construct_server_shared::db::add_contact_link(
-                    &self.context.db_pool,
-                    &sender_hmac,
-                    &caller_hmac,
-                )
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| Status::not_found(e.to_string()))?;
 
                 if let Some(notification_client) = &self.context.notification_client
                     && !notification_client.is_circuit_open()
@@ -2784,8 +2758,10 @@ impl UserService for IdentityGrpcService {
                 &sec.request_envelope_key,
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::not_found(e.to_string()))?;
 
+            // The block, not the request row, is what stops a repeat request, so it is
+            // written first; the row is then deleted and the sender sees nothing of it.
             construct_server_shared::db::block_user(
                 &self.context.db_pool,
                 &caller_id,
@@ -2794,6 +2770,15 @@ impl UserService for IdentityGrpcService {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+            construct_db::decline_contact_request(
+                &self.context.db_pool,
+                request_id,
+                caller_id,
+                &sec.contact_hmac_secret,
+            )
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
         }
 
         Ok(Response::new(proto::RespondToContactRequestResponse {
@@ -3415,6 +3400,28 @@ async fn main() -> Result<()> {
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
     let grpc_keepalive_secs = config.grpc_keepalive_interval_secs;
     let grpc_keepalive_timeout_secs = config.grpc_keepalive_timeout_secs;
+
+    // Hourly sweep of contact requests nobody answered (or whose answer was never read).
+    // Non-critical: a failure is logged and the next tick retries.
+    {
+        let sweep_pool = identity_ctx.db_pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match construct_db::delete_stale_contact_requests(&sweep_pool).await {
+                    Ok(n) if n > 0 => {
+                        info!(deleted = n, "Contact request sweep: removed stale rows");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Contact request sweep failed (non-critical)");
+                    }
+                }
+            }
+        });
+    }
 
     let grpc_ctx = identity_ctx.clone();
     let grpc_veil = veil_bridge_cert.clone();
