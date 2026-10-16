@@ -1,7 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use apns_h2::{
-    Client, ClientConfig, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
+    Client, ClientConfig, CollapseId, DefaultNotificationBuilder, Endpoint, NotificationBuilder,
     NotificationOptions, Priority, PushType as ApnsPushType, error::Error as ApnsH2Error,
     response::ErrorReason,
 };
@@ -154,29 +154,7 @@ impl ApnsClient {
             _ => &self.config.topic,
         };
 
-        // Create notification options
-        // apns-push-type is REQUIRED since iOS 13 — missing it causes silent drops
-        let options = NotificationOptions {
-            apns_topic: Some(topic),
-            apns_push_type: Some(match push_type {
-                PushType::Silent => ApnsPushType::Background,
-                PushType::Visible => ApnsPushType::Alert,
-                PushType::Voip => ApnsPushType::Voip,
-            }),
-            apns_priority: Some(match push_type {
-                PushType::Voip => Priority::High,
-                _ => match priority {
-                    NotificationPriority::High => Priority::High,
-                    NotificationPriority::Low => Priority::Normal,
-                },
-            }),
-            apns_expiration: match push_type {
-                // Calls: do not store / retry when device is offline.
-                PushType::Voip => Some(0),
-                _ => None,
-            },
-            ..Default::default()
-        };
+        let options = notification_options(topic, push_type, priority, &payload);
 
         // Build notification based on push type.
         // BUG FIX: previously the `payload` parameter was ignored entirely and
@@ -358,5 +336,114 @@ impl ApnsClient {
     /// Check if APNs is enabled
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+}
+
+/// `apns-collapse-id` of a message alert. A fixed string: each device token is one device, so a
+/// constant already means "per device", and it carries nothing the push did not reveal. APNs
+/// replaces a banner with a later one that has the same id, so a burst shows one banner, not ten.
+pub const MESSAGE_COLLAPSE_ID: &str = "construct-message";
+
+/// The `construct.type` a message push carries (see `blind_alert` in messaging-service).
+const MESSAGE_ACTIVITY: &str = "new_message";
+
+/// The collapse id for this push: only a message *alert*. Silent wakes, VoIP (a call must never
+/// be merged into another) and contact-request alerts get none.
+pub fn collapse_id_for(push_type: PushType, payload: &ApnsPayload) -> Option<&'static str> {
+    let is_message = payload
+        .construct
+        .as_ref()
+        .is_some_and(|c| c.notification_type == MESSAGE_ACTIVITY);
+    (push_type == PushType::Visible && is_message).then_some(MESSAGE_COLLAPSE_ID)
+}
+
+/// The APNs request headers for a push. `apns-push-type` is REQUIRED since iOS 13 — missing it
+/// causes silent drops.
+fn notification_options<'a>(
+    topic: &'a str,
+    push_type: PushType,
+    priority: NotificationPriority,
+    payload: &ApnsPayload,
+) -> NotificationOptions<'a> {
+    NotificationOptions {
+        apns_topic: Some(topic),
+        apns_push_type: Some(match push_type {
+            PushType::Silent => ApnsPushType::Background,
+            PushType::Visible => ApnsPushType::Alert,
+            PushType::Voip => ApnsPushType::Voip,
+        }),
+        apns_priority: Some(match push_type {
+            PushType::Voip => Priority::High,
+            _ => match priority {
+                NotificationPriority::High => Priority::High,
+                NotificationPriority::Low => Priority::Normal,
+            },
+        }),
+        apns_expiration: match push_type {
+            // Calls: do not store / retry when device is offline.
+            PushType::Voip => Some(0),
+            _ => None,
+        },
+        apns_collapse_id: collapse_id_for(push_type, payload)
+            .and_then(|id| CollapseId::new(id).ok()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ApsData, ConstructData};
+
+    fn payload(activity: Option<&str>) -> ApnsPayload {
+        ApnsPayload {
+            aps: ApsData {
+                content_available: Some(1),
+                alert: None,
+                sound: None,
+                badge: None,
+                mutable_content: None,
+            },
+            construct: activity.map(|a| ConstructData {
+                notification_type: a.to_string(),
+                conversation_id: None,
+            }),
+            construct_call: None,
+        }
+    }
+
+    fn collapse(push_type: PushType, activity: Option<&str>) -> Option<String> {
+        notification_options(
+            "topic",
+            push_type,
+            NotificationPriority::High,
+            &payload(activity),
+        )
+        .apns_collapse_id
+        .map(|c| c.value.to_string())
+    }
+
+    #[test]
+    fn a_message_alert_carries_the_fixed_collapse_id() {
+        assert_eq!(
+            collapse(PushType::Visible, Some("new_message")).as_deref(),
+            Some(MESSAGE_COLLAPSE_ID)
+        );
+    }
+
+    #[test]
+    fn nothing_else_is_collapsed() {
+        assert_eq!(collapse(PushType::Silent, Some("new_message")), None);
+        assert_eq!(collapse(PushType::Voip, Some("new_message")), None);
+        assert_eq!(
+            collapse(PushType::Visible, Some("contact_request_received")),
+            None
+        );
+        assert_eq!(collapse(PushType::Visible, None), None);
+    }
+
+    #[test]
+    fn collapse_id_fits_apns_limit() {
+        assert!(CollapseId::new(MESSAGE_COLLAPSE_ID).is_ok());
     }
 }

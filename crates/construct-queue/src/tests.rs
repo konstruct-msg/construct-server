@@ -898,3 +898,25 @@ async fn mailbox_gap_names_what_the_age_sweep_trimmed_after_the_cursor() {
 
     clear_mailbox(&mut queue, user, &[device]).await;
 }
+
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn push_outstanding_marks_once_until_cleared() {
+    let config = get_test_config();
+    let mut queue = MessageQueue::new(&config).await.expect("queue");
+    let device = format!("test-device-{}", std::process::id());
+
+    assert!(queue.try_mark_push_outstanding(&device).await.unwrap());
+    assert!(!queue.try_mark_push_outstanding(&device).await.unwrap());
+    queue.clear_push_outstanding(&device).await.unwrap();
+    assert!(queue.try_mark_push_outstanding(&device).await.unwrap());
+
+    // Bounded: the marker carries the documented TTL.
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(push_outstanding_key(&device))
+        .query_async(&mut queue.clone_redis_connection())
+        .await
+        .unwrap();
+    assert!(ttl > 0 && ttl <= PUSH_OUTSTANDING_TTL_SECONDS as i64);
+    queue.clear_push_outstanding(&device).await.unwrap();
+}
