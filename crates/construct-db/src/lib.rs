@@ -336,6 +336,14 @@ pub async fn delete_user_account(
         .await
         .context("Failed to delete contact links")?;
 
+    // `contact_requests` uses the raw-bytes convention, not `contact_link_hmac`'s string form.
+    let request_hmac = hmac_sha256(contact_hmac_secret, user_id.as_bytes());
+    sqlx::query("DELETE FROM contact_requests WHERE from_hmac = $1 OR to_hmac = $1")
+        .bind(&request_hmac[..])
+        .execute(&mut *tx)
+        .await
+        .context("Failed to delete contact requests")?;
+
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
         .execute(&mut *tx)
@@ -1838,32 +1846,45 @@ pub async fn get_pending_contact_request_id(
     Ok(id)
 }
 
-/// Respond to a contact request.
+/// How long a contact request row may sit before the sweep deletes it: a pending request
+/// nobody answered, or an accepted one whose sender never came to read the answer.
+pub const CONTACT_REQUEST_RETENTION_DAYS: i32 = 30;
+
+/// Accept a contact request: scrub the row and write both `contact_links` edges, in one
+/// transaction, so there is no state with an accepted request and no edges (or the reverse).
 ///
 /// `actor_user_id` must be the recipient (to_hmac must match) — enforced DB-side.
-/// Returns `Ok(())` on success, error if request not found or actor is not the recipient.
-pub async fn respond_to_contact_request(
+/// `sender_user_id` is the id `get_contact_request_sender` returned for this request.
+///
+/// The row is not deleted: the sender learns that the request was accepted only by reading
+/// it back in `get_sent_contact_requests` (status `accepted`, matched by `request_id`), so
+/// deleting it here would leave the sender waiting forever. What the row keeps is
+/// `id`, the two HMACs, status and timestamps. The encrypted sender id and the encrypted
+/// name snapshot — the parts that name a person — are gone, and the sweep deletes the rest
+/// after `CONTACT_REQUEST_RETENTION_DAYS`.
+pub async fn accept_contact_request(
     pool: &DbPool,
     request_id: Uuid,
     actor_user_id: Uuid,
-    new_status: &str,
+    sender_user_id: Uuid,
     hmac_secret: &[u8],
 ) -> Result<()> {
     let actor_to_hmac = hmac_sha256(hmac_secret, actor_user_id.as_bytes());
+    let mut tx = pool.begin().await.context("Failed to begin accept")?;
 
     let rows_affected = sqlx::query(
         r#"
         UPDATE contact_requests
-        SET status = $1, resolved_at = NOW()
-        WHERE id = $2
-          AND to_hmac = $3
+        SET status = 'accepted', resolved_at = NOW(),
+            from_enc = '\x'::bytea, from_identity_enc = NULL
+        WHERE id = $1
+          AND to_hmac = $2
           AND status = 'pending'
         "#,
     )
-    .bind(new_status)
     .bind(request_id)
     .bind(&actor_to_hmac[..])
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to update contact request")?
     .rows_affected();
@@ -1874,7 +1895,81 @@ pub async fn respond_to_contact_request(
             request_id
         );
     }
+
+    // Hashing Uuid::as_bytes() here (instead of the canonical string form) broke calls
+    // for request-flow contacts — contact_link_hmac is the single source of the convention.
+    let actor_hmac = contact_link_hmac(hmac_secret, &actor_user_id);
+    let sender_hmac = contact_link_hmac(hmac_secret, &sender_user_id);
+    for (user, peer) in [(&actor_hmac, &sender_hmac), (&sender_hmac, &actor_hmac)] {
+        sqlx::query(
+            r#"
+            INSERT INTO contact_links (user_hmac, peer_hmac)
+            VALUES ($1, $2)
+            ON CONFLICT (user_hmac, peer_hmac) DO NOTHING
+            "#,
+        )
+        .bind(&user[..])
+        .bind(&peer[..])
+        .execute(&mut *tx)
+        .await
+        .context("Failed to insert contact link")?;
+    }
+
+    tx.commit().await.context("Failed to commit accept")?;
     Ok(())
+}
+
+/// Decline a contact request by deleting it. Repeat requests are stopped by the block the
+/// caller writes (`send_contact_request` checks `is_blocked_by`), not by this row, so
+/// nothing about the request needs to stay.
+///
+/// `actor_user_id` must be the recipient (to_hmac must match) — enforced DB-side.
+pub async fn decline_contact_request(
+    pool: &DbPool,
+    request_id: Uuid,
+    actor_user_id: Uuid,
+    hmac_secret: &[u8],
+) -> Result<()> {
+    let actor_to_hmac = hmac_sha256(hmac_secret, actor_user_id.as_bytes());
+
+    let rows_affected = sqlx::query(
+        r#"
+        DELETE FROM contact_requests
+        WHERE id = $1
+          AND to_hmac = $2
+          AND status = 'pending'
+        "#,
+    )
+    .bind(request_id)
+    .bind(&actor_to_hmac[..])
+    .execute(pool)
+    .await
+    .context("Failed to delete contact request")?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        anyhow::bail!(
+            "contact request {} not found, already resolved, or actor is not the recipient",
+            request_id
+        );
+    }
+    Ok(())
+}
+
+/// Sweep: delete pending requests older than `CONTACT_REQUEST_RETENTION_DAYS` and accepted
+/// ones resolved longer ago than that. Returns the number of rows removed.
+pub async fn delete_stale_contact_requests(pool: &DbPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM contact_requests
+        WHERE COALESCE(resolved_at, created_at) < NOW() - make_interval(days => $1)
+        "#,
+    )
+    .bind(CONTACT_REQUEST_RETENTION_DAYS)
+    .execute(pool)
+    .await
+    .context("Failed to sweep contact requests")?;
+    Ok(result.rows_affected())
 }
 
 /// Fetch the raw (unencrypted) from_enc for a specific request — used internally to get
@@ -2026,6 +2121,242 @@ mod deletion_tests {
 
         for id in [friend, other] {
             delete_user_account(&pool, &id, SECRET)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    const ENVELOPE_KEY: &[u8] = &[7u8; 32];
+
+    async fn request(pool: &DbPool, from: &Uuid, to: &Uuid) -> Uuid {
+        match create_contact_request(pool, *from, *to, SECRET, ENVELOPE_KEY, Some(b"snapshot"))
+            .await
+            .expect("create request")
+        {
+            CreateContactRequestOutcome::Created(id) => id,
+            CreateContactRequestOutcome::AlreadyPending(id) => id,
+        }
+    }
+
+    async fn requests_touching(pool: &DbPool, id: &Uuid) -> i64 {
+        let h = hmac_sha256(SECRET, id.as_bytes());
+        sqlx::query_scalar(
+            "SELECT count(*) FROM contact_requests WHERE from_hmac = $1 OR to_hmac = $1",
+        )
+        .bind(&h[..])
+        .fetch_one(pool)
+        .await
+        .expect("count")
+    }
+
+    async fn request_exists(pool: &DbPool, id: Uuid) -> bool {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contact_requests WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("exists")
+    }
+
+    /// Requests the account sent and received go, in both directions; a request between
+    /// two other accounts stays. Mutation: drop the `contact_requests` DELETE, or either
+    /// half of its `OR` — the first or second assertion reddens.
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn deletion_removes_contact_requests_both_ways_and_only_those() {
+        let pool = pool().await;
+        let (gone, a, b) = (user(&pool).await, user(&pool).await, user(&pool).await);
+        request(&pool, &gone, &a).await;
+        request(&pool, &b, &gone).await;
+        let unrelated = request(&pool, &a, &b).await;
+        assert_eq!(requests_touching(&pool, &gone).await, 2);
+
+        delete_user_account(&pool, &gone, SECRET)
+            .await
+            .expect("delete");
+
+        assert_eq!(
+            requests_touching(&pool, &gone).await,
+            0,
+            "the account's requests remain"
+        );
+        assert!(
+            request_exists(&pool, unrelated).await,
+            "another pair's request was touched"
+        );
+
+        for id in [a, b] {
+            delete_user_account(&pool, &id, SECRET)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// Accept writes both edges and scrubs what names a person, but keeps the status row
+    /// the sender polls. Mutation: drop the scrub columns from the UPDATE (second block),
+    /// the link inserts (first block), or make the UPDATE not match (the error assertion).
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn accept_scrubs_the_row_and_links_both_ways() {
+        let pool = pool().await;
+        let (sender, recipient) = (user(&pool).await, user(&pool).await);
+        let id = request(&pool, &sender, &recipient).await;
+
+        accept_contact_request(&pool, id, recipient, sender, SECRET)
+            .await
+            .expect("accept");
+
+        assert!(
+            are_mutual_contacts(
+                &pool,
+                &contact_link_hmac(SECRET, &sender),
+                &contact_link_hmac(SECRET, &recipient)
+            )
+            .await
+            .unwrap(),
+            "accept did not write both edges"
+        );
+        let (status, from_enc, identity): (String, Vec<u8>, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT status, from_enc, from_identity_enc FROM contact_requests WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(status, "accepted");
+        assert!(from_enc.is_empty(), "the encrypted sender id remains");
+        assert!(identity.is_none(), "the encrypted name snapshot remains");
+        let sent = get_sent_contact_requests(&pool, sender, SECRET)
+            .await
+            .unwrap();
+        assert!(
+            sent.iter().any(|r| r.id == id && r.status == "accepted"),
+            "the sender can no longer see the acceptance"
+        );
+        assert!(
+            accept_contact_request(&pool, id, recipient, sender, SECRET)
+                .await
+                .is_err(),
+            "a resolved request accepted twice"
+        );
+        assert!(
+            accept_contact_request(&pool, id, sender, recipient, SECRET)
+                .await
+                .is_err(),
+            "the sender accepted their own request"
+        );
+
+        for u in [sender, recipient] {
+            delete_user_account(&pool, &u, SECRET)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// Decline deletes the row; only the recipient can. Mutation: turn the DELETE back
+    /// into a status UPDATE — the row survives and `request_exists` stays true.
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn decline_deletes_the_row() {
+        let pool = pool().await;
+        let (sender, recipient) = (user(&pool).await, user(&pool).await);
+        let id = request(&pool, &sender, &recipient).await;
+
+        assert!(
+            decline_contact_request(&pool, id, sender, SECRET)
+                .await
+                .is_err(),
+            "the sender declined their own request"
+        );
+        assert!(request_exists(&pool, id).await);
+
+        decline_contact_request(&pool, id, recipient, SECRET)
+            .await
+            .expect("decline");
+        assert!(!request_exists(&pool, id).await, "the declined row remains");
+        assert!(
+            get_sent_contact_requests(&pool, sender, SECRET)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        for u in [sender, recipient] {
+            delete_user_account(&pool, &u, SECRET)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// The sweep deletes pending rows past the retention and accepted rows resolved past
+    /// it, and nothing younger. Mutation: remove the DELETE, or compare `created_at` only
+    /// (the old accepted row, created long ago but resolved recently, would then go).
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn sweep_deletes_only_stale_requests() {
+        let pool = pool().await;
+        let (a, b, c, d, e) = (
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+        );
+        let old_pending = request(&pool, &a, &b).await;
+        let fresh_pending = request(&pool, &a, &c).await;
+        let old_accepted = request(&pool, &a, &d).await;
+        let fresh_accepted = request(&pool, &a, &e).await;
+        accept_contact_request(&pool, old_accepted, d, a, SECRET)
+            .await
+            .unwrap();
+        accept_contact_request(&pool, fresh_accepted, e, a, SECRET)
+            .await
+            .unwrap();
+
+        let past = format!("{} days", CONTACT_REQUEST_RETENTION_DAYS + 1);
+        sqlx::query("UPDATE contact_requests SET created_at = NOW() - $2::interval WHERE id = $1")
+            .bind(old_pending)
+            .bind(&past)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE contact_requests SET created_at = NOW() - $2::interval, \
+             resolved_at = NOW() - $2::interval WHERE id = $1",
+        )
+        .bind(old_accepted)
+        .bind(&past)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Created long ago, resolved just now: the answer has not been waiting 30 days.
+        sqlx::query("UPDATE contact_requests SET created_at = NOW() - $2::interval WHERE id = $1")
+            .bind(fresh_accepted)
+            .bind(&past)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let removed = delete_stale_contact_requests(&pool).await.unwrap();
+        assert!(removed >= 2, "the sweep removed {removed}");
+        assert!(
+            !request_exists(&pool, old_pending).await,
+            "stale pending kept"
+        );
+        assert!(
+            !request_exists(&pool, old_accepted).await,
+            "stale accepted kept"
+        );
+        assert!(
+            request_exists(&pool, fresh_pending).await,
+            "fresh pending swept"
+        );
+        assert!(
+            request_exists(&pool, fresh_accepted).await,
+            "fresh answer swept"
+        );
+
+        for u in [a, b, c, d, e] {
+            delete_user_account(&pool, &u, SECRET)
                 .await
                 .expect("cleanup");
         }
