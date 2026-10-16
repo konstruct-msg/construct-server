@@ -61,6 +61,24 @@
 	metrics /metrics
 }
 
+# ACME HTTP-01 webroot for the host coturn's certificate (turn.ams.konstruct.cc).
+# coturn is a host systemd service, not a container (construct-docs
+# decisions/turn-host-systemd-not-in-compose), and certbot cannot bind :80 for
+# `--standalone` while Caddy owns the port — the cert expired on 2026-09-25 for
+# that reason, with every `turns:5349` handshake failing since. Caddy serves
+# certbot's challenge files for the name instead (`certbot --webroot`, see
+# ops/coturn/turnserver-prod.conf) and answers everything else on it with 404.
+# `http://` keeps Caddy from issuing a cert of its own for the name.
+http://turn.ams.konstruct.cc {
+	handle /.well-known/acme-challenge/* {
+		root * /srv/acme-webroot
+		file_server
+	}
+	handle {
+		respond 404
+	}
+}
+
 ams.konstruct.cc {
 	tls {
 		protocols tls1.2 tls1.3
