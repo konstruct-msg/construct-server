@@ -526,6 +526,23 @@ services:
   # Prometheus scrapes /metrics from every service on the internal network.
   # Web UI accessible on host loopback only (ssh tunnel or localhost).
 
+  # Dials things from the outside the way a client would — TLS handshake and
+  # certificate expiry of the call relays (job turn_tls). No port published; only
+  # Prometheus talks to it.
+  blackbox:
+    image: prom/blackbox-exporter:v0.26.0
+    container_name: construct-blackbox
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/blackbox/blackbox.yml'
+    volumes:
+      - ./blackbox:/etc/blackbox:ro
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - internal
+
   prometheus:
     image: prom/prometheus:v3.2.1
     container_name: construct-prometheus
@@ -546,6 +563,10 @@ services:
       # makes a replaced file visible, which is what makes SIGHUP mean anything.
       - ./prometheus:/etc/prometheus:ro
       - prometheus-data:/prometheus
+      # Host-only scrape targets (file_sd). The backup call relay's name is not
+      # public, so it is listed here on the host, not in ops/prometheus/. See
+      # the turn_tls job in prometheus.yml.
+      - /opt/construct/monitoring/prometheus-targets:/etc/prometheus/targets:ro
     networks:
       - internal
 

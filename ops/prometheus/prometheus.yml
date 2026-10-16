@@ -100,6 +100,32 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']
 
+  # TLS reachability and certificate expiry of the call relays — the `turns:`
+  # listeners clients dial. coturn is a host service (decisions/turn-host-systemd-
+  # not-in-compose) and outside every other scrape; on 2026-10-16 the
+  # turn.ams.konstruct.cc certificate had been expired for three weeks and the
+  # only sign was `turns:` handshakes failing in a log nobody reads. Blackbox
+  # dials each target with its host as SNI and verifies the chain as a client
+  # would. The backup relay's name is not public: it is listed on the host in
+  #   /opt/construct/monitoring/prometheus-targets/turn.yml
+  #   - targets: ['<relay-name>:443']
+  # and nowhere in this repository.
+  - job_name: turn_tls
+    metrics_path: /probe
+    params:
+      module: [tls_connect]
+    static_configs:
+      - targets: ['turn.ams.konstruct.cc:5349']
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/turn*.yml']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
   # Self-scrape. `up` for every other job comes from here, and so does the answer
   # to "was Prometheus itself restarted while I was reading this graph".
   - job_name: prometheus
