@@ -18,6 +18,7 @@ mod connection;
 mod delivery;
 mod gap;
 mod pow;
+mod push_outstanding;
 mod rate_limiting;
 mod replay;
 mod sessions;
@@ -25,6 +26,7 @@ mod tokens;
 
 pub use gap::MailboxGap;
 pub use pow::PowChallengeRecord;
+pub use push_outstanding::{PUSH_OUTSTANDING_TTL_SECONDS, push_outstanding_key};
 
 /// How long a message may sit in a mailbox: the hourly age sweep
 /// (`trim_streams_by_age`) deletes anything older. Delivery deletes nothing —
@@ -593,6 +595,26 @@ impl MessageQueue {
         use redis::AsyncCommands;
         let value: Option<String> = self.client.connection_mut().get(key).await?;
         Ok(value)
+    }
+
+    /// Record that a message push is now outstanding for `device_id`. Returns `true` when this
+    /// call set the marker (no push was outstanding: send), `false` when one already was (skip).
+    /// One atomic `SET NX EX`, so two envelopes racing for the same device cannot both send.
+    pub async fn try_mark_push_outstanding(&mut self, device_id: &str) -> Result<bool> {
+        let set: Option<String> = redis::cmd("SET")
+            .arg(push_outstanding_key(device_id))
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(PUSH_OUTSTANDING_TTL_SECONDS)
+            .query_async(self.client.connection_mut())
+            .await?;
+        Ok(set.is_some())
+    }
+
+    /// The device read its mailbox, or the push could not be sent: forget the marker.
+    pub async fn clear_push_outstanding(&mut self, device_id: &str) -> Result<()> {
+        self.delete(&push_outstanding_key(device_id)).await
     }
 
     /// Delete a key

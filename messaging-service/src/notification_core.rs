@@ -206,6 +206,46 @@ fn extension_reads_it(activity_type: Option<&str>, is_alert: bool) -> Option<u8>
     (is_alert && activity_type == Some("new_message")).then_some(1)
 }
 
+/// Whether a push is a message alert, the only kind that is held back while a previous one is
+/// unconsumed. Contact requests, key-maintenance wakes and silent pushes are never held back, and
+/// call pushes do not pass through here at all.
+fn is_message_alert(activity_type: Option<&str>, is_alert: bool) -> bool {
+    is_alert && activity_type == Some("new_message")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PushDecision {
+    Send,
+    /// A message push to this device has not been consumed yet; its banner is still the one the
+    /// person will see.
+    SkipOutstanding,
+}
+
+/// The one decision: a message alert is skipped while a push to the same device is outstanding;
+/// every other push is sent regardless of the marker.
+pub(crate) fn decide_push(is_message_alert: bool, outstanding: bool) -> PushDecision {
+    if is_message_alert && outstanding {
+        PushDecision::SkipOutstanding
+    } else {
+        PushDecision::Send
+    }
+}
+
+/// A push that never reached the device must not leave its marker behind, or the next envelope
+/// would be held back for a banner that was never shown.
+async fn release_marker(context: &NotificationServiceContext, device: Option<&str>) {
+    if let Some(device) = device
+        && let Err(e) = context
+            .queue
+            .lock()
+            .await
+            .clear_push_outstanding(device)
+            .await
+    {
+        tracing::warn!(error = %e, "could not clear push-outstanding marker — TTL will");
+    }
+}
+
 /// Send blind notification (privacy-preserving push)
 pub async fn send_blind_notification(
     context: &NotificationServiceContext,
@@ -243,6 +283,28 @@ pub async fn send_blind_notification(
         );
         return Ok(SendBlindNotificationOutput { success: true });
     }
+
+    // `device_id` is read with a runtime query rather than added to the `query!` above: that
+    // would change the compile-time-checked statement and its offline data for one column.
+    let device_ids: std::collections::HashMap<Vec<u8>, String> = sqlx::query(
+        "SELECT device_token_encrypted, device_id FROM device_tokens \
+         WHERE user_id = $1 AND enabled = TRUE AND device_id IS NOT NULL",
+    )
+    .bind(input.user_id)
+    .fetch_all(&*context.db_pool)
+    .await
+    .map(|rows| {
+        rows.iter()
+            .filter_map(|r| {
+                Some((
+                    r.try_get::<Vec<u8>, _>("device_token_encrypted").ok()?,
+                    r.try_get::<String, _>("device_id").ok()?,
+                ))
+            })
+            .collect()
+    })
+    // Fail open: without the ids nothing is held back and every device gets its push.
+    .unwrap_or_default();
 
     let mut sent_count = 0;
     for token_row in &device_tokens {
@@ -301,6 +363,39 @@ pub async fn send_blind_notification(
         } else {
             (PushType::Silent, NotificationPriority::Low)
         };
+        // One banner per unread batch, per device: while a message push to this device is
+        // outstanding, the next envelope does not push again. A row with no device id cannot be
+        // cleared by a mailbox read, so it is never held back.
+        //
+        // Fails OPEN: if Redis cannot answer, the push is sent. A duplicate banner is a nuisance;
+        // a withheld one is a missed message, and only the marker's TTL would end it.
+        let outstanding_for: Option<&str> =
+            if is_message_alert(input.activity_type.as_deref(), alert.is_some()) {
+                device_ids
+                    .get(&token_row.device_token_encrypted)
+                    .map(String::as_str)
+            } else {
+                None
+            };
+        if let Some(device) = outstanding_for {
+            let acquired = context
+                .queue
+                .lock()
+                .await
+                .try_mark_push_outstanding(device)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "push-outstanding marker unavailable — sending");
+                    true
+                });
+            if decide_push(true, !acquired) == PushDecision::SkipOutstanding {
+                tracing::debug!(
+                    user_hash = %user_id_hash,
+                    "Message push skipped — previous one unconsumed"
+                );
+                continue;
+            }
+        }
         let mutable_content = extension_reads_it(input.activity_type.as_deref(), alert.is_some());
         let payload = ApnsPayload {
             aps: ApsData {
@@ -374,6 +469,7 @@ pub async fn send_blind_notification(
             }
         }
         if rejected_by_all {
+            release_marker(context, outstanding_for).await;
             match verdict_after_rejection(environments.len()) {
                 RejectionVerdict::Widen => {
                     tracing::warn!(
@@ -424,6 +520,7 @@ pub async fn send_blind_notification(
             }
         }
         let Some(environment) = succeeded_on else {
+            release_marker(context, outstanding_for).await;
             continue;
         };
 
@@ -1352,5 +1449,33 @@ mod blind_alert_tests {
                 "loc-key": "construct_new_message"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod push_outstanding_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_message_alert_is_skipped_while_one_is_outstanding() {
+        assert_eq!(decide_push(true, true), PushDecision::SkipOutstanding);
+    }
+
+    #[test]
+    fn the_first_message_alert_is_sent() {
+        assert_eq!(decide_push(true, false), PushDecision::Send);
+    }
+
+    #[test]
+    fn other_pushes_ignore_the_marker() {
+        assert_eq!(decide_push(false, true), PushDecision::Send);
+    }
+
+    #[test]
+    fn only_a_new_message_alert_is_a_message_alert() {
+        assert!(is_message_alert(Some("new_message"), true));
+        assert!(!is_message_alert(Some("new_message"), false)); // silent device
+        assert!(!is_message_alert(Some("contact_request_received"), true));
+        assert!(!is_message_alert(None, true));
     }
 }
