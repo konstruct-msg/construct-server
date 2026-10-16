@@ -1,0 +1,12 @@
+# /etc/logrotate.d/coturn — relay log retention: 7 daily files, then gone.
+# The privacy policy (construct-docs compliance, §2.3 Calls) states this period.
+# copytruncate: coturn keeps the file open (`simple-log` in turnserver.conf).
+/var/log/coturn/coturn.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
