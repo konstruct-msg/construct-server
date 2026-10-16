@@ -28,26 +28,11 @@ pub(crate) fn generate_turn_credentials(secret: &str, ttl: u64) -> TurnCredentia
     mac.update(username.as_bytes());
     let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
-    // Support multiple TURN servers via TURN_HOSTS (comma-separated).
-    // Falls back to legacy TURN_HOST for single-server setups.
-    let hosts: Vec<String> = env::var("TURN_HOSTS")
-        .or_else(|_| env::var("TURN_HOST"))
-        .unwrap_or_else(|_| "turn.konstruct.cc".into())
-        .split(',')
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .collect();
-
-    let urls = hosts
-        .iter()
-        .flat_map(|host| {
-            [
-                format!("turn:{}:3478?transport=udp", host),
-                format!("turn:{}:3478?transport=tcp", host),
-                format!("turns:{}:5349?transport=tcp", host),
-            ]
-        })
-        .collect();
+    let urls = turn_urls(
+        &env::var("TURN_HOSTS")
+            .or_else(|_| env::var("TURN_HOST"))
+            .unwrap_or_else(|_| "turn.konstruct.cc".into()),
+    );
 
     TurnCredentials {
         urls,
@@ -57,9 +42,37 @@ pub(crate) fn generate_turn_credentials(secret: &str, ttl: u64) -> TurnCredentia
     }
 }
 
+/// `TURN_HOSTS` (comma-separated) → ICE server URLs.
+///
+/// A bare host is a relay in the standard shape and expands to its three listeners:
+/// `turn:` UDP and TCP on 3478, `turns:` on 5349. An entry that already carries a
+/// scheme (`turn:` / `turns:`) is advertised verbatim and nothing else is added for
+/// it — a relay that exists only as `turns:<host>:443?transport=tcp` behind an SNI
+/// demux must not be probed on ports it never opened (each dead URL costs the
+/// client an ICE gathering timeout, and 3478 on a host that answers nothing else
+/// says what the host is).
+pub(crate) fn turn_urls(hosts: &str) -> Vec<String> {
+    hosts
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .flat_map(|entry| {
+            if entry.starts_with("turn:") || entry.starts_with("turns:") {
+                vec![entry.to_string()]
+            } else {
+                vec![
+                    format!("turn:{entry}:3478?transport=udp"),
+                    format!("turn:{entry}:3478?transport=tcp"),
+                    format!("turns:{entry}:5349?transport=tcp"),
+                ]
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::generate_turn_credentials;
+    use super::{generate_turn_credentials, turn_urls};
     use base64::Engine;
     use hmac::{Hmac, Mac, digest::KeyInit};
     use sha1::Sha1;
@@ -86,5 +99,19 @@ mod tests {
         let expected =
             base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         assert_eq!(c.credential, expected);
+    }
+
+    #[test]
+    fn a_bare_host_expands_and_an_explicit_url_is_advertised_as_is() {
+        let urls = turn_urls("turn.ams.konstruct.cc, turns:relay.example.org:443?transport=tcp,,");
+        assert_eq!(
+            urls,
+            vec![
+                "turn:turn.ams.konstruct.cc:3478?transport=udp",
+                "turn:turn.ams.konstruct.cc:3478?transport=tcp",
+                "turns:turn.ams.konstruct.cc:5349?transport=tcp",
+                "turns:relay.example.org:443?transport=tcp",
+            ]
+        );
     }
 }
