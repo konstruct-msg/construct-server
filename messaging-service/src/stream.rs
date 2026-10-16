@@ -830,6 +830,13 @@ pub(crate) async fn poll_messages(
     // Read before `entries` is moved out: a method on the page borrows the whole struct.
     let user_only_count = page.user_only();
     let messages = page.entries;
+    // Delivering to the device consumes the push that announced it; the next envelope may push
+    // again. Only on a non-empty read — an idle poll runs every few seconds per open stream.
+    if !messages.is_empty()
+        && let Some(device) = device_id.filter(|d| !d.is_empty())
+    {
+        let _ = queue.clear_push_outstanding(device).await;
+    }
     construct_metrics::MSG_MAILBOX_READ_TOTAL
         .with_label_values(&["stream", mode])
         .inc();

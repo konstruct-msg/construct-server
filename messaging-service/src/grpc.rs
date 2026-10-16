@@ -919,6 +919,17 @@ impl MessagingService for MessagingGrpcService {
                 .await
                 .map_err(|e| Status::internal(format!("Failed to read messages: {}", e)))?
         };
+        // The device is reading its mailbox: whatever push announced these messages is consumed,
+        // so the next envelope may push again. Failure is harmless — the marker expires.
+        if let Some(device) = device_id.as_deref().filter(|d| !d.is_empty()) {
+            let _ = self
+                .context
+                .queue
+                .lock()
+                .await
+                .clear_push_outstanding(device)
+                .await;
+        }
         let stream_messages = page.entries;
         let raw_page_len = stream_messages.len();
         construct_metrics::MSG_MAILBOX_READ_TOTAL
