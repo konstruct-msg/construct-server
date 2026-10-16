@@ -117,7 +117,7 @@ scrape_configs:
     static_configs:
       - targets: ['turn.ams.konstruct.cc:5349']
     file_sd_configs:
-      - files: ['/etc/prometheus/targets/turn*.yml']
+      - files: ['/etc/prometheus-targets/turn*.yml']
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

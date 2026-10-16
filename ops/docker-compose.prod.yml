@@ -445,9 +445,12 @@ services:
       METRICS_PORT: "8091"
       # CONTACT_HMAC_SECRET + TURN_SECRET come from env_file (app.env) — do NOT re-list
       # as ${VAR} (unset interpolation blanks them, breaking HMAC + TURN credentials).
-      # Further relays are added here in app.env, not in this file: which hosts
-      # carry calls is not public (TODO 156). turn.msk.konstruct.cc has no DNS
-      # record — listing it cost every ICE gathering a failed lookup.
+      # Further relays go into the compose .env on the host (the file this
+      # ${…} interpolates from), not into this file — which hosts carry calls
+      # is not public (TODO 156) — and not into app.env: `environment:` wins
+      # over env_file, so a TURN_HOSTS there is silently ignored.
+      # turn.msk.konstruct.cc has no DNS record — listing it cost every ICE
+      # gathering a failed lookup.
       TURN_HOSTS: ${TURN_HOSTS:-turn.ams.konstruct.cc}
       TURN_CREDENTIALS_TTL_SECONDS: ${TURN_CREDENTIALS_TTL_SECONDS:-3600}
       NOTIFICATION_GRPC_ENDPOINT: "http://messaging:50053"
@@ -565,8 +568,11 @@ services:
       - prometheus-data:/prometheus
       # Host-only scrape targets (file_sd). The backup call relay's name is not
       # public, so it is listed here on the host, not in ops/prometheus/. See
-      # the turn_tls job in prometheus.yml.
-      - /opt/construct/monitoring/prometheus-targets:/etc/prometheus/targets:ro
+      # the turn_tls job in prometheus.yml. Its own path, not a subdirectory of
+      # /etc/prometheus: that one is a read-only bind mount, and runc cannot
+      # create a mountpoint inside it ("mkdirat ...: read-only file system" —
+      # the deploy of c4926ba left Prometheus in Created).
+      - /opt/construct/monitoring/prometheus-targets:/etc/prometheus-targets:ro
     networks:
       - internal
 
