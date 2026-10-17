@@ -273,10 +273,22 @@ enum ContentType {
   // false. Server forwards opaquely. decisions/profile-share-is-a-typed-versioned-state.md
   CONTENT_TYPE_PROFILE = 29;
 
+  // READ_SYNC — how far the reader has read each chat, as `ReadMarkers` (below), from one of the
+  // reader's devices to its OTHER devices, so their unread counts agree. Never to a contact: a
+  // contact gets only the delivery receipt (14). Sent only when the account has more than one
+  // device — the core's `plan_send(recipient_is_self: true)` is empty otherwise.
+  //
+  // Framed side channel inside the ciphertext: knst_byte5 = true. The envelope OUTSIDE says
+  // SENDER_SYNC (23), like every copy to an own device, so the relay cannot tell a read marker
+  // from a copy of a sent message by its type. A receiver applies markers only from its own
+  // account's devices; one from anyone else is dropped.
+  // decisions/read-state-syncs-between-own-devices.md
+  CONTENT_TYPE_READ_SYNC = 30;
+
   reserved "CONTENT_TYPE_INTAKE_KEY";
 
   // Reserved for future types
-  reserved 3 to 9, 15 to 19, 30 to 100;
+  reserved 3 to 9, 15 to 19, 31 to 100;
 }
 
 // MessagePriority - Delivery priority
@@ -703,6 +715,28 @@ message AvatarRef {
   // 32 bytes, AES-256.
   bytes media_key = 3;
   string mime_type = 4;
+}
+
+// The payload of CONTENT_TYPE_READ_SYNC (30): how far this account has read each chat, from one
+// of its devices to the others. One marker per chat whose boundary moved since the last send.
+//
+// A marker names the last read message by what every device of the reader holds alike — the id
+// and the sender's timestamp from inside the ciphertext — never by a server position, which is
+// different in each device's mailbox. A receiver keeps the boundary per partner and applies a
+// marker only if it is later: `last_read_sent_at_ms` greater, or equal with a greater
+// `last_read_message_id` (byte order). Incoming messages at or before the boundary count as read,
+// including ones that arrive after the marker.
+message ReadMarkers {
+  repeated ReadMarker markers = 1;
+}
+
+message ReadMarker {
+  // The ServerUserId of the contact the chat is with.
+  string partner_user_id = 1;
+  // The last read incoming message, by its id from inside the ciphertext, lowercased.
+  string last_read_message_id = 2;
+  // That message's timestamp by its sender's clock, ms since the epoch.
+  uint64 last_read_sent_at_ms = 3;
 }
 
 message ContactCard {

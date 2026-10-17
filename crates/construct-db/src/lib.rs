@@ -1956,6 +1956,34 @@ pub async fn decline_contact_request(
     Ok(())
 }
 
+/// The sender has seen these requests ACCEPTED and made its contacts from them, so their rows
+/// have no further use and go now rather than at the sweep. Only accepted rows the caller sent:
+/// an id that is someone else's, still pending, or unknown is left alone, so a caller can delete
+/// nothing but its own answered requests. Returns the number of rows removed.
+pub async fn delete_acknowledged_contact_requests(
+    pool: &DbPool,
+    sender_user_id: Uuid,
+    request_ids: &[Uuid],
+    hmac_secret: &[u8],
+) -> Result<u64> {
+    if request_ids.is_empty() {
+        return Ok(0);
+    }
+    let from_hmac = hmac_sha256(hmac_secret, sender_user_id.as_bytes());
+    let result = sqlx::query(
+        r#"
+        DELETE FROM contact_requests
+        WHERE from_hmac = $1 AND status = 'accepted' AND id = ANY($2)
+        "#,
+    )
+    .bind(&from_hmac[..])
+    .bind(request_ids)
+    .execute(pool)
+    .await
+    .context("Failed to delete acknowledged contact requests")?;
+    Ok(result.rows_affected())
+}
+
 /// Sweep: delete pending requests older than `CONTACT_REQUEST_RETENTION_DAYS` and accepted
 /// ones resolved longer ago than that. Returns the number of rows removed.
 pub async fn delete_stale_contact_requests(pool: &DbPool) -> Result<u64> {
@@ -2281,6 +2309,62 @@ mod deletion_tests {
         );
 
         for u in [sender, recipient] {
+            delete_user_account(&pool, &u, SECRET)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// An acknowledgement deletes the caller's own accepted rows and nothing else: not a pending
+    /// one, not someone else's accepted one. Mutation: drop `status = 'accepted'` (the pending
+    /// row goes) or `from_hmac = $1` (the other sender's row goes).
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn acknowledgement_deletes_only_own_accepted_requests() {
+        let pool = pool().await;
+        let (a, b, c, other, d) = (
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+            user(&pool).await,
+        );
+        let accepted = request(&pool, &a, &b).await;
+        let pending = request(&pool, &a, &c).await;
+        let not_mine = request(&pool, &other, &d).await;
+        accept_contact_request(&pool, accepted, b, a, SECRET)
+            .await
+            .unwrap();
+        accept_contact_request(&pool, not_mine, d, other, SECRET)
+            .await
+            .unwrap();
+
+        let ids = [accepted, pending, not_mine, Uuid::new_v4()];
+        let removed = delete_acknowledged_contact_requests(&pool, a, &ids, SECRET)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let left: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM contact_requests WHERE id = ANY($1)")
+                .bind(&ids[..])
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(!left.contains(&accepted), "the acknowledged row is gone");
+        assert!(left.contains(&pending), "a pending request stays");
+        assert!(
+            left.contains(&not_mine),
+            "another sender's accepted request stays"
+        );
+        // Resent after a lost response: nothing left to delete, and no error.
+        assert_eq!(
+            delete_acknowledged_contact_requests(&pool, a, &ids, SECRET)
+                .await
+                .unwrap(),
+            0
+        );
+
+        for u in [a, b, c, other, d] {
             delete_user_account(&pool, &u, SECRET)
                 .await
                 .expect("cleanup");
