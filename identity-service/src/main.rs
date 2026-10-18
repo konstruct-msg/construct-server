@@ -382,6 +382,10 @@ fn build_sender_cert_sign_payload(
 
 const IDENTITY_DECODE: usize = construct_server_shared::decode_limits::IDENTITY;
 
+/// Ids honoured from one `GetContactRequests.ack_accepted`. A sender has as many as it had
+/// requests answered since its last poll; the rest of a longer list waits for the next one.
+const MAX_ACKED_CONTACT_REQUESTS: usize = 100;
+
 fn extract_user_id_from_metadata(
     auth_manager: &Arc<construct_server_shared::auth::AuthManager>,
     metadata: &tonic::metadata::MetadataMap,
@@ -2631,6 +2635,27 @@ impl UserService for IdentityGrpcService {
         let caller_id =
             extract_user_id_from_metadata(&self.context.auth_manager, request.metadata())?;
         let sec = &self.context.config.security;
+
+        // Accepted requests the sender has made contacts from: their rows go before the answer,
+        // so the answer no longer lists them. A failure is not the caller's problem — it resends
+        // until an answer arrives, and the sweep is the backstop.
+        let acked: Vec<uuid::Uuid> = request
+            .get_ref()
+            .ack_accepted
+            .iter()
+            .take(MAX_ACKED_CONTACT_REQUESTS)
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+            .collect();
+        if let Err(e) = construct_db::delete_acknowledged_contact_requests(
+            &self.context.db_pool,
+            caller_id,
+            &acked,
+            &sec.contact_hmac_secret,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "acknowledged contact requests not deleted");
+        }
 
         let incoming_raw = construct_db::get_pending_contact_requests(
             &self.context.db_pool,
