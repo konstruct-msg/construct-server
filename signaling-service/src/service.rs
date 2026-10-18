@@ -80,6 +80,13 @@ pub(crate) struct SignalingServiceImpl {
 
 /// Authenticated user_id from Bearer token (optional x-user-id must match).
 /// When `auth` is `None` (misconfigured keys), refuse rather than trust headers.
+/// Every refusal of a call reads the same: not a mutual contact, blocked by the callee, or the
+/// check unavailable. Until 2026-10-18 the block had its own text, so the caller learned they
+/// were blocked (TODO 170). Why it was refused stays in the server log.
+fn call_refused() -> Status {
+    Status::permission_denied("Call not allowed")
+}
+
 fn caller_user_id<T>(req: &Request<T>, auth: Option<&AuthManager>) -> Result<String, Status> {
     let auth = auth.ok_or_else(|| {
         Status::failed_precondition(
@@ -354,13 +361,11 @@ impl SignalingService for SignalingServiceImpl {
                         callee_user_id,
                         "InitiateCall denied — not mutual contacts"
                     );
-                    return Err(Status::permission_denied(
-                        "Calls allowed only for mutual contacts",
-                    ));
+                    return Err(call_refused());
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to check mutual contacts — denying (fail-closed)");
-                    return Err(Status::permission_denied("Calls not allowed"));
+                    return Err(call_refused());
                 }
             }
 
@@ -371,16 +376,14 @@ impl SignalingService for SignalingServiceImpl {
                         callee_user_id,
                         "InitiateCall denied — caller is blocked"
                     );
-                    return Err(Status::permission_denied("Call not allowed"));
+                    return Err(call_refused());
                 }
                 Ok(false) => {}
                 Err(e) => tracing::warn!(error = %e, "Failed to check user_blocks — proceeding"),
             }
         } else {
             tracing::warn!("InitiateCall denied — db_pool not configured (DATABASE_URL missing?)");
-            return Err(Status::permission_denied(
-                "Calls allowed only for mutual contacts",
-            ));
+            return Err(call_refused());
         }
 
         // ── Rate limits ────────────────────────────────────────────────────
@@ -676,4 +679,19 @@ pub(crate) fn make_instance_id() -> String {
 
 pub(crate) fn make_default_peer_salt(turn_secret: &str) -> String {
     turn_secret.to_string()
+}
+
+#[cfg(test)]
+mod call_refusal_tests {
+    /// A second text would tell a blocked caller apart from one who is not a contact.
+    #[test]
+    fn every_call_refusal_reads_the_same() {
+        let source = include_str!("service.rs");
+        let literal = concat!("Status::permission", "_denied(");
+        assert_eq!(
+            source.matches(literal).count(),
+            1,
+            "refuse a call through call_refused()"
+        );
+    }
 }
