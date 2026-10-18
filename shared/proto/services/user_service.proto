@@ -56,6 +56,7 @@ service UserService {
 
   // GetContactRequests - Fetch incoming pending contact requests (requires auth)
   // Also returns outgoing sent requests (status only, no recipient ID revealed).
+  // Deletes the caller's ACCEPTED sent requests named in `ack_accepted` first.
   rpc GetContactRequests(GetContactRequestsRequest) returns (GetContactRequestsResponse);
 
   // RespondToContactRequest - Accept or block an incoming contact request (requires auth)
@@ -508,7 +509,14 @@ message SendContactRequestResponse {
 
 // GetContactRequests
 message GetContactRequestsRequest {
-  // No fields — returns all pending incoming + all outgoing for the caller.
+  // Returns all pending incoming + all outgoing for the caller.
+
+  // Sent requests the caller has seen ACCEPTED and made a contact from. The server deletes those
+  // rows — only ACCEPTED ones whose sender is the caller — before answering: once the sender
+  // knows, the row has no use, and the less the server holds the better. Resent until a
+  // response arrives, so deleting twice is a no-op. A server that predates the field ignores
+  // it, and the retention sweep removes the rows as before.
+  repeated string ack_accepted = 1;
 }
 
 message GetContactRequestsResponse {
