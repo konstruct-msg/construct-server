@@ -491,32 +491,19 @@ where
     Ok(())
 }
 
-/// GET /.well-known/construct-server
-/// GET /.well-known/konstruct
+/// The fixed part of the discovery document: what a client needs to find the services.
 ///
-/// Server discovery endpoint for DPI detection and VEIL endpoint configuration.
-/// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
-/// DPI detection, triggering VEIL auto-start and adding 5-8 seconds to every connection.
-async fn well_known_construct_server(
-    State(state): State<GatewayState>,
-) -> (
-    StatusCode,
-    [(axum::http::header::HeaderName, &'static str); 1],
-    Json<serde_json::Value>,
-) {
-    let config = &state.config;
-    let domain = &config.instance_domain;
-    let mut body = json!({
+/// No version, commit or build. This document is public, and "which build of the server is
+/// this" is an answer for whoever operates it, not for whoever asks: it told a passer-by which
+/// release they were looking at, and when it changed (vault TODO 162 C.4, unobservability map
+/// P3). What is deployed is read from `construct_build_info` on the metrics port, which Caddy
+/// does not expose.
+fn discovery_body(domain: &str, relays: &[String]) -> serde_json::Value {
+    json!({
         "version": "1.0",
         "protocol": "grpc",
         "server": {
             "domain": domain,
-            "version": env!("CARGO_PKG_VERSION"),
-            // The semver alone cannot answer "what is running?" — it only moves
-            // on a manual bump, so many commits share one number and one image
-            // tag. The commit can.
-            "commit": construct_server_shared::build_info::GIT_SHA_SHORT,
-            "build": construct_server_shared::build_info::full(),
         },
         "grpc_endpoint": format!("{}:443", domain),
         "signaling_endpoint": format!("{}:443", domain),
@@ -531,7 +518,7 @@ async fn well_known_construct_server(
         ],
         "veil": {
             "primary": format!("veil.{}:443", domain),
-            "relays": config.veil_relay_addresses,
+            "relays": relays,
         },
         "capabilities": {
             "max_message_size_bytes": 100_000,
@@ -539,7 +526,24 @@ async fn well_known_construct_server(
             "supports_streaming": true,
             "supports_grpc_web": true,
         },
-    });
+    })
+}
+
+/// GET /.well-known/construct-server
+/// GET /.well-known/konstruct
+///
+/// Server discovery endpoint for DPI detection and VEIL endpoint configuration.
+/// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
+/// DPI detection, triggering VEIL auto-start and adding 5-8 seconds to every connection.
+async fn well_known_construct_server(
+    State(state): State<GatewayState>,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, &'static str); 1],
+    Json<serde_json::Value>,
+) {
+    let config = &state.config;
+    let mut body = discovery_body(&config.instance_domain, &config.veil_relay_addresses);
     // Expose bundle verification key when configured so clients can verify server-signed bundles.
     if let Some(vk) = &state.bundle_verification_key {
         body["bundle_verification_key"] = json!(vk);
@@ -670,5 +674,27 @@ mod tests {
             derived, expected,
             "derived public key must match independent derivation"
         );
+    }
+
+    /// The public discovery document names no build. Mutation: put `CARGO_PKG_VERSION` or the
+    /// commit back into `server` — this fails.
+    #[test]
+    fn discovery_says_nothing_about_the_build() {
+        let body = discovery_body("example.test", &["relay.example.test:443".to_string()]);
+        let text = body.to_string();
+        assert!(
+            !text.contains(env!("CARGO_PKG_VERSION")),
+            "server version in {text}"
+        );
+        assert!(
+            !text.contains(construct_server_shared::build_info::GIT_SHA_SHORT),
+            "commit in {text}"
+        );
+        let server = body["server"].as_object().expect("server section");
+        for key in ["version", "commit", "build"] {
+            assert!(!server.contains_key(key), "server.{key} is public again");
+        }
+        assert_eq!(body["server"]["domain"], "example.test");
+        assert_eq!(body["veil"]["relays"][0], "relay.example.test:443");
     }
 }
