@@ -17,6 +17,10 @@ pub struct SendBlindNotificationInput {
     pub badge_count: Option<i32>,
     pub activity_type: Option<String>,
     pub conversation_id: Option<String>,
+    /// Whether the push may show a banner. False for an envelope a user sent to their own
+    /// devices (SENDER_SYNC, read markers): it wakes the device to fetch, and says nothing —
+    /// writing on the Desktop rang the phone with "New message" for every line (2026-10-19).
+    pub announce: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +172,16 @@ pub(crate) fn verdict_after_rejection(declared_environments: usize) -> Rejection
         RejectionVerdict::Delete
     } else {
         RejectionVerdict::Widen
+    }
+}
+
+/// The banner a push carries, if any: none for a device that asked for silent pushes, none for
+/// an envelope its sender sent to their own devices (`announce == false`), else the activity's.
+fn push_alert(filter: &str, announce: bool, activity_type: Option<&str>) -> Option<AlertData> {
+    if filter == "silent" || !announce {
+        None
+    } else {
+        blind_alert(activity_type)
     }
 }
 
@@ -351,11 +365,7 @@ pub async fn send_blind_notification(
         };
 
         // A device that asked for silent pushes keeps getting only those.
-        let alert = if filter == "silent" {
-            None
-        } else {
-            blind_alert(input.activity_type.as_deref())
-        };
+        let alert = push_alert(filter, input.announce, input.activity_type.as_deref());
         // Visible pushes still carry content-available (the builder adds it), so a wake the
         // system does grant still fetches; the app's banner then replaces this one.
         let (push_type, priority) = if alert.is_some() {
@@ -1469,6 +1479,13 @@ mod push_outstanding_tests {
     #[test]
     fn other_pushes_ignore_the_marker() {
         assert_eq!(decide_push(false, true), PushDecision::Send);
+    }
+
+    #[test]
+    fn an_unannounced_push_has_no_banner() {
+        assert!(push_alert("visible_all", true, Some("new_message")).is_some());
+        assert!(push_alert("visible_all", false, Some("new_message")).is_none());
+        assert!(push_alert("silent", true, Some("new_message")).is_none());
     }
 
     #[test]
