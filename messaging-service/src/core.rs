@@ -263,6 +263,7 @@ pub async fn dispatch_envelope(
         if should_send_wake_push(recipient_online) {
             let ctx = notif_ctx;
             let recipient = recipient_id.clone();
+            let announce = push_announces(sender_id, recipient_id);
             tokio::spawn(async move {
                 let Ok(recipient_uuid) = Uuid::parse_str(&recipient) else {
                     return;
@@ -272,6 +273,7 @@ pub async fn dispatch_envelope(
                     badge_count: None,
                     activity_type: Some("new_message".to_string()),
                     conversation_id: None,
+                    announce,
                 };
                 match crate::notification_core::send_blind_notification(&ctx, input).await {
                     Ok(_) => tracing::debug!("Blind notification sent via embedded APNs"),
@@ -296,9 +298,38 @@ pub async fn dispatch_envelope(
     Ok(())
 }
 
+/// Whether a message's push may show a banner. An envelope from an account to itself is a copy
+/// for its other devices — a line just sent from the Desktop, a read marker — and announcing it
+/// rings the person's phone for their own words. `sender_id` is the authenticated sender (the
+/// regular path rejects a mismatch), so no one else can make an envelope look like this; a
+/// sealed envelope names no sender and keeps announcing.
+///
+/// Three questions: the server learns nothing it did not route on already (sender and recipient
+/// are both read here); a sender can only quiet its own copies; no boundary moves.
+fn push_announces(sender_id: &str, recipient_id: &str) -> bool {
+    sender_id.is_empty() || !sender_id.eq_ignore_ascii_case(recipient_id)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{normalize_device_id, select_target_devices, should_send_wake_push};
+
+    #[test]
+    fn a_copy_to_ones_own_devices_pushes_without_a_banner() {
+        let me = "ffeeddc6-14f2-4d02-a66a-caf0d8dfeda8";
+        assert!(!push_announces(me, me));
+        assert!(
+            !push_announces(&me.to_uppercase(), me),
+            "ids compare as uuids, not bytes"
+        );
+        assert!(push_announces("5e493b3c-e833-4039-9f6c-1211f860e6f6", me));
+        assert!(
+            push_announces("", me),
+            "a sealed envelope names no sender and is announced"
+        );
+    }
+    use super::{
+        normalize_device_id, push_announces, select_target_devices, should_send_wake_push,
+    };
 
     #[test]
     fn an_empty_wire_device_id_is_no_device() {
