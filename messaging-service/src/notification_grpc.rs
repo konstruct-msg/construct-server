@@ -66,6 +66,7 @@ impl NotificationService for NotificationGrpcService {
             badge_count: req.badge_count,
             activity_type: req.activity_type,
             conversation_id: req.conversation_id,
+            announce: true,
         };
 
         let ctx = self.notif_ctx()?;
