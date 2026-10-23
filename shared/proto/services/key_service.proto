@@ -392,6 +392,11 @@ message DevicePreKeyBundle {
 
   // The tree head this device's two proofs are relative to, as GetPreKeyBundleResponse.tree_head.
   optional SignedTreeHead tree_head = 7;
+
+  // Certificate by which another device of the same account vouches for this one
+  // (PublishDeviceCertificate). Absent for an account's first device and for a device nobody
+  // vouched for; a client hands it to construct-core `judge_peer_devices`, which decides.
+  optional bytes device_certificate = 8;
 }
 
 // ============================================================================

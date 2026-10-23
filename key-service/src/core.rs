@@ -96,6 +96,10 @@ pub struct PreKeyBundle {
 
     /// Capability flag: device supports SuiteID::PQ_RATCHET (sparse continuous PQ ratchet).
     pub supports_pq_ratchet: bool,
+
+    /// Certificate by which another device of the account vouches for this one (migration 074,
+    /// `PublishDeviceCertificate`). Opaque here: peers verify it, the server only serves it.
+    pub device_certificate: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -383,7 +387,7 @@ pub async fn get_prekey_bundle(
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
-                   supports_pq_ratchet
+                   supports_pq_ratchet, device_certificate
             FROM devices
             WHERE device_id = $1 AND user_id = $2::uuid AND is_active = true
             "#,
@@ -403,7 +407,7 @@ pub async fn get_prekey_bundle(
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
-                   supports_pq_ratchet
+                   supports_pq_ratchet, device_certificate
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             ORDER BY registered_at ASC
@@ -516,6 +520,7 @@ pub async fn get_prekey_bundle(
         hybrid_kt_proof: None,
         kt_tree_head: None,
         supports_pq_ratchet: device.supports_pq_ratchet,
+        device_certificate: device.device_certificate,
     };
     bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
     if let Some(sk) = bundle_signing_key {
@@ -597,7 +602,7 @@ pub async fn get_prekey_bundles(
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
-                   supports_pq_ratchet
+                   supports_pq_ratchet, device_certificate
             FROM devices
             WHERE user_id = $1::uuid AND device_id = ANY($2) AND is_active = true
             "#,
@@ -616,7 +621,7 @@ pub async fn get_prekey_bundles(
                    spk_uploaded_at, spk_rotation_epoch, kyber_spk_uploaded_at, kyber_spk_rotation_epoch,
                    hybrid_identity_key, hybrid_identity_signature,
                    signed_prekey_hybrid_signature, kyber_signed_pre_key_hybrid_signature,
-                   supports_pq_ratchet
+                   supports_pq_ratchet, device_certificate
             FROM devices
             WHERE user_id = $1::uuid AND is_active = true
             "#,
@@ -726,6 +731,7 @@ pub async fn get_prekey_bundles(
             hybrid_kt_proof: None,
             kt_tree_head: None,
             supports_pq_ratchet: device.supports_pq_ratchet,
+            device_certificate: device.device_certificate,
         };
         bundle.bundle_signature = bundle_signing_key.map(|sk| sign_bundle(&bundle, sk));
         if let Some(sk) = bundle_signing_key {
@@ -1581,6 +1587,9 @@ struct DeviceRow {
 
     // PQ ratchet capability (additive, for Suite 3)
     supports_pq_ratchet: bool,
+
+    // Another device of the account vouching for this one (migration 074)
+    device_certificate: Option<Vec<u8>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -2034,6 +2043,7 @@ mod tests {
             hybrid_kt_proof: None,
             kt_tree_head: None,
             supports_pq_ratchet: false,
+            device_certificate: None,
         }
     }
 

@@ -421,6 +421,33 @@ impl MessageQueue {
             .await
     }
 
+    pub async fn peek_device_link_token(&mut self, token: &str) -> Result<Option<String>> {
+        tokens::TokenManager::new(&mut self.client)
+            .peek_device_link_token(token)
+            .await
+    }
+
+    pub async fn store_device_link_result(
+        &mut self,
+        token: &str,
+        user_id: &str,
+        device_id: &str,
+        proof: &[u8],
+    ) -> Result<()> {
+        tokens::TokenManager::new(&mut self.client)
+            .store_device_link_result(token, user_id, device_id, proof)
+            .await
+    }
+
+    pub async fn get_device_link_result(
+        &mut self,
+        token: &str,
+    ) -> Result<Option<(String, String, Vec<u8>)>> {
+        tokens::TokenManager::new(&mut self.client)
+            .get_device_link_result(token)
+            .await
+    }
+
     // =========================================================================
     // Join Request Tokens (Flow B)
     // =========================================================================

@@ -1702,6 +1702,118 @@ impl proto::device_service_server::DeviceService for IdentityGrpcService {
             expires_at,
         }))
     }
+
+    /// Which device used the caller's link token, and its proof of keys (Flow A).
+    ///
+    /// Answers only the account that issued the token: a token of another account, an unknown
+    /// one and an expired one all read as EXPIRED, so the RPC cannot be used to probe tokens.
+    async fn get_device_link_result(
+        &self,
+        request: Request<proto::GetDeviceLinkResultRequest>,
+    ) -> Result<Response<proto::GetDeviceLinkResultResponse>, Status> {
+        use proto::get_device_link_result_response::Status as LinkStatus;
+
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let req = request.into_inner();
+        if req.link_token.is_empty() {
+            return Err(Status::invalid_argument("link_token is required"));
+        }
+
+        let (result, pending_for) = {
+            let mut queue = self.context.queue.lock().await;
+            let result = queue
+                .get_device_link_result(&req.link_token)
+                .await
+                .map_err(|e| Status::internal(format!("Redis error: {e}")))?;
+            let pending_for = if result.is_none() {
+                queue
+                    .peek_device_link_token(&req.link_token)
+                    .await
+                    .map_err(|e| Status::internal(format!("Redis error: {e}")))?
+            } else {
+                None
+            };
+            (result, pending_for)
+        };
+
+        let response = match (result, pending_for) {
+            (Some((user_id, device_id, link_key_proof)), _) if user_id == claims.sub => {
+                proto::GetDeviceLinkResultResponse {
+                    status: LinkStatus::Confirmed as i32,
+                    device_id,
+                    link_key_proof,
+                }
+            }
+            (None, Some(user_id)) if user_id == claims.sub => proto::GetDeviceLinkResultResponse {
+                status: LinkStatus::Pending as i32,
+                ..Default::default()
+            },
+            _ => proto::GetDeviceLinkResultResponse {
+                status: LinkStatus::Expired as i32,
+                ..Default::default()
+            },
+        };
+        Ok(Response::new(response))
+    }
+
+    /// Store a certificate by which the calling device vouches for another device of its account.
+    ///
+    /// The signer is the caller's own device, from the verified token, and the certificate must
+    /// name it; the subject must be another active device of the same account (checked in the
+    /// statement). The signature is not verified: peers do that, and a certificate this server
+    /// altered would read to them as an unsigned device.
+    async fn publish_device_certificate(
+        &self,
+        request: Request<proto::PublishDeviceCertificateRequest>,
+    ) -> Result<Response<proto::PublishDeviceCertificateResponse>, Status> {
+        let token = request_token(request.metadata())?;
+        let claims = self
+            .context
+            .auth_manager
+            .verify_token(&token)
+            .map_err(|_| Status::unauthenticated("invalid access token"))?;
+        let signer = claims
+            .device_id
+            .ok_or_else(|| Status::failed_precondition("token names no device"))?;
+
+        let req = request.into_inner();
+        if req.certificate.len() != construct_db::DEVICE_CERTIFICATE_LEN {
+            return Err(Status::invalid_argument(format!(
+                "certificate is {} bytes, not {}",
+                req.certificate.len(),
+                construct_db::DEVICE_CERTIFICATE_LEN
+            )));
+        }
+        if !certificate_names_signer(&req.certificate, &signer) {
+            return Err(Status::invalid_argument(
+                "certificate does not name the calling device as its signer",
+            ));
+        }
+
+        let stored = construct_db::set_device_certificate(
+            self.context.db_pool.as_ref(),
+            &signer,
+            &req.subject_device_id,
+            &req.certificate,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if !stored {
+            return Err(Status::not_found(
+                "subject is not another active device of this account",
+            ));
+        }
+
+        tracing::info!(signer = %signer, subject = %req.subject_device_id, "Device certificate stored");
+        Ok(Response::new(proto::PublishDeviceCertificateResponse {
+            success: true,
+        }))
+    }
 }
 
 // ============================================================================
@@ -1725,6 +1837,10 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         let public_keys = req
             .public_keys
             .ok_or_else(|| Status::invalid_argument("public_keys is required"))?;
+        // Empty from clients older than device certificates; otherwise an HMAC-SHA256.
+        if !req.link_key_proof.is_empty() && req.link_key_proof.len() != 32 {
+            return Err(Status::invalid_argument("link_key_proof must be 32 bytes"));
+        }
 
         let user_id_str = {
             let mut queue = self.context.queue.lock().await;
@@ -1797,6 +1913,25 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
                 .store_refresh_token(&refresh_jti, &user_id_str, refresh_ttl)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to store refresh token: {e}")))?;
+        }
+
+        // For the issuing device to read (GetDeviceLinkResult): which device used its token and
+        // the proof of keys, which it checks against the secret in its own QR before vouching for
+        // the device. The server cannot check the proof — it never sees the secret. A failure to
+        // store it costs the certificate, not the link: the device is created and stays.
+        {
+            let mut queue = self.context.queue.lock().await;
+            if let Err(e) = queue
+                .store_device_link_result(
+                    &req.link_token,
+                    &user_id_str,
+                    &req.device_id,
+                    &req.link_key_proof,
+                )
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to store device link result");
+            }
         }
 
         tracing::info!(user_id = %user_id_str, device_id = %req.device_id, "Device linked");
@@ -3119,6 +3254,13 @@ async fn well_known_construct_server(
     )
 }
 
+/// Whether a device certificate is version 1 and names `signer` (lowercase hex) as its signer:
+/// `0x01 ‖ signer_device_id (16) ‖ …` — construct-protos conformance/knst_device_certificate.json.
+/// The only part of the certificate the server reads; the signature is the peers' to check.
+fn certificate_names_signer(certificate: &[u8], signer: &str) -> bool {
+    certificate.len() >= 17 && certificate[0] == 1 && hex::encode(&certificate[1..17]) == signer
+}
+
 // ============================================================================
 // SPK signature verification (shared by multiple gRPC methods)
 // ============================================================================
@@ -3734,5 +3876,30 @@ mod acting_user_tests {
     fn a_malformed_field_is_refused() {
         let status = acting_user(id(1), "not-a-uuid", "user_id").unwrap_err();
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+}
+
+#[cfg(test)]
+mod device_certificate_tests {
+    use super::certificate_names_signer;
+
+    const SIGNER: &str = "1a92f23852dc908d97316a3b13578281";
+
+    fn cert(version: u8, signer: &str) -> Vec<u8> {
+        let mut c = vec![version];
+        c.extend(hex::decode(signer).unwrap());
+        c.extend([0u8; 8]);
+        c
+    }
+
+    #[test]
+    fn the_certificate_must_name_the_calling_device() {
+        assert!(certificate_names_signer(&cert(1, SIGNER), SIGNER));
+        assert!(!certificate_names_signer(
+            &cert(1, "cfa570c653bd212b10a9cb551fd7a1b4"),
+            SIGNER
+        ));
+        assert!(!certificate_names_signer(&cert(2, SIGNER), SIGNER));
+        assert!(!certificate_names_signer(&cert(1, SIGNER)[..16], SIGNER));
     }
 }

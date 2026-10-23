@@ -1246,6 +1246,7 @@ impl KeyService for KeyGrpcService {
                 verifying_key: b.verifying_key,
                 hybrid_kt_proof: b.hybrid_kt_proof.map(to_proto_kt_proof),
                 tree_head: b.kt_tree_head.map(to_proto_tree_head),
+                device_certificate: b.device_certificate,
             })
             .collect();
 
