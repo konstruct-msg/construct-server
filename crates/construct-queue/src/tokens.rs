@@ -243,6 +243,39 @@ impl<'a> TokenManager<'a> {
         Ok(user_id)
     }
 
+    /// Whether a device link token is still unused, and for whom: the user_id, without
+    /// consuming it.
+    pub(crate) async fn peek_device_link_token(&mut self, token: &str) -> Result<Option<String>> {
+        let key = format!("device_link:{}", token);
+        Ok(self.client.get(&key).await?)
+    }
+
+    /// Record which device used a link token and the proof of keys it presented, for the
+    /// account that issued the token to read (`GetDeviceLinkResult`). Same 15-minute life as
+    /// the token. Value: `len(user_id) u8 ‖ user_id ‖ len(device_id) u8 ‖ device_id ‖ proof`.
+    pub(crate) async fn store_device_link_result(
+        &mut self,
+        token: &str,
+        user_id: &str,
+        device_id: &str,
+        proof: &[u8],
+    ) -> Result<()> {
+        let key = format!("device_link_result:{}", token);
+        let value = encode_link_result(user_id, device_id, proof)?;
+        let _: () = self.client.set_ex(&key, value, 15 * 60).await?;
+        Ok(())
+    }
+
+    /// The result stored by [`store_device_link_result`]: `(user_id, device_id, proof)`.
+    pub(crate) async fn get_device_link_result(
+        &mut self,
+        token: &str,
+    ) -> Result<Option<(String, String, Vec<u8>)>> {
+        let key = format!("device_link_result:{}", token);
+        let value: Option<Vec<u8>> = self.client.get(&key).await?;
+        Ok(value.and_then(|v| decode_link_result(&v)))
+    }
+
     // =========================================================================
     // Join Request Tokens (Flow B: TUI → Phone linking)
     // =========================================================================
@@ -306,5 +339,55 @@ impl<'a> TokenManager<'a> {
         let key = format!("join_approved:{}", pending_device_id);
         let value: Option<String> = self.client.get(&key).await?;
         Ok(value)
+    }
+}
+
+fn encode_link_result(user_id: &str, device_id: &str, proof: &[u8]) -> Result<Vec<u8>> {
+    let (u, d) = (user_id.as_bytes(), device_id.as_bytes());
+    let (Ok(ul), Ok(dl)) = (u8::try_from(u.len()), u8::try_from(d.len())) else {
+        anyhow::bail!("link result ids over 255 bytes");
+    };
+    let mut out = Vec::with_capacity(2 + u.len() + d.len() + proof.len());
+    out.push(ul);
+    out.extend_from_slice(u);
+    out.push(dl);
+    out.extend_from_slice(d);
+    out.extend_from_slice(proof);
+    Ok(out)
+}
+
+fn decode_link_result(v: &[u8]) -> Option<(String, String, Vec<u8>)> {
+    let ul = *v.first()? as usize;
+    let user = std::str::from_utf8(v.get(1..1 + ul)?).ok()?.to_string();
+    let rest = v.get(1 + ul..)?;
+    let dl = *rest.first()? as usize;
+    let device = std::str::from_utf8(rest.get(1..1 + dl)?).ok()?.to_string();
+    let proof = rest.get(1 + dl..)?.to_vec();
+    Some((user, device, proof))
+}
+
+#[cfg(test)]
+mod link_result_tests {
+    use super::*;
+
+    #[test]
+    fn link_result_round_trips() {
+        let enc = encode_link_result("14f28d31-0000-4000-8000-000000000001", "6f5e37ac", &[9; 32])
+            .unwrap();
+        assert_eq!(
+            decode_link_result(&enc),
+            Some((
+                "14f28d31-0000-4000-8000-000000000001".to_string(),
+                "6f5e37ac".to_string(),
+                vec![9; 32]
+            ))
+        );
+        // An empty proof (a client older than device certificates) is a result, not an error.
+        let enc = encode_link_result("u", "d", &[]).unwrap();
+        assert_eq!(
+            decode_link_result(&enc),
+            Some(("u".to_string(), "d".to_string(), vec![]))
+        );
+        assert_eq!(decode_link_result(&enc[..2]), None);
     }
 }

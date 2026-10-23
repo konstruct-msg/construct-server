@@ -98,6 +98,14 @@ service DeviceService {
   // cannot set another device's metadata, including its own account's.
   rpc SetDeviceMetadata(SetDeviceMetadataRequest) returns (SetDeviceMetadataResponse);
 
+  // PublishDeviceCertificate - Store a certificate by which the caller vouches for another
+  // device of its own account (construct-docs decisions/devices-of-an-account-sign-each-other.md).
+  // Authenticated. The server checks only that the subject is a device of the caller's account,
+  // that it is not the caller, and that the certificate names the caller as its signer; it does
+  // not verify the signature — the peers do, and a certificate the server drops or alters reads
+  // to them as an unsigned device, the safe side.
+  rpc PublishDeviceCertificate(PublishDeviceCertificateRequest) returns (PublishDeviceCertificateResponse);
+
   // =========================================================================
   // Device Linking
   // =========================================================================
@@ -105,6 +113,12 @@ service DeviceService {
   // InitiateDeviceLink - Primary device generates a short-lived QR link token
   // Authenticated: requires valid JWT from the primary/existing device
   rpc InitiateDeviceLink(InitiateDeviceLinkRequest) returns (InitiateDeviceLinkResponse);
+
+  // GetDeviceLinkResult - The device that issued a link token asks which device used it, and
+  // that device's proof of keys (Flow A). Authenticated; answers only the account that issued
+  // the token. The old device then fetches the new device's bundle, checks the proof against
+  // the secret in its own QR, and publishes a certificate.
+  rpc GetDeviceLinkResult(GetDeviceLinkResultRequest) returns (GetDeviceLinkResultResponse);
 }
 
 // DeviceLinkService - Device linking flow (separate service to avoid auth middleware)
@@ -348,6 +362,22 @@ message SetDeviceMetadataRequest {
   // sealed copy per device of the account, so it grows with the device count;
   // larger is INVALID_ARGUMENT, never a silent truncation.
   bytes sealed_metadata = 1;
+}
+
+// PublishDeviceCertificateRequest - The caller vouches for another device of its account
+message PublishDeviceCertificateRequest {
+  // The device vouched for
+  string subject_device_id = 1;
+
+  // construct-core device certificate: 0x01 ‖ signer_device_id (16) ‖ issued_at (u64 BE) ‖
+  // signer hybrid public (1984) ‖ signature (3373) — 5382 bytes. Vectors:
+  // conformance/knst_device_certificate.json. Replaces any certificate stored for the subject.
+  bytes certificate = 2;
+}
+
+// PublishDeviceCertificateResponse - Stored
+message PublishDeviceCertificateResponse {
+  bool success = 1;
 }
 
 // SetDeviceMetadataResponse - Stored
@@ -772,6 +802,30 @@ message ConfirmDeviceLinkRequest {
 
   // New device public keys for E2EE and authentication
   DevicePublicKeys public_keys = 3;
+
+  // HMAC-SHA256 under the secret the old device's QR carried (never sent to the server) over
+  // the fingerprint of this device's keys — construct-core `device_link_key_proof`, 32 bytes.
+  // Opaque to the server: stored with the token's result and handed to the issuing account
+  // only. Empty from clients older than device certificates.
+  bytes link_key_proof = 4;
+}
+
+// GetDeviceLinkResultRequest - The issuing device asks about its own link token
+message GetDeviceLinkResultRequest {
+  string link_token = 1;
+}
+
+// GetDeviceLinkResultResponse - Which device used the token, and its proof of keys
+message GetDeviceLinkResultResponse {
+  enum Status {
+    STATUS_PENDING = 0;   // Not used yet
+    STATUS_CONFIRMED = 1; // A device linked with it — device_id and link_key_proof are set
+    STATUS_EXPIRED = 2;   // Expired unused, or unknown to this account
+  }
+
+  Status status = 1;
+  string device_id = 2;
+  bytes link_key_proof = 3;
 }
 
 // ============================================================================

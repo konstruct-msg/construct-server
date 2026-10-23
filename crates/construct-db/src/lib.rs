@@ -1194,6 +1194,51 @@ pub async fn set_device_sealed_metadata(
     Ok(result.rows_affected() > 0)
 }
 
+/// Exact length of a device certificate, matching the CHECK constraint in migration 074:
+/// version (1) ‖ signer id (16) ‖ issued_at (8) ‖ signer hybrid public (1984) ‖ signature (3373).
+pub const DEVICE_CERTIFICATE_LEN: usize = 5382;
+
+/// Store the certificate by which `signer_device_id` vouches for `subject_device_id`.
+///
+/// Written only when both are active devices of one account and are not the same device; the
+/// ownership check is in the statement, so it cannot be raced. Returns false when nothing
+/// matched. The signature is not verified here — peers do that (migration 074).
+pub async fn set_device_certificate(
+    pool: &DbPool,
+    signer_device_id: &str,
+    subject_device_id: &str,
+    certificate: &[u8],
+) -> Result<bool> {
+    if certificate.len() != DEVICE_CERTIFICATE_LEN {
+        anyhow::bail!(
+            "device certificate is {} bytes, not {}",
+            certificate.len(),
+            DEVICE_CERTIFICATE_LEN
+        );
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE devices AS subject SET device_certificate = $3
+        WHERE subject.device_id = $2
+          AND subject.is_active = TRUE
+          AND subject.device_id <> $1
+          AND subject.user_id = (
+              SELECT signer.user_id FROM devices AS signer
+              WHERE signer.device_id = $1 AND signer.is_active = TRUE
+          )
+        "#,
+    )
+    .bind(signer_device_id)
+    .bind(subject_device_id)
+    .bind(certificate)
+    .execute(pool)
+    .await
+    .context("Failed to store device certificate")?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Point an account at the device that owns it.
 ///
 /// Set once at registration (`create_user_with_device`) and again after an account recovery,
@@ -2443,6 +2488,147 @@ mod deletion_tests {
             delete_user_account(&pool, &u, SECRET)
                 .await
                 .expect("cleanup");
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_certificate_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
+
+    async fn pool() -> DbPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect")
+    }
+
+    async fn user(pool: &DbPool) -> Uuid {
+        sqlx::query_scalar("INSERT INTO users DEFAULT VALUES RETURNING id")
+            .fetch_one(pool)
+            .await
+            .expect("insert user")
+    }
+
+    async fn device(pool: &DbPool, user_id: Uuid) -> String {
+        let bytes32 = || [*Uuid::new_v4().as_bytes(), *Uuid::new_v4().as_bytes()].concat();
+        let identity = bytes32();
+        let device_id = Uuid::new_v4().simple().to_string();
+        create_device(
+            pool,
+            CreateDeviceData {
+                device_id: device_id.clone(),
+                server_hostname: "test".to_string(),
+                verifying_key: bytes32(),
+                identity_public: identity,
+                signed_prekey_public: bytes32(),
+                signed_prekey_signature: vec![0; 64],
+                crypto_suites: "[\"Curve25519+Ed25519\"]".to_string(),
+                supports_pq_ratchet: false,
+            },
+            Some(user_id),
+        )
+        .await
+        .expect("insert device");
+        device_id
+    }
+
+    async fn stored(pool: &DbPool, device_id: &str) -> Option<Vec<u8>> {
+        sqlx::query_scalar("SELECT device_certificate FROM devices WHERE device_id = $1")
+            .bind(device_id)
+            .fetch_one(pool)
+            .await
+            .expect("select")
+    }
+
+    /// A device vouches only for another active device of its own account. Mutations: drop the
+    /// `user_id` subquery, the `<> $1`, or the `is_active` on either side — one assertion
+    /// reddens each.
+    #[tokio::test]
+    #[ignore] // Requires Postgres with migrations
+    async fn a_certificate_is_stored_only_within_one_account() {
+        let pool = pool().await;
+        let (owner, stranger) = (user(&pool).await, user(&pool).await);
+        let (old, new) = (device(&pool, owner).await, device(&pool, owner).await);
+        let foreign = device(&pool, stranger).await;
+        let cert = vec![1u8; DEVICE_CERTIFICATE_LEN];
+
+        assert!(
+            set_device_certificate(&pool, &old, &new, &cert)
+                .await
+                .unwrap()
+        );
+        assert_eq!(stored(&pool, &new).await, Some(cert.clone()));
+
+        assert!(
+            !set_device_certificate(&pool, &old, &foreign, &cert)
+                .await
+                .unwrap(),
+            "vouched for another account's device"
+        );
+        assert_eq!(stored(&pool, &foreign).await, None);
+        assert!(
+            !set_device_certificate(&pool, &foreign, &new, &cert)
+                .await
+                .unwrap(),
+            "another account vouched for ours"
+        );
+        assert!(
+            !set_device_certificate(&pool, &old, &old, &cert)
+                .await
+                .unwrap(),
+            "a device vouched for itself"
+        );
+
+        let retired = device(&pool, owner).await;
+        sqlx::query("UPDATE devices SET is_active = FALSE WHERE device_id = $1")
+            .bind(&retired)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !set_device_certificate(&pool, &old, &retired, &cert)
+                .await
+                .unwrap(),
+            "vouched for a deactivated device"
+        );
+
+        sqlx::query("UPDATE devices SET is_active = FALSE WHERE device_id = $1")
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replacement = vec![2u8; DEVICE_CERTIFICATE_LEN];
+        assert!(
+            !set_device_certificate(&pool, &old, &new, &replacement)
+                .await
+                .unwrap(),
+            "a deactivated device vouched"
+        );
+        assert_eq!(stored(&pool, &new).await, Some(cert.clone()));
+
+        assert!(
+            set_device_certificate(&pool, &old, &new, &cert[..10])
+                .await
+                .is_err(),
+            "a certificate of the wrong length was accepted"
+        );
+
+        for id in [owner, stranger] {
+            sqlx::query("DELETE FROM devices WHERE user_id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
         }
     }
 }
