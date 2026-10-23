@@ -239,8 +239,13 @@ message VoiceMessage {
   // Audio codec (Opus recommended)
   string codec = 6;
 
+  // Quoted message (when the voice note is sent as a reply). Same meaning as
+  // `TextMessage.quoted` and `MediaAlbumMessage.quoted`. A client that predates
+  // the field skips it and shows the voice note without the quote.
+  optional QuotedMessage quoted = 7;
+
   // Reserved for future features
-  reserved 7 to 10;
+  reserved 8 to 10;
 }
 
 // ReactionMessage - Emoji reaction to a message
