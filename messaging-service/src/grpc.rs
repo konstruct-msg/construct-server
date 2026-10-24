@@ -835,7 +835,7 @@ impl MessagingService for MessagingGrpcService {
         &self,
         request: Request<proto::EditMessageRequest>,
     ) -> Result<Response<proto::EditMessageResponse>, Status> {
-        // Extract authenticated sender_id from x-user-id header or Bearer JWT (+ blocklist check)
+        // Extract authenticated sender_id from x-user-id header or Bearer token (+ blocklist check)
         let sender_id = extract_authed_user_id(request.metadata(), &self.context)
             .await
             .ok_or_else(|| Status::unauthenticated("Missing or invalid authentication"))?;
@@ -1152,7 +1152,7 @@ fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Resu
 
 /// Extract the authenticated user UUID from gRPC request metadata.
 ///
-/// Requires a cryptographically verified Bearer access token (PASETO/JWT).
+/// Requires a cryptographically verified Bearer access token (PASETO).
 /// Optional `x-user-id` must match `claims.sub` when present (spoof guard).
 /// Always checks the Redis revocation blocklist (fail-closed on Redis error).
 ///
@@ -1181,7 +1181,7 @@ async fn extract_authed_identity(
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "Blocklist check failed — rejecting JWT");
+            tracing::warn!(error = %e, "Blocklist check failed — rejecting token");
             return None;
         }
     }
@@ -1197,7 +1197,7 @@ async fn extract_authed_identity(
             }
             Ok(false) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "Device-revoked check failed — rejecting JWT");
+                tracing::warn!(error = %e, "Device-revoked check failed — rejecting token");
                 return None;
             }
         }

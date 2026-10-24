@@ -150,9 +150,9 @@ impl KeyServiceContext {
             .context("Failed to load config for AuthManager")?;
         let auth = Arc::new(
             construct_auth::AuthManager::new(&config)
-                .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+                .context("Failed to initialize AuthManager (set PASETO public keys)")?,
         );
-        info!("JWT/PASETO verification enabled for key-service upload paths");
+        info!("PASETO verification enabled for key-service upload paths");
 
         let kt_head_signer = match construct_crypto::server_trust::DelegatedSigner::from_env(
             construct_crypto::server_trust::Purpose::KtHead,

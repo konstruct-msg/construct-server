@@ -8,7 +8,7 @@
 //
 // HTTP (port 8081):
 //   /health*, /metrics         — ops probes
-//   /.well-known/*, /public-key — discovery + JWKS
+//   /.well-known/* — discovery
 // Client auth/user/invite are gRPC only (port 50051).
 // ============================================================================
 
@@ -203,7 +203,6 @@ fn app_error_to_status(e: construct_error::AppError) -> Status {
         AppError::TooManyRequests(msg) => Status::resource_exhausted(msg.clone()),
         AppError::Forbidden(msg) => Status::permission_denied(msg.clone()),
         AppError::Conflict(msg) => Status::already_exists(msg.clone()),
-        AppError::Jwt(_) => Status::unauthenticated("Invalid or expired token".to_string()),
         _ => Status::internal(e.to_string()),
     }
 }
@@ -3117,59 +3116,6 @@ async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
-async fn get_jwks() -> impl IntoResponse {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use rsa::pkcs1::DecodeRsaPublicKey as _;
-    use rsa::pkcs8::DecodePublicKey as _;
-    use rsa::traits::PublicKeyParts as _;
-
-    let raw = match env::var("JWT_PUBLIC_KEY") {
-        Ok(v) => v,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "JWT_PUBLIC_KEY not configured"})),
-            );
-        }
-    };
-
-    let pem = raw.replace("\\n", "\n");
-    let public_key = rsa::RsaPublicKey::from_public_key_pem(&pem)
-        .or_else(|_| rsa::RsaPublicKey::from_pkcs1_pem(&pem));
-
-    match public_key {
-        Ok(key) => {
-            let n = URL_SAFE_NO_PAD.encode(key.n().to_bytes_be());
-            let e = URL_SAFE_NO_PAD.encode(key.e().to_bytes_be());
-            let jwks = json!({
-                "keys": [{
-                    "kty": "RSA", "use": "sig", "alg": "RS256",
-                    "kid": "construct-auth-key", "n": n, "e": e
-                }]
-            });
-            (StatusCode::OK, Json(jwks))
-        }
-        Err(e) => {
-            tracing::error!("Failed to parse JWT_PUBLIC_KEY for JWKS: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to parse JWT public key"})),
-            )
-        }
-    }
-}
-
-async fn get_public_key() -> impl IntoResponse {
-    match env::var("JWT_PUBLIC_KEY") {
-        Ok(key) => (StatusCode::OK, key),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "JWT public key not configured".to_string(),
-        ),
-    }
-}
-
 async fn well_known_construct_server(
     State(context): State<Arc<IdentityServiceContext>>,
 ) -> impl IntoResponse {
@@ -3656,8 +3602,6 @@ async fn main() -> Result<()> {
             "/.well-known/construct-server",
             get(well_known_construct_server),
         )
-        .route("/.well-known/jwks.json", get(get_jwks))
-        .route("/public-key", get(get_public_key))
         .with_state(identity_ctx)
         .layer(
             ServiceBuilder::new()

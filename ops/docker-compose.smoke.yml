@@ -48,11 +48,8 @@ services:
       PORT: "8081"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
-      JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
-      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       PASETO_PRIVATE_KEY: ${SMOKE_PASETO_PRIVATE_KEY}
       PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
-      TOKEN_ISSUE_FORMAT: "paseto"
       INSTANCE_DOMAIN: smoke.test
       SERVICE_NAME: identity
 
@@ -83,8 +80,6 @@ services:
       KEY_SERVICE_GRPC_ADDR: "0.0.0.0:50057"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
-      JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
-      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
 
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
@@ -103,8 +98,6 @@ services:
       MESSAGING_GRPC_BIND_ADDRESS: "0.0.0.0:50052"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
-      JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
-      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
 
@@ -128,8 +121,6 @@ services:
       PORT: "8080"
       DATABASE_URL: postgres://construct:smoke_test_password@postgres:5432/construct_smoke
       REDIS_URL: redis://redis:6379
-      JWT_PRIVATE_KEY: ${SMOKE_JWT_PRIVATE_KEY}
-      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       INSTANCE_DOMAIN: smoke.test
       ICE_ENABLED: "false"
@@ -156,7 +147,6 @@ services:
       METRICS_PORT: "8091"
       REDIS_URL: redis://redis:6379
       LOG_HASH_SALT: smoke-test-log-salt-not-secret
-      JWT_PUBLIC_KEY: ${SMOKE_JWT_PUBLIC_KEY}
       PASETO_PUBLIC_KEY: ${SMOKE_PASETO_PUBLIC_KEY}
       # No DATABASE_URL — service starts without DB (contacts checks limited to Redis)
       # No CONTACT_HMAC_SECRET — uses insecure default (fine for smoke tests)

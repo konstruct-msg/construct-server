@@ -43,9 +43,8 @@ assert "media lacks PASETO_PRIVATE_KEY"           slice_lacks media     PASETO_P
 assert "gateway lacks PASETO_PRIVATE_KEY"         slice_lacks gateway   PASETO_PRIVATE_KEY
 assert "quic lacks PASETO_PRIVATE_KEY"            slice_lacks quic      PASETO_PRIVATE_KEY
 
-assert "identity has JWT_PRIVATE_KEY"             slice_has   identity  JWT_PRIVATE_KEY
-assert "messaging lacks JWT_PRIVATE_KEY"          slice_lacks messaging JWT_PRIVATE_KEY
-assert "media lacks JWT_PRIVATE_KEY"              slice_lacks media     JWT_PRIVATE_KEY
+assert "identity has AUTH_TOKEN_ISSUER"           slice_has   identity  AUTH_TOKEN_ISSUER
+assert "media has AUTH_TOKEN_ISSUER"              slice_has   media     AUTH_TOKEN_ISSUER
 
 assert "identity has TOKEN_ISSUER_KEY"            slice_has   identity  TOKEN_ISSUER_KEY
 assert "messaging has TOKEN_ISSUER_KEY"           slice_has   messaging TOKEN_ISSUER_KEY

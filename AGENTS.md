@@ -35,7 +35,7 @@ partial dispatcher in `shared/tests/test_utils.rs` — it is not a twin to keep
 in sync; production delivery lives only in `messaging-service/src/core.rs`.
 
 Key crates: `construct-config` (+ `secret_hygiene`), `construct-queue`,
-`construct-message`, `construct-auth` (PASETO v4.public + legacy JWT),
+`construct-message`, `construct-auth` (PASETO v4.public only since 0.20.0),
 `construct-db`, `construct-types` (`UserId`, `RouteId`), `construct-federation`,
 `construct-apns`. Full crate list → `DOCUMENTATION.md`.
 
@@ -111,15 +111,16 @@ list). Routing is `GET user:{user}:server_instance_id`.
 
 ## Auth & Edge
 
-- **PASETO v4.public** primary; legacy RS256 JWT still verified (`v4.public.` prefix).
-  Non-standard framing `nonce(32) || message || sig(64)` — client offsets are NOT a bug
+- **PASETO v4.public only** (since 0.20.0; RS256 JWT issuance and verification were removed,
+  any token without the `v4.public.` prefix is rejected). Issuer (`iss`): `AUTH_TOKEN_ISSUER`,
+  falling back to the pre-0.20.0 `JWT_ISSUER`. Non-standard framing `nonce(32) || message || sig(64)` — client offsets are NOT a bug
   (construct-docs PASETO framing note). TTL default 24h (`ACCESS_TOKEN_TTL_HOURS`).
 - **Blocklist:** `invalidated_token:{jti}` on logout/revoke. Logout requires
   `access_token` in body; empty → `INVALID_ARGUMENT`.
 - **messaging gRPC:** `extract_authed_user_id()` — Bearer required; verify + blocklist
   (fail-closed on Redis error). Optional `x-user-id` / `x-device-id` must match claims;
   headers alone are never trusted.
-- **Caddy does not inject `x-user-id`.** Gateway `:9443` is veil/obfs4 proxy only, not JWT.
+- **Caddy does not inject `x-user-id`.** Gateway `:9443` is veil/obfs4 proxy only, no token auth.
   Each service validates via `construct-auth::AuthManager`. File: `ops/Caddyfile`.
   `flush_interval -1` is for the streaming RPCs only (**MessageStream**, `SignalingService`). Unary MessagingService RPCs must
   not flush immediately — that emits DATA+END_STREAM and grpc-swift reports

@@ -58,10 +58,6 @@ pub enum AppError {
     #[error("Authentication error: {}", .0.message())]
     DeviceRefused(DeviceRefusal),
 
-    #[cfg(feature = "jwt")]
-    #[error("JWT error: {0}")]
-    Jwt(#[from] jsonwebtoken::errors::Error),
-
     #[error("CSRF validation failed: {0}")]
     Csrf(String),
 
@@ -153,8 +149,6 @@ impl AppError {
     pub fn status_code(&self) -> StatusCode {
         match self {
             AppError::Auth(_) | AppError::DeviceRefused(_) => StatusCode::UNAUTHORIZED,
-            #[cfg(feature = "jwt")]
-            AppError::Jwt(_) => StatusCode::UNAUTHORIZED,
             AppError::Csrf(_) => StatusCode::FORBIDDEN,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -184,8 +178,6 @@ impl AppError {
         match self {
             AppError::Auth(msg) => format!("Authentication failed: {}", msg),
             AppError::DeviceRefused(r) => format!("Authentication failed: {}", r.message()),
-            #[cfg(feature = "jwt")]
-            AppError::Jwt(_) => "Invalid or expired token".to_string(),
             AppError::Csrf(_) => "CSRF validation failed".to_string(),
             AppError::Validation(msg) => format!("Validation error: {}", msg),
             AppError::NotFound(msg) => format!("Not found: {}", msg),
@@ -217,8 +209,6 @@ impl AppError {
     pub fn error_code(&self) -> &'static str {
         match self {
             AppError::Auth(_) | AppError::DeviceRefused(_) => "AUTH_ERROR",
-            #[cfg(feature = "jwt")]
-            AppError::Jwt(_) => "JWT_ERROR",
             AppError::Csrf(_) => "CSRF_ERROR",
             AppError::Validation(_) => "VALIDATION_ERROR",
             AppError::NotFound(_) => "NOT_FOUND",

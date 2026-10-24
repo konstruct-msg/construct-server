@@ -2,10 +2,10 @@
 // construct-auth Unit Tests
 // ============================================================================
 //
-// Tests for JWT (legacy RS256) and PASETO v4.public token creation/verification.
+// Tests for PASETO v4.public token creation/verification (RS256 JWT removed in 0.20.0).
 //
 // All test keys are generated on the fly at test-module init — no key material
-// is ever committed to the repository. RSA and Ed25519 keygen is deterministic
+// is ever committed to the repository. Ed25519 keygen is deterministic
 // across test runs only in the sense that each test builds its own throwaway
 // pair; no shared global key state is relied upon.
 //
@@ -15,7 +15,7 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod auth_tests {
-    use crate::{AuthManager, TokenFormat};
+    use crate::AuthManager;
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
         DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MicroservicesConfig,
@@ -40,54 +40,21 @@ mod auth_tests {
         )
     }
 
-    /// Generate a fresh 2048-bit RSA keypair, returning (pkcs8_priv_pem, spki_pub_pem).
-    /// Used to exercise the legacy RS256 JWT dual-stack path without committing keys.
-    fn make_rsa_keypair() -> (String, String) {
-        use rsa::RsaPrivateKey;
-        use rsa::pkcs1::EncodeRsaPrivateKey;
-        use rsa::pkcs8::EncodePrivateKey;
-        use rsa::pkcs8::EncodePublicKey;
-        use rsa::rand_core::OsRng;
-
-        let mut rng = OsRng;
-        let priv_key = RsaPrivateKey::new(&mut rng, 2048).expect("RSA 2048 keygen");
-        let priv_pem = priv_key
-            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
-            .expect("RSA private PKCS8 PEM")
-            .to_string();
-        // Try PKCS8 SPKI first, fall back to PKCS1.
-        let pub_pem_zerosize = priv_key
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .expect("RSA public SPKI PEM");
-        // Suppress dead-code lint on EncodeRsaPrivateKey by trying PKCS1 as a fallback path
-        // (the primary method used is to_public_key().to_public_key_pem()).
-        let _ = priv_key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).ok();
-        (priv_pem, pub_pem_zerosize.to_string())
-    }
-
     // ── Config builder ────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
     fn make_config(
-        jwt_priv: Option<&str>,
-        jwt_pub: Option<&str>,
         paseto_priv: Option<&str>,
         paseto_pub: Option<&str>,
         issuer: &str,
         ttl_hours: i64,
-        issue_format: &str,
     ) -> Config {
         Config {
             database_url: String::new(),
             redis_url: String::new(),
-            jwt_secret: "test-secret-not-used-in-rs256".to_string(),
-            jwt_private_key: jwt_priv.map(|s| s.to_string()),
-            jwt_public_key: jwt_pub.map(|s| s.to_string()),
             paseto_private_key: paseto_priv.map(|s| s.to_string()),
             paseto_public_key: paseto_pub.map(|s| s.to_string()),
             paseto_public_key_previous: Vec::new(),
-            token_issue_format: issue_format.to_string(),
             port: 8080,
             bind_address: "127.0.0.1".to_string(),
             health_port: 8081,
@@ -97,7 +64,7 @@ mod auth_tests {
             access_token_ttl_hours: ttl_hours,
             session_ttl_days: 30,
             refresh_token_ttl_days: 7,
-            jwt_issuer: issuer.to_string(),
+            token_issuer: issuer.to_string(),
             online_channel: "online".to_string(),
             offline_queue_prefix: "queue:".to_string(),
             delivery_queue_prefix: "delivery:".to_string(),
@@ -242,15 +209,7 @@ mod auth_tests {
     /// PASETO full mode (sign + verify) with a freshly-generated Ed25519 keypair.
     fn make_paseto_full() -> (AuthManager, String, String) {
         let (priv_pem, pub_pem) = make_ed25519_keypair();
-        let config = make_config(
-            None,
-            None,
-            Some(&priv_pem),
-            Some(&pub_pem),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let config = make_config(Some(&priv_pem), Some(&pub_pem), "construct-test", 1);
         (
             AuthManager::new(&config).expect("PASETO full AuthManager"),
             priv_pem,
@@ -261,59 +220,8 @@ mod auth_tests {
     /// PASETO verify-only mode built from an externally-supplied public PEM.
     /// Pairs with tests that need a signing manager using the same key.
     fn make_paseto_verify_only(pub_pem: &str) -> AuthManager {
-        let config = make_config(
-            None,
-            None,
-            None,
-            Some(pub_pem),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let config = make_config(None, Some(pub_pem), "construct-test", 1);
         AuthManager::new(&config).expect("PASETO verify-only AuthManager")
-    }
-
-    /// JWT full mode (sign + verify) with a freshly-generated RSA-2048 keypair.
-    fn make_jwt_full() -> (AuthManager, String, String) {
-        let (priv_pem, pub_pem) = make_rsa_keypair();
-        let config = make_config(
-            Some(&priv_pem),
-            Some(&pub_pem),
-            None,
-            None,
-            "construct-test",
-            1,
-            "jwt",
-        );
-        (
-            AuthManager::new(&config).expect("JWT full AuthManager"),
-            priv_pem,
-            pub_pem,
-        )
-    }
-
-    /// Dual-stack manager: both JWT (RSA) and PASETO (Ed25519) verify keys loaded,
-    /// issue_format=paseto so new tokens are PASETO. Used to simulate the migration
-    /// server during the dual-stack window.
-    fn make_dual_full() -> (AuthManager, String, String, String, String) {
-        let (jwt_priv, jwt_pub) = make_rsa_keypair();
-        let (paseto_priv, paseto_pub) = make_ed25519_keypair();
-        let config = make_config(
-            Some(&jwt_priv),
-            Some(&jwt_pub),
-            Some(&paseto_priv),
-            Some(&paseto_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
-        (
-            AuthManager::new(&config).expect("dual-stack full AuthManager"),
-            jwt_priv,
-            jwt_pub,
-            paseto_priv,
-            paseto_pub,
-        )
     }
 
     // ── PASETO key rotation (overlap window) ──────────────────────────────────
@@ -328,28 +236,12 @@ mod auth_tests {
         let user_id = Uuid::new_v4();
 
         // A server still on the OLD key issues a token.
-        let old_cfg = make_config(
-            None,
-            None,
-            Some(&old_priv),
-            Some(&old_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let old_cfg = make_config(Some(&old_priv), Some(&old_pub), "construct-test", 1);
         let old_auth = AuthManager::new(&old_cfg).expect("old AuthManager");
         let (old_token, _, _) = old_auth.create_token(&user_id).expect("sign with old key");
 
         // Post-rotation server: signs with NEW key, keeps OLD pub as previous.
-        let mut overlap_cfg = make_config(
-            None,
-            None,
-            Some(&new_priv),
-            Some(&new_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let mut overlap_cfg = make_config(Some(&new_priv), Some(&new_pub), "construct-test", 1);
         overlap_cfg.paseto_public_key_previous = vec![old_pub.clone()];
         let overlap_auth = AuthManager::new(&overlap_cfg).expect("overlap AuthManager");
 
@@ -369,15 +261,7 @@ mod auth_tests {
         );
 
         // Once the overlap window closes (previous key dropped), the old token fails.
-        let closed_cfg = make_config(
-            None,
-            None,
-            Some(&new_priv),
-            Some(&new_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let closed_cfg = make_config(Some(&new_priv), Some(&new_pub), "construct-test", 1);
         let closed_auth = AuthManager::new(&closed_cfg).expect("post-overlap AuthManager");
         assert!(
             closed_auth.verify_token(&old_token).is_err(),
@@ -390,15 +274,7 @@ mod auth_tests {
     #[test]
     fn test_paseto_rotation_rejects_malformed_previous_key() {
         let (new_priv, new_pub) = make_ed25519_keypair();
-        let mut cfg = make_config(
-            None,
-            None,
-            Some(&new_priv),
-            Some(&new_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let mut cfg = make_config(Some(&new_priv), Some(&new_pub), "construct-test", 1);
         cfg.paseto_public_key_previous =
             vec!["-----BEGIN PUBLIC KEY-----\nnonsense\n-----END PUBLIC KEY-----".to_string()];
         assert!(
@@ -470,15 +346,7 @@ mod auth_tests {
     fn test_paseto_verify_wrong_issuer_fails() {
         let (auth_signer, _, _) = make_paseto_full();
         let (priv_pem, pub_pem) = make_ed25519_keypair();
-        let config_wrong = make_config(
-            None,
-            None,
-            Some(&priv_pem),
-            Some(&pub_pem),
-            "wrong-issuer",
-            1,
-            "paseto",
-        );
+        let config_wrong = make_config(Some(&priv_pem), Some(&pub_pem), "wrong-issuer", 1);
         let auth_wrong = AuthManager::new(&config_wrong).unwrap();
 
         let user_id = Uuid::new_v4();
@@ -493,13 +361,13 @@ mod auth_tests {
         // overridden via a manual claim injection. The simpler path: create at TTL=1
         // hour, then manually tamper exp. But PASETO signing is cryptographically
         // bound — we cannot forge. Instead, sign with a hand-crafted Claims via
-        // the legacy internal API route by issuing a JWT and trusting exp here.
+        // the internal API route and trusting exp here.
         // We bypass this by creating a token, then sleeping? No — use chrono shim.
         //
         // Cleaner: directly call sign_paseto via an expired Claims struct. Since
         // sign_paseto is private, we test the public create_token path which keeps
-        // exp in the future; for expired-path coverage we lean on jwtwebtoken's
-        // leeway-based coverage plus a manual construction below.
+        // exp in the future; for expired-path coverage we use
+        // a manual construction below.
         //
         // Manual path: we craft a token signed with the same key but with exp in
         // the past. We construct the signed bytes manually to avoid exposing
@@ -535,15 +403,7 @@ mod auth_tests {
         // Build a verify-only AuthManager from the same key's pub side.
         let pub_pem = kp.pk.to_pem();
         let pub_pem_str = String::from_utf8(pub_pem.as_bytes().to_vec()).unwrap();
-        let config = make_config(
-            None,
-            None,
-            None,
-            Some(&pub_pem_str),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let config = make_config(None, Some(&pub_pem_str), "construct-test", 1);
         let auth = AuthManager::new(&config).unwrap();
         let result = auth.verify_token(&token);
         assert!(result.is_err(), "expired PASETO must not verify");
@@ -564,15 +424,7 @@ mod auth_tests {
         // full manager (same keypair). This is the production pattern used by
         // user/messaging/etc services that hold only PASETO_PUBLIC_KEY.
         let (priv_pem, pub_pem) = make_ed25519_keypair();
-        let config_full = make_config(
-            None,
-            None,
-            Some(&priv_pem),
-            Some(&pub_pem),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let config_full = make_config(Some(&priv_pem), Some(&pub_pem), "construct-test", 1);
         let auth_full = AuthManager::new(&config_full).unwrap();
         let auth_vo = make_paseto_verify_only(&pub_pem);
 
@@ -597,118 +449,16 @@ mod auth_tests {
         assert!(auth.verify_token("").is_err());
     }
 
-    // ── Legacy RS256 JWT round trips (dual-stack — removed in Phase 4) ───────
+    // ── Legacy RS256 JWT is rejected (removed in 0.20.0) ──────────────────────
 
     #[test]
-    fn test_jwt_create_and_verify_access_token_round_trip() {
-        let (auth, _, _) = make_jwt_full();
-        let user_id = Uuid::new_v4();
-
-        let (token, jti, exp) = auth.create_token(&user_id).expect("create_token failed");
-        assert!(
-            token.split('.').count() >= 2,
-            "JWT has ≥2 dot-separated parts"
-        );
-        assert!(!jti.is_empty());
-        assert!(exp > chrono::Utc::now().timestamp());
-
-        let claims = auth.verify_token(&token).expect("verify_token failed");
-        assert_eq!(claims.sub, user_id.to_string());
-        assert_eq!(claims.jti, jti);
-        assert_eq!(claims.iss, "construct-test");
-        assert_eq!(claims.exp, exp);
-    }
-
-    #[test]
-    fn test_jwt_expired_token_fails() {
-        use crate::Claims;
-        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-        let (auth, priv_pem, _) = make_jwt_full();
-        let past_exp = chrono::Utc::now().timestamp() - 300;
-        let claims = Claims {
-            sub: Uuid::new_v4().to_string(),
-            jti: Uuid::new_v4().to_string(),
-            exp: past_exp,
-            iat: past_exp - 3600,
-            iss: "construct-test".to_string(),
-            device_id: None,
-        };
-        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
-        let token = encode(&Header::new(Algorithm::RS256), &claims, &key).unwrap();
-        assert!(auth.verify_token(&token).is_err());
-    }
-
-    #[test]
-    fn test_jwt_wrong_issuer_fails() {
-        let (auth_signer, _, _) = make_jwt_full();
-        let (priv_pem, pub_pem) = make_rsa_keypair();
-        let config_wrong = make_config(
-            Some(&priv_pem),
-            Some(&pub_pem),
-            None,
-            None,
-            "wrong-issuer",
-            1,
-            "jwt",
-        );
-        let auth_wrong = AuthManager::new(&config_wrong).unwrap();
-        let (token, _, _) = auth_signer.create_token(&Uuid::new_v4()).unwrap();
-        assert!(auth_wrong.verify_token(&token).is_err());
-    }
-
-    // ── Dual-stack verify (the migration-core feature) ────────────────────────
-
-    #[test]
-    fn test_dual_verify_jwt_token_accepted() {
-        // Server with verify keys for both formats, but issue_format=jwt.
-        // Verify it accepts a JWT issued by itself.
-        let (jwt_auth, _, _) = make_jwt_full();
-        let (paseto_pub_unused, _) = (String::new(), String::new());
-        let _ = paseto_pub_unused;
-        let user_id = Uuid::new_v4();
-        let (token, _, _) = jwt_auth.create_token(&user_id).unwrap();
-        let claims = jwt_auth
-            .verify_token(&token)
-            .expect("JWT must verify in dual mode");
-        assert_eq!(claims.sub, user_id.to_string());
-    }
-
-    #[test]
-    fn test_dual_issue_paseto_verify_both() {
-        // Server with both verifying keys, issue_format=paseto.
-        // Issues PASETO → both PASETO and a pre-existing JWT (signed with jwt key)
-        // must verify via the same manager.
-        let (auth_dual, jwt_priv, _, _, _) = make_dual_full();
-
-        // Issue PASETO through the manager (issue_format=paseto).
-        let user_id = Uuid::new_v4();
-        let (paseto_token, _, _) = auth_dual.create_token(&user_id).unwrap();
-        assert!(paseto_token.starts_with("v4.public."));
-        let claims = auth_dual
-            .verify_token(&paseto_token)
-            .expect("PASETO verify in dual manager");
-        assert_eq!(claims.sub, user_id.to_string());
-
-        // Manually craft a JWT using the same RSA private key + issuer, to simulate
-        // a legacy refresh token presented during dual-stack window.
-        use crate::Claims;
-        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-        let jwt_claims = Claims {
-            sub: user_id.to_string(),
-            jti: Uuid::new_v4().to_string(),
-            exp: chrono::Utc::now().timestamp() + 3600,
-            iat: chrono::Utc::now().timestamp(),
-            iss: "construct-test".to_string(),
-            device_id: None,
-        };
-        let key = EncodingKey::from_rsa_pem(jwt_priv.as_bytes()).unwrap();
-        let jwt_token = encode(&Header::new(Algorithm::RS256), &jwt_claims, &key).unwrap();
-
-        let jwt_claims_recovered = auth_dual
-            .verify_token(&jwt_token)
-            .expect("JWT verify in dual manager must succeed (force-refresh path)");
-        assert_eq!(jwt_claims_recovered.sub, user_id.to_string());
-        assert_eq!(jwt_claims_recovered.jti, jwt_claims.jti);
+    fn test_jwt_shaped_token_is_rejected() {
+        // Header {"alg":"RS256","typ":"JWT"}, claims, junk signature. Not v4.public,
+        // so it must be refused outright.
+        let (auth, _, _) = make_paseto_full();
+        let jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ4In0.c2ln";
+        let err = auth.verify_token(jwt).expect_err("JWT must be rejected");
+        assert!(err.to_string().contains("Unsupported token format"));
     }
 
     #[test]
@@ -719,15 +469,7 @@ mod auth_tests {
         let (priv_pem_a, pub_pem_a) = make_ed25519_keypair();
         let (_, pub_pem_b) = make_ed25519_keypair();
 
-        let config_a = make_config(
-            None,
-            None,
-            Some(&priv_pem_a),
-            Some(&pub_pem_a),
-            "construct-test",
-            1,
-            "paseto",
-        );
+        let config_a = make_config(Some(&priv_pem_a), Some(&pub_pem_a), "construct-test", 1);
         let auth_a = AuthManager::new(&config_a).unwrap();
         let auth_b = make_paseto_verify_only(&pub_pem_b);
 
@@ -831,28 +573,16 @@ mod auth_tests {
 
     #[test]
     fn test_new_without_any_keys_fails() {
-        let config = make_config(None, None, None, None, "construct-test", 1, "paseto");
+        let config = make_config(None, None, "construct-test", 1);
         let result = AuthManager::new(&config);
         assert!(result.is_err(), "must fail when no keys are provided");
     }
 
     #[test]
-    fn test_issue_format_paseto_can_be_verifier_only_without_private_key() {
-        // issue_format=paseto but only verifying keys (both PASETO pub + JWT pub)
-        // is allowed — verify-only deployments don't need a signing key.
+    fn test_verify_only_manager_cannot_create_token() {
         let (_, paseto_pub) = make_ed25519_keypair();
-        let (_, jwt_pub) = make_rsa_keypair();
-        let config = make_config(
-            None,
-            Some(&jwt_pub),
-            None,
-            Some(&paseto_pub),
-            "construct-test",
-            1,
-            "paseto",
-        );
-        let auth = AuthManager::new(&config).expect("verify-only dual manager must init OK");
-        // But create_token must fail at runtime — no signing key.
+        let config = make_config(None, Some(&paseto_pub), "construct-test", 1);
+        let auth = AuthManager::new(&config).expect("verify-only manager must init OK");
         assert!(
             auth.create_token(&Uuid::new_v4()).is_err(),
             "no private key → create fail"
@@ -860,44 +590,9 @@ mod auth_tests {
     }
 
     #[test]
-    fn test_issue_format_jwt_can_be_verifier_only_without_private_key() {
-        let (_, paseto_pub) = make_ed25519_keypair();
-        let (_, jwt_pub) = make_rsa_keypair();
-        let config = make_config(
-            None,
-            Some(&jwt_pub),
-            None,
-            Some(&paseto_pub),
-            "construct-test",
-            1,
-            "jwt",
-        );
-        let auth = AuthManager::new(&config).expect("verify-only dual manager must init OK");
-        assert!(auth.create_token(&Uuid::new_v4()).is_err());
-    }
-
-    #[test]
-    fn test_invalid_issue_format_fails() {
-        let (paseto_priv, paseto_pub) = make_ed25519_keypair();
-        let config = make_config(
-            None,
-            None,
-            Some(&paseto_priv),
-            Some(&paseto_pub),
-            "construct-test",
-            1,
-            "hacker",
-        );
-        let result = AuthManager::new(&config);
-        assert!(result.is_err(), "invalid TOKEN_ISSUE_FORMAT must error");
-    }
-
-    #[test]
-    fn test_token_format_parse() {
-        assert_eq!(TokenFormat::parse("paseto").unwrap(), TokenFormat::Paseto);
-        assert_eq!(TokenFormat::parse("JWT").unwrap(), TokenFormat::Jwt);
-        assert_eq!(TokenFormat::parse(" jwt ").unwrap(), TokenFormat::Jwt);
-        assert!(TokenFormat::parse("hacker").is_err());
-        assert!(TokenFormat::parse("").is_err());
+    fn test_issued_token_is_paseto() {
+        let (auth, _, _) = make_paseto_full();
+        let (token, _, _) = auth.create_token(&Uuid::new_v4()).unwrap();
+        assert!(token.starts_with("v4.public."));
     }
 }

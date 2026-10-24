@@ -2,7 +2,7 @@
 // gRPC authentication helpers
 // ============================================================================
 //
-// Production edge is vanilla Caddy reverse_proxy → h2c services (no JWT plugin,
+// Production edge is vanilla Caddy reverse_proxy → h2c services (no auth plugin,
 // no header rewrite). Clients send on every authenticated RPC (see client docs):
 //
 //   Authorization: Bearer <access_token>
@@ -209,13 +209,9 @@ mod tests {
         let config = Config {
             database_url: String::new(),
             redis_url: String::new(),
-            jwt_secret: "unused".to_string(),
-            jwt_private_key: None,
-            jwt_public_key: None,
             paseto_private_key: Some(priv_pem),
             paseto_public_key: Some(pub_pem),
             paseto_public_key_previous: Vec::new(),
-            token_issue_format: "paseto".to_string(),
             port: 8080,
             bind_address: "127.0.0.1".to_string(),
             health_port: 8081,
@@ -225,7 +221,7 @@ mod tests {
             access_token_ttl_hours: 24,
             session_ttl_days: 30,
             refresh_token_ttl_days: 7,
-            jwt_issuer: "construct-test".to_string(),
+            token_issuer: "construct-test".to_string(),
             online_channel: "online".to_string(),
             offline_queue_prefix: "queue:".to_string(),
             delivery_queue_prefix: "delivery:".to_string(),

@@ -89,7 +89,7 @@ impl SecretNeeds {
     };
 
     /// Signaling reads DATABASE_URL / REDIS_URL / CONTACT_HMAC itself.
-    /// Config here is only for AuthManager (PASETO/JWT public keys).
+    /// Config here is only for AuthManager (PASETO public keys).
     pub const SIGNALING: Self = Self {
         database_url: false,
         redis_url: false,

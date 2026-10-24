@@ -2,7 +2,7 @@
 # Construct Server — Production Docker Compose
 # =============================================================================
 # Architecture:
-#   Caddy — TLS termination (Let's Encrypt ACME), HTTP/3, JWT validation,
+#   Caddy — TLS termination (Let's Encrypt ACME), HTTP/3, token validation,
 #           gRPC routing to Rust microservices (replaces Traefik + Envoy).
 #     ├→ caddy:8080 (internal h2c, no TLS — used by gateway)
 #     └→ caddy:443  (external TLS, HTTP/2 + HTTP/3)
@@ -178,8 +178,8 @@ services:
       - internal
 
   # ─── Caddy (TLS + gRPC routing) ───────────────────────────────────────────
-  # Replaces Traefik (TLS + Let's Encrypt) + Envoy (gRPC routing + JWT authn).
-  # Vanilla caddy:alpine — no JWT plugin. Each service validates JWT itself.
+  # Replaces Traefik (TLS + Let's Encrypt) + Envoy (gRPC routing + token authn).
+  # Vanilla caddy:alpine — no auth plugin. Each service validates the token itself.
   #
   # Caddyfile: ops/Caddyfile
   #   - :80      → redirect to HTTPS

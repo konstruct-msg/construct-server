@@ -129,15 +129,15 @@ _timed "GetPowChallenge (liveness)" grpcurl \
   "$AUTH_HOST" \
   shared.proto.services.v1.AuthService/GetPowChallenge
 
-# VerifyToken with a fake JWT: VerifyToken always returns gRPC OK — it responds
+# VerifyToken with a fake token: VerifyToken always returns gRPC OK — it responds
 # with {valid: false} for bad tokens rather than an error status.
 # Test that it responds quickly (liveness + non-hanging, not rejection).
-FAKE_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzbW9rZS10ZXN0IiwiZXhwIjoxfQ.ZmFrZXNpZ25hdHVyZQ"
-_timed "VerifyToken (invalid JWT → valid:false fast)" grpcurl \
+FAKE_TOKEN="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzbW9rZS10ZXN0IiwiZXhwIjoxfQ.ZmFrZXNpZ25hdHVyZQ"
+_timed "VerifyToken (invalid token → valid:false fast)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/auth_service.proto \
-  -d "{\"access_token\": \"$FAKE_JWT\"}" \
+  -d "{\"access_token\": \"$FAKE_TOKEN\"}" \
   "$AUTH_HOST" \
   shared.proto.services.v1.AuthService/VerifyToken
 
@@ -155,13 +155,13 @@ _timed_err "GetPendingMessages (no auth → rejected fast)" grpcurl \
   "$MSG_HOST" \
   shared.proto.services.v1.MessagingService/GetPendingMessages
 
-# With a fake Bearer token → JWT middleware runs, must reject quickly.
+# With a fake Bearer token → auth middleware runs, must reject quickly.
 # Catches hangs in auth middleware that only trigger when Authorization header is present.
-_timed_err "GetPendingMessages (fake JWT → rejected fast)" grpcurl \
+_timed_err "GetPendingMessages (fake token → rejected fast)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
-  -H "Authorization: Bearer $FAKE_JWT" \
+  -H "Authorization: Bearer $FAKE_TOKEN" \
   -d '{}' \
   "$MSG_HOST" \
   shared.proto.services.v1.MessagingService/GetPendingMessages
@@ -178,11 +178,11 @@ _timed_err "GetPendingMessages (x-user-id spoof only → rejected)" grpcurl \
   shared.proto.services.v1.MessagingService/GetPendingMessages
 
 # Spoof guard: Bearer present but x-user-id mismatches claims → reject.
-_timed_err "GetPendingMessages (fake JWT + mismatched x-user-id → rejected)" grpcurl \
+_timed_err "GetPendingMessages (fake token + mismatched x-user-id → rejected)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
-  -H "Authorization: Bearer $FAKE_JWT" \
+  -H "Authorization: Bearer $FAKE_TOKEN" \
   -H "x-user-id: 00000000-0000-0000-0000-000000000001" \
   -d '{}' \
   "$MSG_HOST" \
@@ -215,12 +215,12 @@ _timed_err "GetPreKeyBundle (no auth → rejected fast)" grpcurl \
   "$KEY_HOST" \
   shared.proto.services.v1.KeyService/GetPreKeyBundle
 
-# GetPreKeyBundle with fake JWT → tests auth middleware under the key service.
-_timed_err "GetPreKeyBundle (fake JWT → rejected fast)" grpcurl \
+# GetPreKeyBundle with fake token → tests auth middleware under the key service.
+_timed_err "GetPreKeyBundle (fake token → rejected fast)" grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/key_service.proto \
-  -H "Authorization: Bearer $FAKE_JWT" \
+  -H "Authorization: Bearer $FAKE_TOKEN" \
   -d '{"user_id": "00000000-0000-0000-0000-000000000000"}' \
   "$KEY_HOST" \
   shared.proto.services.v1.KeyService/GetPreKeyBundle

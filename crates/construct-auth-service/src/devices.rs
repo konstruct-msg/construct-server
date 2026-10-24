@@ -232,11 +232,11 @@ pub struct RegisterDeviceResponse {
     #[serde(rename = "userId")]
     pub user_id: String,
 
-    /// Access token (JWT, 1 hour TTL)
+    /// Access token (PASETO v4.public)
     #[serde(rename = "accessToken")]
     pub access_token: String,
 
-    /// Refresh token (JWT, 30 days TTL)
+    /// Refresh token (PASETO v4.public)
     #[serde(rename = "refreshToken")]
     pub refresh_token: String,
 
@@ -552,7 +552,7 @@ pub async fn register_device_core(
         "User + device registered successfully (passwordless)"
     );
 
-    // 8. Generate JWT tokens with device_id
+    // 8. Generate tokens with device_id
     let (access_token, _, exp_timestamp) = app_context
         .auth_manager
         .create_token_for_device(&user.id, Some(&device_id))
@@ -585,7 +585,7 @@ pub async fn register_device_core(
     let now = chrono::Utc::now().timestamp();
     let expires_in = (exp_timestamp - now) as u64;
 
-    // 9. Return success response with JWT tokens
+    // 9. Return success response with tokens
     Ok((
         StatusCode::CREATED,
         Json(RegisterDeviceResponse {
@@ -763,7 +763,7 @@ pub async fn authenticate_device_core(
         .user_id
         .ok_or_else(|| AppError::internal("Device has no user_id"))?;
 
-    // 6. Generate JWT tokens with device_id
+    // 6. Generate tokens with device_id
     let (access_token, _, exp_timestamp) = app_context
         .auth_manager
         .create_token_for_device(&user_id, Some(&device.device_id))
@@ -801,7 +801,7 @@ pub async fn authenticate_device_core(
         "Device authenticated successfully"
     );
 
-    // 7. Return JWT tokens
+    // 7. Return tokens
     Ok((
         StatusCode::OK,
         Json(RegisterDeviceResponse {

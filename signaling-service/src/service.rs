@@ -72,8 +72,8 @@ pub(crate) struct SignalingServiceImpl {
     pub(crate) notification_client: Option<NotificationClient>,
     pub(crate) db_pool: Option<Arc<construct_db::DbPool>>,
     pub(crate) contact_hmac_secret: Arc<Vec<u8>>,
-    /// JWT auth manager for device_id cross-verification.
-    /// `None` when JWT_PUBLIC_KEY is not available (falls back to trusting
+    /// PASETO auth manager for device_id cross-verification.
+    /// `None` when PASETO_PUBLIC_KEY is not available (falls back to trusting
     /// the gateway-injected x-device-id header directly).
     pub(crate) auth: Option<Arc<AuthManager>>,
 }
@@ -90,7 +90,7 @@ fn call_refused() -> Status {
 fn caller_user_id<T>(req: &Request<T>, auth: Option<&AuthManager>) -> Result<String, Status> {
     let auth = auth.ok_or_else(|| {
         Status::failed_precondition(
-            "AuthManager not configured — set PASETO/JWT public keys on signaling-service",
+            "AuthManager not configured — set PASETO public keys on signaling-service",
         )
     })?;
     let caller = construct_server_shared::auth_utils::extract_authed_caller(auth, req.metadata())?;
@@ -104,7 +104,7 @@ fn verified_caller_device_id<T>(
 ) -> Result<String, Status> {
     let auth = auth.ok_or_else(|| {
         Status::failed_precondition(
-            "AuthManager not configured — set PASETO/JWT public keys on signaling-service",
+            "AuthManager not configured — set PASETO public keys on signaling-service",
         )
     })?;
     construct_server_shared::auth_utils::extract_device_id(auth, req.metadata())
