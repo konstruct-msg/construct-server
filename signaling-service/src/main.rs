@@ -151,25 +151,25 @@ async fn main() -> anyhow::Result<()> {
 
     info!("SignalingService listening on {}", grpc_bind_addr);
 
-    // Load JWT auth manager for device_id cross-verification.
+    // Load PASETO auth manager for device_id cross-verification.
     // Auth is required for user/device identity (Bearer); Config keys must be present
     // in production. Degraded None only when Config fails in non-prod.
     let auth: Option<Arc<AuthManager>> =
         match Config::from_env_for(construct_config::SecretNeeds::SIGNALING) {
             Ok(config) => match AuthManager::new(&config) {
                 Ok(manager) => {
-                    info!("JWT/PASETO device verification enabled");
+                    info!("PASETO device verification enabled");
                     Some(Arc::new(manager))
                 }
                 Err(e) => {
                     if construct_config::is_production_environment() {
                         return Err(e.context(
-                            "AuthManager init failed in production (set PASETO/JWT public keys)",
+                            "AuthManager init failed in production (set PASETO public keys)",
                         ));
                     }
                     tracing::warn!(
                         error = %e,
-                        "AuthManager init failed — auth disabled (dev only; set PASETO/JWT keys)"
+                        "AuthManager init failed — auth disabled (dev only; set PASETO keys)"
                     );
                     None
                 }

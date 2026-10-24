@@ -158,13 +158,13 @@ pub async fn refresh_tokens(
         }
     };
 
-    // 5. Defense-in-depth: verify user_id in Redis matches JWT sub
+    // 5. Defense-in-depth: verify user_id in Redis matches token sub
     if user_id_from_token != claims.sub {
         tracing::error!(
             jti = %claims.jti,
             token_user_id = %claims.sub,
             redis_user_id = %user_id_from_token,
-            "User ID mismatch between JWT and Redis"
+            "User ID mismatch between token and Redis"
         );
         AUTH_FAILURES_TOTAL
             .with_label_values(&["token_validation_failed"])

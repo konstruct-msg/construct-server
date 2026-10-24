@@ -35,7 +35,6 @@ fn start_service(package_name: &str, port: u16) -> Child {
             }),
         )
         .env("REDIS_URL", "redis://localhost:6379")
-        .env("JWT_SECRET", "test_jwt_secret_for_microservices_testing")
         .current_dir(workspace_root)
         .spawn()
         .unwrap_or_else(|_| panic!("Failed to start {}", package_name));

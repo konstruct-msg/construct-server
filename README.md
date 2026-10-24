@@ -79,8 +79,8 @@ Delivery invariants:
 
 ## Authentication And Abuse Controls
 
-- Primary access tokens are PASETO v4.public. Legacy RS256 JWT verification is
-  retained for migration compatibility.
+- Access tokens are PASETO v4.public only (since 0.20.0). Legacy RS256 JWT was
+  removed; a token that is not v4.public is rejected.
 - Logout and revoke use Redis blocklist keys: `invalidated_token:{jti}`.
 - Messaging requires a bearer token. Optional `x-user-id` and `x-device-id`
   headers must match token claims.
@@ -105,7 +105,7 @@ server-side tokens. Which layers are post-quantum is in the protocol book:
 | Kyber prekeys | ML-KEM-1024 (signed and one-time), beside the X25519 prekeys; used by PQXDH v2 |
 | Prekey signatures | Ed25519 (`ed25519-dalek` `verify`, not `verify_strict`); Kyber prekeys also carry an Ed25519 + ML-DSA-65 hybrid signature |
 | Sender certificates | Ed25519, signed by the server — not post-quantum (protocol book `PQC-2`) |
-| Access tokens | PASETO v4.public; legacy RS256 JWT accepted |
+| Access tokens | PASETO v4.public only (since 0.20.0) |
 | Anonymous anti-abuse | Privacy Pass VOPRF over ristretto255 |
 | Groups | MLS, RFC 9420 |
 

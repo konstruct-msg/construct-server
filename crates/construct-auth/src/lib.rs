@@ -2,9 +2,6 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use ed25519_compact::{PublicKey, SecretKey, Signature};
-use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
-};
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, opts, register_int_counter_vec};
 use rand::RngCore;
@@ -13,13 +10,14 @@ use uuid::Uuid;
 
 use construct_config::Config;
 
-/// Counts token verifications split by format ("paseto" | "jwt").
-/// Used to decide when JWT volume reaches zero and Phase 4 (cleanup) can begin.
+/// Counts token verifications by format. Only `format="paseto"` is emitted since 0.20.0
+/// (RS256 JWT support was removed); the label is kept so existing dashboards and alerts
+/// keep working. A token that is not v4.public is rejected without being counted.
 static TOKEN_VERIFY_FORMAT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         opts!(
             "construct_auth_token_verify_format_total",
-            "Token verifications by format (paseto | jwt)"
+            "Token verifications by format (paseto)"
         ),
         &["format"]
     )
@@ -44,7 +42,7 @@ static PASETO_VERIFY_KEY_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String, // user_id
-    pub jti: String, // JWT/PASETO ID (unique per token)
+    pub jti: String, // PASETO token ID (unique per token)
     pub exp: i64,    // Expiration time
     pub iat: i64,    // Issued at
     pub iss: String, // Issuer
@@ -52,28 +50,17 @@ pub struct Claims {
     pub device_id: Option<String>, // Device identifier for device-level auth
 }
 
-/// Token issuance / verification manager supporting both legacy RS256 JWT and
-/// PASETO v4.public (Ed25519).
+/// Token issuance / verification manager for PASETO v4.public (Ed25519) tokens.
 ///
-/// Migration strategy (dual-stack):
-/// - `verify_token` accepts **both** formats — chosen by token prefix
-///   (`v4.public.` → PASETO, otherwise → legacy RS256 JWT).
-/// - `create_token*` / `create_refresh_token*` issue the format configured by
-///   `Config::token_issue_format` (`"paseto"` target, `"jwt"` legacy transitional).
-/// - Legacy JWT paths are removable after the rotation window completes
-///   (see `decisions/paseto-v4-public-migration.md`).
+/// Since 0.20.0 PASETO v4.public is the only access/refresh token format; legacy RS256
+/// JWT issuance and verification were removed. A token without the `v4.public.` prefix is
+/// rejected as invalid.
 ///
 /// Two modes:
 /// - **Full mode**: can sign and verify (private + public keys loaded).
 /// - **Verify-only mode**: can only verify (public key only).
 pub struct AuthManager {
-    // ── Legacy RS256 JWT — optional, retained for dual-stack verify ──────────
-    /// JWT encoding key (RSA private key) — None in verify-only mode or after Phase 4 cleanup.
-    jwt_encoding_key: Option<EncodingKey>,
-    /// JWT decoding key (RSA public key) — None if legacy verify disabled.
-    jwt_decoding_key: Option<DecodingKey>,
-
-    // ── PASETO v4.public (Ed25519) — primary post-migration ──────────────────
+    // ── PASETO v4.public (Ed25519) ───────────────────────────────────────────
     /// Ed25519 secret key for PASETO signing — None in verify-only mode.
     paseto_signing_key: Option<SecretKey>,
     /// Ed25519 public key for PASETO verification — None if PASETO verify disabled.
@@ -83,36 +70,13 @@ pub struct AuthManager {
     /// verify until they expire. Signing always uses the current key only.
     paseto_verifying_keys_previous: Vec<PublicKey>,
 
-    // ── Sign policy ───────────────────────────────────────────────────────────
-    /// Token format to issue on `create_token*` / `create_refresh_token*`.
-    issue_format: TokenFormat,
-
     // ── TTLs / issuer ─────────────────────────────────────────────────────────
     access_token_ttl_hours: i64,
     #[allow(dead_code)]
     session_ttl_days: i64,
     refresh_token_ttl_days: i64,
-    /// Issuer claim (shared by JWT `iss` and PASETO `iss`).
+    /// Issuer claim (`iss`) of issued tokens, checked on verify.
     issuer: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TokenFormat {
-    Paseto,
-    Jwt,
-}
-
-impl TokenFormat {
-    fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "paseto" => Ok(TokenFormat::Paseto),
-            "jwt" => Ok(TokenFormat::Jwt),
-            other => anyhow::bail!(
-                "Unknown TOKEN_ISSUE_FORMAT={:?}. Expected \"paseto\" or \"jwt\".",
-                other
-            ),
-        }
-    }
 }
 
 /// PASETO v4.public header literal (ASCII).
@@ -185,70 +149,35 @@ impl AuthManager {
             );
         }
 
-        // ── Load legacy JWT RS256 keys (dual-stack verify) ───────────────────
-        let has_jwt_public = is_valid_key(&config.jwt_public_key);
-        let has_jwt_private = is_valid_key(&config.jwt_private_key);
-
-        let (jwt_decoding_key, jwt_encoding_key) = if has_jwt_public {
-            let pub_pem = config.jwt_public_key.as_ref().unwrap();
-            let dk = DecodingKey::from_rsa_pem(pub_pem.as_bytes())
-                .context("Failed to parse JWT_PUBLIC_KEY as RSA PEM")?;
-            let ek = if has_jwt_private {
-                let priv_pem = config.jwt_private_key.as_ref().unwrap();
-                let ek = EncodingKey::from_rsa_pem(priv_pem.as_bytes())
-                    .context("Failed to parse JWT_PRIVATE_KEY as RSA PEM")?;
-                tracing::info!("JWT RS256 initialized (legacy dual-stack, full mode)");
-                Some(ek)
-            } else {
-                tracing::info!("JWT RS256 initialized (legacy dual-stack, verify-only mode)");
-                None
-            };
-            (Some(dk), ek)
-        } else {
-            (None, None)
-        };
-
-        // At least one verifying key must be present so verify_token can run.
-        if paseto_verifying_key.is_none() && jwt_decoding_key.is_none() {
+        // A verifying key must be present so verify_token can run.
+        if paseto_verifying_key.is_none() {
             anyhow::bail!(
-                "No auth keys configured. Set one of:\n\
-                 - PASETO_PUBLIC_KEY (+optional PASETO_PRIVATE_KEY) for PASETO v4.public\n\
-                 - JWT_PUBLIC_KEY (+optional JWT_PRIVATE_KEY) for legacy RS256\n\
-                 Both can be set for dual-stack verify during migration."
+                "No auth keys configured. Set PASETO_PUBLIC_KEY (+ PASETO_PRIVATE_KEY on the \
+                 service that issues tokens) for PASETO v4.public."
             );
         }
 
-        // Sign policy: which format to issue on `create_token*`.
-        // We accept either format regardless of which signing keys are loaded — a
-        // verify-only deployment (no private key) sets TOKEN_ISSUE_FORMAT=paseto
-        // and simply never calls `create_token`. If a caller does call `create_token*
-        // without a matching signing key, the call fails at runtime inside `sign_*`.
-        let issue_format = TokenFormat::parse(&config.token_issue_format)?;
-
         Ok(Self {
-            jwt_encoding_key,
-            jwt_decoding_key,
             paseto_signing_key,
             paseto_verifying_key,
             paseto_verifying_keys_previous,
-            issue_format,
             access_token_ttl_hours: config.access_token_ttl_hours,
             session_ttl_days: config.session_ttl_days,
             refresh_token_ttl_days: config.refresh_token_ttl_days,
-            issuer: config.jwt_issuer.clone(),
+            issuer: config.token_issuer.clone(),
         })
     }
 
     // ── Token creation ─────────────────────────────────────────────────────────
 
     /// Create access token (short-lived, for REST API).
-    /// Returns error if AuthManager cannot sign in the configured format.
+    /// Returns error if AuthManager has no signing key (verify-only mode).
     pub fn create_token(&self, user_id: &Uuid) -> Result<(String, String, i64)> {
         self.create_token_for_device(user_id, None)
     }
 
     /// Create access token for a specific device.
-    /// Returns (token, jti, exp). Issues whichever format `issue_format` dictates.
+    /// Returns (token, jti, exp).
     pub fn create_token_for_device(
         &self,
         user_id: &Uuid,
@@ -267,10 +196,7 @@ impl AuthManager {
             device_id: device_id.map(String::from),
         };
 
-        let token = match self.issue_format {
-            TokenFormat::Paseto => self.sign_paseto(&claims)?,
-            TokenFormat::Jwt => self.sign_jwt(&claims)?,
-        };
+        let token = self.sign_paseto(&claims)?;
 
         Ok((token, jti, exp.timestamp()))
     }
@@ -299,32 +225,27 @@ impl AuthManager {
             device_id: device_id.map(String::from),
         };
 
-        let token = match self.issue_format {
-            TokenFormat::Paseto => self.sign_paseto(&claims)?,
-            TokenFormat::Jwt => self.sign_jwt(&claims)?,
-        };
+        let token = self.sign_paseto(&claims)?;
 
         Ok((token, jti, exp.timestamp()))
     }
 
-    // ── Token verification (dual-stack) ────────────────────────────────────────
+    // ── Token verification ────────────────────────────────────────
 
-    /// Verify a token, accepting either PASETO v4.public or legacy RS256 JWT.
-    /// Returns the parsed `Claims` on success, error on invalid/expired/unsupported.
+    /// Verify a PASETO v4.public token.
+    /// Returns the parsed `Claims` on success, error on invalid/expired/unsupported
+    /// (including any token that is not v4.public).
     pub fn verify_token(&self, token: &str) -> Result<Claims> {
-        if token.starts_with("v4.public.") {
-            TOKEN_VERIFY_FORMAT_TOTAL
-                .with_label_values(&["paseto"])
-                .inc();
-            self.verify_paseto(token)
-        } else {
-            TOKEN_VERIFY_FORMAT_TOTAL.with_label_values(&["jwt"]).inc();
-            self.verify_jwt(token)
+        if !token.starts_with("v4.public.") {
+            anyhow::bail!("Unsupported token format: expected PASETO v4.public");
         }
+        TOKEN_VERIFY_FORMAT_TOTAL
+            .with_label_values(&["paseto"])
+            .inc();
+        self.verify_paseto(token)
     }
 
     /// Verify that the device_id from header matches the device_id in token claims.
-    /// Same logic for both formats — works on parsed `Claims`.
     pub fn verify_device_id(&self, header_device_id: &str, claims: &Claims) -> Result<String> {
         let claims_device_id = claims
             .device_id
@@ -441,40 +362,7 @@ impl AuthManager {
         Ok(claims)
     }
 
-    // ── Legacy RS256 JWT internals (removable after Phase 4) ──────────────────
-
-    fn sign_jwt(&self, claims: &Claims) -> Result<String> {
-        let encoding_key = self.jwt_encoding_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Cannot sign JWT: verify-only mode (no JWT_PRIVATE_KEY)")
-        })?;
-        let header = Header::new(Algorithm::RS256);
-        encode(&header, claims, encoding_key).context("Failed to encode JWT token")
-    }
-
-    fn verify_jwt(&self, token: &str) -> Result<Claims> {
-        let decoding_key = self.jwt_decoding_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("JWT token presented but no JWT_PUBLIC_KEY configured")
-        })?;
-
-        let header = decode_header(token).context("Failed to decode JWT header")?;
-        if header.alg != Algorithm::RS256 {
-            anyhow::bail!(
-                "Unsupported JWT algorithm: {:?}. Only RS256 is supported.",
-                header.alg
-            );
-        }
-
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(std::slice::from_ref(&self.issuer));
-        // jsonwebtoken has 60s default leeway on exp — we keep that to tolerate clock skew.
-
-        let token_data = decode::<Claims>(token, decoding_key, &validation)
-            .context("JWT verification failed")?;
-
-        Ok(token_data.claims)
-    }
-
-    // ── Shared claim validation (used by PASETO verify; JWT path uses jsonwebtoken's) ──
+    // ── Claim validation ──
 
     fn validate_claims(&self, claims: &Claims) -> Result<()> {
         if claims.iss != self.issuer {
@@ -495,7 +383,3 @@ impl AuthManager {
 // Unit tests (keypairs generated on the fly — no keys committed to the repo).
 #[cfg(test)]
 mod auth_tests;
-
-// Note: legacy tests previously embedded a fixed RSA key pair (2048-bit) here.
-// That pair leaked into the repo history. The current test module generates
-// Ed25519 / RSA keypairs at runtime — never committed to source control.

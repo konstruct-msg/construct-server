@@ -49,20 +49,6 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: String,
 
-    /// Legacy JWT secret - kept for backward compatibility with old tests
-    /// Production uses RS256 (jwt_private_key/jwt_public_key)
-    #[allow(dead_code)]
-    pub jwt_secret: String,
-
-    /// RSA private key for JWT signing (RS256)
-    /// Required for auth-service (to create tokens)
-    /// Optional for other services (verify-only mode)
-    pub jwt_private_key: Option<String>,
-
-    /// RSA public key for JWT verification (RS256)
-    /// REQUIRED for all services
-    pub jwt_public_key: Option<String>,
-
     /// Ed25519 private key for PASETO v4.public signing (PEM or file path).
     /// Required for auth-service (to create tokens) after migration cutover.
     /// Optional for other services (verify-only mode).
@@ -79,11 +65,6 @@ pub struct Config {
     /// current `paseto_private_key` always signs. Drop entries once every token
     /// signed by them has expired (refresh-token TTL).
     pub paseto_public_key_previous: Vec<String>,
-
-    /// Token format to issue: `"paseto"` (target) or `"jwt"` (legacy, transitional).
-    /// Verification accepts both formats regardless of this setting (dual-stack).
-    /// Env: `TOKEN_ISSUE_FORMAT`, default `"paseto"`.
-    pub token_issue_format: String,
 
     pub port: u16,
     pub bind_address: String,
@@ -106,7 +87,9 @@ pub struct Config {
     /// Refresh token TTL in days (long-lived for user convenience)
     pub refresh_token_ttl_days: i64,
 
-    pub jwt_issuer: String,
+    /// Issuer (`iss`) claim of PASETO access tokens. Env: `AUTH_TOKEN_ISSUER`, falling
+    /// back to `JWT_ISSUER` (the name deployments set before 0.20.0); default `construct-server`.
+    pub token_issuer: String,
     pub online_channel: String,
     pub offline_queue_prefix: String,
     pub delivery_queue_prefix: String,
@@ -250,16 +233,9 @@ impl Config {
             database_url: required_env("DATABASE_URL", needs.database_url)?,
             redis_url: required_env("REDIS_URL", needs.redis_url)?,
 
-            // JWT_SECRET is deprecated - RS256 is now required
-            jwt_secret: std::env::var("JWT_SECRET").unwrap_or_default(),
-
-            jwt_private_key: Self::load_jwt_private_key(),
-            jwt_public_key: Self::load_jwt_public_key(),
             paseto_private_key: Self::load_paseto_private_key(),
             paseto_public_key: Self::load_paseto_public_key(),
             paseto_public_key_previous: Self::load_paseto_public_key_previous(),
-            token_issue_format: std::env::var("TOKEN_ISSUE_FORMAT")
-                .unwrap_or_else(|_| "paseto".to_string()),
 
             port: std::env::var("PORT")
                 .ok()
@@ -309,7 +285,8 @@ impl Config {
                 .and_then(|d| d.parse().ok())
                 .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_DAYS),
 
-            jwt_issuer: std::env::var("JWT_ISSUER")
+            token_issuer: std::env::var("AUTH_TOKEN_ISSUER")
+                .or_else(|_| std::env::var("JWT_ISSUER"))
                 .unwrap_or_else(|_| "construct-server".to_string()),
 
             online_channel: std::env::var("ONLINE_CHANNEL")
@@ -383,53 +360,6 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
-        })
-    }
-
-    fn load_jwt_private_key() -> Option<String> {
-        std::env::var("JWT_PRIVATE_KEY").ok().map(|key| {
-            // Detect PEM data in env var BEFORE any path check.
-            // Base64 uses '/' which would otherwise trigger the path-separator
-            // heuristic and cause the key to be logged as `path = %key`.
-            if key.starts_with("-----BEGIN") {
-                if key.contains("PRIVATE") {
-                    tracing::warn!(
-                        "SECURITY: JWT_PRIVATE_KEY contains PEM data directly in environment \
-                        variable. This is insecure - the key is visible in /proc/*/environ, \
-                        `ps aux`, and logs. \
-                        Recommended: Store key in a file and set JWT_PRIVATE_KEY=/path/to/private.pem"
-                    );
-                }
-                return key;
-            }
-
-            // Value is a file path — read it.
-            std::fs::read_to_string(&key).unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = %e,
-                    path = %key,
-                    "Failed to read JWT_PRIVATE_KEY from file, using as-is"
-                );
-                key
-            })
-        })
-    }
-
-    fn load_jwt_public_key() -> Option<String> {
-        std::env::var("JWT_PUBLIC_KEY").ok().map(|key| {
-            // Same as private key: detect PEM first to avoid logging key as path.
-            if key.starts_with("-----BEGIN") {
-                return key;
-            }
-
-            std::fs::read_to_string(&key).unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = %e,
-                    path = %key,
-                    "Failed to read JWT_PUBLIC_KEY from file, using as-is"
-                );
-                key
-            })
         })
     }
 

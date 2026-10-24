@@ -23,7 +23,7 @@ pub struct SentinelGrpcService {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Extract and verify device_id from both `x-device-id` header and JWT token.
+/// Extract and verify device_id from both `x-device-id` header and access token.
 /// This prevents header forgery attacks where an attacker spoofs `x-device-id`.
 fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<String, Status> {
     // Extract header device_id
@@ -34,7 +34,7 @@ fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<
         .map(|s| s.to_string())
         .ok_or_else(|| Status::unauthenticated("Missing x-device-id header"))?;
 
-    // Extract JWT token from authorization header
+    // Extract access token from authorization header
     let token = req
         .metadata()
         .get("authorization")
@@ -43,7 +43,7 @@ fn verified_caller_device_id<T>(req: &Request<T>, auth: &AuthManager) -> Result<
         .map(|s| s.to_string())
         .ok_or_else(|| Status::unauthenticated("Missing Authorization header"))?;
 
-    // Verify JWT and extract claims
+    // Verify token and extract claims
     let claims = auth
         .verify_token(&token)
         .map_err(|e| Status::unauthenticated(format!("Invalid token: {}", e)))?;

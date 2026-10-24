@@ -27,7 +27,6 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         redis_url: env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
         // SECURITY: Use a strong test secret that passes entropy validation
         // This must be at least 32 chars with good entropy (not all same char, no simple patterns, >= 8 unique chars)
-        jwt_secret: "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0".to_string(),
         bind_address: "127.0.0.1".to_string(),
         port: 8080,
         health_port: 8081,
@@ -39,7 +38,7 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         refresh_token_ttl_days: 90,
         grpc_keepalive_interval_secs: 45,
         grpc_keepalive_timeout_secs: 5,
-        jwt_issuer: "construct-test".to_string(),
+        token_issuer: "construct-test".to_string(),
         online_channel: "test-online-channel".to_string(),
         offline_queue_prefix: "test_queue:".to_string(),
         delivery_queue_prefix: "test_delivery_queue".to_string(),
@@ -139,12 +138,9 @@ async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {
         federation_base_domain: "test.local".to_string(),
         federation_enabled: false,
         deep_link_base_url: "".to_string(),
-        jwt_private_key: None,
-        jwt_public_key: None,
         paseto_private_key: None,
         paseto_public_key: None,
         paseto_public_key_previous: Vec::new(),
-        token_issue_format: "paseto".to_string(),
         media: construct_config::MediaConfig {
             enabled: false,
             base_url: "".to_string(),

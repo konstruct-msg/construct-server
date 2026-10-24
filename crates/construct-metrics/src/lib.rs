@@ -525,7 +525,7 @@ pub static MSG_DELIVERY_ROUTING_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 // where the server is the suspect, so a server-side counter for it would be
 // evidence supplied by the accused.
 
-/// Authentication failures (JWT validation, device not found, etc.).
+/// Authentication failures (token validation, device not found, etc.).
 /// Label `reason`: "invalid_token" | "expired" | "device_not_found" | "permission_denied"
 ///   | "refresh_token_consumed" | "refresh_token_revoked" | "redis_unavailable"
 pub static AUTH_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {

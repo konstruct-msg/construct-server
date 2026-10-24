@@ -577,9 +577,9 @@ async fn main() -> Result<()> {
 
     let auth = Arc::new(
         AuthManager::new(&main_config)
-            .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+            .context("Failed to initialize AuthManager (set PASETO public keys)")?,
     );
-    info!("JWT/PASETO verification enabled for media-service");
+    info!("PASETO verification enabled for media-service");
 
     let mint_limiter = Arc::new(SlidingWindowLimiter::new(
         media_config.rate_limit_per_hour,
@@ -684,13 +684,9 @@ mod tests {
         let config = Config {
             database_url: String::new(),
             redis_url: String::new(),
-            jwt_secret: "unused".into(),
-            jwt_private_key: None,
-            jwt_public_key: None,
             paseto_private_key: Some(priv_pem),
             paseto_public_key: Some(pub_pem),
             paseto_public_key_previous: vec![],
-            token_issue_format: "paseto".into(),
             port: 0,
             bind_address: "127.0.0.1".into(),
             health_port: 0,
@@ -700,7 +696,7 @@ mod tests {
             access_token_ttl_hours: 24,
             session_ttl_days: 30,
             refresh_token_ttl_days: 7,
-            jwt_issuer: "construct-test".into(),
+            token_issuer: "construct-test".into(),
             online_channel: "online".into(),
             offline_queue_prefix: "queue:".into(),
             delivery_queue_prefix: "delivery:".into(),

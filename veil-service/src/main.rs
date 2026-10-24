@@ -300,9 +300,9 @@ async fn main() -> Result<()> {
 
     let auth = Arc::new(
         AuthManager::new(&config)
-            .context("Failed to initialize AuthManager (set PASETO/JWT public keys)")?,
+            .context("Failed to initialize AuthManager (set PASETO public keys)")?,
     );
-    info!("JWT/PASETO verification enabled for veil-service");
+    info!("PASETO verification enabled for veil-service");
 
     // gRPC server.
     let grpc_context = context.clone();

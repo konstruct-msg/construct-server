@@ -28,7 +28,6 @@ bytes = "1.9"
 sqlx = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rmp-serde = { version = "1.3", optional = true }
 
@@ -37,12 +36,11 @@ rmp-serde = { version = "1.3", optional = true }
 default = ["full"]
 
 # All error conversions enabled
-full = ["database", "redis", "jwt", "http", "serialization"]
+full = ["database", "redis", "http", "serialization"]
 
 # Individual feature flags
 database = ["dep:sqlx"]
 redis = ["dep:redis"]
-jwt = ["dep:jsonwebtoken"]
 http = ["dep:reqwest"]
 serialization = ["dep:rmp-serde", "dep:uuid"]
 
