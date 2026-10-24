@@ -23,7 +23,7 @@ Optional args to override default hosts:
 ## Key Management
 
 ```bash
-./scripts/generate_test_keys.sh     # Generate keys for local/CI testing
+./scripts/generate_test_keys.sh     # Generate PASETO test keys for local/CI testing
 ./scripts/cleanup_test_keys.sh      # Remove generated test keys
 ./scripts/preflight-secrets.sh      # Validate app.env (format, duplicates, slices)
 ./scripts/split-secrets.sh          # Write per-service slices from app.env + allowlist

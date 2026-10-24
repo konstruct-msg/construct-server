@@ -79,7 +79,7 @@ DATABASE_URL=postgres://user:pass@localhost:5432/construct_test
 REDIS_URL=redis://localhost:6379
 ```
 
-Additional per-service vars: `JWT_SECRET`, `RS256_PRIVATE_KEY`, `REDIS_URL`, etc.  
+Additional per-service vars: `PASETO_PRIVATE_KEY`, `PASETO_PUBLIC_KEY`, `AUTH_TOKEN_ISSUER`, `REDIS_URL`, etc.  
 See `crates/construct-config/src/lib.rs` for the full list and defaults.
 
 ### gRPC services per binary
@@ -325,10 +325,13 @@ key cannot pass as a new one (`crates/construct-crypto/src/pqc/hybrid.rs`).
 Verification is `ed25519-dalek` 2.2 `Verifier::verify` — not `verify_strict`, so weak
 (small-order) public keys are not rejected by this check.
 
-### Auth Tokens (PASETO + legacy JWT)
+### Auth Tokens (PASETO v4.public only)
 
-- Format: **PASETO v4.public** (Ed25519) primary; legacy RS256 JWT still verified —
-  `construct-auth` dispatches by the `v4.public.` prefix.
+- Format: **PASETO v4.public** (Ed25519) only, since 0.20.0. Legacy RS256 JWT issuance and
+  verification were removed; `construct-auth` rejects any token without the `v4.public.` prefix.
+  Env: `PASETO_PRIVATE_KEY` (issuing service), `PASETO_PUBLIC_KEY`, `PASETO_PUBLIC_KEY_PREVIOUS`
+  (rotation overlap), `AUTH_TOKEN_ISSUER` (the `iss` claim; falls back to the pre-0.20.0 `JWT_ISSUER`).
+  Metric `construct_auth_token_verify_format_total{format="paseto"}`.
 - PASETO payload framing is non-standard: `nonce(32) || message || sig(64)` even for the
   signed purpose (documented; client-side slice offsets are intentional).
 - Access tokens: TTL 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, reduced to limit token exposure window)
@@ -452,9 +455,9 @@ grpcurl -plaintext localhost:50051 list shared.proto.services.v1.AuthService
 grpcurl -plaintext localhost:50051 \
   shared.proto.services.v1.AuthService/GetPowChallenge '{}'
 
-# Get pre-key bundle for a user (requires JWT)
+# Get pre-key bundle for a user (requires an access token)
 grpcurl -plaintext \
-  -H 'authorization: Bearer <jwt>' \
+  -H 'authorization: Bearer <access_token>' \
   -d '{"user_id": "<uuid>"}' \
   localhost:50057 \
   shared.proto.services.v1.KeyService/GetPreKeyBundle
@@ -525,7 +528,7 @@ docker logs construct-caddy --tail 50
 - gRPC-first architecture (HTTP only for health, metrics, discovery, federation S2S)
 - Caddy edge routing by proto path prefix (h2c backends, Let's Encrypt TLS)
 - Identity service merge: `AuthService`, `DeviceService`, `DeviceLinkService`, `UserService`, `InviteService` in one binary
-- Passwordless device auth (Ed25519 device key; PASETO v4.public tokens, legacy RS256 JWT still verified)
+- Passwordless device auth (Ed25519 device key; PASETO v4.public tokens only)
 - Proof-of-Work anti-spam on registration
 - Invite-code-only onboarding
 - Device linking via join request flow
@@ -587,7 +590,7 @@ cannot fan out to other users. Empty `token_spend_id` keeps legacy per-envelope 
 - Device-token registration accepts ≤ 512 chars (FCM-ready); FCM send path not yet implemented
 
 **Federation:**
-- `.well-known/construct-server` + `jwks.json` server discovery
+- `.well-known/construct-server` server discovery (the RS256 `jwks.json` and `/public-key` endpoints were removed in 0.20.0)
 - S2S sealed sender forwarding (`/federation/v1/sealed`, `/federation/v1/messages`)
 - Inbound S2S receiver (signature-verified) implemented — two-VPS end-to-end test pending
   (construct-docs `decisions/decentralization-execution-plan.md`, Epic A)

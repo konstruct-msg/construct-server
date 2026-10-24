@@ -43,7 +43,7 @@ members = [
 
 # One version for all packages
 [workspace.package]
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 authors = ["Construct Team"]
 repository = "https://github.com/konstruct-msg/construct-server"
@@ -85,7 +85,6 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 
 # Auth
-jsonwebtoken = "10"
 bcrypt = "0.16"
 base64 = "0.22"
 
