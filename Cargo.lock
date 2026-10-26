@@ -949,8 +949,8 @@ dependencies = [
 
 [[package]]
 name = "construct-server-trust"
-version = "0.1.0"
-source = "git+https://github.com/konstruct-msg/construct-core?rev=ee84058d387af35d24f9aba0fe73316a234a76ba#ee84058d387af35d24f9aba0fe73316a234a76ba"
+version = "0.2.0"
+source = "git+https://github.com/konstruct-msg/construct-core?rev=7daf9eda90f21278d9ced5d95a6f5d52fa99386d#7daf9eda90f21278d9ced5d95a6f5d52fa99386d"
 dependencies = [
  "hex",
  "sha2 0.10.9",

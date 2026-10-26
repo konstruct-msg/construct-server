@@ -683,6 +683,7 @@ impl AuthService for IdentityGrpcService {
             setup_at: status.setup_at.map(|t| t.timestamp()),
             last_used_at: status.last_used_at.map(|t| t.timestamp()),
             has_backup: status.has_backup,
+            is_hybrid: status.is_hybrid,
         }))
     }
 
@@ -695,8 +696,10 @@ impl AuthService for IdentityGrpcService {
         if req.identifier.is_empty() {
             return Err(Status::invalid_argument("identifier is required"));
         }
-        if req.challenge.is_empty() {
-            return Err(Status::invalid_argument("challenge is required"));
+        if req.challenge.is_empty() && req.recovery_public_key.is_empty() {
+            return Err(Status::invalid_argument(
+                "challenge or recovery_public_key is required",
+            ));
         }
         if req.recovery_signature.is_empty() {
             return Err(Status::invalid_argument("recovery_signature is required"));
@@ -710,11 +713,27 @@ impl AuthService for IdentityGrpcService {
 
         let db = self.context.db_pool.as_ref();
 
+        // A claim with the hybrid key is the new format whatever else is set; only one without it
+        // falls back to the legacy challenge.
+        let claim = if req.recovery_public_key.is_empty() {
+            recovery::RecoveryClaim::Legacy {
+                challenge: &req.challenge,
+                signature: &req.recovery_signature,
+            }
+        } else {
+            recovery::RecoveryClaim::Hybrid {
+                public_key: &req.recovery_public_key,
+                timestamp: req.timestamp,
+                signature: &req.recovery_signature,
+                device_id: &new_device.device_id,
+                verifying_key: &public_keys.verifying_key,
+                identity_public: &public_keys.identity_public,
+            }
+        };
         let user_id = recovery::verify_recovery_signature(
             db,
             &req.identifier,
-            &req.challenge,
-            &req.recovery_signature,
+            claim,
             &self.context.config.security.username_hmac_secret,
         )
         .await

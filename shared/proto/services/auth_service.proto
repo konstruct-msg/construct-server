@@ -29,8 +29,9 @@ service AuthService {
   // =========================================================================
 
   // SetRecoveryKey - Set recovery public key (derived from seed phrase)
-  // Called once during initial setup, cannot be changed later
-  // Recovery key = Ed25519 public key derived from BIP39 seed
+  // Called once during initial setup. The key cannot be changed later, with one exception: an
+  // Ed25519 key is upgraded to the hybrid key whose Ed25519 half it is.
+  // Recovery key = Ed25519, or hybrid Ed25519 + ML-DSA-65, derived from the BIP39 seed
   rpc SetRecoveryKey(SetRecoveryKeyRequest) returns (SetRecoveryKeyResponse);
 
   // GetRecoveryStatus - Check if recovery is set up for account
@@ -556,13 +557,19 @@ enum PushEnvironment {
 
 // SetRecoveryKeyRequest - Set up account recovery
 message SetRecoveryKeyRequest {
-  // Recovery public key (Ed25519, 32 bytes)
-  // Derived from BIP39 seed phrase on client
-  // Path: m/44'/0'/0'/0/0 or custom derivation
+  // Recovery public key, derived from the BIP39 seed phrase on the client (construct-core).
+  // Its length names its kind:
+  // - 32 bytes: Ed25519 (SLIP-0010 m/44'/0'/0'/0'/0'), the key accounts had before 0.59.0;
+  // - 1984 bytes: hybrid Ed25519 (32) ‖ ML-DSA-65 (1952). Its Ed25519 half is the Ed25519 key
+  //   above. Sent to an account whose Ed25519 key is that half, it upgrades the account.
+  // The account's address is the Ed25519 key, or the hybrid key's Ed25519 half — the same key.
   bytes recovery_public_key = 1;
 
-  // Signature proving possession of private key
-  // Signs: "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}"
+  // Signature proving possession of the private key:
+  // - Ed25519 key: 64 bytes over "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}";
+  // - hybrid key: 3373 bytes (Ed25519 64 ‖ ML-DSA-65 3309) over
+  //   `construct_server_trust::recovery::setup_signable(user_id, timestamp, recovery_public_key)`;
+  //   both halves must verify.
   bytes setup_signature = 2;
 
   // Timestamp used in signature
@@ -613,6 +620,10 @@ message GetRecoveryStatusResponse {
 
   // Has encrypted backup?
   bool has_backup = 5;
+
+  // Is the recovery key hybrid (Ed25519 + ML-DSA-65)? A client holding the phrase upgrades an
+  // account where this is false and is_setup is true (SetRecoveryKey with the hybrid key).
+  bool is_hybrid = 6;
 }
 
 // RecoverAccountRequest - Recover account with seed phrase
@@ -620,10 +631,15 @@ message RecoverAccountRequest {
   // Username or user ID to recover
   string identifier = 1;
 
-  // Recovery challenge (obtained from GetRecoveryChallenge or embedded)
+  // Legacy claim: a decimal timestamp the Ed25519 recovery key signs. Empty in a hybrid claim.
+  // It bound nothing — not the time, not the new device — so a request seen once could be
+  // replayed with other device keys; accepted only from an account without a hybrid key.
   string challenge = 2;
 
-  // Signature over challenge using recovery private key
+  // Legacy claim: Ed25519, 64 bytes over `challenge`.
+  // Hybrid claim: 3373 bytes over `construct_server_trust::recovery::claim_signable(
+  //   recovery_public_key, timestamp, new_device.device_id, new_device.public_keys.verifying_key,
+  //   new_device.public_keys.identity_public)`; both halves must verify.
   bytes recovery_signature = 3;
 
   // New device registration (recovery creates new device)
@@ -631,6 +647,15 @@ message RecoverAccountRequest {
 
   // Reserved for future options
   reserved 5 to 10;
+
+  // Hybrid claim: the hybrid recovery key (1984 bytes). Its Ed25519 half must be the account's
+  // key; an account without an ML-DSA-65 key yet is upgraded to it by the claim. Empty in a
+  // legacy claim.
+  bytes recovery_public_key = 11;
+
+  // Hybrid claim: the signing time, Unix seconds; within ten minutes of the server's clock
+  // (`construct_server_trust::recovery::MAX_SKEW_SECS`) and after the account's last recovery.
+  int64 timestamp = 12;
 }
 
 // NewDeviceForRecovery - New device info during recovery
