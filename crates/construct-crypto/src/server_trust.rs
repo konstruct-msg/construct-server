@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 
 pub use construct_server_trust::{
     Delegation, KID_LEN, Kid, Purpose, SENDER_CERT_MAX_LIFETIME_SECS, fingerprint, kid_of,
-    kt_head_body, sender_cert_body, server_signable,
+    kt_head_body, recovery, sender_cert_body, server_signable,
 };
 
 use crate::pqc::hybrid::{
