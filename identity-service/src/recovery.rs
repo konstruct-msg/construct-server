@@ -55,6 +55,17 @@ pub struct RecoveryStatus {
 /// Length of a hybrid recovery key: Ed25519 (32) ‖ ML-DSA-65 (1952).
 pub const HYBRID_RECOVERY_KEY_LEN: usize = 32 + 1952;
 
+/// 2026-11-01T00:00:00Z. From this instant the legacy formats are refused — the 32-byte Ed25519
+/// setup and the claim over `challenge` — and every recovery key is set, and every account
+/// recovered, with the hybrid key (owner, 2026-10-26). An account still on its Ed25519 key loses
+/// nothing: the hybrid claim of its phrase recovers it and completes its key.
+pub const LEGACY_RECOVERY_CUTOFF: i64 = 1_793_491_200;
+
+/// Whether the legacy formats are still accepted at `now`.
+pub fn legacy_recovery_accepted(now: i64) -> bool {
+    now < LEGACY_RECOVERY_CUTOFF
+}
+
 /// How a RecoverAccount request proves the phrase.
 pub enum RecoveryClaim<'a> {
     /// Ed25519 over a client-chosen string. Binds nothing; refused by a hybrid account.
@@ -94,7 +105,32 @@ pub async fn set_recovery_key(
     timestamp: i64,
     encrypted_backup: Option<&[u8]>,
 ) -> Result<String> {
+    set_recovery_key_at(
+        db,
+        user_id,
+        recovery_public_key,
+        setup_signature,
+        timestamp,
+        encrypted_backup,
+        Utc::now().timestamp(),
+    )
+    .await
+}
+
+/// `set_recovery_key` with the server's clock at `now`.
+pub async fn set_recovery_key_at(
+    db: &PgPool,
+    user_id: Uuid,
+    recovery_public_key: &[u8],
+    setup_signature: &[u8],
+    timestamp: i64,
+    encrypted_backup: Option<&[u8]>,
+    now: i64,
+) -> Result<String> {
     match recovery_public_key.len() {
+        32 if !legacy_recovery_accepted(now) => anyhow::bail!(
+            "Invalid recovery key: Ed25519-only keys are no longer accepted, send the hybrid key"
+        ),
         32 => {
             set_ed25519_recovery_key(
                 db,
@@ -103,6 +139,7 @@ pub async fn set_recovery_key(
                 setup_signature,
                 timestamp,
                 encrypted_backup,
+                now,
             )
             .await
         }
@@ -114,6 +151,7 @@ pub async fn set_recovery_key(
                 setup_signature,
                 timestamp,
                 encrypted_backup,
+                now,
             )
             .await
         }
@@ -133,8 +171,9 @@ async fn set_hybrid_recovery_key(
     setup_signature: &[u8],
     timestamp: i64,
     encrypted_backup: Option<&[u8]>,
+    now: i64,
 ) -> Result<String> {
-    if !claim_bytes::fresh(timestamp, Utc::now().timestamp()) {
+    if !claim_bytes::fresh(timestamp, now) {
         anyhow::bail!("Setup signature has expired");
     }
     let message = claim_bytes::setup_signable(&user_id.to_string(), timestamp, recovery_public_key)
@@ -208,9 +247,9 @@ async fn set_ed25519_recovery_key(
     setup_signature: &[u8],
     timestamp: i64,
     encrypted_backup: Option<&[u8]>,
+    now: i64,
 ) -> Result<String> {
     // 2. Validate signature freshness (reject timestamps older than 5 minutes)
-    let now = Utc::now().timestamp();
     if (now - timestamp).abs() > 300 {
         anyhow::bail!("Setup signature has expired");
     }
@@ -334,6 +373,17 @@ pub async fn verify_recovery_signature(
     claim: RecoveryClaim<'_>,
     hmac_secret: &[u8],
 ) -> Result<Uuid> {
+    verify_recovery_signature_at(db, identifier, claim, hmac_secret, Utc::now().timestamp()).await
+}
+
+/// `verify_recovery_signature` with the server's clock at `now`.
+pub async fn verify_recovery_signature_at(
+    db: &PgPool,
+    identifier: &str,
+    claim: RecoveryClaim<'_>,
+    hmac_secret: &[u8],
+    now: i64,
+) -> Result<Uuid> {
     // 1. Find user by UUID or username_hash (privacy-first)
     // Trim first so surrounding whitespace doesn't break either branch.
     let identifier = identifier.trim();
@@ -398,6 +448,9 @@ pub async fn verify_recovery_signature(
             if row.recovery_mldsa_public_key.is_some() {
                 anyhow::bail!("Invalid recovery signature: this account takes hybrid claims only");
             }
+            if !legacy_recovery_accepted(now) {
+                anyhow::bail!("Invalid recovery signature: legacy claims are no longer accepted");
+            }
             verify_ed25519_claim(&recovery_public_key, challenge, signature)?;
         }
         RecoveryClaim::Hybrid {
@@ -420,7 +473,6 @@ pub async fn verify_recovery_signature(
             {
                 anyhow::bail!("Invalid recovery signature");
             }
-            let now = Utc::now().timestamp();
             let after_last = row
                 .last_recovery_at
                 .is_none_or(|last| timestamp > last.timestamp());
@@ -541,6 +593,11 @@ struct RecoveryKeyRow {
 #[cfg(test)]
 mod address_tests {
     use super::*;
+
+    /// The tests' clock: a day before the legacy cutoff, so the suite does not change its verdicts
+    /// when the date passes. The tests of the cutoff itself use `AFTER_CUTOFF`.
+    const NOW: i64 = LEGACY_RECOVERY_CUTOFF - 86_400;
+    const AFTER_CUTOFF: i64 = LEGACY_RECOVERY_CUTOFF + 86_400;
     use ed25519_dalek::{Signer, SigningKey};
 
     /// Local Postgres from `ops/docker-compose.dev.yml`; the test skips without it.
@@ -571,17 +628,18 @@ mod address_tests {
                 .unwrap();
         let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
         let public = signing.verifying_key().to_bytes();
-        let timestamp = Utc::now().timestamp();
+        let timestamp = NOW;
         let signature =
             signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
 
-        set_recovery_key(
+        set_recovery_key_at(
             &db,
             user_id,
             &public,
             &signature.to_bytes(),
             timestamp,
             None,
+            NOW,
         )
         .await
         .unwrap();
@@ -609,7 +667,7 @@ mod address_tests {
     }
 
     fn signed_setup(signing: &SigningKey, user_id: Uuid) -> ([u8; 32], [u8; 64], i64) {
-        let timestamp = Utc::now().timestamp();
+        let timestamp = NOW;
         let signature =
             signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
         (
@@ -636,11 +694,11 @@ mod address_tests {
         let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
 
         let (public, signature, timestamp) = signed_setup(&signing, user_id);
-        let first = set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+        let first = set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
             .await
             .unwrap();
         let (public, signature, timestamp) = signed_setup(&signing, user_id);
-        let again = set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+        let again = set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
             .await
             .expect("the same key again is accepted");
         assert_eq!(first, again);
@@ -648,7 +706,7 @@ mod address_tests {
         let other = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
         let (public, signature, timestamp) = signed_setup(&other, user_id);
         assert!(
-            set_recovery_key(&db, user_id, &public, &signature, timestamp, None)
+            set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
                 .await
                 .is_err(),
             "another key is still refused"
@@ -685,7 +743,7 @@ mod address_tests {
         }
         fn hybrid_setup(&self, user_id: Uuid) -> (Vec<u8>, Vec<u8>, i64) {
             let (private, public) = self.hybrid();
-            let timestamp = Utc::now().timestamp();
+            let timestamp = NOW;
             let message =
                 claim_bytes::setup_signable(&user_id.to_string(), timestamp, &public).unwrap();
             (public, hybrid_sign(&private, &message).unwrap(), timestamp)
@@ -737,14 +795,14 @@ mod address_tests {
 
     async fn set_legacy(db: &PgPool, user_id: Uuid, phrase: &Phrase) {
         let (public, signature, timestamp) = signed_setup(&phrase.legacy(), user_id);
-        set_recovery_key(db, user_id, &public, &signature, timestamp, None)
+        set_recovery_key_at(db, user_id, &public, &signature, timestamp, None, NOW)
             .await
             .unwrap();
     }
 
     async fn set_hybrid(db: &PgPool, user_id: Uuid, phrase: &Phrase) -> Result<String> {
         let (public, signature, timestamp) = phrase.hybrid_setup(user_id);
-        set_recovery_key(db, user_id, &public, &signature, timestamp, None).await
+        set_recovery_key_at(db, user_id, &public, &signature, timestamp, None, NOW).await
     }
 
     async fn claim(
@@ -755,7 +813,7 @@ mod address_tests {
         signature: &[u8],
         device: &Device,
     ) -> Result<Uuid> {
-        verify_recovery_signature(
+        verify_recovery_signature_at(
             db,
             &user_id.to_string(),
             RecoveryClaim::Hybrid {
@@ -767,14 +825,15 @@ mod address_tests {
                 identity_public: &device.identity_public,
             },
             b"test",
+            NOW,
         )
         .await
     }
 
     async fn legacy_claim(db: &PgPool, user_id: Uuid, phrase: &Phrase) -> Result<Uuid> {
-        let challenge = Utc::now().timestamp().to_string();
+        let challenge = NOW.to_string();
         let signature = phrase.legacy().sign(challenge.as_bytes()).to_bytes();
-        verify_recovery_signature(
+        verify_recovery_signature_at(
             db,
             &user_id.to_string(),
             RecoveryClaim::Legacy {
@@ -782,6 +841,7 @@ mod address_tests {
                 signature: &signature,
             },
             b"test",
+            NOW,
         )
         .await
     }
@@ -860,7 +920,7 @@ mod address_tests {
         assert!(err.to_string().contains("hybrid claims only"), "{err}");
 
         let device = Device::new();
-        let now = Utc::now().timestamp();
+        let now = NOW;
         let (public, signature) = phrase.hybrid_claim(now, &device);
         assert_eq!(
             claim(&db, user_id, &public, now, &signature, &device)
@@ -886,7 +946,7 @@ mod address_tests {
         let phrase = Phrase::new();
         set_hybrid(&db, user_id, &phrase).await.unwrap();
         let device = Device::new();
-        let now = Utc::now().timestamp();
+        let now = NOW;
 
         let (public, signature) = phrase.hybrid_claim(now, &device);
         let attacker = Device {
@@ -928,13 +988,103 @@ mod address_tests {
             .expect("an Ed25519 account still takes the legacy claim");
 
         let device = Device::new();
-        let now = Utc::now().timestamp();
+        let now = NOW;
         let (public, signature) = phrase.hybrid_claim(now, &device);
         claim(&db, user_id, &public, now, &signature, &device)
             .await
             .unwrap();
         assert!(is_hybrid(&db, user_id).await);
         assert!(legacy_claim(&db, user_id, &phrase).await.is_err());
+        drop_user(&db, user_id).await;
+    }
+
+    // ── The legacy cutoff, 2026-11-01 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_legacy_formats_close_at_the_cutoff() {
+        assert!(legacy_recovery_accepted(LEGACY_RECOVERY_CUTOFF - 1));
+        assert!(!legacy_recovery_accepted(LEGACY_RECOVERY_CUTOFF));
+    }
+
+    /// After the cutoff no account gets an Ed25519-only recovery key.
+    ///
+    /// Mutation: drop the cutoff from the 32-byte setup — the key is set; this reddens.
+    #[tokio::test]
+    async fn after_the_cutoff_an_ed25519_key_is_not_set() {
+        let Some(db) = try_db().await else {
+            eprintln!("recovery cutoff test: postgres unavailable — skipping");
+            return;
+        };
+        let user_id = new_user(&db).await;
+        let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let signature =
+            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{AFTER_CUTOFF}").as_bytes());
+        let err = set_recovery_key_at(
+            &db,
+            user_id,
+            &signing.verifying_key().to_bytes(),
+            &signature.to_bytes(),
+            AFTER_CUTOFF,
+            None,
+            AFTER_CUTOFF,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no longer accepted"), "{err}");
+        assert!(!get_recovery_status(&db, user_id).await.unwrap().is_setup);
+        drop_user(&db, user_id).await;
+    }
+
+    /// After the cutoff an account still on its Ed25519 key refuses the legacy claim, and its
+    /// phrase's hybrid claim recovers it and completes the key — nobody is locked out.
+    ///
+    /// Mutation: drop the cutoff from the legacy claim — it is accepted; this reddens.
+    #[tokio::test]
+    async fn after_the_cutoff_an_ed25519_account_is_recovered_by_its_hybrid_claim_only() {
+        let Some(db) = try_db().await else {
+            eprintln!("recovery cutoff test: postgres unavailable — skipping");
+            return;
+        };
+        let user_id = new_user(&db).await;
+        let phrase = Phrase::new();
+        set_legacy(&db, user_id, &phrase).await;
+
+        let challenge = AFTER_CUTOFF.to_string();
+        let signature = phrase.legacy().sign(challenge.as_bytes()).to_bytes();
+        let err = verify_recovery_signature_at(
+            &db,
+            &user_id.to_string(),
+            RecoveryClaim::Legacy {
+                challenge: &challenge,
+                signature: &signature,
+            },
+            b"test",
+            AFTER_CUTOFF,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no longer accepted"), "{err}");
+
+        let device = Device::new();
+        let (public, signature) = phrase.hybrid_claim(AFTER_CUTOFF, &device);
+        let recovered = verify_recovery_signature_at(
+            &db,
+            &user_id.to_string(),
+            RecoveryClaim::Hybrid {
+                public_key: &public,
+                timestamp: AFTER_CUTOFF,
+                signature: &signature,
+                device_id: &device.id,
+                verifying_key: &device.verifying_key,
+                identity_public: &device.identity_public,
+            },
+            b"test",
+            AFTER_CUTOFF,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered, user_id);
+        assert!(is_hybrid(&db, user_id).await);
         drop_user(&db, user_id).await;
     }
 }
