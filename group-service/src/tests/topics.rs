@@ -11,6 +11,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_topic_success() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -48,6 +49,7 @@ async fn test_create_topic_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_topic_non_admin() {
     let db = get_test_db().await;
     let (_user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -96,6 +98,7 @@ async fn test_create_topic_non_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_topic_empty_name() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -132,6 +135,7 @@ async fn test_create_topic_empty_name() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_topic_invalid_sort_order() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -168,6 +172,7 @@ async fn test_create_topic_invalid_sort_order() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_topic_max_limit() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -223,6 +228,7 @@ async fn test_create_topic_max_limit() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_list_topics_success() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -271,6 +277,7 @@ async fn test_list_topics_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_list_topics_non_member() {
     let db = get_test_db().await;
     let (_user_id, device_id, _) = create_test_device(&db).await;
@@ -303,6 +310,7 @@ async fn test_list_topics_non_member() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_archive_topic_success() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -360,6 +368,7 @@ async fn test_archive_topic_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_archive_topic_non_admin() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;

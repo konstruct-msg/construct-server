@@ -10,6 +10,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_submit_commit_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -69,6 +70,7 @@ async fn test_submit_commit_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_submit_commit_epoch_mismatch() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -101,6 +103,7 @@ async fn test_submit_commit_epoch_mismatch() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_submit_commit_non_member() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -135,6 +138,7 @@ async fn test_submit_commit_non_member() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_fetch_commits_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -191,6 +195,7 @@ async fn test_fetch_commits_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_fetch_commits_non_member() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;

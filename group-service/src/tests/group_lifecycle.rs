@@ -13,6 +13,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -52,6 +53,7 @@ async fn test_create_group_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_rejects_header_only_auth() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -85,6 +87,7 @@ async fn test_create_group_rejects_header_only_auth() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_rejects_spoofed_x_user_id() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -122,6 +125,7 @@ async fn test_create_group_rejects_spoofed_x_user_id() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_invalid_group_id() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -154,6 +158,7 @@ async fn test_create_group_invalid_group_id() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_empty_ratchet_tree() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -186,6 +191,7 @@ async fn test_create_group_empty_ratchet_tree() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_max_members_exceeded() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -218,6 +224,7 @@ async fn test_create_group_max_members_exceeded() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_group_missing_user_id() {
     let db = get_test_db().await;
     let (_, device_id, _) = create_test_device(&db).await;
@@ -251,6 +258,7 @@ async fn test_create_group_missing_user_id() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_group_state_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -287,6 +295,7 @@ async fn test_get_group_state_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_group_state_non_member() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -316,6 +325,7 @@ async fn test_get_group_state_non_member() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_dissolve_group_success() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -365,6 +375,7 @@ async fn test_dissolve_group_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_dissolve_group_invalid_signature() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -400,6 +411,7 @@ async fn test_dissolve_group_invalid_signature() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_dissolve_group_expired_timestamp() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -434,6 +446,7 @@ async fn test_dissolve_group_expired_timestamp() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_dissolve_group_non_admin() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -481,6 +494,7 @@ async fn test_dissolve_group_non_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_dissolve_group_already_dissolved() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;

@@ -89,7 +89,7 @@ const HASH_LENGTH: usize = 32; // 32 bytes
 ///
 /// # Example
 /// ```rust
-/// use construct_server_shared::pow::verify_pow_solution;
+/// use construct_pow::verify_pow_solution;
 ///
 /// let challenge = "abc123def456";
 /// let nonce = 12345u64;
@@ -300,57 +300,24 @@ mod tests {
         );
     }
 
+    /// A known vector, computed outside this crate (argon2-cffi 25.1, `hash_secret_raw` with
+    /// Argon2id v1.3, m=32 MiB, t=2, p=1, 32-byte output, salt = the raw bytes of
+    /// `derive_pow_salt`). Its hash has exactly 6 leading zero bits. The test it replaces
+    /// searched nonces 0..1000 and passed without asserting anything if none was found.
     #[test]
-    fn test_pow_verification_basic() {
-        // This test verifies the algorithm works
-        // In production, we'd have known good values from client
-
+    fn a_known_solution_verifies_and_every_altered_one_is_refused() {
         let challenge = "test_challenge_12345";
+        let nonce = 28;
+        let hash = "0301660bdaaeb4eb0ed5d199179dedabbd960ae63e54135b80747aa86bef05e7";
 
-        // Try to find a valid nonce (difficulty 4 for fast test)
-        // NOTE: In real usage, client does this work
-        for test_nonce in 0..1000 {
-            let input = format!("{}{}", challenge, test_nonce);
-
-            let params = ParamsBuilder::new()
-                .m_cost(MEMORY_COST_KIB)
-                .t_cost(TIME_COST)
-                .p_cost(PARALLELISM)
-                .output_len(HASH_LENGTH)
-                .build()
-                .unwrap();
-
-            let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
-            let derived_salt = derive_pow_salt(challenge);
-            let salt = SaltString::encode_b64(derived_salt.as_bytes()).unwrap();
-
-            if let Ok(hash) = argon2.hash_password(input.as_bytes(), &salt)
-                && let Some(h) = hash.hash
-            {
-                let hash_bytes = h.as_bytes();
-                let leading_zeros = count_leading_zero_bits(hash_bytes);
-
-                if leading_zeros >= 4 {
-                    let hash_hex = hex::encode(hash_bytes);
-
-                    // Verify our verification function works
-                    assert!(verify_pow_solution(challenge, test_nonce, &hash_hex, 4));
-                    assert!(!verify_pow_solution(
-                        challenge,
-                        test_nonce + 1,
-                        &hash_hex,
-                        4
-                    ));
-                    assert!(!verify_pow_solution(challenge, test_nonce, &hash_hex, 12));
-
-                    println!("Found valid nonce: {} (hash: {})", test_nonce, hash_hex);
-                    return;
-                }
-            }
-        }
-
-        // If we didn't find a nonce in 1000 attempts, that's OK for difficulty 4
-        // (expected ~16 attempts on average, but we might be unlucky)
-        println!("Did not find valid nonce in 1000 attempts (unlucky, but OK for test)");
+        assert!(verify_pow_solution(challenge, nonce, hash, 6));
+        assert!(
+            !verify_pow_solution(challenge, nonce, hash, 7),
+            "6 leading zero bits do not meet difficulty 7"
+        );
+        assert!(!verify_pow_solution(challenge, nonce + 1, hash, 6));
+        assert!(!verify_pow_solution("test_challenge_12346", nonce, hash, 6));
+        let altered = format!("{}6", &hash[..hash.len() - 1]);
+        assert!(!verify_pow_solution(challenge, nonce, &altered, 6));
     }
 }

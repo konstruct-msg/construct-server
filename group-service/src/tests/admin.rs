@@ -11,6 +11,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_delegate_admin_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, admin_signing_key) = create_test_device(&db).await;
@@ -76,6 +77,7 @@ async fn test_delegate_admin_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_delegate_admin_non_admin() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -138,6 +140,7 @@ async fn test_delegate_admin_non_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_transfer_ownership_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, admin_signing_key) = create_test_device(&db).await;
@@ -234,6 +237,7 @@ async fn test_transfer_ownership_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_transfer_ownership_non_creator() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;

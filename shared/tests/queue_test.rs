@@ -6,17 +6,24 @@ use std::env;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// `false` skips the test on a laptop. Under CI (`CI` is set by GitHub Actions) a missing
+/// Redis fails it instead: a run that has the service and still skips proves nothing.
 async fn is_redis_available(redis_url: &str) -> bool {
-    let Ok(client) = redis::Client::open(redis_url) else {
-        return false;
+    let available = match redis::Client::open(redis_url) {
+        Ok(client) => tokio::time::timeout(
+            Duration::from_millis(300),
+            client.get_multiplexed_async_connection(),
+        )
+        .await
+        .ok()
+        .is_some_and(|res| res.is_ok()),
+        Err(_) => false,
     };
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        client.get_multiplexed_async_connection(),
-    )
-    .await
-    .ok()
-    .is_some_and(|res| res.is_ok())
+    assert!(
+        available || std::env::var_os("CI").is_none(),
+        "queue_test: Redis at {redis_url} is required under CI"
+    );
+    available
 }
 
 async fn setup_queue() -> Option<(MessageQueue, redis::Connection)> {

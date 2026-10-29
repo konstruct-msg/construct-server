@@ -8,6 +8,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_comment_group_post_not_found() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;

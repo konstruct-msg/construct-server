@@ -263,7 +263,7 @@ jobs:
       # sticker store — while this job started both services for nothing. That is how the
       # 2026-08-18 loss shipped green. Here they run against the services this job starts.
       - name: Run service-backed tests (#[ignore])
-        run: cargo test --workspace --all-targets -- --ignored --test-threads=1
+        run: cargo test --workspace --all-targets --no-fail-fast -- --ignored --test-threads=1
 
       - name: Cleanup test keys
         if: always()
