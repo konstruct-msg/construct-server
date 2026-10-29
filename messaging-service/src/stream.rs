@@ -157,9 +157,19 @@ pub(crate) async fn handle_stream_request(
                 if recipient_id.is_empty() {
                     return Err(anyhow::anyhow!("recipient is required"));
                 }
-                if envelope.encrypted_payload.is_empty() {
-                    return Err(anyhow::anyhow!("encrypted_payload is required"));
-                }
+                // Same 64 KiB cap as SendMessage. Until 2026-10-29 this path checked only for
+                // empty, so a stream send wrote anything up to the gRPC decode limit into the
+                // recipient's mailbox (construct-docs todo 228).
+                crate::grpc::validate_payload(&envelope.encrypted_payload)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let sender_device_id = crate::grpc::sentinel_sender_device(
+                    device_id,
+                    envelope
+                        .sender_device
+                        .as_ref()
+                        .map(|d| d.device_id.as_str()),
+                )
+                .map_err(|status| anyhow::anyhow!(status.message().to_string()))?;
 
                 // Prefer client-provided message_id for idempotency; generate only as fallback.
                 use construct_server_shared::shared::proto::core::v1 as proto_core;
@@ -174,20 +184,13 @@ pub(crate) async fn handle_stream_request(
                 // Must mirror the sentinel check in send_message gRPC so that limits
                 // enforced on one transport are also enforced on the other.
                 // Fails open — sentinel outage does not block message delivery.
-                let sender_device_id = envelope
-                    .sender_device
-                    .as_ref()
-                    .map(|d| d.device_id.as_str())
-                    .unwrap_or("");
                 let recipient_device_id = envelope
                     .recipient_device
                     .as_ref()
                     .map(|d| d.device_id.as_str())
                     .unwrap_or("");
 
-                if let Some(ref sentinel) = context.sentinel
-                    && !sender_device_id.is_empty()
-                {
+                if let Some(ref sentinel) = context.sentinel {
                     let target = if !recipient_device_id.is_empty() {
                         recipient_device_id
                     } else {
