@@ -367,7 +367,9 @@ impl MessagingService for MessagingGrpcService {
         // Legacy sealed sender over SendMessage stays auth-gated until the old
         // transport is fully sunset. The dedicated SendSealedMessage RPC is the
         // only intentional unauthenticated ingress for sealed traffic.
-        let authed_user_id = extract_authed_user_id(request.metadata(), &self.context).await;
+        let authed = extract_authed_identity(request.metadata(), &self.context).await;
+        let authed_user_id = authed.as_ref().map(|(uid, _)| *uid);
+        let authed_device_id = authed.and_then(|(_, device)| device);
 
         let req = request.into_inner();
         let attempt_id = req.attempt_id.clone();
@@ -412,6 +414,13 @@ impl MessagingService for MessagingGrpcService {
                 "sender.user_id does not match authenticated user",
             ));
         }
+        let sender_device_id = sentinel_sender_device(
+            authed_device_id.as_deref(),
+            envelope
+                .sender_device
+                .as_ref()
+                .map(|d| d.device_id.as_str()),
+        )?;
 
         let recipient = envelope
             .recipient
@@ -495,23 +504,16 @@ impl MessagingService for MessagingGrpcService {
             }));
         }
 
-        // Sentinel check: rate limits and spam/ban enforcement.
-        // Fails open — a sentinel outage or missing device_id does not block messaging.
-        // Uses device_id (not user_id): sentinel keys are SHA256(pubkey)[0..16].
-        let sender_device_id = envelope
-            .sender_device
-            .as_ref()
-            .map(|d| d.device_id.as_str())
-            .unwrap_or("");
+        // Sentinel check: rate limits and spam/ban enforcement, charged to the token's device
+        // (`sentinel_sender_device`). Uses device_id (not user_id): sentinel keys are
+        // SHA256(pubkey)[0..16].
         let recipient_device_id = envelope
             .recipient_device
             .as_ref()
             .map(|d| d.device_id.as_str())
             .unwrap_or("");
 
-        if let Some(ref sentinel) = self.context.sentinel
-            && !sender_device_id.is_empty()
-        {
+        if let Some(ref sentinel) = self.context.sentinel {
             let target = if !recipient_device_id.is_empty() {
                 recipient_device_id
             } else {
@@ -520,11 +522,10 @@ impl MessagingService for MessagingGrpcService {
             };
             // In-process call to SentinelCore — no gRPC hop.
             //
-            // This fail-open branch is narrower than it looks: SentinelCore turns a Redis
-            // failure in the quota path into `Ok(allowed: false)` on purpose, so it never
-            // surfaces here as `Err`. Only errors before that point (trust lookup, block
-            // lookup) reach this arm. Rate limiting itself is fail-CLOSED — a Redis outage
-            // denies every send with retry_after=30.
+            // This fail-open branch is narrower than it looks: a Redis failure in the quota
+            // path does not surface here as `Err`. `charge_window` degrades to per-instance
+            // limits instead (sends continue, counted as `sentinel_degraded*` fail-opens), so
+            // only errors before that point (trust lookup, block lookup) reach this arm.
             let (allowed, reason, retry_after) = match sentinel
                 .check_send_permission(sender_device_id, target, Some(&sender_id.to_string()))
                 .await
@@ -1136,6 +1137,31 @@ pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The device a regular send is charged to: always the one the access token names.
+///
+/// `envelope.sender_device` is client-asserted. Until 2026-10-29 Sentinel keyed on it and ran only
+/// when it was non-empty, on both transports: a banned device skipped the ban, server-side blocks and
+/// every per-device quota by leaving it out, and a device naming a sibling spent the sibling's quota
+/// (construct-docs todo 228). The envelope may still carry it — clients do — but it must agree.
+///
+/// A token with no device is refused rather than waved through: every token issued since 2026-04
+/// names one, refresh tokens live 90 days and 0.20.0 rejects everything older, so the only way to
+/// arrive here without one is a token this server did not mean to issue.
+pub(crate) fn sentinel_sender_device<'a>(
+    token_device: Option<&'a str>,
+    envelope_device: Option<&str>,
+) -> Result<&'a str, Status> {
+    let token_device = token_device
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| Status::unauthenticated("access token is not bound to a device"))?;
+    match envelope_device.filter(|d| !d.is_empty()) {
+        Some(claimed) if !claimed.eq_ignore_ascii_case(token_device) => Err(
+            Status::permission_denied("sender_device does not match authenticated device"),
+        ),
+        _ => Ok(token_device),
+    }
+}
+
 // ============================================================================
 // Auth Helpers
 // ============================================================================
@@ -1282,6 +1308,49 @@ mod tests {
     fn test_payload_size_over_64kb_rejected() {
         let payload = vec![0u8; 65537];
         assert!(validate_payload(&payload).is_err());
+    }
+
+    // ── sentinel_sender_device: Sentinel is charged to the token's device ──
+
+    const TOKEN_DEVICE: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn sentinel_charges_the_token_device_when_the_envelope_names_none() {
+        // The bypass: an envelope without sender_device used to skip Sentinel entirely.
+        assert_eq!(
+            sentinel_sender_device(Some(TOKEN_DEVICE), None).unwrap(),
+            TOKEN_DEVICE
+        );
+        assert_eq!(
+            sentinel_sender_device(Some(TOKEN_DEVICE), Some("")).unwrap(),
+            TOKEN_DEVICE
+        );
+    }
+
+    #[test]
+    fn sentinel_refuses_an_envelope_naming_another_device() {
+        // A sibling's or a made-up id would otherwise be charged instead of the sender.
+        let err =
+            sentinel_sender_device(Some(TOKEN_DEVICE), Some("ffffffffffffffffffffffffffffffff"))
+                .expect_err("a different device must be refused");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn sentinel_accepts_the_envelope_naming_the_token_device_in_any_case() {
+        assert_eq!(
+            sentinel_sender_device(Some(TOKEN_DEVICE), Some(&TOKEN_DEVICE.to_uppercase())).unwrap(),
+            TOKEN_DEVICE
+        );
+    }
+
+    #[test]
+    fn sentinel_refuses_a_token_without_a_device() {
+        for token_device in [None, Some("")] {
+            let err = sentinel_sender_device(token_device, Some(TOKEN_DEVICE))
+                .expect_err("no device in the token must not fall back to the envelope");
+            assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        }
     }
 
     #[test]
