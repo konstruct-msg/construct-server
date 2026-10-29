@@ -744,4 +744,12 @@ message ContactCard {
   bytes intake_key = 1;
   // 32 bytes: the account's Ed25519 recovery public key (route_id = SHA-256(0x0001 || key)).
   bytes account_address = 2;
+  // The generation of `intake_key` (construct-core `IntakeKeyState`). A holder replaces its key
+  // only with a higher generation (`intake_offer`). 0 — absent — is a key from before
+  // 2026-10-29, when each device minted its own; every generation minted since is above it.
+  //
+  // One meaning, two readers: a card from a contact is their account's key; a card from our own
+  // account, opened by a session with one of our devices (inside SENDER_SYNC), is our account's
+  // key. construct-docs decisions/intake-key-is-the-accounts-not-the-devices.md.
+  uint32 intake_generation = 3;
 }
