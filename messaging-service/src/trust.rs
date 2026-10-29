@@ -470,7 +470,7 @@ mod tests {
             del_key(&mut redis, &key).await;
 
             assert!(result.is_err(), "exceeding fanout limit should return Err");
-            assert_eq!(result.unwrap_err(), 6u32);
+            assert_eq!(result.unwrap_err(), c.pow_level_low);
         }
 
         #[tokio::test]
