@@ -172,12 +172,13 @@ pub(crate) fn intake_epoch(unix_seconds: u64) -> u64 {
     unix_seconds / INTAKE_EPOCH_SECONDS
 }
 
-/// Most tags one account may have live for one epoch — one per device that mints a key.
+/// Most tags one account may have live for one epoch.
 ///
-/// A set, not a single value, since 2026-09-29: each device of an account mints its own intake key
-/// and publishes its own tags, and a single `SET` let the last device to publish silently revoke
-/// every other device's key for everyone holding it (`decisions/contact-traffic-is-vouched-not-
-/// purchased.md`, "Multi-device sync"). The cap bounds what one account can make this store hold.
+/// A set, not a single value, since 2026-09-29, when each device minted its own key. Since
+/// generations (`decisions/intake-key-is-the-accounts-not-the-devices.md`) the key is the
+/// account's and a set holds one generation's tags — normally one, more only while devices that
+/// rotated at the same moment converge, and old builds' per-device tags until they update. The cap
+/// bounds what one account can make this store hold.
 pub(crate) const MAX_TAGS_PER_EPOCH: usize = 32;
 
 /// Redis key for the set of one account's tags in one epoch.
@@ -240,7 +241,7 @@ pub(crate) fn tag_matches(presented: &[u8], stored: &[u8]) -> bool {
     // `subtle` already returns false for slices of different lengths, so this is not the guard
     // against a 32-byte token presented here. What it does catch is the case `subtle` cannot: two
     // values that are equal to each other and both the wrong size — a truncated or corrupted entry
-    // in Redis, matchable by presenting the same truncation. `store_published_tag` refuses to write
+    // in Redis, matchable by presenting the same truncation. `publishable_tags` refuses to store
     // one, and "cannot be written" is not a property a credential check should lean on.
     if presented.len() != INTAKE_TAG_LEN || stored.len() != INTAKE_TAG_LEN {
         return false;
@@ -328,51 +329,149 @@ pub(crate) fn any_tag_matches<'a>(
     })
 }
 
-/// Store one published tag, or say why it was not stored.
+/// Redis key holding the generation of an account's intake key — the highest one it has
+/// published under. Hashed like the tag keys, so a keyspace scan is not a user list.
+pub(crate) fn generation_key(account_user_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(account_user_id.trim().to_ascii_lowercase().as_bytes());
+    hasher.update(b"|generation");
+    format!("intake:gen:{}", hex::encode(hasher.finalize()))
+}
+
+/// How long the generation outlives the account's last publish.
 ///
-/// The recipient owns its own tags and nothing else: the caller must pass the *authenticated*
-/// account id, never one taken from a request body, or publishing would be a way to vouch for
-/// traffic to someone else.
-pub(crate) async fn store_published_tag(
-    conn: &mut redis::aio::ConnectionManager,
-    recipient_user_id: &str,
-    epoch: u64,
-    tag: &[u8],
+/// Not forever: that would be per-account state that outlives the account, and nothing needs it.
+/// Every tag the generation guards is gone `MAX_PUBLISHED_EPOCHS` + grace after the last publish,
+/// and an account with no live tags is exactly the case `GetIntakeState` exists for — a device
+/// mints above whatever it reads, so a generation that has lapsed to 0 costs nothing.
+pub(crate) const GENERATION_TTL_SECONDS: u64 =
+    (MAX_PUBLISHED_EPOCHS as u64 + INTAKE_TAG_GRACE_EPOCHS + 15) * INTAKE_EPOCH_SECONDS;
+
+/// One publish, already validated: tags of the right length for epochs still live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishableTag {
+    pub(crate) epoch: u64,
+    pub(crate) tag: Vec<u8>,
+    pub(crate) ttl: u64,
+}
+
+/// Keep the entries this server would store at all, at most `MAX_PUBLISHED_EPOCHS` of them.
+///
+/// Dropped individually rather than failing the call: an epoch past its grace or a tag of the
+/// wrong length lands as a smaller `accepted` count, because refusing a publish costs the
+/// caller's contacts tokens.
+pub(crate) fn publishable_tags(
+    entries: impl IntoIterator<Item = (u64, Vec<u8>)>,
     now_unix: u64,
-) -> Result<bool, redis::RedisError> {
-    if tag.len() != INTAKE_TAG_LEN {
-        return Ok(false);
+) -> Vec<PublishableTag> {
+    let now_epoch = intake_epoch(now_unix);
+    entries
+        .into_iter()
+        .take(MAX_PUBLISHED_EPOCHS)
+        .filter(|(_, tag)| tag.len() == INTAKE_TAG_LEN)
+        .filter_map(|(epoch, tag)| {
+            tag_ttl_seconds(epoch, now_epoch).map(|ttl| PublishableTag { epoch, tag, ttl })
+        })
+        .collect()
+}
+
+/// Generation check and store, in one step so two devices publishing at once cannot interleave a
+/// replace with an add.
+///
+/// KEYS[1] = generation key; then, per entry, its set key and its legacy single-tag key.
+/// ARGV: generation, cap, generation TTL, then per entry: tag, TTL.
+/// Returns {generation after, accepted}.
+const PUBLISH_SCRIPT: &str = r#"
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local generation = tonumber(ARGV[1])
+if generation < current then
+  return {current, 0}
+end
+local replace = generation > current
+if replace then
+  redis.call('SET', KEYS[1], generation, 'EX', ARGV[3])
+elseif generation > 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+end
+local cap = tonumber(ARGV[2])
+local accepted = 0
+local cleared = {}
+local entries = (#KEYS - 1) / 2
+for i = 1, entries do
+  local set_key = KEYS[2 * i]
+  local legacy_key = KEYS[2 * i + 1]
+  local tag = ARGV[2 + 2 * i]
+  local ttl = ARGV[3 + 2 * i]
+  if replace and not cleared[set_key] then
+    redis.call('DEL', set_key, legacy_key)
+    cleared[set_key] = true
+  end
+  if redis.call('SISMEMBER', set_key, tag) == 1 or redis.call('SCARD', set_key) < cap then
+    redis.call('SADD', set_key, tag)
+    redis.call('EXPIRE', set_key, ttl)
+    accepted = accepted + 1
+  end
+end
+return {math.max(current, generation), accepted}
+"#;
+
+/// Store a publish under the account's key generation
+/// (`decisions/intake-key-is-the-accounts-not-the-devices.md`, points 2-3):
+///
+/// - **higher** than the account's: the sets for these epochs are *replaced* — the previous key
+///   stops being accepted now, not when its window runs out. That is what makes a rotation (after
+///   a block, say) mean something; before generations the store only ever added.
+/// - **equal**: added to the set, up to `MAX_TAGS_PER_EPOCH` — devices of one account publish
+///   identical tags, and two that rotated to the same generation at once both stay valid until the
+///   next rotation settles it.
+/// - **lower**: nothing stored. The caller's key is behind; `current_generation` says so.
+///
+/// Generation 0 is a build from before generations: added while the account is at 0, refused as
+/// lower once anything has published a generation. Returns `(generation after, accepted)`.
+///
+/// The account must be the *authenticated* one — a request-supplied id would make publishing a
+/// way to vouch for someone else's incoming traffic.
+pub(crate) async fn publish_tags(
+    conn: &mut redis::aio::ConnectionManager,
+    account_user_id: &str,
+    generation: u32,
+    tags: &[PublishableTag],
+) -> Result<(u32, u32), redis::RedisError> {
+    let script = redis::Script::new(PUBLISH_SCRIPT);
+    let mut invocation = script.key(generation_key(account_user_id));
+    for entry in tags {
+        invocation
+            .key(tag_key(account_user_id, entry.epoch))
+            .key(legacy_tag_key(account_user_id, entry.epoch));
     }
-    let Some(ttl) = tag_ttl_seconds(epoch, intake_epoch(now_unix)) else {
-        return Ok(false);
-    };
-    let key = tag_key(recipient_user_id, epoch);
-    let present: usize = redis::cmd("SCARD").arg(&key).query_async(conn).await?;
-    if present >= MAX_TAGS_PER_EPOCH {
-        let already: bool = redis::cmd("SISMEMBER")
-            .arg(&key)
-            .arg(tag)
-            .query_async(conn)
-            .await?;
-        if !already {
-            return Ok(false);
-        }
+    invocation
+        .arg(generation)
+        .arg(MAX_TAGS_PER_EPOCH)
+        .arg(GENERATION_TTL_SECONDS);
+    for entry in tags {
+        invocation.arg(entry.tag.as_slice()).arg(entry.ttl);
     }
-    // Added beside the other devices' tags, never over them. EXPIRE is re-applied on every
-    // publish; the TTL depends only on the epoch and today, so every device sets the same one.
-    redis::pipe()
-        .atomic()
-        .cmd("SADD")
-        .arg(&key)
-        .arg(tag)
-        .ignore()
-        .cmd("EXPIRE")
-        .arg(&key)
-        .arg(ttl)
-        .ignore()
-        .query_async::<()>(conn)
+    let (after, accepted): (u32, u32) = invocation.invoke_async(conn).await?;
+    Ok((after, accepted))
+}
+
+/// The account's generation and whether any tag is live for the current epoch.
+pub(crate) async fn intake_state(
+    conn: &mut redis::aio::ConnectionManager,
+    account_user_id: &str,
+    now_unix: u64,
+) -> Result<(u32, bool), redis::RedisError> {
+    let epoch = intake_epoch(now_unix);
+    let (generation, tags, legacy): (Option<u32>, usize, bool) = redis::pipe()
+        .cmd("GET")
+        .arg(generation_key(account_user_id))
+        .cmd("SCARD")
+        .arg(tag_key(account_user_id, epoch))
+        .cmd("EXISTS")
+        .arg(legacy_tag_key(account_user_id, epoch))
+        .query_async(conn)
         .await?;
-    Ok(true)
+    Ok((generation.unwrap_or(0), tags > 0 || legacy))
 }
 
 #[cfg(test)]
@@ -415,6 +514,47 @@ mod tests {
             assert!(IntakeCheck::Unrecognised(reason).owes_token());
         }
         assert!(IntakeCheck::Unavailable.owes_token());
+    }
+
+    // ── publishable_tags: what a publish may store at all ──
+
+    const NOW: u64 = 20_000 * INTAKE_EPOCH_SECONDS + 3_600;
+
+    #[test]
+    fn a_publish_keeps_live_epochs_of_the_right_length_only() {
+        let now_epoch = intake_epoch(NOW);
+        let kept = publishable_tags(
+            [
+                (now_epoch, vec![1u8; INTAKE_TAG_LEN]),
+                (now_epoch - 1, vec![2u8; INTAKE_TAG_LEN]), // previous epoch: still in grace
+                (now_epoch - 2, vec![3u8; INTAKE_TAG_LEN]), // past grace
+                (now_epoch + 1, vec![4u8; INTAKE_TAG_LEN - 1]), // wrong length
+                (now_epoch + 2, vec![5u8; INTAKE_TAG_LEN]),
+            ],
+            NOW,
+        );
+        let epochs: Vec<u64> = kept.iter().map(|t| t.epoch).collect();
+        assert_eq!(epochs, vec![now_epoch, now_epoch - 1, now_epoch + 2]);
+        assert!(kept.iter().all(|t| t.ttl > 0));
+    }
+
+    #[test]
+    fn a_publish_carries_at_most_the_published_window() {
+        let now_epoch = intake_epoch(NOW);
+        let window = (0..40).map(|i| (now_epoch + i, vec![9u8; INTAKE_TAG_LEN]));
+        assert_eq!(publishable_tags(window, NOW).len(), MAX_PUBLISHED_EPOCHS);
+    }
+
+    #[test]
+    fn the_generation_key_is_per_account_and_does_not_leak_it() {
+        let key = generation_key("ABCDEF00-0000-0000-0000-000000000000");
+        assert_eq!(
+            key,
+            generation_key(" abcdef00-0000-0000-0000-000000000000 ")
+        );
+        assert_ne!(key, generation_key("abcdef00-0000-0000-0000-000000000001"));
+        assert!(!key.contains("abcdef00"));
+        assert!(GENERATION_TTL_SECONDS > (MAX_PUBLISHED_EPOCHS as u64 + 1) * INTAKE_EPOCH_SECONDS);
     }
 
     /// A client drops its use of a key only on `NotAccepted`, so that verdict must never come

@@ -560,6 +560,13 @@ impl GrpcMessagingService for TestMessagingGrpcService {
         Err(GrpcStatus::unimplemented("publish_intake_tags"))
     }
 
+    async fn get_intake_state(
+        &self,
+        _: GrpcRequest<proto_svc::GetIntakeStateRequest>,
+    ) -> Result<GrpcResponse<proto_svc::GetIntakeStateResponse>, GrpcStatus> {
+        Err(GrpcStatus::unimplemented("get_intake_state"))
+    }
+
     async fn edit_message(
         &self,
         _: GrpcRequest<proto_svc::EditMessageRequest>,
