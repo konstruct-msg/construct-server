@@ -319,6 +319,11 @@ pub(crate) async fn dispatch_sealed_sender(
         construct_metrics::MSG_INTAKE_CHECK_TOTAL
             .with_label_values(&[intake.as_label()])
             .inc();
+        if let Some(reason) = intake.unrecognised_reason() {
+            construct_metrics::MSG_INTAKE_UNRECOGNISED_TOTAL
+                .with_label_values(&[reason.as_label()])
+                .inc();
+        }
 
         if intake.owes_token() {
             let has_token =
