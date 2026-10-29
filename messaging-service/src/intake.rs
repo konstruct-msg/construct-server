@@ -378,6 +378,10 @@ end
 local replace = generation > current
 if replace then
   redis.call('SET', KEYS[1], generation)
+elseif generation > 0 then
+  -- Keys written by the first cut of generations (2026-10-29, 30-day TTL) are made permanent on
+  -- the account's next ordinary publish; SET above already drops a TTL on a replace.
+  redis.call('PERSIST', KEYS[1])
 end
 local cap = tonumber(ARGV[2])
 local accepted = 0
