@@ -34,6 +34,15 @@ route:
   receiver: telegram
 
   routes:
+    # Info is a gate or a planning signal (MailboxCutoverBlocked, RedisMailboxSplitTrigger),
+    # never a reason to pick up the phone. It stays firing in Alertmanager and Grafana and
+    # reaches no one. Routed to Telegram it was ~40% of the channel: MailboxCutoverBlocked
+    # holds for exactly the hour of its `increase(...[1h])` window after each entry, so
+    # every one was a FIRING and a RESOLVED (13 pairs, 2026-10-22..29).
+    - matchers:
+        - severity = "info"
+      receiver: "null"
+
     # Critical means something is failing now — Redis refusing writes stops
     # message delivery outright, because maxmemory-policy is noeviction.
     - matchers:
@@ -43,6 +52,9 @@ route:
       repeat_interval: 1h
 
 receivers:
+  # No integrations: what is routed here is visible over the tunnel and nowhere else.
+  - name: "null"
+
   - name: telegram
     telegram_configs:
       - bot_token_file: /etc/alertmanager/telegram_token

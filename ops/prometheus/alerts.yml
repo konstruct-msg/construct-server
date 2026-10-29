@@ -253,10 +253,18 @@ groups:
       # disagree about which intake tags are live — the epoch rollover at 00:00 UTC
       # is where that happens, and under enforce the cost of disagreeing is a
       # refused envelope rather than a charged token.
+      #
+      # The last clause is a floor on volume, not on the ratio. At a handful of
+      # envelopes per quarter hour one stray tag crosses 10% and the next quiet
+      # stretch drops it back, so the rule flapped FIRING/RESOLVED 16 times in a week
+      # (2026-10-22..29). Replayed against that week's series: > 10 fires 6 times and
+      # keeps every sustained stretch (10-23, 10-25, 10-28 ×2, 10-29 ×2); > 20 fired 4
+      # and lost 10-23 and 10-25 — too blunt for a signal that is real when it fires.
       - alert: IntakeCredentialsNotRecognised
         expr: >
           sum(rate(construct_msg_intake_check_total{result="unrecognised"}[15m]))
             / clamp_min(sum(rate(construct_msg_intake_check_total[15m])), 0.001) > 0.10
+          and sum(increase(construct_msg_intake_check_total{result="unrecognised"}[15m])) > 10
         for: 15m
         labels:
           severity: warning
