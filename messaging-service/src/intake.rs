@@ -23,6 +23,7 @@
 //! Design: `construct-docs/decisions/contact-traffic-is-vouched-not-purchased.md`.
 
 use construct_crypto::privacy_pass::open_sealed_token_bytes;
+use construct_server_shared::shared::proto::services::v1::IntakeVerdict;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -123,6 +124,29 @@ impl IntakeCheck {
             Self::Absent => "absent",
             Self::Unrecognised(_) => "unrecognised",
             Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// What the sender is told about its tag (`SendMessageResponse.intake_verdict`).
+    ///
+    /// Only `NotAccepted` makes a client stop presenting its key, so only a statement about the
+    /// *key* may map there: no match, nothing published, not a tag. A tag that did not open with
+    /// this server's token key, a server with no token key, and an unreachable store all say
+    /// something about the server — `Unchecked`, and the sender keeps a key that may be fine.
+    /// construct-docs `decisions/intake-key-is-the-accounts-not-the-devices.md`, point 1.
+    pub(crate) fn verdict(self) -> IntakeVerdict {
+        match self {
+            Self::Vouched => IntakeVerdict::Accepted,
+            Self::Absent => IntakeVerdict::None,
+            Self::Unrecognised(
+                UnrecognisedReason::NoMatch
+                | UnrecognisedReason::NothingPublished
+                | UnrecognisedReason::WrongLength,
+            ) => IntakeVerdict::NotAccepted,
+            Self::Unrecognised(
+                UnrecognisedReason::NoServerKey | UnrecognisedReason::UnsealFailed,
+            )
+            | Self::Unavailable => IntakeVerdict::Unchecked,
         }
     }
 
@@ -391,6 +415,47 @@ mod tests {
             assert!(IntakeCheck::Unrecognised(reason).owes_token());
         }
         assert!(IntakeCheck::Unavailable.owes_token());
+    }
+
+    /// A client drops its use of a key only on `NotAccepted`, so that verdict must never come
+    /// from the server's own trouble. Each reason is pinned, not just the ones that matter
+    /// today: a new reason has to be placed on one side deliberately.
+    #[test]
+    fn only_a_statement_about_the_key_is_not_accepted() {
+        use UnrecognisedReason as R;
+        let expected = [
+            (IntakeCheck::Vouched, IntakeVerdict::Accepted),
+            (IntakeCheck::Absent, IntakeVerdict::None),
+            (
+                IntakeCheck::Unrecognised(R::NoMatch),
+                IntakeVerdict::NotAccepted,
+            ),
+            (
+                IntakeCheck::Unrecognised(R::NothingPublished),
+                IntakeVerdict::NotAccepted,
+            ),
+            (
+                IntakeCheck::Unrecognised(R::WrongLength),
+                IntakeVerdict::NotAccepted,
+            ),
+            (
+                IntakeCheck::Unrecognised(R::UnsealFailed),
+                IntakeVerdict::Unchecked,
+            ),
+            (
+                IntakeCheck::Unrecognised(R::NoServerKey),
+                IntakeVerdict::Unchecked,
+            ),
+            (IntakeCheck::Unavailable, IntakeVerdict::Unchecked),
+        ];
+        for (check, verdict) in expected {
+            assert_eq!(check.verdict(), verdict, "{check:?}");
+        }
+        assert_eq!(
+            expected.len(),
+            UnrecognisedReason::ALL.len() + 3,
+            "every outcome is pinned"
+        );
     }
 
     /// The reasons exist to say whose bug it is; two sharing a label would put two owners

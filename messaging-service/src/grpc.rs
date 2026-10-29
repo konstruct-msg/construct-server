@@ -465,6 +465,7 @@ impl MessagingService for MessagingGrpcService {
                         error: None,
                         rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
+                        intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
                 }
                 Ok(false) => {} // first time — proceed to rate check
@@ -501,6 +502,7 @@ impl MessagingService for MessagingGrpcService {
                 }),
                 rate_limit_challenge: None,
                 attempt_id: attempt_id.clone(),
+                intake_verdict: proto::IntakeVerdict::Unspecified as i32,
             }));
         }
 
@@ -563,6 +565,7 @@ impl MessagingService for MessagingGrpcService {
                         }),
                         rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
+                        intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
                 } else {
                     tracing::info!(
@@ -584,6 +587,7 @@ impl MessagingService for MessagingGrpcService {
                         }),
                         rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
+                        intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
                 }
             }
@@ -640,6 +644,7 @@ impl MessagingService for MessagingGrpcService {
                         expires_at,
                     }),
                     attempt_id: attempt_id.clone(),
+                    intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                 }));
             }
 
@@ -683,6 +688,7 @@ impl MessagingService for MessagingGrpcService {
                             expires_at,
                         }),
                         attempt_id: attempt_id.clone(),
+                        intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
                 }
             }
@@ -734,6 +740,7 @@ impl MessagingService for MessagingGrpcService {
             error: None,
             rate_limit_challenge: None,
             attempt_id,
+            intake_verdict: proto::IntakeVerdict::Unspecified as i32,
         }))
     }
 
