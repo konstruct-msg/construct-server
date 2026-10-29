@@ -7,6 +7,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_subscribe_public_channel() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -55,6 +56,7 @@ async fn test_subscribe_public_channel() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_subscribe_private_no_token() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -100,6 +102,7 @@ async fn test_subscribe_private_no_token() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_unsubscribe_success() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -159,6 +162,7 @@ async fn test_unsubscribe_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_owner_cannot_unsubscribe() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -203,6 +207,7 @@ async fn test_owner_cannot_unsubscribe() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_list_subscriptions() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -245,6 +250,7 @@ async fn test_list_subscriptions() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_subscriber_count() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;

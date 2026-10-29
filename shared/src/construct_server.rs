@@ -12,7 +12,6 @@ pub mod auth_utils;
 pub use construct_context as context;
 pub use construct_db as db;
 pub use construct_federation as federation;
-pub mod health;
 pub use construct_message as message;
 pub mod metrics;
 pub mod notification_service;

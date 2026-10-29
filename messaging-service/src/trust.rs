@@ -331,7 +331,8 @@ mod tests {
         assert_ne!(c1, c2, "consecutive challenges must differ");
     }
 
-    #[cfg(feature = "integration_tests")]
+    // Redis round trips. They sat behind an `integration_tests` feature that only clippy's
+    // --all-features turned on, so they compiled in CI and never ran.
     mod integration {
         use super::*;
         use serial_test::serial;
@@ -351,6 +352,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_hourly_rate_allows_under_limit() {
             let mut redis = redis_conn().await;
@@ -365,6 +367,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_hourly_rate_blocks_at_limit() {
             let mut redis = redis_conn().await;
@@ -390,6 +393,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_hourly_rate_pow_scales_with_ratio() {
             let mut redis = redis_conn().await;
@@ -422,6 +426,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_fanout_rate_new_recipients_counted() {
             let mut redis = redis_conn().await;
@@ -444,6 +449,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_fanout_rate_blocks_at_limit() {
             let mut redis = redis_conn().await;
@@ -464,10 +470,11 @@ mod tests {
             del_key(&mut redis, &key).await;
 
             assert!(result.is_err(), "exceeding fanout limit should return Err");
-            assert_eq!(result.unwrap_err(), 6u32);
+            assert_eq!(result.unwrap_err(), c.pow_level_low);
         }
 
         #[tokio::test]
+        #[ignore = "requires Redis"]
         #[serial]
         async fn test_check_fanout_rate_same_recipient_not_double_counted() {
             let mut redis = redis_conn().await;

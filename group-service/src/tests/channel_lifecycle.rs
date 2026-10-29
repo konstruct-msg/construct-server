@@ -8,6 +8,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_channel_public() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -41,6 +42,7 @@ async fn test_create_channel_public() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_channel_private() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -72,6 +74,7 @@ async fn test_create_channel_private() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_channel_empty_metadata() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -100,6 +103,7 @@ async fn test_create_channel_empty_metadata() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_channel_exceeds_max_subscribers() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -128,6 +132,7 @@ async fn test_create_channel_exceeds_max_subscribers() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_channel_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -180,6 +185,7 @@ async fn test_get_channel_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_channel_not_found() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -205,6 +211,7 @@ async fn test_get_channel_not_found() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_update_channel_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -252,6 +259,7 @@ async fn test_update_channel_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_update_channel_not_owner() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -297,6 +305,7 @@ async fn test_update_channel_not_owner() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_set_channel_visibility() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -344,6 +353,7 @@ async fn test_set_channel_visibility() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_delete_channel_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -390,6 +400,7 @@ async fn test_delete_channel_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_delete_channel_not_owner() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;

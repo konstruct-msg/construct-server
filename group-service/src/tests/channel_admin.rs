@@ -7,6 +7,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_add_and_list_admins() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -78,6 +79,7 @@ async fn test_add_and_list_admins() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_remove_admin() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -147,6 +149,7 @@ async fn test_remove_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_add_admin_not_owner() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;

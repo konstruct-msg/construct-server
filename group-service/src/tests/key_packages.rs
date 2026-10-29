@@ -10,6 +10,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_publish_key_package_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -45,6 +46,7 @@ async fn test_publish_key_package_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_publish_key_package_empty_list_rejected() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -74,6 +76,7 @@ async fn test_publish_key_package_empty_list_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_publish_key_package_wrong_device_rejected() {
     let db = get_test_db().await;
     let (attacker_user_id, attacker_device_id, _) = create_test_device(&db).await;
@@ -108,6 +111,7 @@ async fn test_publish_key_package_wrong_device_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_consume_key_package_success() {
     let db = get_test_db().await;
     let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -164,6 +168,7 @@ async fn test_consume_key_package_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_consume_key_package_not_found() {
     let db = get_test_db().await;
     let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -194,6 +199,7 @@ async fn test_consume_key_package_not_found() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_key_package_count_zero() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -228,6 +234,7 @@ async fn test_get_key_package_count_zero() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_key_package_count_after_publish() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -277,6 +284,7 @@ async fn test_get_key_package_count_after_publish() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_pending_invites_cross_device_rejected() {
     let db = get_test_db().await;
     let (attacker_user_id, attacker_device_id, _) = create_test_device(&db).await;
@@ -336,6 +344,7 @@ async fn test_get_pending_invites_cross_device_rejected() {
 /// Mutation: drop the `extract_user_id` check from `consume_key_package` — the anonymous call
 /// succeeds and this fails.
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_consume_key_package_requires_a_token() {
     let db = get_test_db().await;
     let (target_user_id, target_device_id, _) = create_test_device(&db).await;

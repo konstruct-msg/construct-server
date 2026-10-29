@@ -6,7 +6,8 @@
 //! cargo test -p messaging-service sealed_matrix -- --nocapture
 //! ```
 //!
-//! Tests skip cleanly when Redis/Postgres are unavailable (no hard CI fail without infra).
+//! Tests skip when Redis/Postgres are unavailable on a laptop; under CI a missing service
+//! fails them (`service_absent`).
 //! See `AUDIT-SEALED-MESSAGING.md` § Test matrix.
 
 use std::sync::Arc;
@@ -44,9 +45,25 @@ fn database_url() -> String {
     })
 }
 
+/// A missing service skips the test on a laptop and fails it under CI (`CI` is set by
+/// GitHub Actions): a run that has the services and still skips proves nothing.
+fn service_absent(what: &str, error: impl std::fmt::Display) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "sealed_matrix: {what} is required under CI: {error}"
+    );
+    eprintln!("sealed_matrix: {what} unavailable ({error}) — skipping");
+}
+
 async fn try_redis() -> Option<redis::aio::ConnectionManager> {
     let client = redis::Client::open(redis_url()).ok()?;
-    construct_redis::manager_for(client).await.ok()
+    match construct_redis::manager_for(client).await {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            service_absent(&format!("redis at {}", redis_url()), e);
+            None
+        }
+    }
 }
 
 async fn try_db_pool() -> Option<Arc<DbPool>> {
@@ -58,7 +75,7 @@ async fn try_db_pool() -> Option<Arc<DbPool>> {
             Some(Arc::new(pool))
         }
         Err(e) => {
-            eprintln!("sealed_matrix: postgres unavailable ({e}) — skipping");
+            service_absent("postgres", e);
             None
         }
     }
@@ -247,16 +264,7 @@ struct TestHarness {
 }
 
 async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
-    let redis_conn = match try_redis().await {
-        Some(c) => c,
-        None => {
-            eprintln!(
-                "sealed_matrix: redis unavailable at {} — skipping",
-                redis_url()
-            );
-            return None;
-        }
-    };
+    let redis_conn = try_redis().await?;
     let db_pool = try_db_pool().await?;
 
     let (priv_pem, pub_pem) = make_ed25519_pems();

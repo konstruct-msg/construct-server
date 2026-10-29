@@ -800,6 +800,7 @@ mod signal_gate_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn a_stranger_cannot_touch_someone_elses_call() {
         let stranger = format!("stranger-{}", Uuid::new_v4());
         let signals = [
@@ -827,6 +828,7 @@ mod signal_gate_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn a_party_still_ends_the_call_when_the_peer_is_offline() {
         // Busy/Hangup ignore forward errors on purpose — "peer offline" must not keep a call alive.
         let call = new_call().await;
@@ -842,6 +844,7 @@ mod signal_gate_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn the_callers_connected_does_not_name_the_answering_device() {
         let call = new_call().await;
         let _ = send(
@@ -873,6 +876,7 @@ mod signal_gate_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn a_signal_naming_another_device_is_refused() {
         let call = new_call().await;
         let err = handle_outbound_signal(

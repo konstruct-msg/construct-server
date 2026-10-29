@@ -7,6 +7,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_create_invite_link() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -57,6 +58,7 @@ async fn test_create_invite_link() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_resolve_invite_link() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -117,6 +119,7 @@ async fn test_resolve_invite_link() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_revoke_invite_link() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -182,6 +185,7 @@ async fn test_revoke_invite_link() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_subscribe_private_with_invite_link() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;

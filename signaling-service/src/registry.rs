@@ -1121,77 +1121,91 @@ impl CallRegistry {
 mod tests {
     use super::*;
 
-    async fn start_test_registry() -> CallRegistry {
+    /// Names unique to one test. These tests share whatever Redis `TEST_REDIS_URL` points
+    /// at — a developer's, by default — and run in parallel; they used to `FLUSHDB` it
+    /// instead, which wiped the dev Redis and let one test erase another's call mid-run.
+    struct Names(String);
+
+    impl Names {
+        fn id(&self, name: &str) -> String {
+            format!("{name}-{}", self.0)
+        }
+    }
+
+    async fn start_test_registry() -> (CallRegistry, Names) {
         let url =
             std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
         let registry = CallRegistry::new(&url, "test-instance".into())
             .await
             .expect("failed to create registry");
-        let mut conn = registry.redis.clone();
-        let _: Result<(), _> = redis::cmd("FLUSHDB").query_async(&mut conn).await;
-        registry
+        (registry, Names(uuid::Uuid::new_v4().simple().to_string()))
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn test_call_ended_by_disconnect_caller() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
-        registry.register_user("caller-user", "caller-device").await;
-        registry.touch_online("caller-user", "caller-device").await;
+        registry
+            .register_user(&t.id("caller-user"), &t.id("caller-device"))
+            .await;
+        registry
+            .touch_online(&t.id("caller-user"), &t.id("caller-device"))
+            .await;
 
         registry
-            .unregister_user("caller-user", "caller-device")
+            .unregister_user(&t.id("caller-user"), &t.id("caller-device"))
             .await;
 
         let state = registry
-            .call_ended_by_disconnect("caller-user", "caller-device")
+            .call_ended_by_disconnect(&t.id("caller-user"), &t.id("caller-device"))
             .await;
         assert!(state.is_some(), "call should end when caller disconnects");
-        assert_eq!(state.unwrap().call_id, "call-1");
+        assert_eq!(state.unwrap().call_id, t.id("call-1"));
     }
 
     #[tokio::test]
-
+    #[ignore = "requires Redis"]
     async fn test_call_ended_by_disconnect_callee_single_device() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
         registry
-            .note_connected("call-1", Some("callee-device-1"))
+            .note_connected(&t.id("call-1"), Some(&t.id("callee-device-1")))
             .await;
 
         registry
-            .register_user("callee-user", "callee-device-1")
+            .register_user(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
         registry
-            .touch_online("callee-user", "callee-device-1")
+            .touch_online(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
 
         registry
-            .unregister_user("callee-user", "callee-device-1")
+            .unregister_user(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
 
         let state = registry
-            .call_ended_by_disconnect("callee-user", "callee-device-1")
+            .call_ended_by_disconnect(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
         assert!(
             state.is_some(),
@@ -1200,43 +1214,43 @@ mod tests {
     }
 
     #[tokio::test]
-
+    #[ignore = "requires Redis"]
     async fn test_call_ended_by_disconnect_callee_multi_device() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
         registry
-            .note_connected("call-1", Some("callee-device-1"))
+            .note_connected(&t.id("call-1"), Some(&t.id("callee-device-1")))
             .await;
 
         registry
-            .register_user("callee-user", "callee-device-1")
+            .register_user(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
         registry
-            .touch_online("callee-user", "callee-device-1")
+            .touch_online(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
         registry
-            .register_user("callee-user", "callee-device-2")
+            .register_user(&t.id("callee-user"), &t.id("callee-device-2"))
             .await;
         registry
-            .touch_online("callee-user", "callee-device-2")
+            .touch_online(&t.id("callee-user"), &t.id("callee-device-2"))
             .await;
 
         registry
-            .unregister_user("callee-user", "callee-device-1")
+            .unregister_user(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
 
         let state = registry
-            .call_ended_by_disconnect("callee-user", "callee-device-1")
+            .call_ended_by_disconnect(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
         assert!(
             state.is_none(),
@@ -1245,27 +1259,33 @@ mod tests {
     }
 
     #[tokio::test]
-
+    #[ignore = "requires Redis"]
     async fn test_call_ended_by_disconnect_non_participant() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
-        registry.register_user("other-user", "other-device").await;
-        registry.touch_online("other-user", "other-device").await;
+        registry
+            .register_user(&t.id("other-user"), &t.id("other-device"))
+            .await;
+        registry
+            .touch_online(&t.id("other-user"), &t.id("other-device"))
+            .await;
 
-        registry.unregister_user("other-user", "other-device").await;
+        registry
+            .unregister_user(&t.id("other-user"), &t.id("other-device"))
+            .await;
 
         let state = registry
-            .call_ended_by_disconnect("other-user", "other-device")
+            .call_ended_by_disconnect(&t.id("other-user"), &t.id("other-device"))
             .await;
         assert!(
             state.is_none(),
@@ -1274,67 +1294,67 @@ mod tests {
     }
 
     #[tokio::test]
-
+    #[ignore = "requires Redis"]
     async fn test_note_connected_sets_answered() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
-        registry.note_ringing("call-1").await;
+        registry.note_ringing(&t.id("call-1")).await;
 
-        let state_before = registry.load_call_state("call-1").await.unwrap();
+        let state_before = registry.load_call_state(&t.id("call-1")).await.unwrap();
         assert!(state_before.answered_at_ms.is_none());
 
         registry
-            .note_connected("call-1", Some("callee-device-1"))
+            .note_connected(&t.id("call-1"), Some(&t.id("callee-device-1")))
             .await;
 
-        let state_after = registry.load_call_state("call-1").await.unwrap();
+        let state_after = registry.load_call_state(&t.id("call-1")).await.unwrap();
         assert!(
             state_after.answered_at_ms.is_some(),
             "note_connected should set answered_at_ms"
         );
         assert_eq!(
             state_after.accepted_callee_device_id,
-            Some("callee-device-1".to_string())
+            Some(t.id("callee-device-1"))
         );
     }
 
     #[tokio::test]
-
+    #[ignore = "requires Redis"]
     async fn test_note_connected_idempotent() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
         registry
-            .note_connected("call-1", Some("callee-device-1"))
+            .note_connected(&t.id("call-1"), Some(&t.id("callee-device-1")))
             .await;
-        let state1 = registry.load_call_state("call-1").await.unwrap();
+        let state1 = registry.load_call_state(&t.id("call-1")).await.unwrap();
         let first_answered = state1.answered_at_ms.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         registry
-            .note_connected("call-1", Some("callee-device-2"))
+            .note_connected(&t.id("call-1"), Some(&t.id("callee-device-2")))
             .await;
-        let state2 = registry.load_call_state("call-1").await.unwrap();
+        let state2 = registry.load_call_state(&t.id("call-1")).await.unwrap();
 
         assert_eq!(
             state2.answered_at_ms.unwrap(),
@@ -1343,34 +1363,35 @@ mod tests {
         );
         assert_eq!(
             state2.accepted_callee_device_id,
-            Some("callee-device-1".to_string()),
+            Some(t.id("callee-device-1")),
             "note_connected should not change accepted device"
         );
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn test_get_user_call_cleans_ghost_calls() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
-        let call_id = registry.get_user_call("caller-user").await;
-        assert_eq!(call_id, Some("call-1".to_string()));
+        let call_id = registry.get_user_call(&t.id("caller-user")).await;
+        assert_eq!(call_id, Some(t.id("call-1")));
 
         {
             let mut conn = registry.redis.clone();
             let _: Result<(), _> = redis::cmd("DEL")
-                .arg("call:call-1")
-                .arg("user:caller-user:active_call")
-                .arg("user:callee-user:active_call")
+                .arg(format!("call:{}", t.id("call-1")))
+                .arg(format!("user:{}:active_call", t.id("caller-user")))
+                .arg(format!("user:{}:active_call", t.id("callee-user")))
                 .query_async(&mut conn)
                 .await;
         }
@@ -1378,12 +1399,12 @@ mod tests {
         {
             let active = registry.active_calls.read().await;
             assert!(
-                active.contains_key("caller-user"),
+                active.contains_key(&t.id("caller-user")),
                 "in-memory cache should still have the entry"
             );
         }
 
-        let call_id = registry.get_user_call("caller-user").await;
+        let call_id = registry.get_user_call(&t.id("caller-user")).await;
         assert!(
             call_id.is_none(),
             "get_user_call should return None when Redis key is gone"
@@ -1392,103 +1413,123 @@ mod tests {
         {
             let active = registry.active_calls.read().await;
             assert!(
-                !active.contains_key("caller-user"),
+                !active.contains_key(&t.id("caller-user")),
                 "in-memory cache should be cleaned up"
             );
         }
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn test_is_user_busy_after_redis_expiry() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user",
-                "caller-device",
-                "callee-user",
+                &t.id("call-1"),
+                &t.id("caller-user"),
+                &t.id("caller-device"),
+                &t.id("callee-user"),
                 1000,
             )
             .await;
 
-        assert!(registry.is_user_busy("caller-user").await);
+        assert!(registry.is_user_busy(&t.id("caller-user")).await);
 
         {
             let mut conn = registry.redis.clone();
             let _: Result<(), _> = redis::cmd("DEL")
-                .arg("call:call-1")
-                .arg("user:caller-user:active_call")
-                .arg("user:callee-user:active_call")
+                .arg(format!("call:{}", t.id("call-1")))
+                .arg(format!("user:{}:active_call", t.id("caller-user")))
+                .arg(format!("user:{}:active_call", t.id("callee-user")))
                 .query_async(&mut conn)
                 .await;
         }
 
         assert!(
-            !registry.is_user_busy("caller-user").await,
+            !registry.is_user_busy(&t.id("caller-user")).await,
             "user should not be busy after Redis key expires"
         );
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn test_list_active_call_ids_uses_set() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
         registry
             .create_call(
-                "call-1",
-                "caller-user-1",
-                "caller-device-1",
-                "callee-user-1",
+                &t.id("call-1"),
+                &t.id("caller-user-1"),
+                &t.id("caller-device-1"),
+                &t.id("callee-user-1"),
                 1000,
             )
             .await;
 
         registry
             .create_call(
-                "call-2",
-                "caller-user-2",
-                "caller-device-2",
-                "callee-user-2",
+                &t.id("call-2"),
+                &t.id("caller-user-2"),
+                &t.id("caller-device-2"),
+                &t.id("callee-user-2"),
                 2000,
             )
             .await;
 
-        let call_ids = registry.list_active_call_ids().await;
+        // The set is shared with every other test (and anything else on this Redis): count
+        // only this test's calls.
+        let ours = |ids: Vec<String>| -> Vec<String> {
+            ids.into_iter().filter(|id| id.ends_with(&t.0)).collect()
+        };
+        let call_ids = ours(registry.list_active_call_ids().await);
         assert_eq!(call_ids.len(), 2);
-        assert!(call_ids.contains(&"call-1".to_string()));
-        assert!(call_ids.contains(&"call-2".to_string()));
+        assert!(call_ids.contains(&t.id("call-1")));
+        assert!(call_ids.contains(&t.id("call-2")));
 
-        registry.remove_call("call-1").await;
+        registry.remove_call(&t.id("call-1")).await;
 
-        let call_ids = registry.list_active_call_ids().await;
+        let call_ids = ours(registry.list_active_call_ids().await);
         assert_eq!(call_ids.len(), 1);
-        assert!(call_ids.contains(&"call-2".to_string()));
-        assert!(!call_ids.contains(&"call-1".to_string()));
+        assert!(call_ids.contains(&t.id("call-2")));
+        assert!(!call_ids.contains(&t.id("call-1")));
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
     async fn test_list_online_devices_uses_lua_script() {
-        let registry = start_test_registry().await;
+        let (registry, t) = start_test_registry().await;
 
-        registry.register_user("user-1", "device-1").await;
-        registry.touch_online("user-1", "device-1").await;
+        registry
+            .register_user(&t.id("user-1"), &t.id("device-1"))
+            .await;
+        registry
+            .touch_online(&t.id("user-1"), &t.id("device-1"))
+            .await;
 
-        registry.register_user("user-1", "device-2").await;
-        registry.touch_online("user-1", "device-2").await;
+        registry
+            .register_user(&t.id("user-1"), &t.id("device-2"))
+            .await;
+        registry
+            .touch_online(&t.id("user-1"), &t.id("device-2"))
+            .await;
 
-        registry.register_user("user-2", "device-3").await;
-        registry.touch_online("user-2", "device-3").await;
+        registry
+            .register_user(&t.id("user-2"), &t.id("device-3"))
+            .await;
+        registry
+            .touch_online(&t.id("user-2"), &t.id("device-3"))
+            .await;
 
-        let devices = registry.list_online_devices("user-1").await;
+        let devices = registry.list_online_devices(&t.id("user-1")).await;
         assert_eq!(devices.len(), 2);
 
         let device_ids: Vec<&str> = devices.iter().map(|(d, _)| d.as_str()).collect();
-        assert!(device_ids.contains(&"device-1"));
-        assert!(device_ids.contains(&"device-2"));
+        assert!(device_ids.contains(&t.id("device-1").as_str()));
+        assert!(device_ids.contains(&t.id("device-2").as_str()));
 
-        let devices = registry.list_online_devices("user-2").await;
+        let devices = registry.list_online_devices(&t.id("user-2")).await;
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].0, "device-3");
+        assert_eq!(devices[0].0, t.id("device-3"));
     }
 }

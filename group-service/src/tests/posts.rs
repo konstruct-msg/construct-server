@@ -7,6 +7,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_publish_post_by_owner() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -60,6 +61,7 @@ async fn test_publish_post_by_owner() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_publish_post_by_non_admin() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -118,6 +120,7 @@ async fn test_publish_post_by_non_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_list_posts() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -184,6 +187,7 @@ async fn test_list_posts() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_post() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
@@ -256,6 +260,7 @@ async fn test_get_post() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_delete_post() {
     let db = get_test_db().await;
     let (owner_id, owner_device, _) = create_test_device(&db).await;
