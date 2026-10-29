@@ -604,6 +604,28 @@ pub static MSG_INTAKE_CHECK_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_INTAKE_CHECK_TOTAL metric")
 });
 
+/// Why an `unrecognised` intake credential was not honoured — one increment per
+/// `construct_msg_intake_check_total{result="unrecognised"}`, so the two always add up.
+///
+/// Label `reason`: "no_server_key" | "unseal_failed" | "wrong_length" | "nothing_published" |
+/// "no_match". A separate counter rather than a second label on the one above, so that series
+/// and every query and dashboard reading it stay continuous across the deploy.
+///
+/// Split because on 2026-10-29 `unrecognised` was 30% of a day and the one number could not say
+/// whose bug it was: `unseal_failed` is a sender sealing to a stale server key,
+/// `nothing_published` is a recipient whose devices all let their tag window lapse, `no_match` is
+/// a sender holding a key the recipient no longer publishes for.
+pub static MSG_INTAKE_UNRECOGNISED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_intake_unrecognised_total",
+            "Why sealed-sender intake credentials were not recognised"
+        ),
+        &["reason"]
+    )
+    .expect("Failed to register MSG_INTAKE_UNRECOGNISED_TOTAL metric")
+});
+
 // ============================================================================
 // Abuse-control fail-open (messaging availability bias)
 // ============================================================================
@@ -843,6 +865,16 @@ pub fn init_registry() {
     // that would be read as "the rollout has not started" when it has and is failing.
     for result in ["vouched", "absent", "unrecognised", "unavailable"] {
         MSG_INTAKE_CHECK_TOTAL.with_label_values(&[result]);
+    }
+    // Same reason: the question is which share of `unrecognised` each cause is.
+    for reason in [
+        "no_server_key",
+        "unseal_failed",
+        "wrong_length",
+        "nothing_published",
+        "no_match",
+    ] {
+        MSG_INTAKE_UNRECOGNISED_TOTAL.with_label_values(&[reason]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
