@@ -329,23 +329,11 @@ pub(crate) fn any_tag_matches<'a>(
     })
 }
 
-/// Redis key holding the generation of an account's intake key — the highest one it has
-/// published under. Hashed like the tag keys, so a keyspace scan is not a user list.
+/// Redis key holding the account's key generation. Shared with identity-service, which deletes
+/// it with the account; no TTL — see `construct_queue::intake_generation_key`.
 pub(crate) fn generation_key(account_user_id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(account_user_id.trim().to_ascii_lowercase().as_bytes());
-    hasher.update(b"|generation");
-    format!("intake:gen:{}", hex::encode(hasher.finalize()))
+    construct_queue::intake_generation_key(account_user_id)
 }
-
-/// How long the generation outlives the account's last publish.
-///
-/// Not forever: that would be per-account state that outlives the account, and nothing needs it.
-/// Every tag the generation guards is gone `MAX_PUBLISHED_EPOCHS` + grace after the last publish,
-/// and an account with no live tags is exactly the case `GetIntakeState` exists for — a device
-/// mints above whatever it reads, so a generation that has lapsed to 0 costs nothing.
-pub(crate) const GENERATION_TTL_SECONDS: u64 =
-    (MAX_PUBLISHED_EPOCHS as u64 + INTAKE_TAG_GRACE_EPOCHS + 15) * INTAKE_EPOCH_SECONDS;
 
 /// One publish, already validated: tags of the right length for epochs still live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,7 +367,7 @@ pub(crate) fn publishable_tags(
 /// replace with an add.
 ///
 /// KEYS[1] = generation key; then, per entry, its set key and its legacy single-tag key.
-/// ARGV: generation, cap, generation TTL, then per entry: tag, TTL.
+/// ARGV: generation, cap, then per entry: tag, TTL.
 /// Returns {generation after, accepted}.
 const PUBLISH_SCRIPT: &str = r#"
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -389,9 +377,7 @@ if generation < current then
 end
 local replace = generation > current
 if replace then
-  redis.call('SET', KEYS[1], generation, 'EX', ARGV[3])
-elseif generation > 0 then
-  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  redis.call('SET', KEYS[1], generation)
 end
 local cap = tonumber(ARGV[2])
 local accepted = 0
@@ -400,8 +386,8 @@ local entries = (#KEYS - 1) / 2
 for i = 1, entries do
   local set_key = KEYS[2 * i]
   local legacy_key = KEYS[2 * i + 1]
-  local tag = ARGV[2 + 2 * i]
-  local ttl = ARGV[3 + 2 * i]
+  local tag = ARGV[1 + 2 * i]
+  local ttl = ARGV[2 + 2 * i]
   if replace and not cleared[set_key] then
     redis.call('DEL', set_key, legacy_key)
     cleared[set_key] = true
@@ -444,10 +430,7 @@ pub(crate) async fn publish_tags(
             .key(tag_key(account_user_id, entry.epoch))
             .key(legacy_tag_key(account_user_id, entry.epoch));
     }
-    invocation
-        .arg(generation)
-        .arg(MAX_TAGS_PER_EPOCH)
-        .arg(GENERATION_TTL_SECONDS);
+    invocation.arg(generation).arg(MAX_TAGS_PER_EPOCH);
     for entry in tags {
         invocation.arg(entry.tag.as_slice()).arg(entry.ttl);
     }
@@ -554,7 +537,6 @@ mod tests {
         );
         assert_ne!(key, generation_key("abcdef00-0000-0000-0000-000000000001"));
         assert!(!key.contains("abcdef00"));
-        assert!(GENERATION_TTL_SECONDS > (MAX_PUBLISHED_EPOCHS as u64 + 1) * INTAKE_EPOCH_SECONDS);
     }
 
     /// A client drops its use of a key only on `NotAccepted`, so that verdict must never come
