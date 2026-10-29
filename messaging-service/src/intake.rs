@@ -57,7 +57,7 @@ pub(crate) enum IntakeCheck {
     /// Deliberately indistinguishable from `Absent` in consequence: the envelope falls back to the
     /// token path and delivery is unaffected. A wrong tag must never be a delivery failure on its
     /// own, or a clock an hour behind would drop messages rather than charge for them.
-    Unrecognised,
+    Unrecognised(UnrecognisedReason),
     /// The credential could not be *checked* — Redis did not answer the lookup.
     ///
     /// Same consequence as `Unrecognised` (fall back to the token path), and split from it only so
@@ -69,13 +69,68 @@ pub(crate) enum IntakeCheck {
     Unavailable,
 }
 
+/// Which of the ways to be `Unrecognised` an envelope took.
+///
+/// One `unrecognised` count stood for five causes owned by three different parties, and on
+/// 2026-10-29 (30% of a day's sealed envelopes) nobody could say whose bug it was. Each reason
+/// names its owner:
+///
+/// - `no_server_key`, `unseal_failed` — this server's token key, or a sender sealing to a stale
+///   copy of it. `unseal_failed` should move with `decrypt_failed` on the token check.
+/// - `wrong_length` — a sender that put something other than a tag in the field.
+/// - `nothing_published` — the recipient has no live tags at all: every device of theirs let its
+///   published window lapse, or never published. The recipient's client is the one to look at.
+/// - `no_match` — the recipient has live tags and this is none of them: the sender holds a key the
+///   recipient no longer publishes for (another device's, or one since re-minted). The sender's
+///   client is the one to look at.
+///
+/// Nothing here is learned that the check did not already learn: the set it reads to compare is
+/// the same set whose emptiness splits the last two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnrecognisedReason {
+    NoServerKey,
+    UnsealFailed,
+    WrongLength,
+    NothingPublished,
+    NoMatch,
+}
+
+impl UnrecognisedReason {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] = [
+        Self::NoServerKey,
+        Self::UnsealFailed,
+        Self::WrongLength,
+        Self::NothingPublished,
+        Self::NoMatch,
+    ];
+
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::NoServerKey => "no_server_key",
+            Self::UnsealFailed => "unseal_failed",
+            Self::WrongLength => "wrong_length",
+            Self::NothingPublished => "nothing_published",
+            Self::NoMatch => "no_match",
+        }
+    }
+}
+
 impl IntakeCheck {
     pub(crate) fn as_label(self) -> &'static str {
         match self {
             Self::Vouched => "vouched",
             Self::Absent => "absent",
-            Self::Unrecognised => "unrecognised",
+            Self::Unrecognised(_) => "unrecognised",
             Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Why an `Unrecognised` credential was not honoured; `None` for every other outcome.
+    pub(crate) fn unrecognised_reason(self) -> Option<UnrecognisedReason> {
+        match self {
+            Self::Unrecognised(reason) => Some(reason),
+            _ => None,
         }
     }
 
@@ -199,15 +254,16 @@ pub(crate) async fn check_intake_credential(
     }
     let Some(secret) = server_secret else {
         // No key to open it with — the same state in which tokens cannot be redeemed either.
-        return IntakeCheck::Unrecognised;
+        return IntakeCheck::Unrecognised(UnrecognisedReason::NoServerKey);
     };
     let Ok(presented) = open_sealed_token_bytes(intake_tag_sealed, secret) else {
-        return IntakeCheck::Unrecognised;
+        return IntakeCheck::Unrecognised(UnrecognisedReason::UnsealFailed);
     };
     if presented.len() != INTAKE_TAG_LEN {
-        return IntakeCheck::Unrecognised;
+        return IntakeCheck::Unrecognised(UnrecognisedReason::WrongLength);
     }
 
+    let mut any_published = false;
     for epoch in acceptable_epochs(intake_epoch(now_unix)) {
         let members: redis::RedisResult<Vec<Vec<u8>>> = redis::cmd("SMEMBERS")
             .arg(tag_key(recipient_user_id, epoch))
@@ -219,6 +275,7 @@ pub(crate) async fn check_intake_credential(
             .await;
         match (members, legacy) {
             (Ok(members), Ok(legacy)) => {
+                any_published |= !members.is_empty() || legacy.is_some();
                 if any_tag_matches(&presented, members.iter().chain(legacy.iter())) {
                     return IntakeCheck::Vouched;
                 }
@@ -229,7 +286,11 @@ pub(crate) async fn check_intake_credential(
             }
         }
     }
-    IntakeCheck::Unrecognised
+    IntakeCheck::Unrecognised(if any_published {
+        UnrecognisedReason::NoMatch
+    } else {
+        UnrecognisedReason::NothingPublished
+    })
 }
 
 /// Does `presented` match any of `stored`? Every member is compared — no early return on a match
@@ -303,12 +364,12 @@ mod tests {
     fn an_unreachable_store_is_not_a_wrong_credential() {
         assert_ne!(
             IntakeCheck::Unavailable.as_label(),
-            IntakeCheck::Unrecognised.as_label()
+            IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch).as_label()
         );
         let labels = [
             IntakeCheck::Vouched.as_label(),
             IntakeCheck::Absent.as_label(),
-            IntakeCheck::Unrecognised.as_label(),
+            IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch).as_label(),
             IntakeCheck::Unavailable.as_label(),
         ];
         let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
@@ -326,8 +387,31 @@ mod tests {
     fn only_a_confirmed_match_skips_the_token() {
         assert!(!IntakeCheck::Vouched.owes_token());
         assert!(IntakeCheck::Absent.owes_token());
-        assert!(IntakeCheck::Unrecognised.owes_token());
+        for reason in UnrecognisedReason::ALL {
+            assert!(IntakeCheck::Unrecognised(reason).owes_token());
+        }
         assert!(IntakeCheck::Unavailable.owes_token());
+    }
+
+    /// The reasons exist to say whose bug it is; two sharing a label would put two owners
+    /// back on one line. And only `Unrecognised` carries one — a reason on `Vouched` or
+    /// `Unavailable` would be counted against the wrong outcome.
+    #[test]
+    fn each_unrecognised_reason_names_one_cause() {
+        let labels: std::collections::BTreeSet<&str> = UnrecognisedReason::ALL
+            .iter()
+            .map(|r| r.as_label())
+            .collect();
+        assert_eq!(labels.len(), UnrecognisedReason::ALL.len());
+        for reason in UnrecognisedReason::ALL {
+            assert_eq!(
+                IntakeCheck::Unrecognised(reason).unrecognised_reason(),
+                Some(reason)
+            );
+        }
+        assert_eq!(IntakeCheck::Vouched.unrecognised_reason(), None);
+        assert_eq!(IntakeCheck::Absent.unrecognised_reason(), None);
+        assert_eq!(IntakeCheck::Unavailable.unrecognised_reason(), None);
     }
 
     #[test]
@@ -491,6 +575,6 @@ mod tests {
         // The three outcomes collapse to one question at the call site, and only "vouched" is free.
         assert!(!IntakeCheck::Vouched.owes_token());
         assert!(IntakeCheck::Absent.owes_token());
-        assert!(IntakeCheck::Unrecognised.owes_token());
+        assert!(IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch).owes_token());
     }
 }
