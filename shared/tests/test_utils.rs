@@ -542,6 +542,7 @@ impl GrpcMessagingService for TestMessagingGrpcService {
             error: None,
             rate_limit_challenge: None,
             attempt_id: None,
+            intake_verdict: proto_svc::IntakeVerdict::Unspecified as i32,
         }))
     }
 
