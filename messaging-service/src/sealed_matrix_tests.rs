@@ -331,7 +331,7 @@ fn issue_client_token(token_issuer_key: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32]
     out
 }
 
-fn seal_token_for_server(token: &[u8; 32], server_secret: &X25519StaticSecret) -> Vec<u8> {
+fn seal_token_for_server(token: &[u8], server_secret: &X25519StaticSecret) -> Vec<u8> {
     use chacha20poly1305::{
         ChaCha20Poly1305, Key, Nonce,
         aead::{Aead, KeyInit},
@@ -350,7 +350,7 @@ fn seal_token_for_server(token: &[u8; 32], server_secret: &X25519StaticSecret) -
     let cipher = ChaCha20Poly1305::new(&Key::from(sym_key));
     let nonce_bytes = random_bytes32();
     let aead_nonce = Nonce::try_from(&nonce_bytes[..12]).expect("12-byte nonce");
-    let ciphertext = cipher.encrypt(&aead_nonce, token.as_slice()).unwrap();
+    let ciphertext = cipher.encrypt(&aead_nonce, token).unwrap();
 
     let mut sealed = Vec::with_capacity(32 + 12 + ciphertext.len());
     sealed.extend_from_slice(ephemeral_pub.as_bytes());
@@ -776,4 +776,147 @@ async fn redeem_missing_token_label_is_stable() {
         ),
         "got {result:?}"
     );
+}
+
+// ── G: intake key generations (decisions/intake-key-is-the-accounts-not-the-devices.md 2-3) ──
+
+/// A higher generation replaces the epoch's set, an equal one adds, a lower one stores nothing,
+/// and 0 (a build from before generations) adds only while the account is at 0.
+#[tokio::test]
+#[serial]
+async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refused() {
+    use crate::intake::{
+        IntakeCheck, PublishableTag, UnrecognisedReason, intake_epoch, intake_state, publish_tags,
+    };
+    let Some(mut conn) = try_redis().await else {
+        return;
+    };
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let account = uuid::Uuid::new_v4().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let epoch = intake_epoch(now);
+    let tag = |b: u8| PublishableTag {
+        epoch,
+        tag: vec![b; crate::intake::INTAKE_TAG_LEN],
+        ttl: 3_600,
+    };
+    async fn presented(
+        h: &TestHarness,
+        conn: &mut redis::aio::ConnectionManager,
+        account: &str,
+        now: u64,
+        b: u8,
+    ) -> IntakeCheck {
+        let sealed =
+            seal_token_for_server(&[b; crate::intake::INTAKE_TAG_LEN], &h.token_enc_secret);
+        crate::intake::check_intake_credential(
+            conn,
+            Some(&h.token_enc_secret),
+            &sealed,
+            account,
+            now,
+        )
+        .await
+    }
+    let check = async |c: &mut redis::aio::ConnectionManager, b: u8| {
+        presented(&h, c, &account, now, b).await
+    };
+
+    // An old build (generation 0) on a fresh account adds, as before generations.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 0, &[tag(1)])
+            .await
+            .unwrap(),
+        (0, 1)
+    );
+    assert_eq!(
+        intake_state(&mut conn, &account, now).await.unwrap(),
+        (0, true)
+    );
+
+    // Generation 1 replaces: the old build's tag stops being accepted now.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 1, &[tag(2)])
+            .await
+            .unwrap(),
+        (1, 1)
+    );
+    assert_eq!(check(&mut conn, 2).await, IntakeCheck::Vouched);
+    assert_eq!(
+        check(&mut conn, 1).await,
+        IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch)
+    );
+
+    // Equal adds beside it — two devices that rotated to the same generation both stay valid.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 1, &[tag(3)])
+            .await
+            .unwrap(),
+        (1, 1)
+    );
+    assert_eq!(check(&mut conn, 2).await, IntakeCheck::Vouched);
+    assert_eq!(check(&mut conn, 3).await, IntakeCheck::Vouched);
+
+    // Lower stores nothing and says where the account is; so does 0 once generations exist.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 0, &[tag(4)])
+            .await
+            .unwrap(),
+        (1, 0)
+    );
+    assert_eq!(
+        check(&mut conn, 4).await,
+        IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch)
+    );
+    assert_eq!(
+        intake_state(&mut conn, &account, now).await.unwrap(),
+        (1, true)
+    );
+
+    // A rotation after a block: generation 2 drops both generation-1 tags at once.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 2, &[tag(5)])
+            .await
+            .unwrap(),
+        (2, 1)
+    );
+    for old in [2, 3] {
+        assert_eq!(
+            check(&mut conn, old).await,
+            IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch)
+        );
+    }
+    assert_eq!(check(&mut conn, 5).await, IntakeCheck::Vouched);
+
+    // A replace also drops the pre-2026-09-29 single-tag key for that epoch.
+    let legacy = crate::intake::legacy_tag_key(&account, epoch);
+    let _: () = redis::cmd("SET")
+        .arg(&legacy)
+        .arg(vec![6u8; crate::intake::INTAKE_TAG_LEN])
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(check(&mut conn, 6).await, IntakeCheck::Vouched);
+    assert_eq!(
+        publish_tags(&mut conn, &account, 3, &[tag(7)])
+            .await
+            .unwrap(),
+        (3, 1)
+    );
+    assert_eq!(
+        check(&mut conn, 6).await,
+        IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch)
+    );
+
+    let _: () = redis::cmd("DEL")
+        .arg(crate::intake::tag_key(&account, epoch))
+        .arg(crate::intake::generation_key(&account))
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(());
 }

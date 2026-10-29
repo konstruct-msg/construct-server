@@ -41,7 +41,18 @@ service MessagingService {
   //
   // Publish a window of future epochs, not just today's: a device that has been offline
   // for a day would otherwise break its own incoming traffic.
+  //
+  // The tags belong to a generation of the account's key (PublishIntakeTagsRequest.generation):
+  // a higher generation replaces the account's set for those epochs, an equal one adds to it, a
+  // lower one is refused. There is no publishing-device id, on purpose: with it the server
+  // would know which contacts hold which device's key.
   rpc PublishIntakeTags(PublishIntakeTagsRequest) returns (PublishIntakeTagsResponse);
+
+  // GetIntakeState - the caller's own account: the generation the server holds and whether any
+  // tag is published for the current epoch. A device that holds no key and whose own devices
+  // never sent one mints a generation above this only when nothing is live (an account restored
+  // onto a new device with every old device gone). AUTHENTICATED, own account only.
+  rpc GetIntakeState(GetIntakeStateRequest) returns (GetIntakeStateResponse);
 
   // DEPRECATED: EditMessage relied on a server-visible message id reference.
   // Edits are now sent as regular E2EE messages with MessageContent.edit inside
@@ -659,6 +670,11 @@ message PublishIntakeTagsRequest {
   // The current epoch and a window of future ones. The server drops entries whose epoch is
   // already past its grace, and caps how many one call may carry.
   repeated IntakeTagEntry tags = 1;
+  // The generation of the key these tags are derived from. Above the account's: the set for
+  // these epochs is replaced (the old key stops being accepted — a rotation takes effect now,
+  // not when the old window runs out). Equal: added to the set. Below: nothing is stored.
+  // 0 is a build from before generations and behaves as it did: added while the account is at 0.
+  uint32 generation = 2;
 }
 
 message PublishIntakeTagsResponse {
@@ -666,4 +682,17 @@ message PublishIntakeTagsResponse {
   // already expired, a tag of the wrong length, or a window longer than the cap are all
   // dropped individually rather than failing the call.
   uint32 accepted = 1;
+  // The account's generation after this call. Above the one sent means the publish was refused
+  // as stale: the caller's key is behind, and the newer one is due from its own devices.
+  uint32 current_generation = 2;
+}
+
+message GetIntakeStateRequest {}
+
+message GetIntakeStateResponse {
+  // The highest generation the account has published; 0 if none, or only pre-generation tags.
+  uint32 generation = 1;
+  // Whether the account has any tag for the current epoch. False with a non-zero generation
+  // means no device of the account is publishing.
+  bool has_tags_for_current_epoch = 2;
 }
