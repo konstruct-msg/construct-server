@@ -257,6 +257,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets -- --test-threads=1
 
+      # The Redis and Postgres round-trip tests are `#[ignore]` so a laptop without the
+      # services can run `cargo test`. The step above therefore never ran them — not the
+      # mailbox invariants (construct-queue), not the contact/prekey/KT queries, not the
+      # sticker store — while this job started both services for nothing. That is how the
+      # 2026-08-18 loss shipped green. Here they run against the services this job starts.
+      - name: Run service-backed tests (#[ignore])
+        run: cargo test --workspace --all-targets -- --ignored --test-threads=1
+
       - name: Cleanup test keys
         if: always()
         run: ./scripts/cleanup_test_keys.sh
