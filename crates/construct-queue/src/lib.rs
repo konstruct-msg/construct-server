@@ -17,6 +17,7 @@ mod cache;
 mod connection;
 mod delivery;
 mod gap;
+mod intake_generation;
 mod pow;
 mod push_outstanding;
 mod rate_limiting;
@@ -25,6 +26,7 @@ mod sessions;
 mod tokens;
 
 pub use gap::MailboxGap;
+pub use intake_generation::intake_generation_key;
 pub use pow::PowChallengeRecord;
 pub use push_outstanding::{PUSH_OUTSTANDING_TTL_SECONDS, push_outstanding_key};
 
@@ -1048,6 +1050,13 @@ impl MessageQueue {
         )
         .delete_mailbox(user_id)
         .await
+    }
+
+    /// Forget the account's intake-key generation, for account deletion. The one place it
+    /// is removed: it carries no TTL on purpose (`intake_generation_key`).
+    pub async fn delete_intake_generation(&mut self, user_id: &str) -> Result<()> {
+        let _: i64 = self.client.del(intake_generation_key(user_id)).await?;
+        Ok(())
     }
 
     /// Purge all pending messages from `sender_id` out of `recipient_id`'s delivery

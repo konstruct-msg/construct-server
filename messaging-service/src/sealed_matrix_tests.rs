@@ -877,6 +877,13 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         intake_state(&mut conn, &account, now).await.unwrap(),
         (1, true)
     );
+    // Monotonic for the life of the account: the generation never expires on its own.
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(crate::intake::generation_key(&account))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1, "the generation key must carry no TTL");
 
     // A rotation after a block: generation 2 drops both generation-1 tags at once.
     assert_eq!(
