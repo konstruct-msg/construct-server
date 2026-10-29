@@ -9,6 +9,7 @@ use construct_server_shared::shared::proto::services::v1::{
 };
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_send_group_message_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -45,6 +46,7 @@ async fn test_send_group_message_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_send_group_message_non_member() {
     let db = get_test_db().await;
     let (_user_id, device_id, _) = create_test_device(&db).await;
@@ -81,6 +83,7 @@ async fn test_send_group_message_non_member() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_send_group_message_epoch_mismatch() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -114,6 +117,7 @@ async fn test_send_group_message_epoch_mismatch() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_send_group_message_dissolved_group() {
     let db = get_test_db().await;
     let (user_id, device_id, signing_key) = create_test_device(&db).await;
@@ -162,6 +166,7 @@ async fn test_send_group_message_dissolved_group() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_send_group_message_empty_ciphertext() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -194,6 +199,7 @@ async fn test_send_group_message_empty_ciphertext() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_fetch_group_messages_success() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -248,6 +254,7 @@ async fn test_fetch_group_messages_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_fetch_group_messages_pagination() {
     let db = get_test_db().await;
     let (user_id, device_id, _) = create_test_device(&db).await;
@@ -322,6 +329,7 @@ async fn test_fetch_group_messages_pagination() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_fetch_group_messages_non_member() {
     let db = get_test_db().await;
     let (_user_id, device_id, _) = create_test_device(&db).await;

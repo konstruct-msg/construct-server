@@ -31,6 +31,7 @@ fn make_accept_invite_request(
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_invite_to_group_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -71,6 +72,7 @@ async fn test_invite_to_group_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_invite_to_group_non_admin() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -116,6 +118,7 @@ async fn test_invite_to_group_non_admin() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_accept_group_invite_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -186,6 +189,7 @@ async fn test_accept_group_invite_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_accept_group_invite_wrong_device() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -253,6 +257,7 @@ async fn test_accept_group_invite_wrong_device() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_decline_group_invite_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -320,6 +325,7 @@ async fn test_decline_group_invite_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_decline_group_invite_wrong_device() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -376,6 +382,7 @@ async fn test_decline_group_invite_wrong_device() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_pending_invites_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -437,6 +444,7 @@ async fn test_get_pending_invites_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_leave_group_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -492,6 +500,7 @@ async fn test_leave_group_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_leave_group_creator_cannot_leave() {
     let db = get_test_db().await;
     let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -521,6 +530,7 @@ async fn test_leave_group_creator_cannot_leave() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_remove_member_success() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, admin_signing_key) = create_test_device(&db).await;
@@ -587,6 +597,7 @@ async fn test_remove_member_success() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_remove_member_cannot_remove_creator() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -649,6 +660,7 @@ async fn test_remove_member_cannot_remove_creator() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_accept_group_invite_epoch_mismatch_rejected() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -713,6 +725,7 @@ async fn test_accept_group_invite_epoch_mismatch_rejected() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_accept_group_invite_epoch_match_succeeds() {
     let db = get_test_db().await;
     let (_admin_user_id, admin_device_id, _) = create_test_device(&db).await;
@@ -766,6 +779,7 @@ async fn test_accept_group_invite_epoch_match_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn test_get_pending_invites_cross_device_rejected_in_membership() {
     let db = get_test_db().await;
     let (attacker_user_id, attacker_device_id, _) = create_test_device(&db).await;

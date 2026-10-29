@@ -600,17 +600,35 @@ mod address_tests {
     const AFTER_CUTOFF: i64 = LEGACY_RECOVERY_CUTOFF + 86_400;
     use ed25519_dalek::{Signer, SigningKey};
 
-    /// Local Postgres from `ops/docker-compose.dev.yml`; the test skips without it.
+    /// Local Postgres from `ops/docker-compose.dev.yml`; the test skips without it, except
+    /// under CI.
     async fn try_db() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:password@127.0.0.1:5432/construct_test".to_string()
         });
-        let pool = PgPool::connect(&url).await.ok()?;
+        let pool = match PgPool::connect(&url).await {
+            Ok(pool) => pool,
+            Err(e) => {
+                service_absent("Postgres", e);
+                return None;
+            }
+        };
+        // A migration that fails is a failed test, not a missing service.
         sqlx::migrate!("../shared/migrations")
             .run(&pool)
             .await
-            .ok()?;
+            .expect("migrations must apply");
         Some(pool)
+    }
+
+    /// A missing service skips the test on a laptop and fails it under CI (`CI` is set by
+    /// GitHub Actions): a run that has the services and still skips proves nothing.
+    fn service_absent(what: &str, error: impl std::fmt::Display) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{what} is required under CI: {error}"
+        );
+        eprintln!("{what} unavailable ({error}) — skipping");
     }
 
     /// Setting the recovery key writes the address it names in the same statement
@@ -618,7 +636,6 @@ mod address_tests {
     #[tokio::test]
     async fn setting_the_recovery_key_writes_the_account_address() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery address test: postgres unavailable — skipping");
             return;
         };
         let user_id: Uuid =
@@ -683,7 +700,6 @@ mod address_tests {
     #[tokio::test]
     async fn the_same_key_again_is_accepted_and_another_is_refused() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery retry test: postgres unavailable — skipping");
             return;
         };
         let user_id: Uuid =
@@ -858,7 +874,6 @@ mod address_tests {
     #[tokio::test]
     async fn an_ed25519_account_is_upgraded_by_its_phrases_hybrid_key_once() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery upgrade test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -892,7 +907,6 @@ mod address_tests {
     #[tokio::test]
     async fn a_hybrid_key_of_another_phrase_does_not_upgrade() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery upgrade test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -909,7 +923,6 @@ mod address_tests {
     #[tokio::test]
     async fn a_hybrid_account_refuses_the_ed25519_only_claim() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery claim test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -939,7 +952,6 @@ mod address_tests {
     #[tokio::test]
     async fn a_claim_is_for_its_device_and_its_moment() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery claim test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -977,7 +989,6 @@ mod address_tests {
     #[tokio::test]
     async fn a_hybrid_recovery_upgrades_an_ed25519_account() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery claim test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -1012,7 +1023,6 @@ mod address_tests {
     #[tokio::test]
     async fn after_the_cutoff_an_ed25519_key_is_not_set() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery cutoff test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;
@@ -1042,7 +1052,6 @@ mod address_tests {
     #[tokio::test]
     async fn after_the_cutoff_an_ed25519_account_is_recovered_by_its_hybrid_claim_only() {
         let Some(db) = try_db().await else {
-            eprintln!("recovery cutoff test: postgres unavailable — skipping");
             return;
         };
         let user_id = new_user(&db).await;

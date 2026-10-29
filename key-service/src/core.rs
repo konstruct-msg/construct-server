@@ -2099,49 +2099,24 @@ mod tests {
     }
 
     async fn insert_test_device(db: &PgPool) -> String {
-        let device_id = uuid::Uuid::new_v4().to_string();
-        let user_id = uuid::Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (user_id, username, created_at) VALUES ($1, $2, NOW())
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(user_id)
-        .bind(format!("testuser-{}", &device_id[..8]))
-        .execute(db)
-        .await
-        .ok();
-        sqlx::query(
-            "INSERT INTO devices (device_id, user_id, is_active, created_at)
-             VALUES ($1::uuid, $2, true, NOW())",
-        )
-        .bind(&device_id)
-        .bind(user_id)
-        .execute(db)
-        .await
-        .expect("Failed to insert test device");
-        device_id
+        insert_test_device_with_user(db).await.0
     }
 
     /// Like `insert_test_device` but also returns the owning user_id, for tests that
-    /// need to reason about device↔user ownership.
+    /// need to reason about device↔user ownership. A 32-hex device id and the NOT NULL key
+    /// columns, as `devices` has them today; the old helper wrote `users(user_id, username)`
+    /// and `devices.created_at`, neither of which exists, and so never ran.
     async fn insert_test_device_with_user(db: &PgPool) -> (String, uuid::Uuid) {
-        let device_id = uuid::Uuid::new_v4().to_string();
+        let device_id = uuid::Uuid::new_v4().simple().to_string();
         let user_id = uuid::Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO users (user_id, username, created_at) VALUES ($1, $2, NOW())
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(user_id)
-        .bind(format!("testuser-{}", &device_id[..8]))
-        .execute(db)
-        .await
-        .ok();
-        sqlx::query(
-            "INSERT INTO devices (device_id, user_id, is_active, created_at)
-             VALUES ($1::uuid, $2, true, NOW())",
+            "INSERT INTO devices (device_id, user_id, server_hostname, verifying_key,
+                                  identity_public, signed_prekey_public, is_active)
+             VALUES ($1, $2, 'test', $3, $3, $3, true)",
         )
         .bind(&device_id)
         .bind(user_id)
+        .bind(device_id.as_bytes())
         .execute(db)
         .await
         .expect("Failed to insert test device");
@@ -2185,7 +2160,7 @@ mod tests {
 
         // A deactivated device must lose self status (revoked device shouldn't get the
         // non-consuming path either).
-        sqlx::query("UPDATE devices SET is_active = false WHERE device_id = $1::uuid")
+        sqlx::query("UPDATE devices SET is_active = false WHERE device_id = $1")
             .bind(&device_a)
             .execute(&db)
             .await
@@ -2202,16 +2177,16 @@ mod tests {
     }
 
     async fn cleanup_device(db: &PgPool, device_id: &str) {
-        sqlx::query("DELETE FROM one_time_prekeys WHERE device_id = $1::uuid")
+        sqlx::query("DELETE FROM one_time_prekeys WHERE device_id = $1")
             .bind(device_id)
             .execute(db)
             .await
-            .ok();
-        sqlx::query("DELETE FROM devices WHERE device_id = $1::uuid")
+            .expect("delete test prekeys");
+        sqlx::query("DELETE FROM devices WHERE device_id = $1")
             .bind(device_id)
             .execute(db)
             .await
-            .ok();
+            .expect("delete test device");
     }
 
     #[tokio::test]
@@ -2227,14 +2202,13 @@ mod tests {
             .expect("Initial upload failed");
 
         // Verify 10 active keys exist
-        let active_count: i64 =
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = false",
-            )
-            .bind(&device_id)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false",
+        )
+        .bind(&device_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(
             active_count, 10,
             "should have 10 active keys after initial upload"
@@ -2253,7 +2227,7 @@ mod tests {
 
         // Old keys must be soft-expired (is_expired=true), NOT hard-deleted
         let still_exist: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = true AND key_id <= 10",
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = true AND key_id <= 10",
         )
         .bind(&device_id)
         .fetch_one(&db)
@@ -2266,7 +2240,7 @@ mod tests {
 
         // New keys must be active
         let new_active: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = false AND key_id >= 51",
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = false AND key_id >= 51",
         )
         .bind(&device_id)
         .fetch_one(&db)
@@ -2301,7 +2275,7 @@ mod tests {
 
         // All 8 keys should be active (no soft-expiry)
         let expired_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND is_expired = true",
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND is_expired = true",
         )
         .bind(&device_id)
         .fetch_one(&db)
@@ -2313,7 +2287,7 @@ mod tests {
         );
 
         let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid")
+            sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1")
                 .bind(&device_id)
                 .fetch_one(&db)
                 .await
@@ -2339,7 +2313,7 @@ mod tests {
         sqlx::query(
             "UPDATE one_time_prekeys
              SET is_expired = true, expired_at = NOW() - INTERVAL '3 days'
-             WHERE device_id = $1::uuid AND key_id <= 3",
+             WHERE device_id = $1 AND key_id <= 3",
         )
         .bind(&device_id)
         .execute(&db)
@@ -2350,7 +2324,7 @@ mod tests {
         sqlx::query(
             "UPDATE one_time_prekeys
              SET is_expired = true, expired_at = NOW() - INTERVAL '1 hour'
-             WHERE device_id = $1::uuid AND key_id > 3",
+             WHERE device_id = $1 AND key_id > 3",
         )
         .bind(&device_id)
         .execute(&db)
@@ -2366,7 +2340,7 @@ mod tests {
 
         // Keys 4-5 (recent soft-expire) must still be present
         let recent_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1::uuid AND key_id > 3",
+            "SELECT COUNT(*) FROM one_time_prekeys WHERE device_id = $1 AND key_id > 3",
         )
         .bind(&device_id)
         .fetch_one(&db)

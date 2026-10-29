@@ -88,7 +88,7 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 ### Services, APNs, Sentinel
 
 - Ports: identity 50051, messaging 50053 (+ HTTP 8083, `/federation/v1/*`), media 50056 (also `StickerService`: public packs, no TTL, published by `sticker-publish`, never via the request path), `veil-service` 50056 (separate deploy), key 50057, group 50058, signaling 50060, masque WS 9200 (built, not deployed). Rest: `ops/docker-compose.prod.yml`.
-- Auth/user/notification/sentinel are not separate deployables. Production delivery lives only in `messaging-service/src/core.rs`; `shared/tests/test_utils.rs` is a partial dispatcher, not a twin to keep in sync.
+- Auth/user/notification/sentinel are not separate deployables. Production delivery lives only in `messaging-service/src/core.rs`; a test drives it, never a copy of it (the old `shared/tests/test_utils.rs` dispatcher is gone).
 - APNs: delete a token only on `BadDeviceToken` / `Unregistered`; 403 is provider auth — never delete. Registration accepts ≤512 chars. Prod + sandbox by `device_tokens.push_environment`.
 - Sentinel is in-process in messaging, fail-open on Redis/internal errors; its ids are 32-char hex device ids, not user UUIDs.
 - Identity: `route_id` = `SHA-256(type || key)` hex; `dispatch_sealed_sender` resolves route_id → UUID before delivery; everything after is UUID-based (migration 064, `construct-types` / `construct-db`).
@@ -111,7 +111,7 @@ docker exec construct-redis-local redis-cli ping   # or: docker compose up -d re
 cargo test -p construct-queue --lib -- --ignored mailbox   # the offline mailbox; run before touching delivery or the flag
 ```
 
-`cargo test` skips the `#[ignore]` Redis round-trip tests — that is how the 2026-08-18 loss shipped. There is no pre-commit hook; the pre-push hook does not reformat.
+`cargo test` skips the `#[ignore]` Redis/Postgres tests — that is how the 2026-08-18 loss shipped; CI now runs them with `-- --ignored` against its own services. A test that needs a service is either `#[ignore = "requires …"]` or skips only outside CI (`CI` set → a missing service fails it); never `FLUSHDB` a shared Redis — name keys per test. Run everything locally with `cargo test --workspace --all-targets -- --ignored --test-threads=1` after `docker compose up -d redis postgres`. There is no pre-commit hook; the pre-push hook does not reformat.
 
 ## Git
 

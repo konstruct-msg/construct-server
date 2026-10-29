@@ -458,7 +458,23 @@ mod tests {
             redis::Client::open("redis://127.0.0.1:6379").expect("redis client must build");
         // Same timeouts as production: a test connection that waits forever hides the
         // exact failure the sealed door's breaker exists for.
-        construct_redis::manager_for(redis_client).await.ok()
+        match construct_redis::manager_for(redis_client).await {
+            Ok(conn) => Some(conn),
+            Err(e) => {
+                service_absent("Redis at redis://127.0.0.1:6379", e);
+                None
+            }
+        }
+    }
+
+    /// A missing service skips the test on a laptop and fails it under CI (`CI` is set by
+    /// GitHub Actions): a run that has the services and still skips proves nothing.
+    fn service_absent(what: &str, error: impl std::fmt::Display) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{what} is required under CI: {error}"
+        );
+        eprintln!("{what} unavailable ({error}) — skipping");
     }
 
     fn issue_sealed(issuer: &[u8; 32], server_secret: &X25519StaticSecret) -> ([u8; 32], Vec<u8>) {
@@ -491,9 +507,6 @@ mod tests {
         );
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!(
-                "skipping Redis-backed double-spend portion: redis://127.0.0.1:6379 unavailable"
-            );
             return;
         };
 
@@ -545,7 +558,6 @@ mod tests {
         let spend_id = random_bytes32();
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!("skipping spend-unit test: redis unavailable");
             return;
         };
 
@@ -616,7 +628,6 @@ mod tests {
         let spend_id = random_bytes32();
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!("skipping recipient-binding test: redis unavailable");
             return;
         };
 
@@ -712,7 +723,6 @@ mod tests {
         let spend_id = random_bytes32();
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!("skipping spend-unit exhaust test: redis unavailable");
             return;
         };
 
@@ -779,7 +789,6 @@ mod tests {
         let (nonce_b, sealed_b) = issue_sealed(&token_issuer_key, &server_secret);
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!("skipping independent-cap test: redis unavailable");
             return;
         };
 
@@ -879,7 +888,6 @@ mod tests {
         let (nonce2, sealed2) = issue_sealed(&token_issuer_key, &server_secret);
 
         let Some(mut conn) = try_redis().await else {
-            eprintln!("skipping empty-spend_id test: redis unavailable");
             return;
         };
 
