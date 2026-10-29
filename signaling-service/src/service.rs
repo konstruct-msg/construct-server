@@ -18,7 +18,7 @@ use construct_server_shared::shared::proto::signaling::v1::{
 
 use crate::forwarded::{ForwardedSignal, IncomingCall};
 use crate::rate_limiter::RateLimiter;
-use crate::registry::CallRegistry;
+use crate::registry::{CallRegistry, CallRole, not_a_participant, not_the_stream_device};
 use crate::time::unix_millis;
 use crate::turn::generate_turn_credentials;
 
@@ -379,7 +379,12 @@ impl SignalingService for SignalingServiceImpl {
                     return Err(call_refused());
                 }
                 Ok(false) => {}
-                Err(e) => tracing::warn!(error = %e, "Failed to check user_blocks — proceeding"),
+                Err(e) => {
+                    // Fail-closed, like the contact check above. Proceeding let a call ring
+                    // someone who had blocked the caller whenever this one query failed.
+                    tracing::warn!(error = %e, "Failed to check user_blocks — denying (fail-closed)");
+                    return Err(call_refused());
+                }
             }
         } else {
             tracing::warn!("InitiateCall denied — db_pool not configured (DATABASE_URL missing?)");
@@ -536,10 +541,25 @@ async fn handle_outbound_signal(
 
     let signal = signal.ok_or_else(|| Status::invalid_argument("Missing routed_signal.signal"))?;
     let call_id = signal.call_id.clone();
-    let sender_device_id = if signal.sender_device_id.is_empty() {
-        device_id.to_string()
-    } else {
-        signal.sender_device_id.clone()
+    // The device is the stream's, verified from the token. A signal may repeat it, never name
+    // another: the id decides where the peer's replies are routed and which device is recorded
+    // as having answered.
+    if !signal.sender_device_id.is_empty()
+        && !signal.sender_device_id.eq_ignore_ascii_case(device_id)
+    {
+        return Err(not_the_stream_device());
+    }
+    let sender_device_id = device_id.to_string();
+
+    // One gate for everything that touches a call: only its two parties. Until 2026-10-29
+    // `Busy` and `Hangup` discarded `forward_signal`'s participant check (they must survive an
+    // offline peer, so its error was ignored wholesale) and then removed the call regardless —
+    // anyone who knew a call_id could end it — and `Ringing` / `Connected` changed call state
+    // before any check ran. A call that no longer exists has no parties to check; the arms below
+    // treat it as they did.
+    let role = match registry.load_call_state(&call_id).await {
+        Some(state) => Some(state.role_of(user_id).ok_or_else(not_a_participant)?),
+        None => None,
     };
 
     match &signal.signal {
@@ -587,7 +607,10 @@ async fn handle_outbound_signal(
                 .await?;
         }
         Some(web_rtc_signal::Signal::Ringing(_)) => {
-            registry.note_ringing(&call_id).await;
+            // Ringing is the callee's device announcing itself; a caller cannot ring.
+            if role == Some(CallRole::Callee) {
+                registry.note_ringing(&call_id).await;
+            }
             registry
                 .forward_signal(
                     &call_id,
@@ -598,7 +621,10 @@ async fn handle_outbound_signal(
                 .await?;
         }
         Some(web_rtc_signal::Signal::Connected(_)) => {
-            registry.note_connected(&call_id, &sender_device_id).await;
+            if let Some(role) = role {
+                let callee_device = (role == CallRole::Callee).then_some(sender_device_id.as_str());
+                registry.note_connected(&call_id, callee_device).await;
+            }
             registry
                 .forward_signal(
                     &call_id,
@@ -693,5 +719,199 @@ mod call_refusal_tests {
             1,
             "refuse a call through call_refused()"
         );
+    }
+}
+
+/// The participant gate in `handle_outbound_signal` (construct-docs todo 230). Needs Redis, like the
+/// registry's own tests; each test uses its own call id and users so they do not share state.
+#[cfg(test)]
+mod signal_gate_tests {
+    use super::*;
+    use construct_server_shared::shared::proto::signaling::v1::{
+        CallBusy, CallConnected, CallRinging,
+    };
+
+    struct Call {
+        registry: Arc<CallRegistry>,
+        limiter: RateLimiter,
+        id: String,
+        caller: String,
+        callee: String,
+    }
+
+    async fn new_call() -> Call {
+        let url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let registry = Arc::new(
+            CallRegistry::new(&url, "gate-test".into())
+                .await
+                .expect("registry needs Redis"),
+        );
+        let conn = construct_redis::manager_for(redis::Client::open(url).unwrap())
+            .await
+            .expect("Redis");
+        let limiter = RateLimiter::new(conn, "salt".into(), Default::default());
+        let id = format!("gate-{}", Uuid::new_v4());
+        let caller = format!("caller-{}", Uuid::new_v4());
+        let callee = format!("callee-{}", Uuid::new_v4());
+        registry
+            .create_call(&id, &caller, "caller-device", &callee, unix_millis())
+            .await;
+        Call {
+            registry,
+            limiter,
+            id,
+            caller,
+            callee,
+        }
+    }
+
+    fn routed(
+        call_id: &str,
+        sender_device: &str,
+        signal: web_rtc_signal::Signal,
+    ) -> RoutedWebRtcSignal {
+        RoutedWebRtcSignal {
+            signal: Some(WebRtcSignal {
+                call_id: call_id.into(),
+                signal: Some(signal),
+                sender_device_id: sender_device.into(),
+                timestamp: unix_millis(),
+            }),
+            route: None,
+            ..Default::default()
+        }
+    }
+
+    async fn send(
+        call: &Call,
+        user: &str,
+        device: &str,
+        signal: web_rtc_signal::Signal,
+    ) -> Result<(), Status> {
+        handle_outbound_signal(
+            &call.registry,
+            &call.limiter,
+            user,
+            device,
+            routed(&call.id, device, signal),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_stranger_cannot_touch_someone_elses_call() {
+        let stranger = format!("stranger-{}", Uuid::new_v4());
+        let signals = [
+            web_rtc_signal::Signal::Hangup(CallHangup::default()),
+            web_rtc_signal::Signal::Busy(CallBusy::default()),
+            web_rtc_signal::Signal::Ringing(CallRinging::default()),
+            web_rtc_signal::Signal::Connected(CallConnected::default()),
+        ];
+        for signal in signals {
+            let call = new_call().await;
+            let err = send(&call, &stranger, "stranger-device", signal.clone())
+                .await
+                .expect_err("a non-participant must be refused");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{signal:?}");
+            let state = call
+                .registry
+                .load_call_state(&call.id)
+                .await
+                .expect("the call survives a stranger's signal");
+            assert!(state.ringing_at_ms.is_none(), "{signal:?}");
+            assert!(state.answered_at_ms.is_none(), "{signal:?}");
+            assert!(state.accepted_callee_device_id.is_none(), "{signal:?}");
+            call.registry.remove_call(&call.id).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_party_still_ends_the_call_when_the_peer_is_offline() {
+        // Busy/Hangup ignore forward errors on purpose — "peer offline" must not keep a call alive.
+        let call = new_call().await;
+        send(
+            &call,
+            &call.callee,
+            "callee-device",
+            web_rtc_signal::Signal::Hangup(CallHangup::default()),
+        )
+        .await
+        .expect("the callee may hang up");
+        assert!(call.registry.load_call_state(&call.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_callers_connected_does_not_name_the_answering_device() {
+        let call = new_call().await;
+        let _ = send(
+            &call,
+            &call.caller,
+            "caller-device",
+            web_rtc_signal::Signal::Connected(CallConnected::default()),
+        )
+        .await;
+        let state = call.registry.load_call_state(&call.id).await.unwrap();
+        assert!(state.answered_at_ms.is_some(), "the call reads as answered");
+        assert_eq!(state.accepted_callee_device_id, None);
+        let answered_at = state.answered_at_ms;
+
+        let _ = send(
+            &call,
+            &call.callee,
+            "callee-device",
+            web_rtc_signal::Signal::Connected(CallConnected::default()),
+        )
+        .await;
+        let state = call.registry.load_call_state(&call.id).await.unwrap();
+        assert_eq!(
+            state.accepted_callee_device_id.as_deref(),
+            Some("callee-device")
+        );
+        assert_eq!(state.answered_at_ms, answered_at, "first answer time kept");
+        call.registry.remove_call(&call.id).await;
+    }
+
+    #[tokio::test]
+    async fn a_signal_naming_another_device_is_refused() {
+        let call = new_call().await;
+        let err = handle_outbound_signal(
+            &call.registry,
+            &call.limiter,
+            &call.callee,
+            "callee-device",
+            routed(
+                &call.id,
+                "some-other-device",
+                web_rtc_signal::Signal::Connected(CallConnected::default()),
+            ),
+        )
+        .await
+        .expect_err("the stream's device, not the signal's");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        let state = call.registry.load_call_state(&call.id).await.unwrap();
+        assert!(state.accepted_callee_device_id.is_none());
+        call.registry.remove_call(&call.id).await;
+    }
+
+    #[test]
+    fn role_of_names_each_party_and_nobody_else() {
+        let state = crate::registry::CallState {
+            call_id: "c".into(),
+            caller_user_id: "a".into(),
+            callee_user_id: "b".into(),
+            caller_device_id: "a1".into(),
+            accepted_callee_device_id: None,
+            created_at: 0,
+            offered_at_ms: 0,
+            ringing_at_ms: None,
+            answered_at_ms: None,
+            caller_last_keepalive_at: 0,
+            callee_last_keepalive_at: 0,
+        };
+        assert_eq!(state.role_of("a"), Some(CallRole::Caller));
+        assert_eq!(state.role_of("b"), Some(CallRole::Callee));
+        assert_eq!(state.role_of("c"), None);
+        assert_eq!(state.role_of(""), None);
     }
 }

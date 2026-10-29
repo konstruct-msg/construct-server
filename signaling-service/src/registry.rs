@@ -64,6 +64,39 @@ pub(crate) struct CallState {
     pub(crate) callee_last_keepalive_at: u64,
 }
 
+/// Which side of a call a user is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallRole {
+    Caller,
+    Callee,
+}
+
+/// A signal for a call the sender is not a party to. One constructor for both places that refuse
+/// it (`forward_signal`, and the gate in `handle_outbound_signal` before any call state changes).
+pub(crate) fn not_a_participant() -> Status {
+    Status::permission_denied("Not a participant in this call")
+}
+
+/// A signal naming a device other than the stream's authenticated one.
+pub(crate) fn not_the_stream_device() -> Status {
+    Status::permission_denied("sender_device_id does not match the authenticated device")
+}
+
+impl CallState {
+    /// `None` for anyone who is neither party — the one check every signal that touches a call
+    /// must pass before it changes anything. Caller first, matching `forward_signal`, so a call
+    /// between two devices of one account reads the same in both places.
+    pub(crate) fn role_of(&self, user_id: &str) -> Option<CallRole> {
+        if self.caller_user_id == user_id {
+            Some(CallRole::Caller)
+        } else if self.callee_user_id == user_id {
+            Some(CallRole::Callee)
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) struct CallRegistry {
     calls: RwLock<HashMap<String, CallState>>,
     active_calls: RwLock<HashMap<String, String>>,
@@ -707,33 +740,40 @@ impl CallRegistry {
         calls.insert(call_id.to_string(), state);
     }
 
-    pub(crate) async fn note_connected(&self, call_id: &str, device_id: &str) {
+    /// Mark the call answered. `callee_device` is the device that answered, and only the
+    /// callee's own `Connected` may name it: until 2026-10-29 whichever side sent `Connected`
+    /// first became `accepted_callee_device_id`, so a caller arriving first had the callee's
+    /// signals routed back to the caller's own device. The caller's `Connected` still marks the
+    /// call answered (passing `None`) so the reaper stops treating it as ringing.
+    pub(crate) async fn note_connected(&self, call_id: &str, callee_device: Option<&str>) {
         let Some(mut state) = self.load_call_state(call_id).await else {
             return;
         };
-        if state.answered_at_ms.is_some() {
+        if state.accepted_callee_device_id.is_none() {
+            state.accepted_callee_device_id = callee_device.map(str::to_string);
+        }
+        let newly_answered = state.answered_at_ms.is_none();
+        if !newly_answered && callee_device.is_none() {
             return;
         }
-        if state.accepted_callee_device_id.is_none() {
-            state.accepted_callee_device_id = Some(device_id.to_string());
-        }
-        let now_ms = unix_millis();
+        let now_ms = state.answered_at_ms.unwrap_or_else(unix_millis);
         state.answered_at_ms = Some(now_ms);
 
         {
             let mut conn = self.redis.clone();
             let key = Self::call_key(call_id);
-            let accepted = state
-                .accepted_callee_device_id
-                .as_deref()
-                .unwrap_or(device_id);
-            let _: Result<(), _> = redis::pipe()
-                .cmd("HSET")
+            let mut pipe = redis::pipe();
+            pipe.cmd("HSET")
                 .arg(&key)
                 .arg("answered_at_ms")
-                .arg(now_ms.to_string())
-                .arg("accepted_callee_device_id")
-                .arg(accepted)
+                .arg(now_ms.to_string());
+            if let Some(accepted) = state.accepted_callee_device_id.as_deref() {
+                pipe.cmd("HSET")
+                    .arg(&key)
+                    .arg("accepted_callee_device_id")
+                    .arg(accepted);
+            }
+            let _: Result<(), _> = pipe
                 .cmd("EXPIRE")
                 .arg(&key)
                 .arg(300)
@@ -772,7 +812,7 @@ impl CallRegistry {
                 Some(state.caller_device_id.clone()),
             )
         } else {
-            return Err(Status::permission_denied("Not a participant in this call"));
+            return Err(not_a_participant());
         };
 
         let sent = if target_user_id == from_user_id {
@@ -1135,7 +1175,9 @@ mod tests {
             )
             .await;
 
-        registry.note_connected("call-1", "callee-device-1").await;
+        registry
+            .note_connected("call-1", Some("callee-device-1"))
+            .await;
 
         registry
             .register_user("callee-user", "callee-device-1")
@@ -1172,7 +1214,9 @@ mod tests {
             )
             .await;
 
-        registry.note_connected("call-1", "callee-device-1").await;
+        registry
+            .note_connected("call-1", Some("callee-device-1"))
+            .await;
 
         registry
             .register_user("callee-user", "callee-device-1")
@@ -1249,7 +1293,9 @@ mod tests {
         let state_before = registry.load_call_state("call-1").await.unwrap();
         assert!(state_before.answered_at_ms.is_none());
 
-        registry.note_connected("call-1", "callee-device-1").await;
+        registry
+            .note_connected("call-1", Some("callee-device-1"))
+            .await;
 
         let state_after = registry.load_call_state("call-1").await.unwrap();
         assert!(
@@ -1277,13 +1323,17 @@ mod tests {
             )
             .await;
 
-        registry.note_connected("call-1", "callee-device-1").await;
+        registry
+            .note_connected("call-1", Some("callee-device-1"))
+            .await;
         let state1 = registry.load_call_state("call-1").await.unwrap();
         let first_answered = state1.answered_at_ms.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-        registry.note_connected("call-1", "callee-device-2").await;
+        registry
+            .note_connected("call-1", Some("callee-device-2"))
+            .await;
         let state2 = registry.load_call_state("call-1").await.unwrap();
 
         assert_eq!(
