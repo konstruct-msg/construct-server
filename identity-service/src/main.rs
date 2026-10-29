@@ -2410,6 +2410,15 @@ impl UserService for IdentityGrpcService {
                     "Account deletion: mailboxes NOT deleted; the age sweep will remove them"
                 ),
             }
+            // The intake-key generation has no TTL (it must be monotonic for the account's
+            // life), so this is the only thing that removes it. Its tag sets expire with their
+            // epochs on their own.
+            if let Err(e) = queue.delete_intake_generation(&user_id.to_string()).await {
+                tracing::error!(
+                    error = %e,
+                    "Account deletion: intake generation NOT deleted; nothing else removes it"
+                );
+            }
         }
 
         tracing::info!(

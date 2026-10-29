@@ -877,6 +877,36 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         intake_state(&mut conn, &account, now).await.unwrap(),
         (1, true)
     );
+    // Monotonic for the life of the account: the generation never expires on its own.
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(crate::intake::generation_key(&account))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1, "the generation key must carry no TTL");
+
+    // A key written with a TTL (the first cut of generations) loses it on an equal publish.
+    let _: () = redis::cmd("EXPIRE")
+        .arg(crate::intake::generation_key(&account))
+        .arg(3_600)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        publish_tags(&mut conn, &account, 1, &[tag(3)])
+            .await
+            .unwrap(),
+        (1, 1)
+    );
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(crate::intake::generation_key(&account))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl, -1,
+        "an equal publish makes an expiring generation permanent"
+    );
 
     // A rotation after a block: generation 2 drops both generation-1 tags at once.
     assert_eq!(
