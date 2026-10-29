@@ -34,6 +34,23 @@ pub enum ApnsSendError {
     Other(#[from] anyhow::Error),
 }
 
+/// Does this APNs answer condemn the *device* token — the one verdict that lets a caller delete
+/// or disable it?
+///
+/// Only an explicit `BadDeviceToken` (400) or `Unregistered` (410) does. A 403 never does,
+/// whatever reason it carries: 403 is APNs judging the *provider* (Expired/Invalid/Missing
+/// ProviderToken, Forbidden, BadCertificate*), and treating it as a verdict on the device turned a
+/// provider-auth outage into deleting every token it touched (`938f395`). No body, no verdict.
+///
+/// Pure so the rule can be pinned by a table test without a live APNs client.
+pub(crate) fn condemns_device_token(code: u16, reason: Option<&ErrorReason>) -> bool {
+    code != 403
+        && matches!(
+            reason,
+            Some(ErrorReason::BadDeviceToken | ErrorReason::Unregistered)
+        )
+}
+
 /// APNs client wrapper
 #[derive(Clone)]
 pub struct ApnsClient {
@@ -236,15 +253,7 @@ impl ApnsClient {
                             resp.error.as_ref().map(|body| &body.reason)
                         );
                     }
-                    resp.error
-                        .as_ref()
-                        .map(|body| {
-                            matches!(
-                                body.reason,
-                                ErrorReason::BadDeviceToken | ErrorReason::Unregistered
-                            )
-                        })
-                        .unwrap_or(false)
+                    condemns_device_token(resp.code, resp.error.as_ref().map(|body| &body.reason))
                 } else {
                     false
                 };
@@ -394,6 +403,45 @@ fn notification_options<'a>(
 mod tests {
     use super::*;
     use crate::types::{ApsData, ConstructData};
+
+    /// The token-deletion rule (`938f395`): only BadDeviceToken / Unregistered condemn a device
+    /// token, and never on a 403 — not even if a 403 were to carry a device reason.
+    #[test]
+    fn only_an_explicit_device_reason_outside_403_condemns_the_token() {
+        use ErrorReason as R;
+        assert!(condemns_device_token(400, Some(&R::BadDeviceToken)));
+        assert!(condemns_device_token(410, Some(&R::Unregistered)));
+
+        for provider in [
+            R::ExpiredProviderToken,
+            R::InvalidProviderToken,
+            R::MissingProviderToken,
+            R::Forbidden,
+            R::BadCertificate,
+            R::BadCertificateEnvironment,
+        ] {
+            assert!(!condemns_device_token(403, Some(&provider)), "{provider:?}");
+        }
+        assert!(!condemns_device_token(403, None), "403 with no body");
+        assert!(!condemns_device_token(403, Some(&R::BadDeviceToken)));
+        assert!(!condemns_device_token(403, Some(&R::Unregistered)));
+
+        // Other 4xx/5xx reasons describe the request or APNs, not the token.
+        for (code, other) in [
+            (400, R::BadTopic),
+            (400, R::DeviceTokenNotForTopic),
+            (400, R::PayloadEmpty),
+            (429, R::TooManyRequests),
+            (500, R::InternalServerError),
+            (503, R::ServiceUnavailable),
+        ] {
+            assert!(
+                !condemns_device_token(code, Some(&other)),
+                "{code} {other:?}"
+            );
+        }
+        assert!(!condemns_device_token(400, None), "no body, no verdict");
+    }
 
     fn payload(activity: Option<&str>) -> ApnsPayload {
         ApnsPayload {

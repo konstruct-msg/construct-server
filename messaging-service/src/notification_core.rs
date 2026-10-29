@@ -1080,17 +1080,37 @@ pub async fn send_key_rotation_wake(
         }
 
         if rejected_by_all {
-            tracing::warn!(user_hash = %user_id_hash, push_environment = %token_row.push_environment, "APNs token rejected by every declared environment — deleting");
-            if let Err(db_err) =
-                sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                    .bind(&token_row.device_token_encrypted)
-                    .execute(&*context.db_pool)
-                    .await
-            {
+            // Same verdict as a message push. Until 2026-10-29 this path deleted on a
+            // rejection from the row's only declared environment — the 2026-08-18 loop
+            // `verdict_after_rejection` exists to stop, reopened by any key-rotation wake.
+            let (query, action) = match verdict_after_rejection(environments.len()) {
+                RejectionVerdict::Widen => (
+                    sqlx::query(
+                        "UPDATE device_tokens SET push_environment = $1 \
+                         WHERE device_token_encrypted = $2",
+                    )
+                    .bind(ApnsEnvironments::both().to_string())
+                    .bind(&token_row.device_token_encrypted),
+                    "widening to both",
+                ),
+                RejectionVerdict::Delete => (
+                    sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                        .bind(&token_row.device_token_encrypted),
+                    "deleting",
+                ),
+            };
+            tracing::warn!(
+                user_hash = %user_id_hash,
+                push_environment = %token_row.push_environment,
+                action,
+                "APNs token rejected by every declared environment (key-rotation wake)"
+            );
+            if let Err(db_err) = query.execute(&*context.db_pool).await {
                 tracing::error!(
                     error = %db_err,
                     user_hash = %user_id_hash,
-                    "Failed to delete invalid device token after key-rotation wake"
+                    action,
+                    "Failed to update device token after key-rotation wake rejection"
                 );
             }
         }
@@ -1299,20 +1319,34 @@ pub async fn send_voip_incoming_call(
         }
 
         if rejected_by_all {
+            // Same verdict as a message push: a rejection from the only declared environment
+            // condemns the pairing, not the token. Disabling here was the 2026-08-18 loop for
+            // calls — a mislabelled VoIP token went dark on the first incoming call.
+            let (query, action) = match verdict_after_rejection(environments.len()) {
+                RejectionVerdict::Widen => (
+                    sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
+                        .bind(ApnsEnvironments::both().to_string())
+                        .bind(token_id),
+                    "widening to both",
+                ),
+                RejectionVerdict::Delete => (
+                    sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
+                        .bind(token_id),
+                    "disabling",
+                ),
+            };
             tracing::info!(
                 user_hash = %user_id_hash,
                 push_environment = %push_environment,
-                "VoIP token rejected by every declared environment - disabling"
+                action,
+                "VoIP token rejected by every declared environment"
             );
-            if let Err(db_err) = sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
-                .bind(token_id)
-                .execute(&*context.db_pool)
-                .await
-            {
+            if let Err(db_err) = query.execute(&*context.db_pool).await {
                 tracing::error!(
                     error = %db_err,
                     user_hash = %user_id_hash,
-                    "Failed to disable VoIP token after APNs InvalidToken"
+                    action,
+                    "Failed to update VoIP token after APNs rejection"
                 );
             }
         } else if let Some(environment) = delivered_on
