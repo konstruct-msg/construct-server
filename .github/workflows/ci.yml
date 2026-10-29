@@ -482,6 +482,10 @@ jobs:
             # five capacity alerts evaluated against nothing. SIGHUP reloads the
             # config in place; no restart, no gap in the series.
             docker kill -s HUP construct-prometheus 2>/dev/null || true
+            # Same for Alertmanager: ops/alertmanager is a directory mount, so the new
+            # alertmanager.yml is on disk after the reset but not loaded. #101 (info off
+            # Telegram) deployed on 2026-10-29 and kept paging info until a hand reload.
+            docker kill -s HUP construct-alertmanager 2>/dev/null || true
 
             echo "=== Waiting for health checks ==="
             sleep 15
