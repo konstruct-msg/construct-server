@@ -343,6 +343,44 @@ message SendMessageResponse {
 
   // Echoed from SendMessageRequest.attempt_id for client-side tracing.
   optional string attempt_id = 7;
+
+  // SendSealedMessage only: what the server made of SealedInner.intake_tag_sealed. Set under
+  // MSG_STEALTH_TOKEN_POLICY=warn as well as enforce — under warn nothing is refused, and until
+  // 2026-10-29 a sender holding a stale intake key had no way to learn it, so the key lived
+  // forever (construct-docs decisions/intake-key-is-the-accounts-not-the-devices.md).
+  //
+  // Tells the sender nothing it would not learn under enforce from the refusal itself, and the
+  // server nothing new. Unset on SendMessage and from a server that predates the field.
+  IntakeVerdict intake_verdict = 8;
+}
+
+// The server's answer to an envelope's intake credential.
+//
+// Only NOT_ACCEPTED means "the key you hold for this recipient is not accepted now": the sender
+// stops presenting it until the epoch rolls and pays tokens meanwhile, then tries it once more.
+// Not dropped: the commonest cause is a recipient device whose window lapsed while it was off,
+// and that key works again as soon as the device publishes; a dropped key would never come back,
+// because the recipient has no reason to send its card again. Every other value keeps the key
+// in use.
+enum IntakeVerdict {
+  // Not reported: SendMessage, or a server older than the field. Keep the key.
+  INTAKE_VERDICT_UNSPECIFIED = 0;
+
+  // The envelope carried no intake tag.
+  INTAKE_VERDICT_NONE = 1;
+
+  // The tag is one the recipient published for the current or previous epoch; no token owed.
+  INTAKE_VERDICT_ACCEPTED = 2;
+
+  // The tag was read and the recipient does not accept it: unsealed but not in the recipient's
+  // set, the wrong length, or the recipient published nothing for these epochs.
+  INTAKE_VERDICT_NOT_ACCEPTED = 3;
+
+  // The server could not check: its tag store was unavailable, it has no token key, or the tag
+  // did not open with the server's key (the sender sealed to a stale server key — a fault of the
+  // seal, not of the intake key). Not a statement about the key: a sender must not suspend a
+  // working key because the server was down or rotated.
+  INTAKE_VERDICT_UNCHECKED = 4;
 }
 
 // EditMessageRequest - Edit message

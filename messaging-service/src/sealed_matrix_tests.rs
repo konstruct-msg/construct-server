@@ -21,6 +21,7 @@ use construct_config::{
 use construct_db::DbPool;
 use construct_queue::MessageQueue;
 use construct_server_shared::shared::proto::core::v1 as core_proto;
+use construct_server_shared::shared::proto::services::v1::IntakeVerdict;
 use prost::Message;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
@@ -461,6 +462,8 @@ async fn k1_a_key_address_reaches_the_account_after_the_backfill() {
     .await
     .expect("a key address of an account here delivers");
     assert!(resp.success);
+    // The envelope carries no intake tag; K2 must read the same for an address with no account.
+    assert_eq!(resp.intake_verdict, IntakeVerdict::None as i32);
     assert!(
         stream_len(&mut conn, &user_id).await > before,
         "delivered to the account the key names"
@@ -502,6 +505,19 @@ async fn k2_an_unknown_key_address_is_accepted_and_not_disclosed() {
     assert!(resp.success);
     assert!(!resp.message_id.is_empty(), "shaped like any accepted send");
     assert_eq!(unresolved(), before + 1);
+    // Not UNSPECIFIED: an existing account answers NONE for the same envelope (K1), and a
+    // verdict that differed would be the existence oracle `success` exists to deny.
+    assert_eq!(resp.intake_verdict, IntakeVerdict::None as i32);
+
+    // Same with a tag that does not open: what an account answers, not a tell that there is none.
+    let mut with_tag = build_sealed_envelope_to(&address, &random_bytes32());
+    let mut inner = core_proto::SealedInner::decode(with_tag.sealed_inner.as_ref()).unwrap();
+    inner.intake_tag_sealed = vec![7u8; 64];
+    with_tag.sealed_inner = inner.encode_to_vec();
+    let resp = dispatch_sealed_sender(&h.ctx, &with_tag)
+        .await
+        .expect("still accepted");
+    assert_eq!(resp.intake_verdict, IntakeVerdict::Unchecked as i32);
 
     // A malformed address is the sender's format error, not a disclosure, and stays refused.
     assert!(

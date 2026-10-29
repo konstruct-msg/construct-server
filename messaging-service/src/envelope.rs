@@ -226,6 +226,8 @@ pub(crate) async fn dispatch_sealed_sender(
             error: None,
             rate_limit_challenge: None,
             attempt_id: None,
+            // The recipient's server holds its tags; this one has nothing to say.
+            intake_verdict: proto::IntakeVerdict::Unspecified as i32,
         });
     }
 
@@ -237,6 +239,13 @@ pub(crate) async fn dispatch_sealed_sender(
     if recipient_address.is_empty() {
         anyhow::bail!("SealedInner.recipient_user_id is required");
     }
+
+    use construct_config::StealthTokenPolicy;
+    let policy = context.config.messaging.stealth_token_policy;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     // A key address names the recipient's account by its recovery key (`RouteId::of_account`).
     // Resolve it to the internal UUID, then keep all delivery and recipient-bound credential
@@ -261,6 +270,24 @@ pub(crate) async fn dispatch_sealed_sender(
                 construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
                     .with_label_values(&["unresolved"])
                     .inc();
+                // The verdict must not become the oracle the `success` above refuses to be: an
+                // existing account answers NONE / NOT_ACCEPTED / UNCHECKED, so this one runs the
+                // same check against a keyspace nobody publishes to (the address itself, hashed
+                // like any account) and answers what an account with no tags would.
+                let intake_verdict = if policy == StealthTokenPolicy::Off {
+                    proto::IntakeVerdict::Unspecified
+                } else {
+                    let mut conn = context.redis_conn.clone();
+                    crate::intake::check_intake_credential(
+                        &mut conn,
+                        context.token_enc_static_secret.as_ref(),
+                        &sealed_inner.intake_tag_sealed,
+                        &recipient_address,
+                        now_unix,
+                    )
+                    .await
+                    .verdict()
+                };
                 return Ok(proto::SendMessageResponse {
                     message_id,
                     message_number: 0,
@@ -269,6 +296,7 @@ pub(crate) async fn dispatch_sealed_sender(
                     error: None,
                     rate_limit_challenge: None,
                     attempt_id: None,
+                    intake_verdict: intake_verdict as i32,
                 });
             }
         }
@@ -279,8 +307,9 @@ pub(crate) async fn dispatch_sealed_sender(
     // ── Privacy Pass token redemption (stealth-sealed-sender-v2 Phase 1) ───
     // Gate cheapest-first, before the delivery-tag check and dispatch. See
     // construct-docs/decisions/stealth-sealed-sender-v2-always-on.md §3 Phase 1.
-    use construct_config::StealthTokenPolicy;
-    let policy = context.config.messaging.stealth_token_policy;
+    // What the sender is told about its intake tag. Unspecified while the policy is off: no
+    // check runs, and a client must not read silence as a verdict on its key.
+    let mut intake_verdict = proto::IntakeVerdict::Unspecified;
     if policy != StealthTokenPolicy::Off {
         let mode_label = match policy {
             StealthTokenPolicy::Warn => "warn",
@@ -301,10 +330,6 @@ pub(crate) async fn dispatch_sealed_sender(
         // Anything other than a match falls through to the token path, which is exactly what
         // the envelope would have done before this existed. A credential is a discount, never
         // a requirement, so a wrong one cannot be a delivery failure on its own.
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let intake = {
             let mut conn = context.redis_conn.clone();
             crate::intake::check_intake_credential(
@@ -324,6 +349,7 @@ pub(crate) async fn dispatch_sealed_sender(
                 .with_label_values(&[reason.as_label()])
                 .inc();
         }
+        intake_verdict = intake.verdict();
 
         if intake.owes_token() {
             let has_token =
@@ -425,6 +451,9 @@ pub(crate) async fn dispatch_sealed_sender(
                     error: None,
                     rate_limit_challenge: None,
                     attempt_id: None,
+                    // Same answer as the first send of this envelope got: a replay must read
+                    // exactly like a delivery.
+                    intake_verdict: intake_verdict as i32,
                 });
             }
             Err(e) => {
@@ -482,6 +511,7 @@ pub(crate) async fn dispatch_sealed_sender(
         error: None,
         rate_limit_challenge: None,
         attempt_id: None,
+        intake_verdict: intake_verdict as i32,
     })
 }
 
