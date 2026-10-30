@@ -6,6 +6,7 @@ mod group_lifecycle;
 mod invite_links;
 mod key_packages;
 mod membership;
+mod message_stream;
 mod messaging;
 mod mls_sync;
 mod posts;

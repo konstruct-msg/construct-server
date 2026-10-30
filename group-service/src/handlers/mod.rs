@@ -6,7 +6,7 @@ mod comment_groups;
 mod group_lifecycle;
 mod key_packages;
 mod membership;
-mod messaging;
+pub(crate) mod messaging;
 mod mls_sync;
 mod posts;
 mod subscriptions;
