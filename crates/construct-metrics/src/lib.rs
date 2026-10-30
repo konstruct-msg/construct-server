@@ -457,6 +457,20 @@ pub static MSG_SEALED_INGRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_SEALED_INGRESS_TOTAL metric")
 });
 
+/// Identified sends refused by a per-sender limit (`hourly` count, daily `fanout` of unique
+/// recipients), answered `RATE_LIMIT` with `retry_after_ms`. The hourly limit refused nothing
+/// from 2026-04-06 until todo 249; this is the series that says whom it now refuses.
+pub static MSG_SEND_RATE_LIMITED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_send_rate_limited_total",
+            "Identified sends refused by a per-sender limit, by limit"
+        ),
+        &["limit"]
+    )
+    .expect("Failed to register MSG_SEND_RATE_LIMITED_TOTAL metric")
+});
+
 /// Sealed envelopes addressed by key (`ed25519:<hex>`), by whether the key named an account here.
 /// Label `result` = `resolved` | `unresolved`. An unresolved one is answered like a send to an
 /// unknown UUID — accepted and dropped — so this counter is the only place the difference shows.
@@ -848,6 +862,9 @@ pub fn init_registry() {
     // trap this function exists for, one level down at the child.
     for ingress in ["sealed_rpc", "legacy_send_message"] {
         MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
+    }
+    for limit in ["hourly", "fanout"] {
+        MSG_SEND_RATE_LIMITED_TOTAL.with_label_values(&[limit]);
     }
     Lazy::force(&MSG_SEALED_LEGACY_REJECTED_TOTAL);
     for result in ["resolved", "unresolved"] {
