@@ -14,9 +14,6 @@ use sqlx::{PgConnection, PgPool};
 /// ML-KEM-1024 public key size in bytes (NIST FIPS 203). Until PQXDH v2 this constant said
 /// "ML-KEM-1024" and held 1184 — the ML-KEM-768 size, which is what clients actually sent.
 pub const KYBER_PUBLIC_KEY_SIZE: usize = 1568;
-/// ML-KEM-1024 ciphertext size in bytes (carried in PreKeySignalMessage.kem_ciphertext)
-#[allow(dead_code)]
-pub const KYBER_CIPHERTEXT_SIZE: usize = 1568;
 /// Ed25519 signature size in bytes
 pub const ED25519_SIGNATURE_SIZE: usize = 64;
 
@@ -1321,12 +1318,11 @@ pub async fn set_device_supports_pq_ratchet(
 // Signed Pre-Key Operations
 // ============================================================================
 
-/// Rotate signed pre-key (archive old one)
+/// Rotate signed pre-key
 pub async fn rotate_signed_prekey(
     db: &mut PgConnection,
     device_id: &str,
     new_key: &SignedPreKey,
-    reason: &str,
     // Optional hybrid (ML-DSA) signature over new_key.public_key (suite 0x01). When provided it
     // is verified against the device's hybrid identity key and stored ATOMICALLY with the rotated
     // SPK (same UPDATE), so the bundle is never served with a hybrid identity but an unsigned SPK.
@@ -1368,40 +1364,6 @@ pub async fn rotate_signed_prekey(
             .map_err(|e| anyhow::anyhow!("SPK hybrid signature verification failed: {}", e))?;
     }
 
-    // Get current signed prekey (including its ID) before updating
-    let current = sqlx::query_as::<_, SignedPreKeyRow>(
-        r#"
-        SELECT signed_prekey_id, signed_prekey_public, signed_prekey_signature
-        FROM devices
-        WHERE device_id = $1 AND is_active = true
-        "#,
-    )
-    .bind(device_id)
-    .fetch_optional(&mut *db)
-    .await?;
-
-    // Archive old key with its real key_id
-    if let Some(old) = current
-        && let Some(sig) = old.signed_prekey_signature
-    {
-        sqlx::query(
-                r#"
-                INSERT INTO signed_prekey_archive (device_id, key_id, public_key, signature, rotation_reason)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (device_id, key_id) DO UPDATE SET
-                    public_key = $3, signature = $4, rotation_reason = $5,
-                    archived_at = NOW(), expires_at = NOW() + INTERVAL '48 hours'
-                "#,
-            )
-            .bind(device_id)
-            .bind(old.signed_prekey_id)
-            .bind(&old.signed_prekey_public)
-            .bind(&sig)
-            .bind(reason)
-            .execute(&mut *db)
-            .await?;
-    }
-
     // Update device with new signed prekey, upload timestamp, and incremented epoch
     let new_epoch: i32 = sqlx::query_scalar(
         r#"
@@ -1427,7 +1389,7 @@ pub async fn rotate_signed_prekey(
     .fetch_one(&mut *db)
     .await?;
 
-    // Old key valid until (48 hours — aligns with signed_prekey_archive expires_at)
+    // How long the client should keep the old key's private half for in-flight messages.
     let expires_at = Utc::now() + chrono::Duration::hours(48);
     Ok((expires_at, new_epoch as u32))
 }
@@ -1614,13 +1576,6 @@ struct PreKeyCountRow {
     last_upload: Option<DateTime<Utc>>,
 }
 
-#[derive(sqlx::FromRow)]
-struct SignedPreKeyRow {
-    signed_prekey_id: i32,
-    signed_prekey_public: Vec<u8>,
-    signed_prekey_signature: Option<Vec<u8>>,
-}
-
 /// Row used by `store_hybrid_identity` to verify hybrid signatures against the
 /// device's current Ed25519 identity and signed pre-keys.
 #[derive(sqlx::FromRow)]
@@ -1648,17 +1603,6 @@ struct IdentityKeyRow {
 // Cleanup Jobs
 // ============================================================================
 
-/// Delete expired archived signed pre-keys
-#[allow(dead_code)]
-pub async fn cleanup_expired_archives(db: &PgPool) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM signed_prekey_archive WHERE expires_at < NOW()")
-        .execute(db)
-        .await?;
-    Ok(result.rows_affected())
-}
-
-/// Hard-delete OTPKs that were soft-expired more than 48 hours ago.
-///
 /// Fleet-wide one-time pre-key inventory, for metrics.
 ///
 /// Counts devices, not keys. A total key count would be dominated by whichever
@@ -1706,8 +1650,10 @@ pub async fn otpk_inventory(db: &PgPool) -> Result<OtpkInventory> {
     })
 }
 
-/// Called on a schedule (e.g. every hour). The 48-hour window matches
-/// `signed_prekey_archive` and gives in-flight prekey messages time to arrive.
+/// Hard-delete OTPKs that were soft-expired more than 48 hours ago.
+///
+/// Called on a schedule (e.g. every hour). The 48-hour window gives in-flight prekey
+/// messages time to arrive.
 pub async fn cleanup_expired_otpks(db: &PgPool) -> Result<u64> {
     let result = sqlx::query(
         "DELETE FROM one_time_prekeys
@@ -1823,7 +1769,6 @@ mod tests {
     fn test_kyber_public_key_size_constant() {
         // FIPS 203: an ML-KEM-1024 encapsulation key is 1568 bytes, as is its ciphertext.
         assert_eq!(KYBER_PUBLIC_KEY_SIZE, 1568);
-        assert_eq!(KYBER_CIPHERTEXT_SIZE, 1568);
         assert_eq!(ED25519_SIGNATURE_SIZE, 64);
     }
 
@@ -2515,7 +2460,7 @@ mod tests {
         legacy.public_key.truncate(1184);
 
         let mut tx = db.begin().await.unwrap();
-        rotate_signed_prekey(&mut tx, &device_id, &new_spk, "scheduled", None)
+        rotate_signed_prekey(&mut tx, &device_id, &new_spk, None)
             .await
             .unwrap();
         let refused = upload_kyber_signed_prekey(
@@ -2644,6 +2589,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    // ── Signed pre-key signature (no DB) ─────────────────────────────────────
+
+    fn signed_spk(suite_id: u8, public_key: &[u8]) -> (SigningKey, Vec<u8>) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut message = b"KonstruktX3DH-v1".to_vec();
+        message.extend_from_slice(&[0x00, suite_id]);
+        message.extend_from_slice(public_key);
+        let signature = key.sign(&message).to_bytes().to_vec();
+        (key, signature)
+    }
+
+    #[test]
+    fn a_signed_prekey_signature_verifies_and_every_altered_part_is_refused() {
+        let spk = [9u8; 32];
+        let (key, sig) = signed_spk(0x01, &spk);
+        let vk = key.verifying_key().to_bytes();
+
+        assert!(verify_prekey_signature(&vk, 0x01, &spk, &sig).is_ok());
+        assert!(
+            verify_prekey_signature(&vk, 0x02, &spk, &sig).is_err(),
+            "suite is signed"
+        );
+        assert!(
+            verify_prekey_signature(&vk, 0x01, &[8u8; 32], &sig).is_err(),
+            "key is signed"
+        );
+        let other = SigningKey::from_bytes(&[6u8; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(
+            verify_prekey_signature(&other, 0x01, &spk, &sig).is_err(),
+            "signer is checked"
+        );
+        assert!(verify_prekey_signature(&vk, 0x01, &spk, &sig[..63]).is_err());
+        assert!(verify_prekey_signature(&vk[..31], 0x01, &spk, &sig).is_err());
+    }
+
+    // ── One-time pre-key handout and sweep (DB) ──────────────────────────────
+
+    /// FOR UPDATE SKIP LOCKED: a fetch never waits on, or gets, a key another fetch holds.
+    /// The other fetch is a transaction holding the oldest key's row lock.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn a_fetch_skips_a_key_another_fetch_holds_and_none_is_handed_out_twice() {
+        let db = get_test_db().await;
+        let (device_id, user_id) = insert_test_device_with_user(&db).await;
+        upload_prekeys(&db, &device_id, &make_prekeys(2), false, &[])
+            .await
+            .unwrap();
+        let user_id = user_id.to_string();
+        let fetch = || async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                get_prekey_bundle(&db, &user_id, Some(&device_id), None, None, true),
+            )
+            .await
+            .expect("a fetch does not wait on a held key")
+            .unwrap()
+            .expect("bundle")
+            .one_time_prekey_id
+        };
+
+        let mut holder = db.begin().await.unwrap();
+        let held: i32 = sqlx::query_scalar(
+            "SELECT key_id FROM one_time_prekeys WHERE device_id = $1
+             ORDER BY uploaded_at ASC, key_id ASC LIMIT 1 FOR UPDATE",
+        )
+        .bind(&device_id)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+        let while_held = fetch().await;
+        holder.rollback().await.unwrap();
+        let after = fetch().await;
+        let empty = fetch().await;
+        cleanup_device(&db, &device_id).await;
+
+        let while_held = while_held.expect("the free key is handed out");
+        assert_ne!(while_held as i32, held);
+        assert_eq!(after, Some(held as u32));
+        assert_eq!(empty, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn the_kyber_otpk_sweep_removes_only_keys_expired_over_48_hours_ago() {
+        let db = get_test_db().await;
+        let device_id = insert_test_device(&db).await;
+        for (key_id, expired) in [(1, None), (2, Some("1 hour")), (3, Some("49 hours"))] {
+            sqlx::query(
+                "INSERT INTO kyber_one_time_pre_keys
+                     (device_id, key_id, public_key, signature, is_expired, expired_at)
+                 VALUES ($1, $2, $3, $3, $4, NOW() - $5::interval)",
+            )
+            .bind(&device_id)
+            .bind(key_id)
+            .bind(vec![0u8])
+            .bind(expired.is_some())
+            .bind(expired)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+
+        cleanup_expired_kyber_otpks(&db).await.unwrap();
+        let left: Vec<i32> = sqlx::query_scalar(
+            "SELECT key_id FROM kyber_one_time_pre_keys WHERE device_id = $1 ORDER BY key_id",
+        )
+        .bind(&device_id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
+        cleanup_device(&db, &device_id).await;
+
+        assert_eq!(left, [1, 2]);
     }
 }
 

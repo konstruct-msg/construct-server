@@ -295,7 +295,6 @@ pub async fn delete_user_account(
             ("device_tokens", "device_id"),
             ("one_time_prekeys", "device_id"),
             ("kyber_one_time_pre_keys", "device_id"),
-            ("signed_prekey_archive", "device_id"),
         ] {
             sqlx::query(&format!("DELETE FROM {table} WHERE {column} = ANY($1)"))
                 .bind(&devices)

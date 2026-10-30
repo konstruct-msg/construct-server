@@ -16,7 +16,6 @@
 //
 // ============================================================================
 
-#[allow(dead_code)]
 mod core;
 mod kt;
 
@@ -304,7 +303,7 @@ async fn check_otpk_drain(redis: &mut redis::aio::ConnectionManager, user_id: &s
             return true;
         }
     };
-    let exceeded = count.unwrap_or(0) >= OTPK_DRAIN_THRESHOLD_PER_HOUR as i64;
+    let exceeded = drain_reached(count.unwrap_or(0));
     if exceeded {
         tracing::warn!(
             %user_id,
@@ -314,6 +313,19 @@ async fn check_otpk_drain(redis: &mut redis::aio::ConnectionManager, user_id: &s
         );
     }
     !exceeded
+}
+
+/// Whether a target's one-time pre-keys handed out this hour have reached the drain threshold:
+/// the next fetch gets no OTPK. The check runs before the fetch, so the threshold-th key is
+/// still handed out and the one after it is not.
+fn drain_reached(consumed_this_hour: i64) -> bool {
+    consumed_this_hour >= OTPK_DRAIN_THRESHOLD_PER_HOUR as i64
+}
+
+/// Whether to ask a device to replenish its one-time pre-keys. `remaining` is what is left after
+/// this fetch consumed one; `None` means the fetch found none, so the store was already empty.
+fn prekeys_run_low(remaining: Option<u32>) -> bool {
+    remaining.is_none_or(|count| count < LOW_PREKEY_THRESHOLD)
 }
 
 /// Decide whether a bundle fetch may burn one of the target's one-time pre-keys.
@@ -741,7 +753,7 @@ impl KeyService for KeyGrpcService {
             };
             // None: the hybrid SPK signature is set separately by store_hybrid_identity below
             // (lockstep), so the rotation clears the column and the COALESCE re-sets it.
-            core::rotate_signed_prekey(&mut tx, &req.device_id, &signed_key, "upload", None)
+            core::rotate_signed_prekey(&mut tx, &req.device_id, &signed_key, None)
                 .await
                 .map(|_| ())
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -910,11 +922,16 @@ impl KeyService for KeyGrpcService {
             &mut tx,
             &req.device_id,
             &signed_key,
-            reason,
             spk_hybrid_sig.as_deref(),
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tracing::info!(
+            device_id = %req.device_id,
+            reason,
+            epoch = new_spk_rotation_epoch,
+            "Signed pre-key rotated"
+        );
 
         // Rotate Kyber SPK if provided in the same request (keeps both keys in sync)
         let (new_kyber_key_id, new_kyber_spk_rotation_epoch) =
@@ -1309,14 +1326,7 @@ fn to_proto_kt_proof(p: crate::kt::KtProof) -> proto::KtInclusionProof {
     }
 }
 
-/// device's one-time prekey supply drops below [`LOW_PREKEY_THRESHOLD`].
-///
-/// - `otp_was_consumed = false`: the prekey store was already empty before this
-///   request — notify immediately.
-/// - `otp_was_consumed = true`: one key was just consumed — query the remaining
-///   count and notify only if it is below the threshold.
-///
-///   Nudge a device to re-publish its hybrid prekey signatures via a throttled silent push.
+/// Nudge a device to re-publish its hybrid prekey signatures via a throttled silent push.
 ///
 /// Used when a fetched bundle has a hybrid identity key but no SPK hybrid signature — a state the
 /// server cannot repair itself (no access to the device's hybrid private key). The device's silent-
@@ -1410,6 +1420,8 @@ async fn maybe_wake_key_rotation(
     }
 }
 
+/// Ask the device to replenish when its one-time prekey supply runs low; see
+/// [`prekeys_run_low`].
 async fn maybe_notify_low_prekeys(
     db: &sqlx::PgPool,
     notif_client: &NotificationClient,
@@ -1418,10 +1430,10 @@ async fn maybe_notify_low_prekeys(
     otp_was_consumed: bool,
 ) {
     let should_notify = if !otp_was_consumed {
-        true
+        prekeys_run_low(None)
     } else {
         match core::get_prekey_count(db, device_id).await {
-            Ok((count, _)) => count < LOW_PREKEY_THRESHOLD,
+            Ok((count, _)) => prekeys_run_low(Some(count)),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -1755,5 +1767,25 @@ mod bundle_rate_bucket_tests {
             body.contains("extract_authed_caller"),
             "bundle_rate_key no longer takes the device id from verified claims"
         );
+    }
+}
+
+#[cfg(test)]
+mod otpk_supply_decision_tests {
+    use super::*;
+
+    #[test]
+    fn the_threshold_th_key_is_handed_out_and_the_next_is_not() {
+        assert!(!drain_reached(0));
+        assert!(!drain_reached(OTPK_DRAIN_THRESHOLD_PER_HOUR as i64 - 1));
+        assert!(drain_reached(OTPK_DRAIN_THRESHOLD_PER_HOUR as i64));
+    }
+
+    #[test]
+    fn a_device_is_asked_to_replenish_below_five_left_or_when_it_had_none() {
+        assert!(prekeys_run_low(None), "the fetch found the store empty");
+        assert!(prekeys_run_low(Some(0)));
+        assert!(prekeys_run_low(Some(LOW_PREKEY_THRESHOLD - 1)));
+        assert!(!prekeys_run_low(Some(LOW_PREKEY_THRESHOLD)));
     }
 }
