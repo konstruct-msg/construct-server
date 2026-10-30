@@ -9,6 +9,12 @@ use construct_server_shared::shared::proto::services::v1::{
     self as proto, mls_service_server::MlsService,
 };
 
+/// KeyPackage bytes no earlier run stored: `key_package_ref` is their hash and unique, so a
+/// fixed literal is refused as a duplicate on any database a previous run left behind.
+fn unique_blob(label: &str) -> Vec<u8> {
+    format!("{label}-{}", Uuid::new_v4()).into_bytes()
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn test_publish_key_package_success() {
@@ -31,9 +37,9 @@ async fn test_publish_key_package_success() {
             proto::PublishKeyPackageRequest {
                 device_id: device_id.clone(),
                 key_packages: vec![
-                    b"kp-blob-1".to_vec(),
-                    b"kp-blob-2".to_vec(),
-                    b"kp-blob-3".to_vec(),
+                    unique_blob("kp-blob-1"),
+                    unique_blob("kp-blob-2"),
+                    unique_blob("kp-blob-3"),
                 ],
             },
         ))
@@ -117,7 +123,7 @@ async fn test_consume_key_package_success() {
     let (admin_user_id, admin_device_id, _) = create_test_device(&db).await;
     let (target_user_id, target_device_id, _) = create_test_device(&db).await;
 
-    let kp_bytes = b"test-key-package-blob".to_vec();
+    let kp_bytes = unique_blob("test-key-package-blob");
     let kp_ref: Vec<u8> = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -349,7 +355,7 @@ async fn test_consume_key_package_requires_a_token() {
     let db = get_test_db().await;
     let (target_user_id, target_device_id, _) = create_test_device(&db).await;
 
-    let kp_bytes = b"anonymous-must-not-take-this".to_vec();
+    let kp_bytes = unique_blob("anonymous-must-not-take-this");
     let kp_ref: Vec<u8> = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();

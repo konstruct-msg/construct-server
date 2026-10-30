@@ -931,11 +931,13 @@ impl MessageQueue {
                 .await?;
             // Not a coverage signal: without a device_id there is no device stream to
             // compare against, so nothing here says anything about cutover readiness.
+            let has_more = entries.len() == count;
             return Ok(MailboxPage {
                 entries,
                 user_only_ids: Vec::new(),
                 sibling_skipped: 0,
                 user_examined_through: None,
+                has_more,
             });
         };
 
@@ -952,6 +954,7 @@ impl MessageQueue {
             device_msgs,
             user_msgs,
             count,
+            per_source,
             device_id,
         ))
     }
@@ -1110,9 +1113,27 @@ pub struct MailboxPage {
     /// not delivered and must be read again) or when the user stream had nothing to
     /// examine. Never compared with a device-stream id: it positions the user stream only.
     pub user_examined_through: Option<String>,
+    /// The streams may hold more after this page: it was cut by `count`, or a source read came
+    /// back full and the page stops at its last entry. Follows the reads, not `entries.len()`
+    /// — a page stopped at a sibling-filled user read can be short, or empty, and still not
+    /// be the end.
+    pub has_more: bool,
 }
 
 impl MailboxPage {
+    /// Where a reader that keeps **one** cursor for both streams resumes after this page
+    /// (`GetPendingMessages`): past the last delivered entry, or past the examined user
+    /// entries when they reach further — every entry up to there was delivered or is not
+    /// this reader's. `since` when the page moved nothing.
+    pub fn resume_after(&self, since: Option<&str>) -> Option<String> {
+        let delivered = self.entries.last().map(|(id, _)| id.as_str());
+        [delivered, self.user_examined_through.as_deref(), since]
+            .into_iter()
+            .flatten()
+            .max_by(|a, b| compare_stream_id_watermarks(a, b))
+            .map(str::to_string)
+    }
+
     /// How many delivered entries the device stream did not have — the cutover gate, as a
     /// number. Derived from `user_only_ids` so the two cannot disagree.
     pub fn user_only(&self) -> usize {
@@ -1139,10 +1160,19 @@ impl MailboxPage {
 /// stream lacks is still `user_only`: that is the incompleteness the gate exists for.
 /// An unnamed entry (a sender that predates `recipient_device`, or a server-generated
 /// envelope) is for every device and is merged as before.
+///
+/// **A page ends where the shorter of the two reads ends.** Each source is read up to
+/// `source_limit` entries; one that came back full may hold more after its last entry, and
+/// those are not in the page. Delivering past that point moved the reader's cursor over
+/// them: the user read of a three-device account is mostly siblings' entries and ends well
+/// before the read of the reader's own stream, so a user-only entry behind a backlog was
+/// passed over and never delivered. Entries after the earliest full read's last id wait for
+/// the next page.
 fn merge_mailbox_pages(
     device_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     user_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     count: usize,
+    source_limit: usize,
     reader_device: &str,
 ) -> MailboxPage {
     use std::collections::{HashMap, HashSet};
@@ -1159,6 +1189,16 @@ fn merge_mailbox_pages(
     // The last user entry examined, wherever it goes below — kept, overwritten by the
     // device copy, skipped, or an orphan. XREAD returns in id order, so it is the page's last.
     let user_last_id = user_msgs.last().map(|(id, _)| id.clone());
+    let horizon = [&device_msgs, &user_msgs]
+        .into_iter()
+        .filter(|read| read.len() >= source_limit)
+        .filter_map(|read| read.last().map(|(id, _)| id.clone()))
+        .min_by(|a, b| compare_stream_id_watermarks(a, b));
+    let past_horizon = |id: &str| {
+        horizon
+            .as_deref()
+            .is_some_and(|h| compare_stream_id_watermarks(id, h) == std::cmp::Ordering::Greater)
+    };
 
     // User first, then device overwrites — device wins on collision.
     for (stream_id, envelope) in user_msgs.into_iter() {
@@ -1194,6 +1234,7 @@ fn merge_mailbox_pages(
             .collect();
 
     merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
+    merged.retain(|(id, _)| !past_horizon(id));
     let cut_by_count = merged.len() > count;
     merged.truncate(count);
 
@@ -1209,7 +1250,19 @@ fn merge_mailbox_pages(
         entries: merged,
         user_only_ids,
         sibling_skipped,
-        user_examined_through: if cut_by_count { None } else { user_last_id },
+        // Examined only up to the horizon: user entries after it were left for the next page.
+        user_examined_through: if cut_by_count {
+            None
+        } else {
+            user_last_id.map(|id| {
+                if past_horizon(&id) {
+                    horizon.clone().unwrap_or(id)
+                } else {
+                    id
+                }
+            })
+        },
+        has_more: cut_by_count || horizon.is_some(),
     }
 }
 
@@ -1268,7 +1321,7 @@ mod mailbox_merge_tests {
             ("150-0".to_string(), Some(env("m1"))),
             ("200-0".to_string(), Some(env("m3"))),
         ];
-        let page = merge_mailbox_pages(device, user, 10, "dev");
+        let page = merge_mailbox_pages(device, user, 10, 100, "dev");
         let ids: Vec<_> = page
             .entries
             .iter()
@@ -1288,7 +1341,7 @@ mod mailbox_merge_tests {
             ("200-0".to_string(), Some(env("b"))),
             ("300-0".to_string(), Some(env("c"))),
         ];
-        let page = merge_mailbox_pages(vec![], user, 2, "dev");
+        let page = merge_mailbox_pages(vec![], user, 2, 100, "dev");
         assert_eq!(page.entries.len(), 2);
         assert_eq!(page.entries[0].1.as_ref().unwrap().message_id, "a");
         assert_eq!(page.entries[1].1.as_ref().unwrap().message_id, "b");
@@ -1307,7 +1360,10 @@ mod mailbox_merge_tests {
             ("100-0".to_string(), Some(env("a"))),
             ("200-0".to_string(), Some(env("b"))),
         ];
-        assert_eq!(merge_mailbox_pages(device, user, 10, "dev").user_only(), 0);
+        assert_eq!(
+            merge_mailbox_pages(device, user, 10, 100, "dev").user_only(),
+            0
+        );
     }
 
     /// Entries dropped by the count cap are re-read on the next poll, so counting them
@@ -1325,7 +1381,7 @@ mod mailbox_merge_tests {
             ("400-0".to_string(), Some(env("d"))),
         ];
         let device = vec![("100-0".to_string(), Some(env("a")))];
-        let page = merge_mailbox_pages(device, user, 3, "dev");
+        let page = merge_mailbox_pages(device, user, 3, 100, "dev");
         assert_eq!(page.entries.len(), 3);
         assert_eq!(
             page.user_only(),
@@ -1348,7 +1404,7 @@ mod mailbox_merge_tests {
             ("300-0".to_string(), Some(env("stranded-2"))),
         ];
         let device = vec![("100-0".to_string(), Some(env("covered")))];
-        let page = merge_mailbox_pages(device, user, 10, "dev");
+        let page = merge_mailbox_pages(device, user, 10, 100, "dev");
         let mut named = page.user_only_ids.clone();
         named.sort();
         assert_eq!(
@@ -1385,7 +1441,7 @@ mod mailbox_merge_tests {
             ("200-0".to_string(), Some(env_for("to-a", "a"))),
             ("400-0".to_string(), Some(env("unnamed"))),
         ];
-        let page = merge_mailbox_pages(device, user, 10, "a");
+        let page = merge_mailbox_pages(device, user, 10, 100, "a");
         let ids: Vec<_> = page
             .entries
             .iter()
@@ -1406,7 +1462,7 @@ mod mailbox_merge_tests {
     #[test]
     fn entry_named_to_the_reader_but_missing_from_its_stream_is_still_user_only() {
         let user = vec![("100-0".to_string(), Some(env_for("to-a", "a")))];
-        let page = merge_mailbox_pages(vec![], user, 10, "a");
+        let page = merge_mailbox_pages(vec![], user, 10, 100, "a");
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.user_only(), 1);
         assert_eq!(page.sibling_skipped, 0);
@@ -1422,7 +1478,7 @@ mod mailbox_merge_tests {
             ("100-0".to_string(), Some(env_for("to-b-1", "b"))),
             ("200-0".to_string(), Some(env_for("to-b-2", "b"))),
         ];
-        let page = merge_mailbox_pages(vec![], user, 10, "a");
+        let page = merge_mailbox_pages(vec![], user, 10, 100, "a");
         assert!(page.entries.is_empty());
         assert_eq!(page.sibling_skipped, 2);
         assert_eq!(page.user_examined_through.as_deref(), Some("200-0"));
@@ -1438,15 +1494,17 @@ mod mailbox_merge_tests {
             ("200-0".to_string(), Some(env("second"))),
             ("300-0".to_string(), Some(env_for("to-b", "b"))),
         ];
-        let page = merge_mailbox_pages(vec![], user, 1, "a");
+        let page = merge_mailbox_pages(vec![], user, 1, 100, "a");
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.user_examined_through, None);
+        assert!(page.has_more, "the cut entries are still to come");
 
-        let nothing = merge_mailbox_pages(vec![], vec![], 10, "a");
+        let nothing = merge_mailbox_pages(vec![], vec![], 10, 100, "a");
         assert_eq!(
             nothing.user_examined_through, None,
             "an empty user page examined nothing and moves nothing"
         );
+        assert!(!nothing.has_more);
     }
 
     /// `unknown_device` fallback: the envelope names a device that was not in the active
@@ -1457,9 +1515,83 @@ mod mailbox_merge_tests {
     fn unknown_device_fallback_still_delivers_through_the_device_stream() {
         let user = vec![("100-0".to_string(), Some(env_for("m", "ghost")))];
         let device = vec![("100-0".to_string(), Some(env_for("m", "ghost")))];
-        let page = merge_mailbox_pages(device, user, 10, "a");
+        let page = merge_mailbox_pages(device, user, 10, 100, "a");
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.user_only(), 0);
         assert_eq!(page.sibling_skipped, 1);
+    }
+
+    fn ids(page: &MailboxPage) -> Vec<&str> {
+        page.entries
+            .iter()
+            .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.as_str()))
+            .collect()
+    }
+
+    /// A three-device account: the user read is siblings' entries and comes back full at
+    /// 300, while the reader's own stream reaches 400. The user stream may hold the reader's
+    /// entries after 300 that this read never saw, so 400 waits: delivering it moved a
+    /// one-cursor reader past them for good. Mutation: drop the `retain` — m2 is delivered
+    /// and the cursor lands on 400.
+    #[test]
+    fn a_full_user_read_ends_the_page_at_its_last_entry() {
+        let user = vec![
+            ("100-0".to_string(), Some(env_for("to-b", "b"))),
+            ("200-0".to_string(), Some(env_for("to-c", "c"))),
+            ("300-0".to_string(), Some(env_for("to-b-2", "b"))),
+        ];
+        let device = vec![
+            ("150-0".to_string(), Some(env_for("m1", "a"))),
+            ("400-0".to_string(), Some(env_for("m2", "a"))),
+        ];
+        let page = merge_mailbox_pages(device, user, 10, 3, "a");
+        assert_eq!(ids(&page), vec!["m1"]);
+        assert_eq!(page.user_examined_through.as_deref(), Some("300-0"));
+        assert!(page.has_more);
+        assert_eq!(page.resume_after(Some("0")).as_deref(), Some("300-0"));
+    }
+
+    /// The other way round: the reader's own stream comes back full at 200 and the user read
+    /// reaches 300. A user-only entry at 300 waits, and the user stream is claimed examined
+    /// only through 200 — claiming 300 would skip it next time. Mutation: report
+    /// `user_last_id` unbounded — the claim reads 300.
+    #[test]
+    fn a_full_device_read_bounds_what_the_user_read_claims() {
+        let device = vec![
+            ("100-0".to_string(), Some(env_for("m1", "a"))),
+            ("200-0".to_string(), Some(env_for("m2", "a"))),
+        ];
+        let user = vec![
+            ("150-0".to_string(), Some(env_for("to-b", "b"))),
+            ("300-0".to_string(), Some(env("user-only"))),
+        ];
+        let page = merge_mailbox_pages(device, user, 10, 2, "a");
+        assert_eq!(ids(&page), vec!["m1", "m2"]);
+        assert_eq!(page.user_examined_through.as_deref(), Some("200-0"));
+        assert!(page.has_more);
+    }
+
+    /// Reads short of their limit are the whole of both streams: nothing waits, and the page
+    /// is the end. Mutation: count a source full at `len > limit` — the first test above
+    /// delivers m2.
+    #[test]
+    fn reads_short_of_the_limit_deliver_everything_and_end() {
+        let user = vec![("300-0".to_string(), Some(env_for("to-b", "b")))];
+        let device = vec![
+            ("150-0".to_string(), Some(env_for("m1", "a"))),
+            ("400-0".to_string(), Some(env_for("m2", "a"))),
+        ];
+        let page = merge_mailbox_pages(device, user, 10, 3, "a");
+        assert_eq!(ids(&page), vec!["m1", "m2"]);
+        assert!(!page.has_more);
+        assert_eq!(page.resume_after(Some("0")).as_deref(), Some("400-0"));
+    }
+
+    /// A page that delivered nothing and examined nothing leaves the cursor where it was.
+    #[test]
+    fn an_empty_page_resumes_where_it_started() {
+        let page = merge_mailbox_pages(vec![], vec![], 10, 100, "a");
+        assert_eq!(page.resume_after(Some("500-0")).as_deref(), Some("500-0"));
+        assert_eq!(page.resume_after(None), None);
     }
 }
