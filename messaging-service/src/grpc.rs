@@ -750,13 +750,16 @@ impl MessagingService for MessagingGrpcService {
         let mut conn = self.context.redis_conn.clone();
         // One script, so it either landed or it did not: an error is reported, not a partial
         // count, and the caller's retry (a whole window, idempotent) is the recovery.
-        let (current_generation, accepted) =
+        let (current_generation, accepted, outcome) =
             crate::intake::publish_tags(&mut conn, &account, req.generation, &tags)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "intake tag publish failed");
                     Status::unavailable("intake tag store unavailable")
                 })?;
+        construct_metrics::MSG_INTAKE_PUBLISH_TOTAL
+            .with_label_values(&[outcome.as_label()])
+            .inc();
         if current_generation > req.generation {
             tracing::info!(
                 sent = req.generation,
