@@ -640,6 +640,27 @@ pub static MSG_INTAKE_UNRECOGNISED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_INTAKE_UNRECOGNISED_TOTAL metric")
 });
 
+/// What each `PublishIntakeTags` did to the account's key generation.
+///
+/// Label `outcome`: "first_generation" | "rotated" | "added" | "added_pre_generation" |
+/// "refused_pre_generation" | "refused_stale".
+///
+/// Read beside `construct_msg_intake_unrecognised_total{reason="no_match"}`. A `no_match` follows
+/// both a recipient that just replaced its set (`first_generation`, `rotated` — the sender's card
+/// lags by up to an hour, an expected cost) and a sender holding a key nobody publishes; without
+/// this the 2026-10-30 09:07–11:07 burst of 37 could not be told apart. `refused_pre_generation`
+/// is a device on a build from before generations whose key will not be accepted again.
+pub static MSG_INTAKE_PUBLISH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_intake_publish_total",
+            "Intake tag publishes by what they did to the account's key generation"
+        ),
+        &["outcome"]
+    )
+    .expect("Failed to register MSG_INTAKE_PUBLISH_TOTAL metric")
+});
+
 // ============================================================================
 // Abuse-control fail-open (messaging availability bias)
 // ============================================================================
@@ -892,6 +913,17 @@ pub fn init_registry() {
         "no_match",
     ] {
         MSG_INTAKE_UNRECOGNISED_TOTAL.with_label_values(&[reason]);
+    }
+    // A rotation is rare; a series that does not exist until the first one reads as "never".
+    for outcome in [
+        "first_generation",
+        "rotated",
+        "added",
+        "added_pre_generation",
+        "refused_pre_generation",
+        "refused_stale",
+    ] {
+        MSG_INTAKE_PUBLISH_TOTAL.with_label_values(&[outcome]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
