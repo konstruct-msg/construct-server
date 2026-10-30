@@ -75,29 +75,6 @@ pub struct MessagingConfig {
     /// entries". Default: 10_000
     pub queue_maxlen_standard: i64,
 
-    // ── PoW challenge difficulty tiers ─────────────────────────────────────
-    /// PoW difficulty when counter / limit is in the range [1×, pow_ratio_mid).
-    /// Default: 6
-    pub pow_level_low: u32,
-    /// PoW difficulty when counter / limit is in [pow_ratio_mid, pow_ratio_high).
-    /// Default: 8
-    pub pow_level_mid: u32,
-    /// PoW difficulty when counter / limit is ≥ pow_ratio_high.
-    /// Default: 10
-    pub pow_level_high: u32,
-
-    // ── PoW ratio thresholds ───────────────────────────────────────────────
-    /// Counter/limit ratio at which difficulty escalates from low → mid.
-    /// Default: 3.0
-    pub pow_ratio_mid: f64,
-    /// Counter/limit ratio at which difficulty escalates from mid → high.
-    /// Default: 5.0
-    pub pow_ratio_high: f64,
-
-    // ── PoW challenge validity ─────────────────────────────────────────────
-    /// Seconds a PoW challenge remains valid after issuance. Default: 60
-    pub challenge_expiry_secs: u64,
-
     // ── Stream keepalive ───────────────────────────────────────────────────
     /// Interval in seconds between server-initiated HeartbeatAck frames sent to
     /// idle MessageStream clients. Keeps H2 streams alive through NAT/ICE proxies.
@@ -181,36 +158,6 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10_000),
-
-            pow_level_low: std::env::var("MSG_POW_LEVEL_LOW")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(16),
-
-            pow_level_mid: std::env::var("MSG_POW_LEVEL_MID")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(22),
-
-            pow_level_high: std::env::var("MSG_POW_LEVEL_HIGH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(24),
-
-            pow_ratio_mid: std::env::var("MSG_POW_RATIO_MID")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3.0),
-
-            pow_ratio_high: std::env::var("MSG_POW_RATIO_HIGH")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(5.0),
-
-            challenge_expiry_secs: std::env::var("MSG_CHALLENGE_EXPIRY_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(60),
 
             stream_heartbeat_interval_secs: std::env::var("MSG_STREAM_HEARTBEAT_INTERVAL_SECS")
                 .ok()
