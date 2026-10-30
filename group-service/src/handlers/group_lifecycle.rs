@@ -258,6 +258,7 @@ pub(crate) async fn dissolve_group(
     db_mls::set_group_dissolved_at(svc.db.as_ref(), group_id, now)
         .await
         .map_err(|e| Status::internal(format!("Failed to dissolve group: {}", e)))?;
+    svc.hub.dissolve(group_id);
 
     if let Some(ref notification_client) = svc.notification_client {
         let client = notification_client.clone();

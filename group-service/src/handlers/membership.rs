@@ -485,6 +485,7 @@ pub(crate) async fn leave_group(
     db_mls::remove_group_member(svc.db.as_ref(), group_id, &device_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
+    svc.hub.remove_member(group_id, &device_id);
 
     db_mls::remove_group_admin_role(svc.db.as_ref(), group_id, &device_id)
         .await
@@ -569,6 +570,7 @@ pub(crate) async fn remove_member(
     db_mls::remove_group_member(svc.db.as_ref(), group_id, &req.target_device_id)
         .await
         .map_err(|e| Status::internal(format!("Failed to remove member: {}", e)))?;
+    svc.hub.remove_member(group_id, &req.target_device_id);
 
     db_mls::remove_group_admin_role(svc.db.as_ref(), group_id, &req.target_device_id)
         .await

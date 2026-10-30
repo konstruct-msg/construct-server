@@ -28,7 +28,7 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand = "0.8"
 
 futures-util = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 prometheus = "0.14"
 lazy_static = "1.4"
