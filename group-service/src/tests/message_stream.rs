@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use ed25519_dalek::Signer;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Status};
@@ -235,4 +236,44 @@ async fn a_stream_that_falls_behind_is_closed_not_left_with_a_gap() {
     let status = client.next().await.expect_err("the lag closes the stream");
     assert_eq!(status.code(), tonic::Code::DataLoss);
     assert!(client.down.recv().await.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_dissolved_group_is_dropped_from_every_stream() {
+    let db = get_test_db().await;
+    let svc = make_test_service(db.clone()).await;
+    let (admin_user, admin_device, signing_key) = create_test_device(&db).await;
+    let group_id = create_test_group_in_db(&db, &admin_device).await;
+    let (_, member_device, _) = create_test_device(&db).await;
+    add_member(&db, group_id, &member_device, 1).await;
+
+    let mut member = Client::open(db.clone(), svc.hub.clone(), &member_device);
+    member.subscribe(group_id).await;
+    assert!(member.until_heartbeat_ack().await.is_empty());
+
+    let timestamp = Utc::now().timestamp();
+    let proof =
+        signing_key.sign(format!("CONSTRUCT_DISSOLVE_GROUP:{group_id}:{timestamp}").as_bytes());
+    let mut dissolve = Request::new(proto::DissolveGroupRequest {
+        group_id: group_id.to_string(),
+        admin_proof: proof.to_bytes().to_vec(),
+        signature_timestamp: timestamp,
+    });
+    *dissolve.metadata_mut() = create_metadata(&admin_user, &admin_device);
+    svc.dissolve_group(dissolve).await.expect("dissolve");
+
+    // A later subscriber recreates the group's channel; the old stream must not be on it.
+    let _later = svc.hub.subscribe(group_id);
+    svc.hub.publish(
+        group_id,
+        proto::GroupStreamResponse {
+            response: Some(Out::Message(proto::GroupMessageEnvelope::default())),
+            response_id: None,
+        },
+    );
+
+    assert!(member.until_heartbeat_ack().await.is_empty());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(member.down.try_recv().is_err());
 }
