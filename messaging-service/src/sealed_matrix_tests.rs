@@ -794,7 +794,8 @@ async fn redeem_missing_token_label_is_stable() {
 #[serial]
 async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refused() {
     use crate::intake::{
-        IntakeCheck, PublishableTag, UnrecognisedReason, intake_epoch, intake_state, publish_tags,
+        IntakeCheck, PublishOutcome, PublishableTag, UnrecognisedReason, intake_epoch,
+        intake_state, publish_tags,
     };
     let Some(mut conn) = try_redis().await else {
         return;
@@ -840,7 +841,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 0, &[tag(1)])
             .await
             .unwrap(),
-        (0, 1)
+        (0, 1, PublishOutcome::AddedPreGeneration)
     );
     assert_eq!(
         intake_state(&mut conn, &account, now).await.unwrap(),
@@ -852,7 +853,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 1, &[tag(2)])
             .await
             .unwrap(),
-        (1, 1)
+        (1, 1, PublishOutcome::FirstGeneration)
     );
     assert_eq!(check(&mut conn, 2).await, IntakeCheck::Vouched);
     assert_eq!(
@@ -865,7 +866,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 1, &[tag(3)])
             .await
             .unwrap(),
-        (1, 1)
+        (1, 1, PublishOutcome::Added)
     );
     assert_eq!(check(&mut conn, 2).await, IntakeCheck::Vouched);
     assert_eq!(check(&mut conn, 3).await, IntakeCheck::Vouched);
@@ -875,7 +876,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 0, &[tag(4)])
             .await
             .unwrap(),
-        (1, 0)
+        (1, 0, PublishOutcome::RefusedPreGeneration)
     );
     assert_eq!(
         check(&mut conn, 4).await,
@@ -904,7 +905,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 1, &[tag(3)])
             .await
             .unwrap(),
-        (1, 1)
+        (1, 1, PublishOutcome::Added)
     );
     let ttl: i64 = redis::cmd("TTL")
         .arg(crate::intake::generation_key(&account))
@@ -921,7 +922,7 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 2, &[tag(5)])
             .await
             .unwrap(),
-        (2, 1)
+        (2, 1, PublishOutcome::Rotated)
     );
     for old in [2, 3] {
         assert_eq!(
@@ -944,11 +945,18 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         publish_tags(&mut conn, &account, 3, &[tag(7)])
             .await
             .unwrap(),
-        (3, 1)
+        (3, 1, PublishOutcome::Rotated)
     );
     assert_eq!(
         check(&mut conn, 6).await,
         IntakeCheck::Unrecognised(UnrecognisedReason::NoMatch)
+    );
+    // A device left behind by the rotation: its generation is stale, and it stores nothing.
+    assert_eq!(
+        publish_tags(&mut conn, &account, 2, &[tag(8)])
+            .await
+            .unwrap(),
+        (3, 0, PublishOutcome::RefusedStale)
     );
 
     let _: () = redis::cmd("DEL")

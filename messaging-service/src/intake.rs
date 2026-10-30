@@ -368,12 +368,12 @@ pub(crate) fn publishable_tags(
 ///
 /// KEYS[1] = generation key; then, per entry, its set key and its legacy single-tag key.
 /// ARGV: generation, cap, then per entry: tag, TTL.
-/// Returns {generation after, accepted}.
+/// Returns {generation after, accepted, generation before}.
 const PUBLISH_SCRIPT: &str = r#"
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
 local generation = tonumber(ARGV[1])
 if generation < current then
-  return {current, 0}
+  return {current, 0, current}
 end
 local replace = generation > current
 if replace then
@@ -402,7 +402,7 @@ for i = 1, entries do
     accepted = accepted + 1
   end
 end
-return {math.max(current, generation), accepted}
+return {math.max(current, generation), accepted, current}
 "#;
 
 /// Store a publish under the account's key generation
@@ -417,7 +417,8 @@ return {math.max(current, generation), accepted}
 /// - **lower**: nothing stored. The caller's key is behind; `current_generation` says so.
 ///
 /// Generation 0 is a build from before generations: added while the account is at 0, refused as
-/// lower once anything has published a generation. Returns `(generation after, accepted)`.
+/// lower once anything has published a generation. Returns `(generation after, accepted,
+/// outcome)`.
 ///
 /// The account must be the *authenticated* one — a request-supplied id would make publishing a
 /// way to vouch for someone else's incoming traffic.
@@ -426,7 +427,7 @@ pub(crate) async fn publish_tags(
     account_user_id: &str,
     generation: u32,
     tags: &[PublishableTag],
-) -> Result<(u32, u32), redis::RedisError> {
+) -> Result<(u32, u32, PublishOutcome), redis::RedisError> {
     let script = redis::Script::new(PUBLISH_SCRIPT);
     let mut invocation = script.key(generation_key(account_user_id));
     for entry in tags {
@@ -438,8 +439,56 @@ pub(crate) async fn publish_tags(
     for entry in tags {
         invocation.arg(entry.tag.as_slice()).arg(entry.ttl);
     }
-    let (after, accepted): (u32, u32) = invocation.invoke_async(conn).await?;
-    Ok((after, accepted))
+    let (after, accepted, before): (u32, u32, u32) = invocation.invoke_async(conn).await?;
+    Ok((after, accepted, publish_outcome(before, generation)))
+}
+
+/// What a publish did to the account's key, by the generation the account held before it and the
+/// one the publisher sent. Counted per publish (`construct_msg_intake_publish_total`), because a
+/// `no_match` alone cannot say whether the recipient just rotated — the sender's card is then
+/// expected to lag for up to an hour — or the sender holds a key nobody publishes any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutcome {
+    /// The account's first generation: the set every pre-generation device had added to is
+    /// replaced, and contacts holding any of those keys fall to `no_match` until a new card.
+    FirstGeneration,
+    /// A rotation (a block or removal): the previous generation's tags stop now.
+    Rotated,
+    /// Same generation, added beside the account's tags.
+    Added,
+    /// A build from before generations, on an account that has none yet: added, as before.
+    AddedPreGeneration,
+    /// A build from before generations on an account that has one: nothing stored, and that
+    /// device's key is never accepted again until it updates.
+    RefusedPreGeneration,
+    /// A generation behind the account's: nothing stored.
+    RefusedStale,
+}
+
+impl PublishOutcome {
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::FirstGeneration => "first_generation",
+            Self::Rotated => "rotated",
+            Self::Added => "added",
+            Self::AddedPreGeneration => "added_pre_generation",
+            Self::RefusedPreGeneration => "refused_pre_generation",
+            Self::RefusedStale => "refused_stale",
+        }
+    }
+}
+
+/// `before` is the account's generation when the publish arrived, `sent` the publisher's.
+pub(crate) fn publish_outcome(before: u32, sent: u32) -> PublishOutcome {
+    use std::cmp::Ordering::*;
+    match (sent.cmp(&before), before, sent) {
+        (Greater, 0, _) => PublishOutcome::FirstGeneration,
+        (Greater, _, _) => PublishOutcome::Rotated,
+        (Equal, 0, _) => PublishOutcome::AddedPreGeneration,
+        (Equal, _, _) => PublishOutcome::Added,
+        (Less, _, 0) => PublishOutcome::RefusedPreGeneration,
+        (Less, _, _) => PublishOutcome::RefusedStale,
+    }
 }
 
 /// The account's generation and whether any tag is live for the current epoch.
@@ -464,6 +513,34 @@ pub(crate) async fn intake_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every (before, sent) shape a publish can arrive in, and the one outcome each is counted as.
+    /// The pre-generation cases are split out because they are the transition: a first
+    /// generation replaces what old builds had added, and an old build after it is refused for
+    /// good. Mutation: swap any two arms, or compare `before` where `sent` is meant — a row fails.
+    #[test]
+    fn each_publish_is_counted_as_what_it_did_to_the_generation() {
+        use PublishOutcome as O;
+        let mut labels = std::collections::HashSet::new();
+        for (before, sent, expected) in [
+            (0, 1, O::FirstGeneration),
+            (0, 3, O::FirstGeneration),
+            (1, 2, O::Rotated),
+            (2, 5, O::Rotated),
+            (0, 0, O::AddedPreGeneration),
+            (2, 2, O::Added),
+            (1, 0, O::RefusedPreGeneration),
+            (3, 2, O::RefusedStale),
+        ] {
+            assert_eq!(
+                publish_outcome(before, sent),
+                expected,
+                "before {before}, sent {sent}"
+            );
+            labels.insert(expected.as_label());
+        }
+        assert_eq!(labels.len(), 6, "six outcomes, six distinct labels");
+    }
 
     /// A credential we could not check and a credential that was wrong have the same
     /// consequence and must not have the same name. They have opposite causes:
