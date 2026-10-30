@@ -1146,7 +1146,7 @@ fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Resu
 ///
 /// **Not trusted:** client-supplied `x-user-id` alone (Caddy does not inject
 /// or strip this header — treating it as identity was an auth bypass).
-async fn extract_authed_identity(
+pub(crate) async fn extract_authed_identity(
     metadata: &tonic::metadata::MetadataMap,
     context: &MessagingServiceContext,
 ) -> Option<(uuid::Uuid, Option<String>)> {
