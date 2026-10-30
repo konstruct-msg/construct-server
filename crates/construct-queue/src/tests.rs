@@ -773,6 +773,76 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
     clear_mailbox(&mut queue, user, &[d1, d2]).await;
 }
 
+/// The user stream holds every device's entries, so for a reader of a three-device account
+/// most of a user-stream read is siblings', and it ends earlier in time than the read of the
+/// reader's own stream. A page that delivered its own entries past that point moved the
+/// cursor over user-stream entries nobody had read: an entry only the user stream has (a
+/// dispatch that found no devices) behind such a backlog was never delivered. Paged as
+/// `GetPendingMessages` pages — one cursor for both streams.
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn mailbox_a_user_only_entry_behind_a_sibling_backlog_reaches_a_paged_read() {
+    let user = "test_mailbox_horizon_user";
+    let (a, b, c) = ("test_mbx_hz_a", "test_mbx_hz_b", "test_mbx_hz_c");
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[a, b, c]).await;
+
+    let named = |device: &str| {
+        let mut env =
+            construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+        env.recipient_device = Some(device.to_string());
+        env
+    };
+    for _ in 0..3 {
+        for sibling in [b, c] {
+            queue
+                .write_message_to_device_streams(user, &[sibling.to_string()], &named(sibling))
+                .await
+                .expect("dispatch to a sibling");
+        }
+    }
+    let user_only =
+        construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    queue
+        .write_message_to_device_streams(user, &[], &user_only)
+        .await
+        .expect("dispatch that found no devices");
+    let mut expected = vec![user_only.message_id.clone()];
+    for _ in 0..2 {
+        let own = named(a);
+        expected.push(own.message_id.clone());
+        queue
+            .write_message_to_device_streams(user, &[a.to_string()], &own)
+            .await
+            .expect("dispatch to the reader");
+    }
+
+    let mut delivered = Vec::new();
+    let mut cursor = "0".to_string();
+    for _ in 0..20 {
+        let page = queue
+            .read_mailbox_messages(user, Some(a), Some(&cursor), Some(&cursor), 2)
+            .await
+            .expect("read");
+        delivered.extend(
+            page.entries
+                .iter()
+                .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone())),
+        );
+        cursor = page
+            .resume_after(Some(&cursor))
+            .expect("a cursor to resume from");
+        if !page.has_more {
+            break;
+        }
+    }
+    delivered.sort();
+    expected.sort();
+    assert_eq!(delivered, expected, "every entry for the reader, once each");
+
+    clear_mailbox(&mut queue, user, &[a, b, c]).await;
+}
+
 /// Account deletion empties every mailbox of the account — the user stream and each
 /// device stream — and no one else's. Mutation: drop the SCAN for device streams and
 /// the device mailbox survives; widen the pattern and the neighbour's goes too.
