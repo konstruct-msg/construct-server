@@ -95,7 +95,6 @@ pub(crate) async fn handle_stream_request(
                         response: Some(proto::message_stream_response::Response::Error(error)),
                         response_id: Some(req.request_id.clone()),
                         stream_cursor: None,
-                        rate_limit_challenge: None,
                         attempt_id,
                     };
                     tx.send(Ok(response)).await?;
@@ -122,7 +121,6 @@ pub(crate) async fn handle_stream_request(
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: None,
                             attempt_id,
                         };
                         tx.send(Ok(response)).await?;
@@ -140,7 +138,6 @@ pub(crate) async fn handle_stream_request(
                     response: Some(proto::message_stream_response::Response::Ack(ack)),
                     response_id: Some(req.request_id.clone()),
                     stream_cursor: None,
-                    rate_limit_challenge: None,
                     attempt_id,
                 };
                 tx.send(Ok(response)).await?;
@@ -238,7 +235,6 @@ pub(crate) async fn handle_stream_request(
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: None,
                             attempt_id,
                         };
                         tx.send(Ok(response)).await?;
@@ -276,7 +272,6 @@ pub(crate) async fn handle_stream_request(
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: None,
                             attempt_id,
                         };
                         tx.send(Ok(response)).await?;
@@ -318,7 +313,6 @@ pub(crate) async fn handle_stream_request(
                             response: Some(proto::message_stream_response::Response::Ack(ack)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: None,
                             attempt_id,
                         };
 
@@ -347,7 +341,6 @@ pub(crate) async fn handle_stream_request(
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: None,
                             attempt_id,
                         };
 
@@ -367,7 +360,6 @@ pub(crate) async fn handle_stream_request(
                 response: Some(proto::message_stream_response::Response::HeartbeatAck(ack)),
                 response_id: Some(req.request_id),
                 stream_cursor: None,
-                rate_limit_challenge: None,
                 attempt_id: req.attempt_id,
             };
 
@@ -441,7 +433,6 @@ pub(crate) async fn handle_stream_request(
                                     ),
                                     response_id: None,
                                     stream_cursor: None,
-                                    rate_limit_challenge: None,
                                     attempt_id: None,
                                 };
                                 tx.send(Ok(response)).await?;
@@ -863,7 +854,6 @@ pub(crate) async fn poll_messages(
                 )),
                 response_id: None,
                 stream_cursor: None,
-                rate_limit_challenge: None,
                 attempt_id: None,
             }
         };

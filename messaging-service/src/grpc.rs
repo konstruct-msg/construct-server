@@ -40,7 +40,6 @@ fn heartbeat_ack_response() -> proto::MessageStreamResponse {
     proto::MessageStreamResponse {
         response_id: None,
         stream_cursor: None,
-        rate_limit_challenge: None,
         attempt_id: None,
         response: Some(proto::message_stream_response::Response::HeartbeatAck(
             proto::HeartbeatAck {
@@ -463,7 +462,6 @@ impl MessagingService for MessagingGrpcService {
                         server_timestamp: chrono::Utc::now().timestamp_millis(),
                         success: true,
                         error: None,
-                        rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
@@ -500,7 +498,6 @@ impl MessagingService for MessagingGrpcService {
                     retryable: false,
                     retry_after_ms: None,
                 }),
-                rate_limit_challenge: None,
                 attempt_id: attempt_id.clone(),
                 intake_verdict: proto::IntakeVerdict::Unspecified as i32,
             }));
@@ -563,7 +560,6 @@ impl MessagingService for MessagingGrpcService {
                             retryable: true,
                             retry_after_ms: Some((retry_after * 1000).into()),
                         }),
-                        rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
@@ -585,7 +581,6 @@ impl MessagingService for MessagingGrpcService {
                             retryable: false,
                             retry_after_ms: None,
                         }),
-                        rate_limit_challenge: None,
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                     }));
@@ -627,7 +622,6 @@ impl MessagingService for MessagingGrpcService {
                         limit,
                         retry,
                     )),
-                    rate_limit_challenge: None,
                     attempt_id: attempt_id.clone(),
                     intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                 }));
@@ -678,7 +672,6 @@ impl MessagingService for MessagingGrpcService {
             server_timestamp: chrono::Utc::now().timestamp_millis(),
             success: true,
             error: None,
-            rate_limit_challenge: None,
             attempt_id,
             intake_verdict: proto::IntakeVerdict::Unspecified as i32,
         }))
