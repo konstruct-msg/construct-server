@@ -6,21 +6,21 @@
 // Warming accounts (7–30 days) have relaxed limits.
 // Trusted accounts (30+ days) are rate-limited only lightly.
 //
-// Limits that are exceeded do NOT hard-block the send; instead they issue a
-// Proof-of-Work challenge that the client must solve before retrying.  This
-// keeps the UX smooth for legitimate users who happen to burst while making
-// spam expensive.
+// An exceeded limit refuses the send with `RATE_LIMIT` and `retry_after_ms`: when the hourly
+// window ends, or the UTC day for fanout. (Until todo 249 it answered with a Proof-of-Work
+// challenge that no client could solve: SendMessageRequest has no field for a solution.)
 //
 // Redis keys:
 //   trust:{user_id}          — cached account-age in hours (SETEX 3600)
 //   rate:msg:{user_id}:hour  — hourly send counter (INCR + EXPIRE 3600); uses Redis hash tag for cluster routing
-//   fanout:{user_id}:{day}   — daily unique-recipient HLL (PFADD, EXPIRE 172800)
+//   fanout:{user_id}:{day}   — daily unique-recipient HLL (PFADD, EXPIRE 172800); `…:probe` is a
+//                             transient copy that asks whether a recipient is new
 // ============================================================================
 
-use std::fmt::Write as FmtWrite;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use construct_config::MessagingConfig;
+use construct_server_shared::shared::proto::services::v1 as proto;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -114,57 +114,52 @@ pub async fn get_trust_level(
 // Hourly rate check
 // ---------------------------------------------------------------------------
 
-/// Atomically increment the hourly send counter for `user_id`.
+/// A send a limit refused: the client may retry after this many seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryAfter(pub u64);
+
+/// Atomically count one send against the hourly limit for `user_id`.
 ///
-/// Returns `Ok(current_count)` when under the limit, or `Err(pow_difficulty)`
-/// when the limit is exceeded (difficulty scales with overage).
-///
-/// Critically, the counter is **not** incremented when the limit is already
-/// exceeded — this prevents rate-limited retries from inflating the counter
-/// further (which would unfairly escalate the PoW difficulty on each attempt).
+/// `Ok(count)` while `count <= limit`; past it, `Err(RetryAfter)` until the window ends. A
+/// refused send is not counted, so retries do not stretch the window. Redis errors fail open.
 pub async fn check_hourly_rate(
     redis: &mut ConnectionManager,
     user_id: &str,
     limit: u32,
-    config: &MessagingConfig,
-) -> Result<i64, u32> {
+) -> Result<i64, RetryAfter> {
     let key = format!("rate:msg:{{{0}}}:hour", user_id);
 
-    // Atomic check-then-increment: only INCR when still under the limit so that
-    // rate-limited retries do not inflate the counter (and therefore the PoW ratio).
-    // If already at or above the limit, return the current count without touching it.
-    let count: i64 = redis::Script::new(
+    // {1, count} when counted, {0, ttl} when refused. A key left without a TTL would refuse
+    // forever, so a refusal also gives it one.
+    let (allowed, value): (i64, i64) = redis::Script::new(
         r#"
         local limit = tonumber(ARGV[1])
-        local current = redis.call('GET', KEYS[1])
-        if current ~= false and tonumber(current) >= limit then
-            return tonumber(current)
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        if current >= limit then
+            local ttl = redis.call('TTL', KEYS[1])
+            if ttl < 0 then
+                redis.call('EXPIRE', KEYS[1], 3600)
+                ttl = 3600
+            end
+            return {0, ttl}
         end
-        local new_count = redis.call('INCR', KEYS[1])
-        if new_count == 1 then
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
             redis.call('EXPIRE', KEYS[1], 3600)
         end
-        return new_count
+        return {1, count}
         "#,
     )
     .key(&key)
     .arg(limit)
     .invoke_async(redis)
     .await
-    .unwrap_or(0);
+    .unwrap_or((1, 0));
 
-    if count <= limit as i64 {
-        Ok(count)
+    if allowed == 1 {
+        Ok(value)
     } else {
-        let ratio = count as f64 / limit as f64;
-        let pow_level = if ratio >= config.pow_ratio_high {
-            config.pow_level_high
-        } else if ratio >= config.pow_ratio_mid {
-            config.pow_level_mid
-        } else {
-            config.pow_level_low
-        };
-        Err(pow_level)
+        Err(RetryAfter(value.max(1) as u64))
     }
 }
 
@@ -172,72 +167,103 @@ pub async fn check_hourly_rate(
 // Daily fanout check (HyperLogLog)
 // ---------------------------------------------------------------------------
 
-/// Track daily unique recipients via Redis HyperLogLog.
+/// Count `recipient_id` among the sender's unique recipients of the UTC day.
 ///
-/// Returns `Ok(approx_count)` when under the fanout limit, or `Err(pow_level_low)` when
-/// the daily unique-recipient cap is exceeded.
+/// A recipient already counted today is always allowed, so reaching the cap never cuts the
+/// sender off from people it already wrote to. A new recipient past the cap is refused and
+/// not counted, so retrying it stays refused. `Ok(count)` or `Err(RetryAfter)` until the
+/// next UTC day. Redis errors fail open.
 pub async fn check_fanout_rate(
     redis: &mut ConnectionManager,
     user_id: &str,
     recipient_id: &str,
     limit: u32,
-    config: &MessagingConfig,
-) -> Result<u64, u32> {
-    // Key includes calendar day (days since epoch) so it naturally rolls over.
-    let day = SystemTime::now()
+) -> Result<u64, RetryAfter> {
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
-        / 86400;
-    let key = format!("fanout:{}:{}", user_id, day);
+        .as_secs();
+    let key = format!("fanout:{}:{}", user_id, now / 86400);
 
-    let _added: i64 = redis::cmd("PFADD")
-        .arg(&key)
-        .arg(recipient_id)
-        .query_async::<i64>(redis)
-        .await
-        .unwrap_or(0);
+    // Whether the recipient is new is asked of a copy (PFADD on the real key would count it).
+    // {1, count} when allowed, {0, 0} when refused. 2-day TTL so the key cleans itself up.
+    let (allowed, count): (i64, i64) = redis::Script::new(
+        r#"
+        local key, probe = KEYS[1], KEYS[2]
+        redis.call('PFMERGE', probe, key)
+        local is_new = redis.call('PFADD', probe, ARGV[1])
+        redis.call('DEL', probe)
+        if is_new == 1 then
+            if redis.call('PFCOUNT', key) >= tonumber(ARGV[2]) then
+                return {0, 0}
+            end
+            redis.call('PFADD', key, ARGV[1])
+            redis.call('EXPIRE', key, 172800)
+        end
+        return {1, redis.call('PFCOUNT', key)}
+        "#,
+    )
+    .key(&key)
+    .key(format!("{key}:probe"))
+    .arg(recipient_id)
+    .arg(limit)
+    .invoke_async(redis)
+    .await
+    .unwrap_or((1, 0));
 
-    // 2-day TTL so the key cleans itself up without a cron job.
-    let _: Result<(), _> = redis::cmd("EXPIRE")
-        .arg(&key)
-        .arg(172_800u64)
-        .query_async::<()>(redis)
-        .await;
-
-    let count: u64 = redis::cmd("PFCOUNT")
-        .arg(&key)
-        .query_async::<u64>(redis)
-        .await
-        .unwrap_or(0);
-
-    if count <= limit as u64 {
-        Ok(count)
+    if allowed == 1 {
+        Ok(count as u64)
     } else {
-        Err(config.pow_level_low)
+        Err(RetryAfter(secs_until_next_utc_day(now)))
     }
 }
 
+/// Seconds from `now` (unix seconds) to the next UTC midnight, when the fanout key rolls over.
+fn secs_until_next_utc_day(now: u64) -> u64 {
+    86400 - now % 86400
+}
+
 // ---------------------------------------------------------------------------
-// PoW challenge helper
+// Both limits, as SendMessage and MessageStream apply them
 // ---------------------------------------------------------------------------
 
-/// Build a random PoW challenge string and expiry timestamp.
-///
-/// Returns `(challenge_hex, expires_at_unix_millis)`.
-pub fn make_challenge(difficulty: u32, config: &MessagingConfig) -> (String, i64) {
-    let bytes: [u8; 16] = rand::random();
-    let mut challenge = String::with_capacity(32);
-    for b in bytes {
-        let _ = write!(challenge, "{:02x}", b);
+/// The hourly limit, then the daily fanout. `Some((limit, retry))` names the limit that
+/// refused the send; a send the hourly limit refuses is not counted toward fanout.
+pub async fn check_send_limits(
+    redis: &mut ConnectionManager,
+    trust: TrustLevel,
+    config: &MessagingConfig,
+    sender_id: &str,
+    recipient_id: &str,
+) -> Option<(&'static str, RetryAfter)> {
+    if let Err(retry) = check_hourly_rate(redis, sender_id, trust.hourly_limit(config)).await {
+        return Some(("hourly", retry));
     }
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-        + (config.challenge_expiry_secs as i64 * 1_000);
-    let _ = difficulty; // used by caller in the proto field, not here
-    (challenge, expires_at)
+    let fanout_limit = trust.fanout_limit(config)?;
+    check_fanout_rate(redis, sender_id, recipient_id, fanout_limit)
+        .await
+        .err()
+        .map(|retry| ("fanout", retry))
+}
+
+/// The `RATE_LIMIT` error for a refused send; counts and logs the refusal.
+pub fn rate_limited_error(
+    message_id: &str,
+    sender_id: &str,
+    limit: &'static str,
+    RetryAfter(secs): RetryAfter,
+) -> proto::MessageError {
+    construct_metrics::MSG_SEND_RATE_LIMITED_TOTAL
+        .with_label_values(&[limit])
+        .inc();
+    tracing::info!(sender = %sender_id, limit, retry_after_secs = secs, "Send refused by rate limit");
+    proto::MessageError {
+        message_id: message_id.to_string(),
+        error_code: proto::ErrorCode::RateLimit.into(),
+        error_message: format!("Rate limit exceeded ({limit}); retry in {secs} s"),
+        retryable: true,
+        retry_after_ms: Some((secs * 1000) as i64),
+    }
 }
 
 // ============================================================================
@@ -305,30 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn test_make_challenge_format() {
-        let (challenge, expires_at) = make_challenge(4, &cfg());
-        assert_eq!(challenge.len(), 32, "challenge must be 32 hex chars");
-        assert!(
-            challenge.chars().all(|c| c.is_ascii_hexdigit()),
-            "challenge must be lowercase hex"
-        );
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let diff_ms = expires_at - now_ms;
-        assert!(
-            diff_ms > 0 && diff_ms <= 60_000,
-            "expiry should be ~60s in the future"
-        );
-    }
-
-    #[test]
-    fn test_make_challenge_unique() {
-        let c = cfg();
-        let (c1, _) = make_challenge(4, &c);
-        let (c2, _) = make_challenge(4, &c);
-        assert_ne!(c1, c2, "consecutive challenges must differ");
+    fn fanout_retry_after_runs_to_the_next_utc_midnight() {
+        assert_eq!(secs_until_next_utc_day(0), 86400);
+        assert_eq!(secs_until_next_utc_day(86400 * 20_000 + 1), 86399);
+        assert_eq!(secs_until_next_utc_day(86400 * 20_000 + 86399), 1);
     }
 
     // Redis round trips. They sat behind an `integration_tests` feature that only clippy's
@@ -337,10 +343,6 @@ mod tests {
         use super::*;
         use serial_test::serial;
         use uuid::Uuid;
-
-        fn cfg() -> MessagingConfig {
-            MessagingConfig::default()
-        }
 
         async fn redis_conn() -> ConnectionManager {
             let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
@@ -351,78 +353,70 @@ mod tests {
             let _: Result<(), _> = redis::cmd("DEL").arg(key).query_async::<()>(redis).await;
         }
 
+        async fn ttl(redis: &mut ConnectionManager, key: &str) -> i64 {
+            redis::cmd("TTL").arg(key).query_async(redis).await.unwrap()
+        }
+
+        fn fanout_key(user_id: &str) -> String {
+            let day = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                / 86400;
+            format!("fanout:{}:{}", user_id, day)
+        }
+
         #[tokio::test]
         #[ignore = "requires Redis"]
         #[serial]
-        async fn test_check_hourly_rate_allows_under_limit() {
+        async fn the_hourly_limit_counts_up_to_the_limit_then_refuses_until_the_window_ends() {
             let mut redis = redis_conn().await;
             let user_id = format!("test:trust:{}:hourly", Uuid::new_v4());
             let key = format!("rate:msg:{{{0}}}:hour", user_id);
 
-            let result = check_hourly_rate(&mut redis, &user_id, 10, &cfg()).await;
-            del_key(&mut redis, &key).await;
-
-            assert!(result.is_ok(), "first message should be allowed");
-            assert_eq!(result.unwrap(), 1);
-        }
-
-        #[tokio::test]
-        #[ignore = "requires Redis"]
-        #[serial]
-        async fn test_check_hourly_rate_blocks_at_limit() {
-            let mut redis = redis_conn().await;
-            let user_id = format!("test:trust:{}:limit", Uuid::new_v4());
-            let key = format!("rate:msg:{{{0}}}:hour", user_id);
-
-            // Pre-seed the counter past the limit.
-            let _: Result<i64, _> = redis::cmd("SET")
+            let mut counted = Vec::new();
+            for _ in 0..3 {
+                counted.push(check_hourly_rate(&mut redis, &user_id, 3).await);
+            }
+            let refused = check_hourly_rate(&mut redis, &user_id, 3).await;
+            let refused_again = check_hourly_rate(&mut redis, &user_id, 3).await;
+            let count: i64 = redis::cmd("GET")
                 .arg(&key)
-                .arg(10i64)
-                .query_async::<i64>(&mut redis)
-                .await;
-
-            let result = check_hourly_rate(&mut redis, &user_id, 10, &cfg()).await;
+                .query_async(&mut redis)
+                .await
+                .unwrap();
             del_key(&mut redis, &key).await;
 
-            assert!(result.is_err(), "counter at limit+1 should return Err");
-            assert_eq!(
-                result.unwrap_err(),
-                6u32,
-                "ratio just over 1× → difficulty 6"
+            assert_eq!(counted, [Ok(1), Ok(2), Ok(3)]);
+            let RetryAfter(secs) = refused.expect_err("the 4th send of 3 is refused");
+            assert!(
+                (3590..=3600).contains(&secs),
+                "retry when the hour ends, got {secs}"
             );
+            assert!(refused_again.is_err());
+            assert_eq!(count, 3, "a refused send is not counted");
         }
 
         #[tokio::test]
         #[ignore = "requires Redis"]
         #[serial]
-        async fn test_check_hourly_rate_pow_scales_with_ratio() {
+        async fn an_hourly_counter_without_a_ttl_gets_one_instead_of_refusing_forever() {
             let mut redis = redis_conn().await;
-            let limit = 10u32;
-            let c = cfg();
+            let user_id = format!("test:trust:{}:nottl", Uuid::new_v4());
+            let key = format!("rate:msg:{{{0}}}:hour", user_id);
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(10)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
 
-            // 5× ratio → difficulty 10
-            let user_id_5x = format!("test:trust:{}:pow5x", Uuid::new_v4());
-            let key_5x = format!("rate:msg:{{{0}}}:hour", user_id_5x);
-            let _: Result<i64, _> = redis::cmd("SET")
-                .arg(&key_5x)
-                .arg((limit as i64 * 5) - 1)
-                .query_async::<i64>(&mut redis)
-                .await;
-            let result_5x = check_hourly_rate(&mut redis, &user_id_5x, limit, &c).await;
-            del_key(&mut redis, &key_5x).await;
-            assert_eq!(result_5x.unwrap_err(), 10u32, "5× ratio → difficulty 10");
+            let result = check_hourly_rate(&mut redis, &user_id, 10).await;
+            let left = ttl(&mut redis, &key).await;
+            del_key(&mut redis, &key).await;
 
-            // 3× ratio → difficulty 8
-            let user_id_3x = format!("test:trust:{}:pow3x", Uuid::new_v4());
-            let key_3x = format!("rate:msg:{{{0}}}:hour", user_id_3x);
-            let _: Result<i64, _> = redis::cmd("SET")
-                .arg(&key_3x)
-                .arg((limit as i64 * 3) - 1)
-                .query_async::<i64>(&mut redis)
-                .await;
-            let result_3x = check_hourly_rate(&mut redis, &user_id_3x, limit, &c).await;
-            del_key(&mut redis, &key_3x).await;
-            assert_eq!(result_3x.unwrap_err(), 8u32, "3× ratio → difficulty 8");
+            assert_eq!(result, Err(RetryAfter(3600)));
+            assert!((3590..=3600).contains(&left), "TTL set, got {left}");
         }
 
         #[tokio::test]
@@ -438,8 +432,8 @@ mod tests {
                 / 86400;
             let key = format!("fanout:{}:{}", user_id, day);
 
-            let r1 = check_fanout_rate(&mut redis, &user_id, "recipient_a", 50, &cfg()).await;
-            let r2 = check_fanout_rate(&mut redis, &user_id, "recipient_b", 50, &cfg()).await;
+            let r1 = check_fanout_rate(&mut redis, &user_id, "recipient_a", 50).await;
+            let r2 = check_fanout_rate(&mut redis, &user_id, "recipient_b", 50).await;
             del_key(&mut redis, &key).await;
 
             assert!(r1.is_ok());
@@ -451,26 +445,26 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Redis"]
         #[serial]
-        async fn test_check_fanout_rate_blocks_at_limit() {
+        async fn past_the_fanout_cap_a_new_recipient_is_refused_and_known_ones_stay_reachable() {
             let mut redis = redis_conn().await;
             let user_id = format!("test:trust:{}:fanoutlimit", Uuid::new_v4());
-            let day = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                / 86400;
-            let key = format!("fanout:{}:{}", user_id, day);
-            let c = cfg();
+            let key = fanout_key(&user_id);
 
-            // Add 2 unique recipients with limit=2 to fill it.
-            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_1", 2, &c).await;
-            let _ = check_fanout_rate(&mut redis, &user_id, "rcpt_2", 2, &c).await;
-            // Third unique recipient should exceed limit.
-            let result = check_fanout_rate(&mut redis, &user_id, "rcpt_3", 2, &c).await;
+            let first = check_fanout_rate(&mut redis, &user_id, "rcpt_1", 2).await;
+            let second = check_fanout_rate(&mut redis, &user_id, "rcpt_2", 2).await;
+            let third = check_fanout_rate(&mut redis, &user_id, "rcpt_3", 2).await;
+            let third_again = check_fanout_rate(&mut redis, &user_id, "rcpt_3", 2).await;
+            let known = check_fanout_rate(&mut redis, &user_id, "rcpt_1", 2).await;
             del_key(&mut redis, &key).await;
 
-            assert!(result.is_err(), "exceeding fanout limit should return Err");
-            assert_eq!(result.unwrap_err(), c.pow_level_low);
+            assert_eq!((first, second), (Ok(1), Ok(2)));
+            let RetryAfter(secs) = third.expect_err("a third recipient of 2 is refused");
+            assert!((1..=86400).contains(&secs));
+            assert!(
+                third_again.is_err(),
+                "a refused recipient is not counted by being tried"
+            );
+            assert_eq!(known, Ok(2), "a recipient counted today stays reachable");
         }
 
         #[tokio::test]
@@ -486,9 +480,9 @@ mod tests {
                 / 86400;
             let key = format!("fanout:{}:{}", user_id, day);
 
-            let r1 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
-            let r2 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
-            let r3 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50, &cfg()).await;
+            let r1 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
+            let r2 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
+            let r3 = check_fanout_rate(&mut redis, &user_id, "same_recipient", 50).await;
             del_key(&mut redis, &key).await;
 
             // HLL is approximate, but for a single element it must stay at 1.

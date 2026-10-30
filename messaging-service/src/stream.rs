@@ -256,82 +256,27 @@ pub(crate) async fn handle_stream_request(
                     )
                     .await;
 
-                    if let Err(pow_level) = crate::trust::check_hourly_rate(
+                    let limited = crate::trust::check_send_limits(
                         &mut redis_conn,
-                        &uid.to_string(),
-                        trust.hourly_limit(&context.config.messaging),
+                        trust,
                         &context.config.messaging,
+                        &uid.to_string(),
+                        &recipient_id,
                     )
-                    .await
-                    {
-                        let (challenge, expires_at) =
-                            crate::trust::make_challenge(pow_level, &context.config.messaging);
-                        tracing::info!(
-                            sender = %uid,
-                            pow_level,
-                            "Rate limit exceeded — issuing PoW challenge (stream)"
-                        );
-                        let error = proto::MessageError {
-                            message_id: message_id.clone(),
-                            error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: format!(
-                                "Rate limit exceeded — solve PoW level {}",
-                                pow_level
-                            ),
-                            retryable: true,
-                            retry_after_ms: None,
-                        };
-                        let response = proto::MessageStreamResponse {
-                            response: Some(proto::message_stream_response::Response::Error(error)),
-                            response_id: Some(req.request_id.clone()),
-                            stream_cursor: None,
-                            rate_limit_challenge: Some(proto::RateLimitChallenge {
-                                challenge,
-                                difficulty: pow_level,
-                                expires_at,
-                            }),
-                            attempt_id,
-                        };
-                        tx.send(Ok(response)).await?;
-                        return Ok(());
-                    }
+                    .await;
 
-                    if let Some(fanout_limit) = trust.fanout_limit(&context.config.messaging)
-                        && let Err(pow_level) = crate::trust::check_fanout_rate(
-                            &mut redis_conn,
+                    if let Some((limit, retry)) = limited {
+                        let error = crate::trust::rate_limited_error(
+                            &message_id,
                             &uid.to_string(),
-                            &recipient_id,
-                            fanout_limit,
-                            &context.config.messaging,
-                        )
-                        .await
-                    {
-                        let (challenge, expires_at) =
-                            crate::trust::make_challenge(pow_level, &context.config.messaging);
-                        tracing::info!(
-                            sender = %uid,
-                            pow_level,
-                            "Fanout limit exceeded — issuing PoW challenge (stream)"
+                            limit,
+                            retry,
                         );
-                        let error = proto::MessageError {
-                            message_id: message_id.clone(),
-                            error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: format!(
-                                "Fanout limit exceeded — solve PoW level {}",
-                                pow_level
-                            ),
-                            retryable: true,
-                            retry_after_ms: None,
-                        };
                         let response = proto::MessageStreamResponse {
                             response: Some(proto::message_stream_response::Response::Error(error)),
                             response_id: Some(req.request_id.clone()),
                             stream_cursor: None,
-                            rate_limit_challenge: Some(proto::RateLimitChallenge {
-                                challenge,
-                                difficulty: pow_level,
-                                expires_at,
-                            }),
+                            rate_limit_challenge: None,
                             attempt_id,
                         };
                         tx.send(Ok(response)).await?;

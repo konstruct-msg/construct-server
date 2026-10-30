@@ -606,91 +606,31 @@ impl MessagingService for MessagingGrpcService {
             )
             .await;
 
-            // Hourly message rate check
-            let hourly_result = crate::trust::check_hourly_rate(
+            let limited = crate::trust::check_send_limits(
                 &mut redis_conn,
-                &sender_id.to_string(),
-                trust.hourly_limit(&self.context.config.messaging),
+                trust,
                 &self.context.config.messaging,
+                &sender_id.to_string(),
+                &recipient.user_id,
             )
             .await;
 
-            if let Err(pow_level) = hourly_result {
-                let (challenge, expires_at) =
-                    crate::trust::make_challenge(pow_level, &self.context.config.messaging);
-                tracing::info!(
-                    sender = %sender_id,
-                    pow_level,
-                    "Rate limit exceeded — issuing PoW challenge"
-                );
+            if let Some((limit, retry)) = limited {
                 return Ok(Response::new(proto::SendMessageResponse {
                     message_id: message_id.clone(),
                     message_number: 0,
                     server_timestamp: chrono::Utc::now().timestamp_millis(),
                     success: false,
-                    error: Some(proto::MessageError {
-                        message_id: message_id.clone(),
-                        error_code: proto::ErrorCode::RateLimit.into(),
-                        error_message: format!(
-                            "Rate limit exceeded — solve PoW level {}",
-                            pow_level
-                        ),
-                        retryable: true,
-                        retry_after_ms: None,
-                    }),
-                    rate_limit_challenge: Some(proto::RateLimitChallenge {
-                        challenge,
-                        difficulty: pow_level,
-                        expires_at,
-                    }),
+                    error: Some(crate::trust::rate_limited_error(
+                        &message_id,
+                        &sender_id.to_string(),
+                        limit,
+                        retry,
+                    )),
+                    rate_limit_challenge: None,
                     attempt_id: attempt_id.clone(),
                     intake_verdict: proto::IntakeVerdict::Unspecified as i32,
                 }));
-            }
-
-            // Daily fanout limit check
-            if let Some(fanout_limit) = trust.fanout_limit(&self.context.config.messaging) {
-                let fanout_result = crate::trust::check_fanout_rate(
-                    &mut redis_conn,
-                    &sender_id.to_string(),
-                    &recipient.user_id,
-                    fanout_limit,
-                    &self.context.config.messaging,
-                )
-                .await;
-
-                if let Err(pow_level) = fanout_result {
-                    let (challenge, expires_at) =
-                        crate::trust::make_challenge(pow_level, &self.context.config.messaging);
-                    tracing::info!(
-                        sender = %sender_id,
-                        pow_level,
-                        "Fanout limit exceeded — issuing PoW challenge"
-                    );
-                    return Ok(Response::new(proto::SendMessageResponse {
-                        message_id: message_id.clone(),
-                        message_number: 0,
-                        server_timestamp: chrono::Utc::now().timestamp_millis(),
-                        success: false,
-                        error: Some(proto::MessageError {
-                            message_id: message_id.clone(),
-                            error_code: proto::ErrorCode::RateLimit.into(),
-                            error_message: format!(
-                                "Fanout limit exceeded — solve PoW level {}",
-                                pow_level
-                            ),
-                            retryable: true,
-                            retry_after_ms: None,
-                        }),
-                        rate_limit_challenge: Some(proto::RateLimitChallenge {
-                            challenge,
-                            difficulty: pow_level,
-                            expires_at,
-                        }),
-                        attempt_id: attempt_id.clone(),
-                        intake_verdict: proto::IntakeVerdict::Unspecified as i32,
-                    }));
-                }
             }
         } else {
             // Redis connect failed — trust defaults to Trusted, limits skipped.
