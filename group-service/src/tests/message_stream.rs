@@ -61,6 +61,16 @@ impl Client {
             .expect("stream still open")
     }
 
+    /// The next message frame's id, skipping other frames. The stream's `select!` does not
+    /// order a published message against a heartbeat answer, so wait for the message itself.
+    async fn next_message_id(&mut self) -> String {
+        loop {
+            if let Some(Out::Message(m)) = self.next().await.expect("no stream error").response {
+                return m.message_id;
+            }
+        }
+    }
+
     /// Every frame the server sent before it answered this heartbeat.
     async fn until_heartbeat_ack(&mut self) -> Vec<Out> {
         self.send(In::Heartbeat(proto::GroupHeartbeat { timestamp: 7 }))
@@ -109,16 +119,6 @@ async fn send_message(
         .expect("send")
         .into_inner()
         .message_id
-}
-
-fn message_ids(frames: &[Out]) -> Vec<String> {
-    frames
-        .iter()
-        .filter_map(|f| match f {
-            Out::Message(m) => Some(m.message_id.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 #[tokio::test]
@@ -173,10 +173,7 @@ async fn a_device_outside_the_group_is_refused_and_hears_nothing() {
     let message_id = send_message(&svc, &sender_user, &sender_device, group_id).await;
 
     // The member's stream carries it, so it was published; the outsider's does not.
-    assert_eq!(
-        message_ids(&sender.until_heartbeat_ack().await),
-        [message_id]
-    );
+    assert_eq!(sender.next_message_id().await, message_id);
     assert!(outsider.until_heartbeat_ack().await.is_empty());
 }
 
@@ -195,7 +192,7 @@ async fn a_device_that_left_hears_nothing_more() {
     assert!(leaver.until_heartbeat_ack().await.is_empty());
 
     let first = send_message(&svc, &sender_user, &sender_device, group_id).await;
-    assert_eq!(message_ids(&leaver.until_heartbeat_ack().await), [first]);
+    assert_eq!(leaver.next_message_id().await, first);
 
     let mut leave = Request::new(proto::LeaveGroupRequest {
         group_id: group_id.to_string(),
