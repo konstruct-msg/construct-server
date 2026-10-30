@@ -898,8 +898,14 @@ impl MessagingService for MessagingGrpcService {
                 .clear_push_outstanding(device)
                 .await;
         }
+        // Taken from the page, not from what survives the receipt filter below: a full page of
+        // receipts used to report has_more=false and stall offline catch-up, and a page stopped
+        // at a sibling-filled user read is short and still not the end.
+        let next_cursor = page
+            .resume_after(since)
+            .unwrap_or_else(|| "0-0".to_string());
+        let has_more = page.has_more;
         let stream_messages = page.entries;
-        let raw_page_len = stream_messages.len();
         construct_metrics::MSG_MAILBOX_READ_TOTAL
             .with_label_values(&["pending", mode])
             .inc();
@@ -924,18 +930,12 @@ impl MessagingService for MessagingGrpcService {
         }
 
         // encrypted_payload is opaque — server never reads crypto params from it.
-        // Sort is by server timestamp (already chronological from Redis stream).
-        // Track the last Redis stream ID so the cursor advances correctly.
-        // NOTE: we must use the Redis stream ID (millisecond timestamp) as cursor,
-        // not env.timestamp (Unix seconds) — using seconds caused all messages to
-        // be re-delivered on every GetPendingMessages call.
-        let mut last_stream_id: Option<String> = None;
+        // Sort is by server timestamp (already chronological from Redis stream). The cursor is
+        // a Redis stream ID (millisecond timestamp), not env.timestamp (Unix seconds) — using
+        // seconds caused all messages to be re-delivered on every GetPendingMessages call.
         let messages: Vec<proto::PendingMessage> = stream_messages
             .into_iter()
-            .filter_map(|(stream_id, env)| {
-                // Always advance the cursor past this entry, even if we skip it.
-                last_stream_id = Some(stream_id);
-
+            .filter_map(|(_, env)| {
                 let env = env?; // skip corrupt / wrong-recipient entries
                 use construct_server_shared::message::types::MessageType;
                 use construct_server_shared::shared::proto::core::v1 as core;
@@ -990,13 +990,6 @@ impl MessagingService for MessagingGrpcService {
                 })
             })
             .collect();
-
-        let next_cursor = last_stream_id.unwrap_or_else(|| since.unwrap_or("0-0").to_string());
-
-        // Receipts are dropped above. has_more must follow the *Redis page*,
-        // not the filtered vec: a full page of mixed receipts + chat used to
-        // report has_more=false and stall offline catch-up.
-        let has_more = mailbox_page_has_more(raw_page_len, limit);
 
         // Said, not hidden: what the queue trimmed after this cursor never arrives
         // (decisions/mailbox-gap-is-reported.md). Best effort — a failed check is no gap.
@@ -1084,10 +1077,6 @@ impl MessagingService for MessagingGrpcService {
 /// Uses the Redis page length, not the filtered chat-message count. Receipts
 /// are dropped from the response but still occupy stream entries; comparing
 /// against the filtered vec stalled catch-up when a full page was mixed.
-pub(crate) fn mailbox_page_has_more(raw_page_len: usize, limit: usize) -> bool {
-    raw_page_len == limit
-}
-
 /// Validates that `payload` is non-empty and within the 64 KiB size limit.
 pub(crate) fn validate_payload(payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() {
@@ -1330,14 +1319,6 @@ mod tests {
     fn test_legacy_sealed_sender_accepts_authenticated_user() {
         require_legacy_sealed_sender_auth(Some(uuid::Uuid::new_v4()))
             .expect("authenticated legacy sealed sender must be allowed");
-    }
-
-    #[test]
-    fn pending_has_more_follows_redis_page_not_filtered_len() {
-        // Full Redis page, even if every entry is later dropped as a receipt.
-        assert!(mailbox_page_has_more(50, 50));
-        assert!(!mailbox_page_has_more(10, 50));
-        assert!(!mailbox_page_has_more(0, 50));
     }
 }
 
