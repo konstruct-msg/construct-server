@@ -2,14 +2,21 @@ use construct_db::mls::{
     NewGroupMessage, get_group_retention_days, insert_group_message, list_group_messages,
 };
 use construct_server_shared::shared::proto::services::v1::{self as proto};
-use futures_util::StreamExt;
+use std::sync::Arc;
+
+use futures_util::{Stream, StreamExt};
+use sqlx::PgPool;
+use tokio::sync::mpsc;
+use tokio_stream::StreamMap;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use crate::helpers::{
     check_group_member, extract_device_id, extract_user_id, get_group_dissolved_at, get_group_epoch,
 };
-use crate::service::GroupServiceImpl;
+use crate::service::{GroupHub, GroupServiceImpl, HubEvent};
 
 pub(crate) type FetchGroupMessagesStream = tonic::codegen::BoxStream<proto::GroupMessageEnvelope>;
 pub(crate) type MessageStreamStream = tonic::codegen::BoxStream<proto::GroupStreamResponse>;
@@ -183,105 +190,153 @@ pub(crate) async fn message_stream(
     let _user_id = extract_user_id(svc, &meta)?;
     let device_id = extract_device_id(svc, &meta)?;
 
-    let db = svc.db.clone();
-    let hub = svc.hub.clone();
-    let mut inbound = request.into_inner();
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<proto::GroupStreamResponse, Status>>(512);
-
-    tokio::spawn(async move {
-        let mut group_receivers: Vec<tokio::sync::broadcast::Receiver<proto::GroupStreamResponse>> =
-            Vec::new();
-
-        loop {
-            tokio::select! {
-                msg = inbound.next() => {
-                    match msg {
-                        None => break,
-                        Some(Err(e)) => {
-                            tracing::warn!("MessageStream inbound error for {device_id}: {e}");
-                            break;
-                        }
-                        Some(Ok(frame)) => {
-                            match frame.request {
-                                Some(proto::group_stream_request::Request::Subscribe(sub)) => {
-                                    for gid_str in &sub.group_ids {
-                                        let gid = match gid_str.parse::<Uuid>() {
-                                            Ok(v) => v,
-                                            Err(_) => continue,
-                                        };
-                                        if check_group_member(&db, gid, &device_id).await.is_ok() {
-                                            group_receivers.push(hub.subscribe(gid));
-                                        }
-                                    }
-                                }
-                                Some(proto::group_stream_request::Request::Heartbeat(hb)) => {
-                                    let ack = proto::GroupStreamResponse {
-                                        response: Some(
-                                            proto::group_stream_response::Response::HeartbeatAck(
-                                                proto::GroupHeartbeatAck {
-                                                    timestamp: hb.timestamp,
-                                                    server_timestamp: chrono::Utc::now().timestamp(),
-                                                },
-                                            ),
-                                        ),
-                                        response_id: None,
-                                    };
-                                    if tx.send(Ok(ack)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Some(proto::group_stream_request::Request::Send(_)) => {
-                                    let err = proto::GroupStreamResponse {
-                                        response: Some(
-                                            proto::group_stream_response::Response::Error(
-                                                proto::GroupStreamError {
-                                                    request_id: frame.request_id.clone(),
-                                                    error_code: proto::GroupErrorCode::Unspecified as i32,
-                                                    error_message: "In-stream send not supported; use SendGroupMessage RPC".into(),
-                                                    retryable: false,
-                                                },
-                                            ),
-                                        ),
-                                        response_id: None,
-                                    };
-                                    if tx.send(Ok(err)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                None => {}
-                            }
-                        }
-                    }
-                }
-                else => {
-                    let mut any = false;
-                    for rx in group_receivers.iter_mut() {
-                        match rx.try_recv() {
-                            Ok(event) => {
-                                any = true;
-                                if tx.send(Ok(event)).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    "MessageStream receiver lagged by {n} messages for {device_id}"
-                                );
-                            }
-                            Err(_) => {}
-                        }
-                    }
-                    if !any {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
-                }
-            }
-        }
-    });
+    tokio::spawn(serve_message_stream(
+        svc.db.clone(),
+        svc.hub.clone(),
+        device_id,
+        request.into_inner(),
+        tx,
+    ));
 
     let outbound = tokio_stream::wrappers::ReceiverStream::new(rx);
     Ok(Response::new(Box::pin(outbound)))
+}
+
+/// One device's `MessageStream`: answers its frames and forwards the hub events of the groups
+/// it subscribed to while it is a member. Ends when either side closes.
+pub(crate) async fn serve_message_stream<S>(
+    db: Arc<PgPool>,
+    hub: Arc<GroupHub>,
+    device_id: String,
+    mut inbound: S,
+    tx: mpsc::Sender<Result<proto::GroupStreamResponse, Status>>,
+) where
+    S: Stream<Item = Result<proto::GroupStreamRequest, Status>> + Unpin,
+{
+    let mut groups: StreamMap<Uuid, BroadcastStream<HubEvent>> = StreamMap::new();
+
+    loop {
+        let reply = tokio::select! {
+            msg = inbound.next() => match msg {
+                None => return,
+                Some(Err(e)) => {
+                    tracing::warn!("MessageStream inbound error for {device_id}: {e}");
+                    return;
+                }
+                Some(Ok(frame)) => match frame.request {
+                    Some(proto::group_stream_request::Request::Subscribe(sub)) => {
+                        subscribe(&db, &hub, &device_id, &sub.group_ids, &mut groups).await;
+                        let refused: Vec<&str> = sub
+                            .group_ids
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|gid| gid.parse::<Uuid>().map_or(true, |g| !groups.contains_key(&g)))
+                            .collect();
+                        (!refused.is_empty()).then(|| {
+                            stream_error(
+                                frame.request_id,
+                                proto::GroupErrorCode::NotMember,
+                                format!("Not subscribed (not a member, or the check failed): {}", refused.join(",")),
+                            )
+                        })
+                    }
+                    Some(proto::group_stream_request::Request::Heartbeat(hb)) => {
+                        Some(proto::GroupStreamResponse {
+                            response: Some(proto::group_stream_response::Response::HeartbeatAck(
+                                proto::GroupHeartbeatAck {
+                                    timestamp: hb.timestamp,
+                                    server_timestamp: chrono::Utc::now().timestamp(),
+                                },
+                            )),
+                            response_id: None,
+                        })
+                    }
+                    Some(proto::group_stream_request::Request::Send(_)) => Some(stream_error(
+                        frame.request_id,
+                        proto::GroupErrorCode::Unspecified,
+                        "In-stream send not supported; use SendGroupMessage RPC".into(),
+                    )),
+                    None => None,
+                },
+            },
+            // An empty map yields `None` at once, which disables this branch for this turn.
+            Some((group_id, event)) = groups.next() => match event {
+                Ok(HubEvent::Frame(frame)) => Some(frame),
+                Ok(HubEvent::Removed(removed)) => {
+                    if removed == device_id {
+                        groups.remove(&group_id);
+                    }
+                    None
+                }
+                Err(BroadcastStreamRecvError::Lagged(n)) => {
+                    // Frames were dropped; close the stream so the client re-fetches from its
+                    // last sequence number instead of silently missing messages.
+                    tracing::warn!(
+                        group_id = %group_id,
+                        "MessageStream for {device_id} lagged by {n} events; closing"
+                    );
+                    let _ = tx
+                        .send(Err(Status::data_loss(format!(
+                            "group {group_id}: stream fell behind; FetchGroupMessages from the last sequence_number"
+                        ))))
+                        .await;
+                    return;
+                }
+            },
+        };
+
+        if let Some(reply) = reply
+            && tx.send(Ok(reply)).await.is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Adds the groups this device is a member of. The hub receiver is taken before the membership
+/// check, so a removal that lands between the two still reaches the stream.
+async fn subscribe(
+    db: &PgPool,
+    hub: &GroupHub,
+    device_id: &str,
+    group_ids: &[String],
+    groups: &mut StreamMap<Uuid, BroadcastStream<HubEvent>>,
+) {
+    for gid_str in group_ids {
+        let Ok(gid) = gid_str.parse::<Uuid>() else {
+            continue;
+        };
+        if groups.contains_key(&gid) {
+            continue;
+        }
+        let rx = hub.subscribe(gid);
+        match check_group_member(db, gid, device_id).await {
+            Ok(true) => {
+                groups.insert(gid, BroadcastStream::new(rx));
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(group_id = %gid, "MessageStream membership check failed: {e}"),
+        }
+    }
+}
+
+fn stream_error(
+    request_id: String,
+    code: proto::GroupErrorCode,
+    message: String,
+) -> proto::GroupStreamResponse {
+    proto::GroupStreamResponse {
+        response: Some(proto::group_stream_response::Response::Error(
+            proto::GroupStreamError {
+                request_id,
+                error_code: code as i32,
+                error_message: message,
+                retryable: false,
+            },
+        )),
+        response_id: None,
+    }
 }
 
 fn group_message_row_to_envelope(

@@ -9,31 +9,59 @@ use uuid::Uuid;
 
 const GROUP_BROADCAST_CAPACITY: usize = 256;
 
+/// What a group's open `MessageStream`s hear from the handlers of this process.
+#[derive(Clone, Debug)]
+pub(crate) enum HubEvent {
+    /// A frame for every subscribed member.
+    Frame(proto::GroupStreamResponse),
+    /// This device left or was removed: its stream drops the group.
+    Removed(String),
+}
+
 pub(crate) struct GroupHub {
-    inner: Mutex<HashMap<Uuid, broadcast::Sender<proto::GroupStreamResponse>>>,
+    capacity: usize,
+    inner: Mutex<HashMap<Uuid, broadcast::Sender<HubEvent>>>,
 }
 
 impl GroupHub {
     pub(crate) fn new() -> Arc<Self> {
+        Self::with_capacity(GROUP_BROADCAST_CAPACITY)
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
+            capacity,
             inner: Mutex::new(HashMap::new()),
         })
     }
 
-    pub(crate) fn subscribe(
-        &self,
-        group_id: Uuid,
-    ) -> broadcast::Receiver<proto::GroupStreamResponse> {
+    pub(crate) fn subscribe(&self, group_id: Uuid) -> broadcast::Receiver<HubEvent> {
         let mut map = self.inner.lock().unwrap();
         map.entry(group_id)
-            .or_insert_with(|| broadcast::channel(GROUP_BROADCAST_CAPACITY).0)
+            .or_insert_with(|| broadcast::channel(self.capacity).0)
             .subscribe()
     }
 
-    pub(crate) fn publish(&self, group_id: Uuid, event: proto::GroupStreamResponse) {
-        let map = self.inner.lock().unwrap();
-        if let Some(tx) = map.get(&group_id) {
-            let _ = tx.send(event);
+    pub(crate) fn publish(&self, group_id: Uuid, frame: proto::GroupStreamResponse) {
+        self.send(group_id, HubEvent::Frame(frame));
+    }
+
+    pub(crate) fn remove_member(&self, group_id: Uuid, device_id: &str) {
+        self.send(group_id, HubEvent::Removed(device_id.to_string()));
+    }
+
+    /// Drops the group's sender: every stream subscribed to it sees its end and drops the group.
+    pub(crate) fn dissolve(&self, group_id: Uuid) {
+        self.inner.lock().unwrap().remove(&group_id);
+    }
+
+    fn send(&self, group_id: Uuid, event: HubEvent) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(tx) = map.get(&group_id)
+            && tx.send(event).is_err()
+        {
+            // No stream is subscribed any more; the next Subscribe recreates it.
+            map.remove(&group_id);
         }
     }
 }
