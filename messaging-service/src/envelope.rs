@@ -224,7 +224,6 @@ pub(crate) async fn dispatch_sealed_sender(
             server_timestamp: chrono::Utc::now().timestamp_millis(),
             success: true,
             error: None,
-            rate_limit_challenge: None,
             attempt_id: None,
             // The recipient's server holds its tags; this one has nothing to say.
             intake_verdict: proto::IntakeVerdict::Unspecified as i32,
@@ -294,7 +293,6 @@ pub(crate) async fn dispatch_sealed_sender(
                     server_timestamp: chrono::Utc::now().timestamp_millis(),
                     success: true,
                     error: None,
-                    rate_limit_challenge: None,
                     attempt_id: None,
                     intake_verdict: intake_verdict as i32,
                 });
@@ -449,7 +447,6 @@ pub(crate) async fn dispatch_sealed_sender(
                     server_timestamp: chrono::Utc::now().timestamp_millis(),
                     success: true,
                     error: None,
-                    rate_limit_challenge: None,
                     attempt_id: None,
                     // Same answer as the first send of this envelope got: a replay must read
                     // exactly like a delivery.
@@ -509,7 +506,6 @@ pub(crate) async fn dispatch_sealed_sender(
         server_timestamp: chrono::Utc::now().timestamp_millis(),
         success: true,
         error: None,
-        rate_limit_challenge: None,
         attempt_id: None,
         intake_verdict: intake_verdict as i32,
     })

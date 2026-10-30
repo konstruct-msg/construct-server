@@ -175,10 +175,10 @@ message MessageStreamResponse {
   // on the next reconnect to avoid re-reading already-delivered messages.
   optional string stream_cursor = 11;
 
-  // Rate-limit PoW challenge for the stream send path.
-  // Populated when the oneof error has error_code = RATE_LIMIT.
-  // Replaces the legacy JSON-encoded challenge in error_message.
-  optional RateLimitChallenge rate_limit_challenge = 21;
+  // Was rate_limit_challenge: a PoW no client could answer (SendMessageRequest has no field
+  // for a solution). A refused send now carries MessageError.retry_after_ms (server #113).
+  reserved 21;
+  reserved "rate_limit_challenge";
 
   // Echoed from MessageStreamRequest.attempt_id for "attempt → decision" tracing.
   optional string attempt_id = 22;
@@ -317,20 +317,6 @@ message SendSealedMessageRequest {
   optional string attempt_id = 2;
 }
 
-// RateLimitChallenge - Proof-of-Work challenge issued on soft rate-limit breach.
-// Client must solve this challenge before retrying the send.
-// difficulty: 4 = x1.5 limit, 6 = x3 limit, 8 = x5+ limit
-message RateLimitChallenge {
-  // Random hex string the client must hash against
-  string challenge = 1;
-
-  // Argon2 difficulty level
-  uint32 difficulty = 2;
-
-  // Unix millis — challenge expires in 60 seconds
-  int64 expires_at = 3;
-}
-
 // SendMessageResponse - Send message response
 message SendMessageResponse {
   // Message ID (echo back)
@@ -348,9 +334,9 @@ message SendMessageResponse {
   // Error (if failed)
   optional MessageError error = 5;
 
-  // PoW challenge issued when rate limit is soft-exceeded.
-  // Client must solve this challenge before retrying.
-  optional RateLimitChallenge rate_limit_challenge = 6;
+  // Was rate_limit_challenge (see MessageStreamResponse field 21): use error.retry_after_ms.
+  reserved 6;
+  reserved "rate_limit_challenge";
 
   // Echoed from SendMessageRequest.attempt_id for client-side tracing.
   optional string attempt_id = 7;
