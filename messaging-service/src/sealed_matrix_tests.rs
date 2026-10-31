@@ -264,12 +264,23 @@ struct TestHarness {
 }
 
 async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
-    let redis_conn = try_redis().await?;
+    build_harness_on(policy, &redis_url(), &redis_url()).await
+}
+
+/// `queue_redis` carries the mailbox and the auth blocklist (`MessageQueue`); `abuse_redis` the
+/// standalone connection the sealed path keeps its anti-abuse state on — delivery tags, intake
+/// tags, spent tokens. Two addresses so a test can take one down and keep the other.
+async fn build_harness_on(
+    policy: StealthTokenPolicy,
+    queue_redis: &str,
+    abuse_redis: &str,
+) -> Option<TestHarness> {
+    try_redis().await?;
     let db_pool = try_db_pool().await?;
 
     let (priv_pem, pub_pem) = make_ed25519_pems();
     let config = Arc::new(make_config(
-        &redis_url(),
+        queue_redis,
         &database_url(),
         &priv_pem,
         &pub_pem,
@@ -279,8 +290,10 @@ async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
     let message_queue = MessageQueue::new(&config)
         .await
         .expect("MessageQueue::new with live redis");
-    let redis_from_queue = message_queue.clone_redis_connection();
-    let _ = redis_conn; // queue has its own manager; keep both alive
+    let abuse_conn =
+        construct_redis::manager_for(redis::Client::open(abuse_redis).expect("abuse redis url"))
+            .await
+            .expect("abuse redis");
     let queue = Arc::new(Mutex::new(message_queue));
 
     let auth_manager = Arc::new(AuthManager::new(&config).expect("AuthManager"));
@@ -300,7 +313,7 @@ async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
         config,
         server_signer: None,
         server_instance_id: format!("sealed-matrix-{}", uuid::Uuid::new_v4()),
-        redis_conn: redis_from_queue,
+        redis_conn: abuse_conn,
         token_issuer_key: Some(token_issuer_key),
         token_enc_static_secret: Some(token_enc_secret.clone()),
     });
@@ -965,4 +978,414 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
         .query_async(&mut conn)
         .await
         .unwrap_or(());
+}
+
+// ── 234: delivery invariants from AGENTS.md that no test held ───────────────────────────────
+
+/// A TCP forwarder to the test Redis that can be cut. After `cut()` every connection through it
+/// is closed and every new one dropped at once — a Redis outage as this process sees it, without
+/// touching the Redis the other tests share.
+struct CuttableRedis {
+    url: String,
+    cut: tokio::sync::watch::Sender<bool>,
+}
+
+impl CuttableRedis {
+    async fn start() -> Self {
+        let target = redis_url()
+            .trim_start_matches("redis://")
+            .trim_end_matches('/')
+            .to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local port");
+        let url = format!("redis://{}", listener.local_addr().expect("local addr"));
+        let (cut, cut_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                if *cut_rx.borrow() {
+                    continue;
+                }
+                let target = target.clone();
+                let mut cut_rx = cut_rx.clone();
+                tokio::spawn(async move {
+                    let Ok(mut outbound) = tokio::net::TcpStream::connect(&target).await else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound) => {}
+                        _ = cut_rx.wait_for(|cut| *cut) => {}
+                    }
+                });
+            }
+        });
+        Self { url, cut }
+    }
+
+    fn cut(&self) {
+        let _ = self.cut.send(true);
+    }
+}
+
+async fn del(conn: &mut redis::aio::ConnectionManager, keys: &[String]) {
+    let _: () = redis::cmd("DEL")
+        .arg(keys)
+        .query_async(conn)
+        .await
+        .unwrap_or(());
+}
+
+/// The token blocklist cannot be read → the caller is not authenticated. A Redis outage must not
+/// turn a revoked token back into a valid one. Mutation: let the blocklist `Err` arm fall through
+/// — the device-less token is accepted after the cut.
+///
+/// The device-revoked `Err` arm cannot be isolated this way: both reads go to the same Redis and
+/// the blocklist read fails first. Its `Ok(true)` arm is held here.
+#[tokio::test]
+#[serial]
+async fn a1_auth_fails_closed_when_the_blocklist_cannot_be_read() {
+    use crate::grpc::extract_authed_identity;
+    let proxy = CuttableRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+        return;
+    };
+    let bearer = |token: &str| {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        md
+    };
+    let user = uuid::Uuid::new_v4();
+    let (plain, _, _) = h.ctx.auth_manager.create_token(&user).expect("token");
+    let device = hex::encode(&random_bytes32()[..16]);
+    let (with_device, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&user, Some(&device))
+        .expect("device token");
+
+    assert_eq!(
+        extract_authed_identity(&bearer(&plain), &h.ctx).await,
+        Some((user, None))
+    );
+    assert_eq!(
+        extract_authed_identity(&bearer(&with_device), &h.ctx).await,
+        Some((user, Some(device.clone())))
+    );
+    h.ctx
+        .queue
+        .lock()
+        .await
+        .mark_device_revoked(&device, 60)
+        .await
+        .expect("revoke");
+    assert_eq!(
+        extract_authed_identity(&bearer(&with_device), &h.ctx).await,
+        None,
+        "a removed device's token is refused"
+    );
+
+    proxy.cut();
+    assert_eq!(
+        extract_authed_identity(&bearer(&plain), &h.ctx).await,
+        None,
+        "with the blocklist unreadable a token is not trusted"
+    );
+}
+
+/// `msg:dedup:{message_id}` is written after the mailbox entry, never before: marking first turned
+/// a failed XADD into an acknowledged message with no stream entry, and the retry into a no-op.
+/// The XADD is made to fail by putting a string where the recipient's stream goes. Mutation: mark
+/// before the write — the key exists after the failed dispatch.
+#[tokio::test]
+#[serial]
+async fn d1_a_message_is_marked_dispatched_only_once_its_stream_entry_exists() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let envelope = construct_message::MessageEnvelope::new_direct_message(
+        message_id.clone(),
+        uuid::Uuid::new_v4().to_string(),
+        recipient.to_string(),
+        vec![0u8; 32],
+        0,
+        b"ciphertext".to_vec(),
+        String::new(),
+    );
+    let app_context = Arc::new(h.ctx.to_app_context());
+    let mut conn = h.ctx.redis_conn.clone();
+    let stream_key = format!("delivery:offline:{recipient}");
+    let dedup_key = format!("msg:dedup:{message_id}");
+    let dedup_exists = async |conn: &mut redis::aio::ConnectionManager| -> bool {
+        redis::cmd("EXISTS")
+            .arg(&dedup_key)
+            .query_async(conn)
+            .await
+            .unwrap()
+    };
+
+    let _: () = redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    crate::core::dispatch_envelope(&app_context, envelope.clone(), None)
+        .await
+        .expect_err("a mailbox write that failed is an error, not a delivery");
+    assert!(
+        !dedup_exists(&mut conn).await,
+        "nothing was written, so a retry must not be swallowed as a duplicate"
+    );
+
+    del(&mut conn, std::slice::from_ref(&stream_key)).await;
+    crate::core::dispatch_envelope(&app_context, envelope.clone(), None)
+        .await
+        .expect("the retry delivers");
+    assert!(dedup_exists(&mut conn).await);
+    crate::core::dispatch_envelope(&app_context, envelope, None)
+        .await
+        .expect("a second retry is an idempotent success");
+    assert_eq!(
+        stream_len(&mut conn, &recipient).await,
+        1,
+        "and writes nothing more"
+    );
+
+    del(&mut conn, &[stream_key, dedup_key]).await;
+}
+
+/// A sealed envelope's `delivery_tag` is remembered for 5 minutes exactly and 24 hours as seen,
+/// and forgotten again when the mailbox write fails — or the client's retry is answered as a
+/// replay with nothing in the stream. Mutation: drop `unmark_delivery_tag` — the retry succeeds
+/// and the stream stays empty.
+#[tokio::test]
+#[serial]
+async fn t1_a_delivery_tag_is_kept_5_min_and_24_h_and_released_when_the_write_fails() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let tag = random_bytes32();
+    let sealed = build_sealed_envelope(&recipient, &tag, None, None);
+    let tag_hex = hex::encode(Sha256::digest(tag));
+    let (exact, seen) = (
+        format!("sealed:exact:{tag_hex}"),
+        format!("sealed:seen:{tag_hex}"),
+    );
+    let stream_key = format!("delivery:offline:{recipient}");
+    let mut conn = h.ctx.redis_conn.clone();
+    let ttl = async |conn: &mut redis::aio::ConnectionManager, key: &str| -> i64 {
+        redis::cmd("TTL").arg(key).query_async(conn).await.unwrap()
+    };
+
+    let _: () = redis::cmd("SET")
+        .arg(&stream_key)
+        .arg("not-a-stream")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect_err("the write failed");
+    assert_eq!(ttl(&mut conn, &exact).await, -2, "exact mark released");
+    assert_eq!(ttl(&mut conn, &seen).await, -2, "seen mark released");
+
+    del(&mut conn, std::slice::from_ref(&stream_key)).await;
+    dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("the retry delivers");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+    assert!((295..=300).contains(&ttl(&mut conn, &exact).await));
+    assert!((86_395..=86_400).contains(&ttl(&mut conn, &seen).await));
+
+    del(&mut conn, &[stream_key, exact, seen]).await;
+}
+
+/// Under `enforce` the intake tag is what spares a token. A tag the recipient published delivers
+/// with none; a tag it did not publish, and a tag that could not be looked up, owe one — the
+/// lookup failing open to the token path, never to delivery. Mutation: treat `Unavailable` as
+/// vouched — the third send is delivered.
+#[tokio::test]
+#[serial]
+async fn n1_under_enforce_only_a_published_intake_tag_spares_the_token() {
+    use crate::intake::{INTAKE_TAG_LEN, PublishableTag, intake_epoch, publish_tags, tag_key};
+    let Some(h) = build_harness(StealthTokenPolicy::Enforce).await else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let account = recipient.to_string();
+    let now = chrono::Utc::now().timestamp() as u64;
+    let epoch = intake_epoch(now);
+    let mut conn = h.ctx.redis_conn.clone();
+    publish_tags(
+        &mut conn,
+        &account,
+        1,
+        &[PublishableTag {
+            epoch,
+            tag: vec![9; INTAKE_TAG_LEN],
+            ttl: 3_600,
+        }],
+    )
+    .await
+    .expect("publish");
+    let with_intake_tag = |tag: u8| {
+        let mut sealed = build_sealed_envelope(&recipient, &random_bytes32(), None, None);
+        let mut inner = core_proto::SealedInner::decode(sealed.sealed_inner.as_ref()).unwrap();
+        inner.intake_tag_sealed =
+            seal_token_for_server(&[tag; INTAKE_TAG_LEN], &h.token_enc_secret);
+        sealed.sealed_inner = inner.encode_to_vec();
+        sealed
+    };
+    let refusal = |err: anyhow::Error| err.downcast_ref::<TokenRejected>().map(|r| r.label);
+
+    let resp = dispatch_sealed_sender(&h.ctx, &with_intake_tag(9))
+        .await
+        .expect("a published tag needs no token");
+    assert_eq!(resp.intake_verdict, IntakeVerdict::Accepted as i32);
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+
+    let err = dispatch_sealed_sender(&h.ctx, &with_intake_tag(8))
+        .await
+        .expect_err("a tag the recipient never published owes a token");
+    assert_eq!(refusal(err), Some("missing_token"));
+
+    // The epoch's set replaced by a string: the lookup errors as it would with Redis failing.
+    let set_key = tag_key(&account, epoch);
+    del(&mut conn, std::slice::from_ref(&set_key)).await;
+    let _: () = redis::cmd("SET")
+        .arg(&set_key)
+        .arg("not-a-set")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let err = dispatch_sealed_sender(&h.ctx, &with_intake_tag(9))
+        .await
+        .expect_err("a tag that could not be checked owes a token");
+    assert_eq!(refusal(err), Some("missing_token"));
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1, "nothing more");
+
+    del(
+        &mut conn,
+        &[
+            set_key,
+            crate::intake::generation_key(&account),
+            format!("delivery:offline:{recipient}"),
+        ],
+    )
+    .await;
+}
+
+/// The anti-abuse store down degrades anti-abuse, never delivery: with the delivery-tag cache and
+/// the spent-token store unreachable, a sealed message carrying a token is delivered under
+/// `enforce` and both bypasses are counted. Mutation: refuse on the delivery-tag `Err` arm, or
+/// map `RedisError` to `Reject` — the send fails.
+#[tokio::test]
+#[serial]
+async fn o1_with_the_anti_abuse_store_down_a_sealed_message_is_still_delivered() {
+    let proxy = CuttableRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Enforce, &redis_url(), &proxy.url).await
+    else {
+        return;
+    };
+    let fail_open = |control: &str| {
+        construct_metrics::MSG_ABUSE_FAIL_OPEN_TOTAL
+            .with_label_values(&[control])
+            .get()
+    };
+    let (tag_before, token_before) = (fail_open("delivery_tag"), fail_open("stealth_token"));
+    let recipient = uuid::Uuid::new_v4();
+    let nonce = random_bytes32();
+    let token = issue_client_token(&h.token_issuer_key, &nonce);
+    let sealed = build_sealed_envelope(
+        &recipient,
+        &random_bytes32(),
+        Some(&nonce),
+        Some(&seal_token_for_server(&token, &h.token_enc_secret)),
+    );
+
+    proxy.cut();
+    let resp = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("delivered without the anti-abuse checks");
+    assert!(resp.success);
+    let mut mailbox = h.ctx.queue.lock().await.clone_redis_connection();
+    assert_eq!(stream_len(&mut mailbox, &recipient).await, 1);
+    assert_eq!(fail_open("delivery_tag"), tag_before + 1);
+    assert_eq!(fail_open("stealth_token"), token_before + 1);
+
+    del(&mut mailbox, &[format!("delivery:offline:{recipient}")]).await;
+}
+
+/// A stream examines a sibling device's user-stream entries once, not on every poll: they are
+/// counted as skipped on the first poll and the user position moves past them. On 2026-09-21 a
+/// two-device stand re-read the same eight on every 5-second tick. Mutation: drop the
+/// `user_stream_id` update in `poll_messages` — the second poll skips all ten again.
+#[tokio::test]
+#[serial]
+async fn p1_a_stream_examines_a_siblings_entries_once() {
+    use crate::stream::{StreamCatchupState, poll_messages};
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let user = uuid::Uuid::new_v4();
+    let (me, sibling) = ("p1-reader-device", "p1-sibling-device");
+    let mut queue = MessageQueue::new(&h.ctx.config).await.expect("queue");
+    for _ in 0..10 {
+        let mut env =
+            construct_message::MessageEnvelope::new_key_sync("alice".into(), user.to_string());
+        env.recipient_device = Some(sibling.to_string());
+        queue
+            .write_message_to_device_streams(&user.to_string(), &[sibling.to_string()], &env)
+            .await
+            .expect("dispatch to the sibling");
+    }
+    let skipped = || {
+        construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
+            .with_label_values(&["stream"])
+            .get()
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut catchup = StreamCatchupState::default();
+
+    let before = skipped();
+    poll_messages(
+        &mut queue,
+        &h.ctx.config.messaging,
+        user,
+        Some(me),
+        &mut catchup,
+        &tx,
+        false,
+    )
+    .await
+    .expect("first poll");
+    assert_eq!(skipped() - before, 10);
+    assert!(rx.try_recv().is_err(), "none of them is the reader's");
+
+    let before = skipped();
+    poll_messages(
+        &mut queue,
+        &h.ctx.config.messaging,
+        user,
+        Some(me),
+        &mut catchup,
+        &tx,
+        false,
+    )
+    .await
+    .expect("second poll");
+    assert_eq!(skipped() - before, 0, "already examined");
+
+    let mut conn = h.ctx.redis_conn.clone();
+    del(
+        &mut conn,
+        &[
+            format!("delivery:offline:{user}"),
+            format!("delivery:offline:{user}:{sibling}"),
+        ],
+    )
+    .await;
 }
