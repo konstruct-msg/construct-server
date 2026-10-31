@@ -690,6 +690,16 @@ pub static MSG_INTAKE_PUBLISH_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 // Policy (launch): fail-open remains intentional. Alert when rate of any label
 // is non-zero for sustained periods (Redis outage or misconfig).
 
+/// Local sealed sends that reached the replay guard without a delivery tag. Kept separate
+/// from infrastructure fail-open: this is a client compatibility path, not a Redis failure.
+pub static MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_msg_sealed_delivery_tag_missing_total",
+        "Local sealed send attempts without a delivery tag at the replay guard"
+    ))
+    .expect("Failed to register MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL metric")
+});
+
 /// Abuse / anti-spam controls skipped due to infrastructure error (fail-open).
 pub static MSG_ABUSE_FAIL_OPEN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -930,6 +940,7 @@ pub fn init_registry() {
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);
     Lazy::force(&GRPC_STREAMS_CLOSED_TOTAL);
     Lazy::force(&MSG_ABUSE_FAIL_OPEN_TOTAL);
+    Lazy::force(&MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL);
     Lazy::force(&AUTH_SECURITY_FAIL_OPEN_TOTAL);
 }
 

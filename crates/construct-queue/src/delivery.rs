@@ -575,21 +575,24 @@ impl<'a> DeliveryManager<'a> {
 
     // ── Message deduplication ────────────────────────────────────────────────
 
-    /// Returns true if `message_id` was already dispatched (duplicate).
-    /// Uses a Redis key `msg:dedup:{message_id}` with 24h TTL.
-    pub(crate) async fn is_message_duplicate(&mut self, message_id: &str) -> Result<bool> {
-        let key = format!("msg:dedup:{}", message_id);
-        let exists: bool = self.client.exists(&key).await?;
+    /// Returns true if the scoped delivery was already dispatched (duplicate).
+    pub(crate) async fn is_message_duplicate(
+        &mut self,
+        key: &crate::MessageDedupKey,
+    ) -> Result<bool> {
+        let exists: bool = self.client.exists(key.as_str()).await?;
         Ok(exists)
     }
 
-    /// Mark `message_id` as dispatched to prevent duplicate delivery.
+    /// Mark the scoped delivery as dispatched to prevent duplicate delivery.
     /// TTL 24h — covers any realistic client retry window.
-    pub(crate) async fn mark_message_dispatched(&mut self, message_id: &str) -> Result<()> {
+    pub(crate) async fn mark_message_dispatched(
+        &mut self,
+        key: &crate::MessageDedupKey,
+    ) -> Result<()> {
         const TTL_SECS: u64 = 24 * 60 * 60;
-        let key = format!("msg:dedup:{}", message_id);
         self.client
-            .set_ex(&key, "1", TTL_SECS)
+            .set_ex(key.as_str(), "1", TTL_SECS)
             .await
             .context("Failed to mark message as dispatched")?;
         Ok(())

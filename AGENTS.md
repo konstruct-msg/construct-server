@@ -68,7 +68,8 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 - A user-stream entry whose `recipient_device` names another device is skipped at the merge and counted in `construct_msg_mailbox_sibling_entries_skipped_total`. `MessageStream` keeps its own position for the user stream (`StreamCatchupState::user_stream_id`) that moves on what a read examined, or the skipped entries are re-read every 5 s poll.
 - Cutover gate for `MSG_MAILBOX_USER_WRITE` (default `1`): `construct_msg_mailbox_user_only_entries_total` flat zero for 7 days (not `mailbox_read_total{mode=…}`). Rollback = set it back to `1`. With the flag off, reaching no stream is a hard error, never a silent `Ok`.
 - Serialization: `rmp_serde::encode::to_vec_named` / `rmp_serde::from_slice`. No Kafka as the offline queue without a new ADR.
-- Keys: `msg:dedup:{message_id}` is set after the mailbox XADD. `delivery_queue:{instance}` is leftover, tests only — never write, poll or `KEYS` it; route by `GET user:{user}:server_instance_id`. Other namespaces (`rate:*`, `pow:*`, `spent:*`, `pp:unit:*`, `sealed:*`, `invalidated_token:*`) are in the code that owns them.
+- Keys: `msg:dedup:v2:{scope_hash}` is set after the mailbox XADD. `MessageDedupKey` scopes sender account + recipient account + recipient device (or none) + message id; unary fast-path, dispatch and mailbox merge share it. Never dual-read old global keys: another sender can plant them. `delivery_queue:{instance}` is leftover, tests only — never write, poll or `KEYS` it; route by `GET user:{user}:server_instance_id`. Other namespaces (`rate:*`, `pow:*`, `spent:*`, `pp:unit:*`, `sealed:*`, `invalidated_token:*`) are in the code that owns them.
+- `MessageStream` drains pages while `has_more`, including empty sibling-only pages; rechecks revocation between pages and respects channel closure/backpressure. Reads never delete mailbox entries.
 
 ### Auth and edge
 

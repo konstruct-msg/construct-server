@@ -303,8 +303,9 @@ pub(crate) async fn dispatch_sealed_sender(
     };
 
     // ── Privacy Pass token redemption (stealth-sealed-sender-v2 Phase 1) ───
-    // Gate cheapest-first, before the delivery-tag check and dispatch. See
-    // construct-docs/decisions/stealth-sealed-sender-v2-always-on.md §3 Phase 1.
+    // Redeem before the delivery-tag check and dispatch. The existing retry contract spends a
+    // fresh token on each attempt (decisions/sealed-sender-anti-abuse-economics.md): even a
+    // failed write does not refund a nonce. t2 in sealed_matrix_tests holds this ordering.
     // What the sender is told about its intake tag. Unspecified while the policy is off: no
     // check runs, and a client must not read silence as a verdict on its key.
     let mut intake_verdict = proto::IntakeVerdict::Unspecified;
@@ -462,6 +463,8 @@ pub(crate) async fn dispatch_sealed_sender(
                 construct_metrics::record_abuse_fail_open("delivery_tag");
             }
         }
+    } else {
+        construct_metrics::MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL.inc();
     }
 
     // The one device this envelope was encrypted for, when the sender named it.

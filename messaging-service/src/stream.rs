@@ -28,7 +28,7 @@ pub(crate) struct StreamCatchupState {
     pub last_stream_id: Option<String>,
     /// Where the legacy **user** stream is read from, when it is ahead of
     /// `last_stream_id`. Server-side only — the client is never told it, so a reconnect
-    /// starts both streams from the client's one cursor and re-examines at most one page.
+    /// starts both streams from the client's one cursor and re-examines skipped entries above it.
     /// Moves on what a read *examined*, not on what it delivered: the user stream holds
     /// a sibling device's entries, which this reader skips and would otherwise re-read
     /// on every poll (`MailboxPage::user_examined_through`).
@@ -713,32 +713,6 @@ pub(crate) async fn poll_messages(
     // the log into one line per second per connected user.
     is_resume_catchup: bool,
 ) -> anyhow::Result<()> {
-    // A device removed while its stream is open (RevokeDevice, or Logout elsewhere) must stop
-    // receiving now — the stream authenticated once, at open. Ending it with the answer
-    // AuthenticateDevice gives sends the client through refresh (refused since 2decc7a) to
-    // device auth, which tells it it was removed. The marker lives one access-token TTL, and
-    // this runs on every wakeup and fallback tick, so an open stream is caught well inside it.
-    // Fail open on a Redis error: ending every stream on a Redis blip is a reconnect storm.
-    if let Some(device) = device_id.filter(|d| !d.is_empty()) {
-        match queue.is_device_revoked(device).await {
-            Ok(true) => {
-                tracing::info!("poll_messages: device was removed — ending its stream");
-                let _ = tx
-                    .send(Err(
-                        construct_server_shared::auth_utils::device_refusal_status(
-                            construct_error::DeviceRefusal::Removed,
-                        ),
-                    ))
-                    .await;
-                anyhow::bail!("device removed while its stream was open");
-            }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "poll_messages: revoked-device check failed — continuing")
-            }
-        }
-    }
-
     let user_id_str = user_id.to_string();
     let StreamCatchupState {
         last_stream_id,
@@ -767,6 +741,33 @@ pub(crate) async fn poll_messages(
     let mut seen = 0usize;
     let mut pages = 0usize;
     loop {
+        anyhow::ensure!(!tx.is_closed(), "message stream closed during catch-up");
+        // A device removed while its stream is open (RevokeDevice, or Logout elsewhere) must stop
+        // receiving now — the stream authenticated once, at open. Ending it with the answer
+        // AuthenticateDevice gives sends the client through refresh (refused since 2decc7a) to
+        // device auth, which tells it it was removed. The marker lives one access-token TTL, and
+        // this runs on every wakeup and fallback tick, so an open stream is caught well inside it.
+        // Fail open on a Redis error: ending every stream on a Redis blip is a reconnect storm.
+        if let Some(device) = device_id.filter(|d| !d.is_empty()) {
+            match queue.is_device_revoked(device).await {
+                Ok(true) => {
+                    tracing::info!("poll_messages: device was removed — ending its stream");
+                    let _ = tx
+                        .send(Err(
+                            construct_server_shared::auth_utils::device_refusal_status(
+                                construct_error::DeviceRefusal::Removed,
+                            ),
+                        ))
+                        .await;
+                    anyhow::bail!("device removed while its stream was open");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "poll_messages: revoked-device check failed — continuing")
+                }
+            }
+        }
+
         pages += 1;
         let device_before = last_stream_id.clone();
         let user_before = user_stream_id.clone();

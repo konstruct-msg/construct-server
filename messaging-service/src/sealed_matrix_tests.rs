@@ -1092,7 +1092,7 @@ async fn a1_auth_fails_closed_when_the_blocklist_cannot_be_read() {
     );
 }
 
-/// `msg:dedup:{message_id}` is written after the mailbox entry, never before: marking first turned
+/// The scoped dedup key is written after the mailbox entry, never before: marking first turned
 /// a failed XADD into an acknowledged message with no stream entry, and the retry into a no-op.
 /// The XADD is made to fail by putting a string where the recipient's stream goes. Mutation: mark
 /// before the write — the key exists after the failed dispatch.
@@ -1116,7 +1116,14 @@ async fn d1_a_message_is_marked_dispatched_only_once_its_stream_entry_exists() {
     let app_context = Arc::new(h.ctx.to_app_context());
     let mut conn = h.ctx.redis_conn.clone();
     let stream_key = format!("delivery:offline:{recipient}");
-    let dedup_key = format!("msg:dedup:{message_id}");
+    let dedup_key = construct_queue::MessageDedupKey::new(
+        &envelope.sender_id,
+        &envelope.recipient_id,
+        envelope.recipient_device.as_deref(),
+        &message_id,
+    )
+    .as_str()
+    .to_string();
     let dedup_exists = async |conn: &mut redis::aio::ConnectionManager| -> bool {
         redis::cmd("EXISTS")
             .arg(&dedup_key)
@@ -1385,6 +1392,471 @@ async fn p1_a_stream_examines_a_siblings_entries_once() {
         &[
             format!("delivery:offline:{user}"),
             format!("delivery:offline:{user}:{sibling}"),
+        ],
+    )
+    .await;
+}
+
+/// One wakeup must drain the backlog, including empty pages consisting entirely of sibling
+/// entries. After #116 such a page has `has_more = true`: waiting for the next 5-second tick
+/// makes catch-up take one tick per page even though Redis already holds the next message.
+#[tokio::test]
+#[serial]
+async fn p2_one_stream_poll_drains_pages_including_an_empty_sibling_page() {
+    use crate::stream::{StreamCatchupState, poll_messages};
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let mut queue = MessageQueue::new(&h.ctx.config).await.expect("queue");
+    // Both carriers, plus the legacy device-less reader. Each case has more than one page.
+    for (device, sibling_count) in [(None, 0), (Some("p2-reader"), 0), (Some("p2-reader"), 205)] {
+        let user = uuid::Uuid::new_v4();
+        let account = user.to_string();
+        let sibling = "p2-sibling";
+        for _ in 0..sibling_count {
+            let mut env =
+                construct_message::MessageEnvelope::new_key_sync("alice".into(), account.clone());
+            env.recipient_device = Some(sibling.into());
+            queue
+                .write_message_to_device_streams(&account, &[sibling.into()], &env)
+                .await
+                .expect("sibling backlog");
+        }
+        let mut expected = Vec::new();
+        for index in 0..125 {
+            let mut env =
+                construct_message::MessageEnvelope::new_key_sync("alice".into(), account.clone());
+            env.recipient_device = device.map(str::to_string);
+            expected.push(env.message_id.clone());
+            if let Some(device) = device.filter(|_| index != 60) {
+                queue
+                    .write_message_to_device_streams(&account, &[device.into()], &env)
+                    .await
+                    .expect("reader backlog");
+            } else {
+                // Keep one user-only entry between device pages: neither source can be
+                // advanced past the shorter read's horizon without actually delivering it.
+                queue
+                    .write_message_to_user_stream(&account, &env)
+                    .await
+                    .expect("legacy backlog");
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let mut catchup = StreamCatchupState::default();
+        poll_messages(
+            &mut queue,
+            &h.ctx.config.messaging,
+            user,
+            device,
+            &mut catchup,
+            &tx,
+            false,
+        )
+        .await
+        .expect("one catch-up poll");
+        let mut previous_cursor = (0_u64, 0_u64);
+        let mut received: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|response| {
+                let response = response.expect("message, not an error");
+                let cursor = response.stream_cursor.expect("resume cursor");
+                let (ts, seq) = cursor.split_once('-').unwrap();
+                let cursor = (ts.parse::<u64>().unwrap(), seq.parse::<u64>().unwrap());
+                assert!(cursor >= previous_cursor, "delivery cursor regressed: {previous_cursor:?} -> {cursor:?}");
+                previous_cursor = cursor;
+                let Some(construct_server_shared::shared::proto::services::v1::message_stream_response::Response::Message(env)) = response.response else {
+                    panic!("expected a message");
+                };
+                let Some(core_proto::envelope::MessageIdType::MessageId(id)) = env.message_id_type else {
+                    panic!("expected a message id");
+                };
+                id
+            }).collect();
+        // Redis orders by each stream's ids; the independent sequence counters can put the
+        // legacy-only entry just before a device copy inserted in the same millisecond.
+        received.sort();
+        expected.sort();
+        assert_eq!(
+            received, expected,
+            "device={device:?}, siblings={sibling_count}"
+        );
+        poll_messages(
+            &mut queue,
+            &h.ctx.config.messaging,
+            user,
+            device,
+            &mut catchup,
+            &tx,
+            false,
+        )
+        .await
+        .expect("idle poll");
+        assert!(
+            rx.try_recv().is_err(),
+            "a second poll must not redeliver the pages"
+        );
+        let mut conn = h.ctx.redis_conn.clone();
+        del(
+            &mut conn,
+            &[
+                format!("delivery:offline:{user}"),
+                format!("delivery:offline:{user}:p2-reader"),
+                format!("delivery:offline:{user}:{sibling}"),
+            ],
+        )
+        .await;
+    }
+}
+
+/// A sender chooses its message id. Reusing another sender's id, or addressing a different
+/// recipient/device with that id, must not suppress delivery. Only the same routing scope is
+/// an idempotent retry. The global key let the first sender reserve an id for everybody.
+#[tokio::test]
+#[serial]
+async fn d2_dispatch_dedup_is_scoped_to_sender_recipient_and_device() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let app = Arc::new(h.ctx.to_app_context());
+    let (alice, bob, recipient, other) = (
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    );
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut conn = h.ctx.redis_conn.clone();
+    // Old global keys cannot be dual-read safely: another sender may have planted one.
+    let old_key = format!("msg:dedup:{id}");
+    let _: () = redis::cmd("SET")
+        .arg(&old_key)
+        .arg("1")
+        .arg("EX")
+        .arg(60)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let mut cleanup = vec![
+        format!("delivery:offline:{recipient}"),
+        format!("delivery:offline:{other}"),
+        old_key,
+    ];
+    for (sender, to, device, expected_len) in [
+        (&alice, recipient, None, 1),
+        (&bob, recipient, None, 2),
+        (&alice, other, None, 1),
+        (&alice, recipient, Some("d2-device-a"), 3),
+        (&alice, recipient, Some("d2-device-b"), 4),
+    ] {
+        let mut env = construct_message::MessageEnvelope::new_direct_message(
+            id.clone(),
+            sender.clone(),
+            to.to_string(),
+            vec![0; 32],
+            0,
+            b"ciphertext".to_vec(),
+            String::new(),
+        );
+        env.recipient_device = device.map(str::to_string);
+        cleanup.push(
+            construct_queue::MessageDedupKey::new(sender, &to.to_string(), device, &id)
+                .as_str()
+                .to_string(),
+        );
+        for _ in 0..2 {
+            crate::core::dispatch_envelope(&app, env.clone(), None)
+                .await
+                .expect("dispatch");
+            assert_eq!(
+                stream_len(&mut conn, &to).await,
+                expected_len,
+                "sender={sender}, recipient={to}, device={device:?}; only its own retry is a no-op"
+            );
+        }
+    }
+    del(&mut conn, &cleanup).await;
+}
+
+/// The unary early return and the dispatcher must use the same scope. Exercise the real RPC:
+/// a global key here would acknowledge Bob's send before it ever reaches the dispatcher.
+#[tokio::test]
+#[serial]
+async fn d3_send_message_fast_path_uses_the_same_scoped_dedup_as_dispatch() {
+    use construct_server_shared::shared::proto::services::v1::{
+        SendMessageRequest, messaging_service_server::MessagingService,
+    };
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let service = crate::grpc::MessagingGrpcService {
+        context: h.ctx.clone(),
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut conn = h.ctx.redis_conn.clone();
+    let old_key = format!("msg:dedup:{id}");
+    let _: () = redis::cmd("SET")
+        .arg(&old_key)
+        .arg("1")
+        .arg("EX")
+        .arg(60)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let mut cleanup = vec![format!("delivery:offline:{recipient}"), old_key];
+    for (index, sender) in [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()]
+        .into_iter()
+        .enumerate()
+    {
+        let device = hex::encode(&random_bytes32()[..16]);
+        let (token, _, _) = h
+            .ctx
+            .auth_manager
+            .create_token_for_device(&sender, Some(&device))
+            .expect("authenticated sender");
+        let env = construct_message::MessageEnvelope::new_direct_message(
+            id.clone(),
+            sender.to_string(),
+            recipient.to_string(),
+            vec![0; 32],
+            0,
+            b"ciphertext".to_vec(),
+            String::new(),
+        );
+        let proto_env = crate::envelope::convert_envelope_to_proto(env).unwrap();
+        for _ in 0..2 {
+            let mut req = tonic::Request::new(SendMessageRequest {
+                message: Some(proto_env.clone()),
+                ..Default::default()
+            });
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            assert!(
+                service
+                    .send_message(req)
+                    .await
+                    .expect("unary send")
+                    .into_inner()
+                    .success
+            );
+            assert_eq!(stream_len(&mut conn, &recipient).await, (index + 1) as i64);
+        }
+        let hourly: u64 = redis::cmd("GET")
+            .arg(format!("rate:msg:{{{sender}}}:hour"))
+            .query_async(&mut conn)
+            .await
+            .expect("hourly send count");
+        assert_eq!(
+            hourly, 1,
+            "a cached retry must not charge the hourly limit twice"
+        );
+        cleanup.push(
+            construct_queue::MessageDedupKey::new(
+                &sender.to_string(),
+                &recipient.to_string(),
+                None,
+                &id,
+            )
+            .as_str()
+            .to_string(),
+        );
+        cleanup.push(format!("trust:{sender}"));
+        cleanup.push(format!("rate:msg:{{{sender}}}:hour"));
+        let day = chrono::Utc::now().timestamp() / 86_400;
+        cleanup.push(format!("fanout:{sender}:{day}"));
+        cleanup.push(format!("fanout:{sender}:{day}:probe"));
+    }
+    del(&mut conn, &cleanup).await;
+}
+
+/// Catch-up checks revocation again between pages. Holding the response channel to one item
+/// lets the test revoke after the first read, before another read can start, without sleeps.
+#[tokio::test]
+#[serial]
+async fn p3_a_device_revoked_during_catchup_receives_no_next_page() {
+    use crate::stream::{StreamCatchupState, poll_messages};
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let user = uuid::Uuid::new_v4();
+    let device = hex::encode(&random_bytes32()[..16]);
+    let mut queue = MessageQueue::new(&h.ctx.config).await.expect("queue");
+    for _ in 0..75 {
+        let mut env =
+            construct_message::MessageEnvelope::new_key_sync("alice".into(), user.to_string());
+        env.recipient_device = Some(device.clone());
+        queue
+            .write_message_to_device_streams(&user.to_string(), std::slice::from_ref(&device), &env)
+            .await
+            .expect("backlog");
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let config = h.ctx.config.clone();
+    let reader = device.clone();
+    let poll = tokio::spawn(async move {
+        poll_messages(
+            &mut queue,
+            &config.messaging,
+            user,
+            Some(&reader),
+            &mut StreamCatchupState::default(),
+            &tx,
+            false,
+        )
+        .await
+    });
+    rx.recv()
+        .await
+        .expect("first response")
+        .expect("first message");
+    h.ctx
+        .queue
+        .lock()
+        .await
+        .mark_device_revoked(&device, 60)
+        .await
+        .expect("revoke");
+    let mut received = 1;
+    while let Some(response) = rx.recv().await {
+        match response {
+            Ok(_) => received += 1,
+            Err(status) => {
+                assert_eq!(status.code(), tonic::Code::Unauthenticated);
+                break;
+            }
+        }
+    }
+    assert_eq!(received, 50, "the next page is refused");
+    poll.await.unwrap().expect_err("revoked stream ends");
+    let mut conn = h.ctx.redis_conn.clone();
+    assert_eq!(stream_len(&mut conn, &user).await, 75, "reads never delete");
+    del(
+        &mut conn,
+        &[
+            format!("delivery:offline:{user}"),
+            format!("delivery:offline:{user}:{device}"),
+            format!("revoked_device:{device}"),
+        ],
+    )
+    .await;
+}
+
+/// The existing Privacy Pass contract spends on every attempt, including a replay and a
+/// mailbox write failure. A fresh token can retry the same delivery tag; refunding a nonce or
+/// moving the replay guard before redemption would change that anti-abuse policy.
+#[tokio::test]
+#[serial]
+async fn t2_enforce_retries_use_a_fresh_token_after_a_failed_write_or_a_replay() {
+    let Some(h) = build_harness(StealthTokenPolicy::Enforce).await else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let tag = random_bytes32();
+    let mut conn = h.ctx.redis_conn.clone();
+    let stream = format!("delivery:offline:{recipient}");
+    let mut cleanup = vec![stream.clone()];
+    let mut envelopes = Vec::new();
+    for _ in 0..3 {
+        let nonce = random_bytes32();
+        let token = issue_client_token(&h.token_issuer_key, &nonce);
+        envelopes.push(build_sealed_envelope(
+            &recipient,
+            &tag,
+            Some(&nonce),
+            Some(&seal_token_for_server(&token, &h.token_enc_secret)),
+        ));
+        cleanup.push(format!("spent:{}", hex::encode(Sha256::digest(nonce))));
+    }
+    let _: () = redis::cmd("SET")
+        .arg(&stream)
+        .arg("not-a-stream")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let err = dispatch_sealed_sender(&h.ctx, &envelopes[0])
+        .await
+        .expect_err("failed write");
+    assert!(
+        err.downcast_ref::<TokenRejected>().is_none(),
+        "token passed; write failed"
+    );
+    del(&mut conn, std::slice::from_ref(&stream)).await;
+    let err = dispatch_sealed_sender(&h.ctx, &envelopes[0])
+        .await
+        .expect_err("spent nonce");
+    assert_eq!(
+        err.downcast_ref::<TokenRejected>().unwrap().label,
+        "double_spent"
+    );
+    assert_eq!(stream_len(&mut conn, &recipient).await, 0);
+    for envelope in &envelopes[1..] {
+        assert!(
+            dispatch_sealed_sender(&h.ctx, envelope)
+                .await
+                .expect("fresh token")
+                .success
+        );
+        assert_eq!(
+            stream_len(&mut conn, &recipient).await,
+            1,
+            "retry delivers once; replay adds nothing"
+        );
+    }
+    for key in &cleanup[1..] {
+        assert!(
+            redis::cmd("EXISTS")
+                .arg(key)
+                .query_async::<bool>(&mut conn)
+                .await
+                .unwrap(),
+            "every attempt spent its fresh token"
+        );
+    }
+    let tag_hash = hex::encode(Sha256::digest(tag));
+    cleanup.extend([
+        format!("sealed:exact:{tag_hash}"),
+        format!("sealed:seen:{tag_hash}"),
+    ]);
+    del(&mut conn, &cleanup).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn t3_a_missing_delivery_tag_is_counted_and_does_not_block_delivery() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let counter = &construct_metrics::MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL;
+    let before = counter.get();
+    let recipient = uuid::Uuid::new_v4();
+    let empty = build_sealed_envelope(&recipient, &[], None, None);
+    for _ in 0..2 {
+        assert!(
+            dispatch_sealed_sender(&h.ctx, &empty)
+                .await
+                .unwrap()
+                .success
+        );
+    }
+    assert_eq!(counter.get() - before, 2);
+    let tag = random_bytes32();
+    dispatch_sealed_sender(&h.ctx, &build_sealed_envelope(&recipient, &tag, None, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        counter.get() - before,
+        2,
+        "a present tag does not count as missing"
+    );
+    let mut conn = h.ctx.redis_conn.clone();
+    assert_eq!(stream_len(&mut conn, &recipient).await, 3);
+    let tag_hash = hex::encode(Sha256::digest(tag));
+    del(
+        &mut conn,
+        &[
+            format!("delivery:offline:{recipient}"),
+            format!("sealed:exact:{tag_hash}"),
+            format!("sealed:seen:{tag_hash}"),
         ],
     )
     .await;
