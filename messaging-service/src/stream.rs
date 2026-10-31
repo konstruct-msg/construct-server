@@ -687,6 +687,11 @@ async fn retry_delay(tx: &mpsc::Sender<()>) -> bool {
     }
 }
 
+/// One mailbox page on the stream. `read_mailbox_messages` reads each source
+/// twice this deep, so a sibling backlog of that depth fills the user read and
+/// ends the page before this device's later entries.
+pub(crate) const STREAM_MAILBOX_PAGE: usize = 50;
+
 /// Poll for new messages from Redis Streams
 ///
 /// Takes `queue` as a per-stream clone rather than locking the global
@@ -708,67 +713,7 @@ pub(crate) async fn poll_messages(
     // the log into one line per second per connected user.
     is_resume_catchup: bool,
 ) -> anyhow::Result<()> {
-    let mut is_resume_catchup = is_resume_catchup;
-    loop {
-        anyhow::ensure!(!tx.is_closed(), "message stream closed during catch-up");
-        if !poll_message_page(
-            queue,
-            config,
-            user_id,
-            device_id,
-            catchup,
-            tx,
-            is_resume_catchup,
-        )
-        .await?
-        {
-            return Ok(());
-        }
-        // An empty final read after a full page is ordinary exhaustion, not an empty resume.
-        is_resume_catchup = false;
-    }
-}
-
-/// Deliver one page and report whether Redis may hold another. An empty page can still make
-/// progress through sibling entries, so continuation follows `has_more`, never message count.
-/// Recheck device revocation on every page and let the bounded response channel apply pressure.
-async fn poll_message_page(
-    queue: &mut construct_queue::MessageQueue,
-    config: &construct_config::MessagingConfig,
-    user_id: uuid::Uuid,
-    device_id: Option<&str>,
-    catchup: &mut StreamCatchupState,
-    tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
-    is_resume_catchup: bool,
-) -> anyhow::Result<bool> {
-    // A device removed while its stream is open (RevokeDevice, or Logout elsewhere) must stop
-    // receiving now — the stream authenticated once, at open. Ending it with the answer
-    // AuthenticateDevice gives sends the client through refresh (refused since 2decc7a) to
-    // device auth, which tells it it was removed. The marker lives one access-token TTL, and
-    // this runs on every wakeup and fallback tick, so an open stream is caught well inside it.
-    // Fail open on a Redis error: ending every stream on a Redis blip is a reconnect storm.
-    if let Some(device) = device_id.filter(|d| !d.is_empty()) {
-        match queue.is_device_revoked(device).await {
-            Ok(true) => {
-                tracing::info!("poll_messages: device was removed — ending its stream");
-                let _ = tx
-                    .send(Err(
-                        construct_server_shared::auth_utils::device_refusal_status(
-                            construct_error::DeviceRefusal::Removed,
-                        ),
-                    ))
-                    .await;
-                anyhow::bail!("device removed while its stream was open");
-            }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "poll_messages: revoked-device check failed — continuing")
-            }
-        }
-    }
-
     let user_id_str = user_id.to_string();
-    let limit = 50;
     let StreamCatchupState {
         last_stream_id,
         user_stream_id,
@@ -783,148 +728,212 @@ async fn poll_message_page(
         construct_metrics::MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL.inc();
     }
 
-    let t_xread = std::time::Instant::now();
     let mode = if device_id.filter(|d| !d.is_empty()).is_some() {
         "device_merge"
     } else {
         "user_only"
     };
-    let user_since = user_read_position(user_stream_id.as_deref(), last_stream_id.as_deref());
-    let page = queue
-        .read_mailbox_messages(
-            &user_id_str,
-            device_id,
-            last_stream_id.as_deref(),
-            user_since,
-            limit,
-        )
-        .await?;
-    // Read before `entries` is moved out: a method on the page borrows the whole struct.
-    let user_only_count = page.user_only();
-    let messages = page.entries;
-    // Delivering to the device consumes the push that announced it; the next envelope may push
-    // again. Only on a non-empty read — an idle poll runs every few seconds per open stream.
-    if !messages.is_empty()
-        && let Some(device) = device_id.filter(|d| !d.is_empty())
-    {
-        let _ = queue.clear_push_outstanding(device).await;
-    }
-    construct_metrics::MSG_MAILBOX_READ_TOTAL
-        .with_label_values(&["stream", mode])
-        .inc();
-    if !page.user_only_ids.is_empty() {
-        construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
-            .with_label_values(&["stream"])
-            .inc_by(page.user_only_ids.len() as u64);
-        // WARN, and with the ids: every one of these is a message `MSG_MAILBOX_USER_WRITE=0`
-        // would have dropped. The counter alone dates the divergence to a scrape interval and
-        // leaves nobody able to ask which message, from whom, by which route — which is where
-        // the gate stood on 2026-09-21 with two entries and no way to name them.
-        tracing::warn!(
-            user_id = %user_id_str,
-            device_id = device_id.unwrap_or(""),
-            mailbox_mode = mode,
-            message_ids = ?page.user_only_ids,
-            "mailbox cutover blocker: delivered from the user stream, absent from the device stream"
-        );
-    }
-    if page.sibling_skipped > 0 {
-        construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
-            .with_label_values(&["stream"])
-            .inc_by(page.sibling_skipped as u64);
-    }
-    let xread_ms = t_xread.elapsed().as_millis();
+    // A page ends at the shorter source read (#116). On a sibling backlog that
+    // page can hold nothing of this device's, and stopping there left the rest
+    // until the next fallback tick. This poll reads on while the page says more
+    // remains. The cursors move only as far as this loop delivers, so a send
+    // that fails resumes there.
+    let mut seen = 0usize;
+    let mut pages = 0usize;
+    loop {
+        anyhow::ensure!(!tx.is_closed(), "message stream closed during catch-up");
+        // A device removed while its stream is open (RevokeDevice, or Logout elsewhere) must stop
+        // receiving now — the stream authenticated once, at open. Ending it with the answer
+        // AuthenticateDevice gives sends the client through refresh (refused since 2decc7a) to
+        // device auth, which tells it it was removed. The marker lives one access-token TTL, and
+        // this runs on every wakeup and fallback tick, so an open stream is caught well inside it.
+        // Fail open on a Redis error: ending every stream on a Redis blip is a reconnect storm.
+        if let Some(device) = device_id.filter(|d| !d.is_empty()) {
+            match queue.is_device_revoked(device).await {
+                Ok(true) => {
+                    tracing::info!("poll_messages: device was removed — ending its stream");
+                    let _ = tx
+                        .send(Err(
+                            construct_server_shared::auth_utils::device_refusal_status(
+                                construct_error::DeviceRefusal::Removed,
+                            ),
+                        ))
+                        .await;
+                    anyhow::bail!("device removed while its stream was open");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "poll_messages: revoked-device check failed — continuing")
+                }
+            }
+        }
 
-    let msg_count = messages.len();
-    if msg_count > 0 {
+        pages += 1;
+        let device_before = last_stream_id.clone();
+        let user_before = user_stream_id.clone();
+
+        let t_xread = std::time::Instant::now();
+        let user_since = user_read_position(user_stream_id.as_deref(), last_stream_id.as_deref());
+        let page = queue
+            .read_mailbox_messages(
+                &user_id_str,
+                device_id,
+                last_stream_id.as_deref(),
+                user_since,
+                STREAM_MAILBOX_PAGE,
+            )
+            .await?;
+        // Read before `entries` is moved out: a method on the page borrows the whole struct.
+        let user_only_count = page.user_only();
+        let has_more = page.has_more;
+        let user_examined_through = page.user_examined_through.clone();
+        let messages = page.entries;
+        // Delivering to the device consumes the push that announced it; the next envelope may push
+        // again. Only on a non-empty read — an idle poll runs every few seconds per open stream.
+        if !messages.is_empty()
+            && let Some(device) = device_id.filter(|d| !d.is_empty())
+        {
+            let _ = queue.clear_push_outstanding(device).await;
+        }
+        construct_metrics::MSG_MAILBOX_READ_TOTAL
+            .with_label_values(&["stream", mode])
+            .inc();
+        if !page.user_only_ids.is_empty() {
+            construct_metrics::MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL
+                .with_label_values(&["stream"])
+                .inc_by(page.user_only_ids.len() as u64);
+            // WARN, and with the ids: every one of these is a message `MSG_MAILBOX_USER_WRITE=0`
+            // would have dropped. The counter alone dates the divergence to a scrape interval and
+            // leaves nobody able to ask which message, from whom, by which route — which is where
+            // the gate stood on 2026-09-21 with two entries and no way to name them.
+            tracing::warn!(
+                user_id = %user_id_str,
+                device_id = device_id.unwrap_or(""),
+                mailbox_mode = mode,
+                message_ids = ?page.user_only_ids,
+                "mailbox cutover blocker: delivered from the user stream, absent from the device stream"
+            );
+        }
+        if page.sibling_skipped > 0 {
+            construct_metrics::MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL
+                .with_label_values(&["stream"])
+                .inc_by(page.sibling_skipped as u64);
+        }
+        let xread_ms = t_xread.elapsed().as_millis();
+
+        let msg_count = messages.len();
+        seen += msg_count;
+        if msg_count > 0 {
+            tracing::info!(
+                user_id = %user_id_str,
+                device_id = device_id.unwrap_or(""),
+                mailbox_mode = mode,
+                msg_count,
+                user_only = user_only_count,
+                xread_ms,
+                last_stream_id = ?last_stream_id,
+                "poll_messages: read messages from Redis offline mailbox"
+            );
+        } else if xread_ms > config.stream_xread_slow_ms {
+            tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
+        }
+
+        for (stream_id, envelope) in messages {
+            // Convert MessageEnvelope to the appropriate stream response
+            let Some(envelope) = envelope else {
+                *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
+                continue;
+            };
+
+            let mut response = if matches!(
+                envelope.message_type,
+                construct_server_shared::message::types::MessageType::Receipt
+            ) {
+                // Parse receipt JSON and send as MessageStreamResponse::Receipt
+                match build_receipt_response(&envelope) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse receipt envelope, skipping");
+                        *last_stream_id = Some(stream_id);
+                        continue;
+                    }
+                }
+            } else {
+                let proto_envelope = convert_envelope_to_proto(envelope)?;
+                proto::MessageStreamResponse {
+                    response: Some(proto::message_stream_response::Response::Message(
+                        proto_envelope,
+                    )),
+                    response_id: None,
+                    stream_cursor: None,
+                    attempt_id: None,
+                }
+            };
+
+            // Attach the Redis stream position so the client can resume on the next
+            // reconnect by passing stream_cursor as SubscribeRequest.since_cursor.
+            response.stream_cursor = Some(stream_id.clone());
+
+            let delivered_message_id = match &response.response {
+                Some(proto::message_stream_response::Response::Message(env)) => env
+                    .message_id_type
+                    .as_ref()
+                    .and_then(|id| match id {
+                        construct_server_shared::shared::proto::core::v1::envelope::MessageIdType::MessageId(
+                            mid,
+                        ) if !mid.is_empty() => Some(mid.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+
+            tx.send(Ok(response)).await?;
+            tracing::info!(
+                user_id = %user_id_str,
+                stream_id = %stream_id,
+                message_id = delivered_message_id.as_deref().unwrap_or(""),
+                "poll_messages: pushed message to gRPC stream"
+            );
+            *last_stream_id = Some(stream_id);
+        }
+
+        // Only once every entry above is delivered: an early return above leaves both
+        // positions where the next poll must start from.
+        if user_examined_through.is_some() {
+            *user_stream_id = user_examined_through;
+        }
+
+        if !has_more {
+            break;
+        }
+        // A page that reports more and moves neither cursor would spin.
+        if last_stream_id == &device_before && user_stream_id == &user_before {
+            tracing::warn!(
+                user_id = %user_id_str,
+                "poll_messages: has_more but the cursors did not move — stopping"
+            );
+            break;
+        }
+    }
+
+    if pages > 1 {
         tracing::info!(
             user_id = %user_id_str,
-            device_id = device_id.unwrap_or(""),
-            mailbox_mode = mode,
-            msg_count,
-            user_only = user_only_count,
-            xread_ms,
-            last_stream_id = ?last_stream_id,
-            "poll_messages: read messages from Redis offline mailbox"
+            pages,
+            msg_count = seen,
+            "poll_messages: read on while the page had more"
         );
-    } else if empty_poll_is_a_finding(msg_count, is_resume_catchup) {
+    }
+    if empty_poll_is_a_finding(seen, is_resume_catchup) {
         tracing::info!(
             user_id = %user_id_str,
-            msg_count,
-            xread_ms,
+            msg_count = seen,
             last_stream_id = ?last_stream_id,
             "poll_messages: nothing after the client's resume cursor"
         );
-    } else if xread_ms > config.stream_xread_slow_ms {
-        tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
     }
 
-    for (stream_id, envelope) in messages {
-        // Convert MessageEnvelope to the appropriate stream response
-        let Some(envelope) = envelope else {
-            *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
-            continue;
-        };
-
-        let mut response = if matches!(
-            envelope.message_type,
-            construct_server_shared::message::types::MessageType::Receipt
-        ) {
-            // Parse receipt JSON and send as MessageStreamResponse::Receipt
-            match build_receipt_response(&envelope) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to parse receipt envelope, skipping");
-                    *last_stream_id = Some(stream_id);
-                    continue;
-                }
-            }
-        } else {
-            let proto_envelope = convert_envelope_to_proto(envelope)?;
-            proto::MessageStreamResponse {
-                response: Some(proto::message_stream_response::Response::Message(
-                    proto_envelope,
-                )),
-                response_id: None,
-                stream_cursor: None,
-                attempt_id: None,
-            }
-        };
-
-        // Attach the Redis stream position so the client can resume on the next
-        // reconnect by passing stream_cursor as SubscribeRequest.since_cursor.
-        response.stream_cursor = Some(stream_id.clone());
-
-        let delivered_message_id = match &response.response {
-            Some(proto::message_stream_response::Response::Message(env)) => env
-                .message_id_type
-                .as_ref()
-                .and_then(|id| match id {
-                    construct_server_shared::shared::proto::core::v1::envelope::MessageIdType::MessageId(
-                        mid,
-                    ) if !mid.is_empty() => Some(mid.clone()),
-                    _ => None,
-                }),
-            _ => None,
-        };
-
-        tx.send(Ok(response)).await?;
-        tracing::info!(
-            user_id = %user_id_str,
-            stream_id = %stream_id,
-            message_id = delivered_message_id.as_deref().unwrap_or(""),
-            "poll_messages: pushed message to gRPC stream"
-        );
-        *last_stream_id = Some(stream_id);
-    }
-
-    // Only once every entry above is delivered: an early return above leaves both
-    // positions where the next poll must start from.
-    if page.user_examined_through.is_some() {
-        *user_stream_id = page.user_examined_through;
-    }
-
-    Ok(page.has_more)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1125,5 +1134,121 @@ mod tests {
             compare_stream_ids("99-9", "100-0"),
             std::cmp::Ordering::Less
         );
+    }
+}
+
+/// One poll used to stop after a single page. After a page ends at the shorter
+/// source read, a sibling backlog of `2 * STREAM_MAILBOX_PAGE` fills that page
+/// with nothing of this device's, and the device's own next message waited for
+/// the fallback tick. Mutation: `break` on the first page — this message is absent.
+#[cfg(test)]
+mod catchup_drains_pages {
+    use super::*;
+
+    fn queue_config() -> construct_config::Config {
+        let redis =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        unsafe {
+            std::env::set_var("REDIS_URL", &redis);
+            if std::env::var_os("DATABASE_URL").is_none() {
+                std::env::set_var("DATABASE_URL", "postgres://test:test@localhost/test");
+            }
+            std::env::set_var("INSTANCE_DOMAIN", "test.local");
+            std::env::set_var(
+                "SERVER_SIGNING_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+            std::env::set_var("TOKEN_ISSUER_KEY", "0".repeat(64));
+            std::env::set_var("APNS_DEVICE_TOKEN_ENCRYPTION_KEY", "0".repeat(64));
+            std::env::set_var("LOG_HASH_SALT", "test_log_hash_salt_unique_for_tests_only");
+        }
+        let mut config =
+            construct_config::Config::from_env_for(construct_config::SecretNeeds::MESSAGING)
+                .expect("test config");
+        config.messaging.mailbox_user_write = true;
+        config
+    }
+
+    fn id_of(response: &proto::MessageStreamResponse) -> Option<String> {
+        match &response.response {
+            Some(proto::message_stream_response::Response::Message(env)) => match &env
+                .message_id_type
+            {
+                Some(
+                    construct_server_shared::shared::proto::core::v1::envelope::MessageIdType::MessageId(
+                        mid,
+                    ),
+                ) if !mid.is_empty() => Some(mid.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn one_poll_delivers_past_a_sibling_page() {
+        let mut queue = construct_queue::MessageQueue::new(&queue_config())
+            .await
+            .expect("Redis");
+        let user = uuid::Uuid::new_v4();
+        let reader = format!("reader-{}", uuid::Uuid::new_v4());
+        let sibling = format!("sibling-{}", uuid::Uuid::new_v4());
+        let user_s = user.to_string();
+
+        let named = |device: &str| {
+            let mut env = construct_message::types::MessageEnvelope::new_key_sync(
+                "alice".into(),
+                user_s.clone(),
+            );
+            env.recipient_device = Some(device.to_string());
+            env
+        };
+        // The user-stream read of one page is twice STREAM_MAILBOX_PAGE deep.
+        for _ in 0..(STREAM_MAILBOX_PAGE * 2) {
+            queue
+                .write_message_to_device_streams(
+                    &user_s,
+                    std::slice::from_ref(&sibling),
+                    &named(&sibling),
+                )
+                .await
+                .expect("sibling write");
+        }
+        let own = named(&reader);
+        let own_id = own.message_id.clone();
+        queue
+            .write_message_to_device_streams(&user_s, std::slice::from_ref(&reader), &own)
+            .await
+            .expect("reader write");
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut catchup = StreamCatchupState::default();
+        poll_messages(
+            &mut queue,
+            &construct_config::MessagingConfig::default(),
+            user,
+            Some(&reader),
+            &mut catchup,
+            &tx,
+            true,
+        )
+        .await
+        .expect("poll");
+        drop(tx);
+
+        let mut ids = Vec::new();
+        while let Some(item) = rx.recv().await {
+            if let Some(id) = item.ok().as_ref().and_then(id_of) {
+                ids.push(id);
+            }
+        }
+        assert!(
+            ids.contains(&own_id),
+            "one poll must walk past the sibling page, got {ids:?}"
+        );
+        assert_eq!(ids.iter().filter(|id| *id == &own_id).count(), 1);
+
+        queue.delete_mailbox(&user_s).await.expect("cleanup");
     }
 }
