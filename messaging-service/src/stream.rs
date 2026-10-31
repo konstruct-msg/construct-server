@@ -1206,14 +1206,18 @@ mod catchup_drains_pages {
         // The user-stream read of one page is twice STREAM_MAILBOX_PAGE deep.
         for _ in 0..(STREAM_MAILBOX_PAGE * 2) {
             queue
-                .write_message_to_device_streams(&user_s, &[sibling.clone()], &named(&sibling))
+                .write_message_to_device_streams(
+                    &user_s,
+                    std::slice::from_ref(&sibling),
+                    &named(&sibling),
+                )
                 .await
                 .expect("sibling write");
         }
         let own = named(&reader);
         let own_id = own.message_id.clone();
         queue
-            .write_message_to_device_streams(&user_s, &[reader.clone()], &own)
+            .write_message_to_device_streams(&user_s, std::slice::from_ref(&reader), &own)
             .await
             .expect("reader write");
 
