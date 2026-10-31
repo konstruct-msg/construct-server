@@ -134,6 +134,12 @@ pub async fn dispatch_envelope(
         envelope.message_type,
         MessageType::DirectMessage | MessageType::MLSMessage | MessageType::SenderSync
     );
+    let dedup_key = construct_queue::MessageDedupKey::new(
+        sender_id,
+        recipient_id,
+        envelope.recipient_device.as_deref(),
+        message_id,
+    );
 
     // Dedup EXISTS is a fast path only. The SETEX that makes a retry a no-op
     // happens *after* the mailbox XADD — marking first turned a write failure
@@ -145,7 +151,7 @@ pub async fn dispatch_envelope(
             wait_ms = t_lock.elapsed().as_millis(),
             "queue lock acquired (dedup)"
         );
-        match queue.is_message_duplicate(message_id).await {
+        match queue.is_message_duplicate(&dedup_key).await {
             Ok(true) => {
                 tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
                 return Ok(());
@@ -206,7 +212,7 @@ pub async fn dispatch_envelope(
         // SETEX failure here can double-deliver on retry — better than
         // ACK-without-write. Log and proceed: the mailbox is the source of
         // truth.
-        if let Err(e) = queue.mark_message_dispatched(message_id).await {
+        if let Err(e) = queue.mark_message_dispatched(&dedup_key).await {
             tracing::warn!(
                 error = %e,
                 message_id = %message_id,

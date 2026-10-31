@@ -152,8 +152,9 @@ Client → MessagingService::SendMessage
   └─► messaging-service/src/grpc.rs
       async fn send_message(...)
         ├─ extract message_id from envelope.message_id (echo back to client)
-        ├─ idempotency check: EXISTS msg:dedup:{message_id} (set with SET EX 24h only
+        ├─ idempotency check: EXISTS msg:dedup:v2:{scope_hash} (set with SET EX 24h only
         │    after the mailbox XADD — check-then-set, not SETNX)
+        │    scope = sender account + recipient account + recipient device (or none) + message_id
         └─► messaging-service/src/core.rs
             pub async fn dispatch_envelope(...)   (local only — federation is the sealed path, §7)
               └─ write directly to Redis Stream (XADD delivery:offline:{user}[:{device}] + PUBLISH wakeup)
@@ -267,6 +268,8 @@ his client subscribes with `since_cursor` — the Redis stream ID of the last me
    the user stream is read from `StreamCatchupState::user_stream_id` when that is ahead —
    a server-side position that moves past entries the reader examined and skipped (a
    sibling device's), never told to the client;
+   continues immediately while `MailboxPage::has_more`, even when a page contains only
+   sibling entries; checks device revocation before each page and stops on a closed channel;
 2. does **not** delete from the client cursor. Client-asserted `XTRIM` caused silent loss
    (paging/cancel races; multi-device shared mailbox). See construct-docs
    `decisions/minimal-server-delivery.md` (Accepted).
@@ -545,7 +548,11 @@ docker logs construct-caddy --tail 50
 **Messaging:**
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
-- Idempotency via Redis `msg:dedup:{message_id}` (24 h, set after the mailbox write)
+- Idempotency via Redis `msg:dedup:v2:{scope_hash}` (24 h, set after the mailbox write).
+  The length-prefixed hash includes sender account, recipient account, recipient device (or
+  none), and message id. Unary fast-path, dispatch, and mailbox merge use the same scope.
+  Old global keys are not read: they can suppress another sender. A retry spanning the
+  rollout may be delivered again once; mailbox retention is unchanged.
 - Offline delivery (Redis stream `delivery:offline:{user_id}[:{device_id}]`; `since_cursor` = read offset only — **no client XTRIM**; retention via `MAXLEN ~` + age sweep 7d)
 - Dual-read mailbox (device + user merge when token has `device_id`; cutover flag `MSG_MAILBOX_USER_WRITE`)
 - Delivery receipts routed back to sender
@@ -582,6 +589,10 @@ cannot fan out to other users. Empty `token_spend_id` keeps legacy per-envelope 
 - `MSG_STEALTH_TOKEN_POLICY` off/warn/enforce; typed enforce rejection
   `FAILED_PRECONDITION privacy_pass:{label}`
 - `delivery_tag` replay guard (Redis `sealed:exact`/`sealed:seen`)
+- Empty delivery tags remain compatible and are counted by
+  `construct_msg_sealed_delivery_tag_missing_total` at the local replay guard.
+  Token redemption still precedes that guard: retries use a fresh token, even after a
+  failed mailbox write; no nonce is refunded (234, `sealed_matrix_tests::t2`).
 
 **Push:**
 - APNs prod + sandbox clients, routed per-token by `push_environment`

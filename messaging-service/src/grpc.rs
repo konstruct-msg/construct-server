@@ -443,6 +443,13 @@ impl MessagingService for MessagingGrpcService {
         };
 
         use construct_server_shared::message::types::{MessageEnvelope, ProtoEnvelopeContext};
+        let recipient_device = core::named_recipient_device(envelope.recipient_device.as_ref());
+        let dedup_key = construct_queue::MessageDedupKey::new(
+            &sender_id.to_string(),
+            &recipient.user_id,
+            recipient_device.as_deref(),
+            &message_id,
+        );
 
         // ── Early idempotency fast-path ─────────────────────────────────────────
         // Check if this message_id was already dispatched BEFORE touching rate
@@ -450,7 +457,7 @@ impl MessagingService for MessagingGrpcService {
         // so without this check every retry inflates the hourly rate counter.
         {
             let mut queue = self.context.queue.lock().await;
-            match queue.is_message_duplicate(&message_id).await {
+            match queue.is_message_duplicate(&dedup_key).await {
                 Ok(true) => {
                     tracing::debug!(
                         message_id = %message_id,
@@ -643,7 +650,7 @@ impl MessagingService for MessagingGrpcService {
             // Carried across the boundary rather than dropped: until now the only
             // reader of this field was the Sentinel check above, so a sender that
             // named a device was answered by a write to every device of the account.
-            recipient_device: core::named_recipient_device(envelope.recipient_device.as_ref()),
+            recipient_device,
         });
         // Do not set max_queue_len from sender trust. Redis MAXLEN trims the
         // recipient's whole inbox; new-account volume is hourly_limit_*.

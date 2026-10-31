@@ -15,6 +15,7 @@
 
 mod cache;
 mod connection;
+mod dedup;
 mod delivery;
 mod gap;
 mod intake_generation;
@@ -25,6 +26,7 @@ mod replay;
 mod sessions;
 mod tokens;
 
+pub use dedup::MessageDedupKey;
 pub use gap::MailboxGap;
 pub use intake_generation::intake_generation_key;
 pub use pow::PowChallengeRecord;
@@ -902,7 +904,7 @@ impl MessageQueue {
     ///
     /// - No `device_id`: legacy user stream only.
     /// - With `device_id` (step 3 transitional dual-read): merge device stream + user
-    ///   stream, dedupe by `message_id` (prefer device copy), order by Redis stream id
+    ///   stream, dedupe by `MessageDedupKey` (prefer device copy), order by Redis stream id
     ///   as a time watermark, return at most `count` entries.
     ///
     /// Stream ids from the two keys are not the same sequence, but both are
@@ -995,25 +997,25 @@ impl MessageQueue {
         Ok(None)
     }
 
-    /// Returns true if this message_id was already dispatched (duplicate retry).
-    pub async fn is_message_duplicate(&mut self, message_id: &str) -> Result<bool> {
+    /// Returns true if this scoped delivery was already dispatched (duplicate retry).
+    pub async fn is_message_duplicate(&mut self, key: &MessageDedupKey) -> Result<bool> {
         delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
             self.delivery_queue_prefix.clone(),
         )
-        .is_message_duplicate(message_id)
+        .is_message_duplicate(key)
         .await
     }
 
-    /// Mark message_id as dispatched (idempotency key, TTL 24h).
-    pub async fn mark_message_dispatched(&mut self, message_id: &str) -> Result<()> {
+    /// Mark a scoped delivery as dispatched (idempotency key, TTL 24h).
+    pub async fn mark_message_dispatched(&mut self, key: &MessageDedupKey) -> Result<()> {
         delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
             self.delivery_queue_prefix.clone(),
         )
-        .mark_message_dispatched(message_id)
+        .mark_message_dispatched(key)
         .await
     }
 
@@ -1143,9 +1145,9 @@ impl MailboxPage {
 
 /// Merge device + user mailbox pages for transitional dual-read.
 ///
-/// Prefer the device copy when `message_id` collides. Order by Redis stream id
+/// Prefer the device copy within the same `MessageDedupKey` scope. Order by Redis stream id
 /// (millisecond watermark). Corrupt/`None` envelopes keep their stream ids for
-/// cursor advance and never collide on message_id.
+/// cursor advance and never collide with a decoded envelope.
 ///
 /// **A user-stream entry named to a different device is not this reader's.** The
 /// legacy user stream holds every envelope of the account, including the ones
@@ -1177,13 +1179,15 @@ fn merge_mailbox_pages(
 ) -> MailboxPage {
     use std::collections::{HashMap, HashSet};
 
-    let device_ids: HashSet<String> = device_msgs
+    let device_ids: HashSet<MessageDedupKey> = device_msgs
         .iter()
-        .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone()))
+        .filter_map(|(_, e)| e.as_ref().map(MessageDedupKey::for_envelope))
         .collect();
 
-    let mut by_message_id: HashMap<String, (String, construct_message::types::MessageEnvelope)> =
-        HashMap::new();
+    let mut by_message_id: HashMap<
+        MessageDedupKey,
+        (String, construct_message::types::MessageEnvelope),
+    > = HashMap::new();
     let mut orphans: Vec<(String, Option<construct_message::types::MessageEnvelope>)> = Vec::new();
     let mut sibling_skipped = 0usize;
     // The last user entry examined, wherever it goes below — kept, overwritten by the
@@ -1212,7 +1216,7 @@ fn merge_mailbox_pages(
                     sibling_skipped += 1;
                     continue;
                 }
-                by_message_id.insert(env.message_id.clone(), (stream_id, env));
+                by_message_id.insert(MessageDedupKey::for_envelope(&env), (stream_id, env));
             }
             None => orphans.push((stream_id, None)),
         }
@@ -1220,7 +1224,7 @@ fn merge_mailbox_pages(
     for (stream_id, envelope) in device_msgs {
         match envelope {
             Some(env) => {
-                by_message_id.insert(env.message_id.clone(), (stream_id, env));
+                by_message_id.insert(MessageDedupKey::for_envelope(&env), (stream_id, env));
             }
             None => orphans.push((stream_id, None)),
         }
@@ -1242,7 +1246,7 @@ fn merge_mailbox_pages(
     let user_only_ids: Vec<String> = merged
         .iter()
         .filter_map(|(_, e)| e.as_ref())
-        .filter(|e| !device_ids.contains(&e.message_id))
+        .filter(|e| !device_ids.contains(&MessageDedupKey::for_envelope(e)))
         .map(|e| e.message_id.clone())
         .collect();
 
@@ -1332,6 +1336,32 @@ mod mailbox_merge_tests {
         assert_eq!(page.entries[0].0, "150-0");
         // m2 exists only in the user stream — the device fan-out missed it.
         assert_eq!(page.user_only(), 1);
+    }
+
+    #[test]
+    fn merge_does_not_hide_another_senders_message_with_the_same_id() {
+        let alice = env("same-id");
+        let mut eve = alice.clone();
+        eve.sender_id = "eve".into();
+        let page = merge_mailbox_pages(
+            vec![("100-1".into(), Some(alice.clone()))],
+            vec![("100-0".into(), Some(alice)), ("200-0".into(), Some(eve))],
+            10,
+            100,
+            "dev",
+        );
+        let senders: Vec<_> = page
+            .entries
+            .iter()
+            .map(|(_, env)| env.as_ref().unwrap().sender_id.as_str())
+            .collect();
+        assert_eq!(senders, ["alice", "eve"]);
+        assert_eq!(page.entries[0].0, "100-1", "prefer Alice's device copy");
+        assert_eq!(
+            page.user_only(),
+            1,
+            "Eve's id matching Alice's is not device coverage"
+        );
     }
 
     #[test]

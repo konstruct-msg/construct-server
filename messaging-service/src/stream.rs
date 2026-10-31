@@ -28,7 +28,7 @@ pub(crate) struct StreamCatchupState {
     pub last_stream_id: Option<String>,
     /// Where the legacy **user** stream is read from, when it is ahead of
     /// `last_stream_id`. Server-side only — the client is never told it, so a reconnect
-    /// starts both streams from the client's one cursor and re-examines at most one page.
+    /// starts both streams from the client's one cursor and re-examines skipped entries above it.
     /// Moves on what a read *examined*, not on what it delivered: the user stream holds
     /// a sibling device's entries, which this reader skips and would otherwise re-read
     /// on every poll (`MailboxPage::user_examined_through`).
@@ -708,6 +708,39 @@ pub(crate) async fn poll_messages(
     // the log into one line per second per connected user.
     is_resume_catchup: bool,
 ) -> anyhow::Result<()> {
+    let mut is_resume_catchup = is_resume_catchup;
+    loop {
+        anyhow::ensure!(!tx.is_closed(), "message stream closed during catch-up");
+        if !poll_message_page(
+            queue,
+            config,
+            user_id,
+            device_id,
+            catchup,
+            tx,
+            is_resume_catchup,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        // An empty final read after a full page is ordinary exhaustion, not an empty resume.
+        is_resume_catchup = false;
+    }
+}
+
+/// Deliver one page and report whether Redis may hold another. An empty page can still make
+/// progress through sibling entries, so continuation follows `has_more`, never message count.
+/// Recheck device revocation on every page and let the bounded response channel apply pressure.
+async fn poll_message_page(
+    queue: &mut construct_queue::MessageQueue,
+    config: &construct_config::MessagingConfig,
+    user_id: uuid::Uuid,
+    device_id: Option<&str>,
+    catchup: &mut StreamCatchupState,
+    tx: &mpsc::Sender<Result<proto::MessageStreamResponse, Status>>,
+    is_resume_catchup: bool,
+) -> anyhow::Result<bool> {
     // A device removed while its stream is open (RevokeDevice, or Logout elsewhere) must stop
     // receiving now — the stream authenticated once, at open. Ending it with the answer
     // AuthenticateDevice gives sends the client through refresh (refused since 2decc7a) to
@@ -891,7 +924,7 @@ pub(crate) async fn poll_messages(
         *user_stream_id = page.user_examined_through;
     }
 
-    Ok(())
+    Ok(page.has_more)
 }
 
 #[cfg(test)]
