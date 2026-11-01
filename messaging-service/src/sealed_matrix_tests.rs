@@ -90,7 +90,7 @@ fn make_ed25519_pems() -> (String, String) {
     )
 }
 
-fn make_config(
+pub(crate) fn make_config(
     redis: &str,
     database: &str,
     paseto_priv: &str,
@@ -985,13 +985,13 @@ async fn g1_a_higher_generation_replaces_an_equal_one_adds_a_lower_one_is_refuse
 /// A TCP forwarder to the test Redis that can be cut. After `cut()` every connection through it
 /// is closed and every new one dropped at once — a Redis outage as this process sees it, without
 /// touching the Redis the other tests share.
-struct CuttableRedis {
-    url: String,
+pub(crate) struct CuttableRedis {
+    pub(crate) url: String,
     cut: tokio::sync::watch::Sender<bool>,
 }
 
 impl CuttableRedis {
-    async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let target = redis_url()
             .trim_start_matches("redis://")
             .trim_end_matches('/')
@@ -1022,7 +1022,7 @@ impl CuttableRedis {
         Self { url, cut }
     }
 
-    fn cut(&self) {
+    pub(crate) fn cut(&self) {
         let _ = self.cut.send(true);
     }
 }

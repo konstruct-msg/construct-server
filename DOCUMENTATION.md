@@ -603,6 +603,13 @@ cannot fan out to other users. Empty `token_spend_id` keeps legacy per-envelope 
 **Federation:**
 - `.well-known/construct-server` server discovery (the RS256 `jwks.json` and `/public-key` endpoints were removed in 0.20.0)
 - S2S sealed sender forwarding (`/federation/v1/sealed`, `/federation/v1/messages`)
+- S2S signatures bind all seven envelope fields, escaping `%` and `:` before joining;
+  the receiver binds the destination to `INSTANCE_DOMAIN`. Regular requests require
+  nonempty signed `from`/`to`; sealed requests sign empty addresses.
+  Replay claims use `fed:v2:msg:<SHA-256(length-framed origin, message_id)>`, seven-day
+  `SET NX EX`, after signature verification; dispatch failure releases the claim,
+  a claim-store outage returns 503. See [the signing contract](crates/construct-federation/README.md)
+  for compatibility and test coverage.
 - Inbound S2S receiver (signature-verified) implemented — two-VPS end-to-end test pending
   (construct-docs `decisions/decentralization-execution-plan.md`, Epic A)
 - `INSTANCE_DOMAIN` is required on all services (no default)

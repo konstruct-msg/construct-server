@@ -3,9 +3,10 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine as _;
 use chrono::Utc;
-use construct_federation::{FederatedEnvelope, PublicKeyCache, ServerSigner};
+use construct_federation::{FederatedEnvelope, PublicKeyCache, ServerSigner, SigningError};
 use construct_rate_limit::sliding_window_check_and_record;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::context::MessagingServiceContext;
@@ -13,7 +14,7 @@ use crate::envelope::dispatch_sealed_sender;
 
 /// Max |now − S2S timestamp| accepted for federated envelopes (seconds).
 /// Stops indefinite replay of valid signed payloads after the origin key is still trusted.
-const FEDERATION_TIMESTAMP_MAX_SKEW_SECS: i64 = 300;
+const FEDERATION_TIMESTAMP_MAX_SKEW_SECS: u64 = 300;
 
 /// How long we remember a federated message_id for replay rejection (7 days).
 const FEDERATION_MSG_DEDUP_TTL_SECS: u64 = 7 * 24 * 3600;
@@ -69,9 +70,11 @@ fn fed_err(status: StatusCode, msg: &str) -> FedHttpErr {
 
 /// Reject envelopes whose timestamp is outside the allowed skew window.
 fn validate_federation_timestamp(timestamp: u64) -> Result<(), FedHttpErr> {
-    let now = Utc::now().timestamp();
-    let ts = timestamp as i64;
-    if (now - ts).abs() > FEDERATION_TIMESTAMP_MAX_SKEW_SECS {
+    validate_federation_timestamp_at(timestamp, Utc::now().timestamp() as u64)
+}
+
+fn validate_federation_timestamp_at(timestamp: u64, now: u64) -> Result<(), FedHttpErr> {
+    if now.abs_diff(timestamp) > FEDERATION_TIMESTAMP_MAX_SKEW_SECS {
         tracing::warn!(
             timestamp,
             now,
@@ -86,6 +89,17 @@ fn validate_federation_timestamp(timestamp: u64) -> Result<(), FedHttpErr> {
     Ok(())
 }
 
+/// Length framing prevents a host's optional port from aliasing a prefix of message_id.
+/// A separate namespace avoids interpreting legacy ambiguous claims as successful writes.
+fn federation_message_key(origin_server: &str, message_id: &str) -> String {
+    let mut hash = Sha256::new();
+    for field in [origin_server, message_id] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    format!("fed:v2:msg:{}", hex::encode(hash.finalize()))
+}
+
 /// Claim `(origin, message_id)` once in Redis. Returns `Ok(true)` if this is the
 /// first delivery, `Ok(false)` if already seen (idempotent replay).
 /// Fail-**closed** on Redis error: without dedup a signed envelope can be replayed forever.
@@ -98,7 +112,7 @@ async fn claim_federation_message_id(
         return Err(fed_err(StatusCode::BAD_REQUEST, "invalid message_id"));
     }
     // origin is already SSRF-checked by PublicKeyCache; keep key bounded.
-    let key = format!("fed:msg:{origin_server}:{message_id}");
+    let key = federation_message_key(origin_server, message_id);
     let mut conn = context.redis_conn.clone();
     // SET NX → Some("OK") if claimed, None if key already existed.
     let result: Option<String> = redis::cmd("SET")
@@ -126,7 +140,7 @@ async fn release_federation_message_id(
     origin_server: &str,
     message_id: &str,
 ) {
-    let key = format!("fed:msg:{origin_server}:{message_id}");
+    let key = federation_message_key(origin_server, message_id);
     let mut conn = context.redis_conn.clone();
     let result: std::result::Result<i64, _> =
         redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
@@ -171,6 +185,10 @@ async fn check_origin_rate_limit(
     }
 }
 
+async fn fetch_origin_key(origin: String) -> Result<String, SigningError> {
+    PublicKeyCache::new().get_public_key(&origin).await
+}
+
 // ── Sealed sender handler ─────────────────────────────────────────────────
 
 /// POST /federation/v1/sealed
@@ -182,6 +200,16 @@ pub(crate) async fn handle_inbound_sealed(
     State(context): State<Arc<MessagingServiceContext>>,
     Json(req): Json<InboundSealedRequest>,
 ) -> Result<(StatusCode, Json<FederationResponse>), (StatusCode, Json<serde_json::Value>)> {
+    receive_sealed(context, req, fetch_origin_key).await
+}
+
+// Only key discovery is replaceable in tests; signature checks, Redis claims and dispatch
+// below are the same functions the HTTP handler executes.
+async fn receive_sealed(
+    context: Arc<MessagingServiceContext>,
+    req: InboundSealedRequest,
+    lookup_key: impl AsyncFnOnce(String) -> Result<String, SigningError>,
+) -> Result<(StatusCode, Json<FederationResponse>), FedHttpErr> {
     if !context.config.federation.enabled {
         return Err((
             StatusCode::NOT_FOUND,
@@ -212,8 +240,7 @@ pub(crate) async fn handle_inbound_sealed(
             Json(serde_json::json!({"error": "server_signature required"})),
         )
     })?;
-    let cache = PublicKeyCache::new();
-    match cache.get_public_key(&req.origin_server).await {
+    match lookup_key(req.origin_server.clone()).await {
         Ok(remote_pk) => {
             let envelope = FederatedEnvelope {
                 message_id: req.message_id.clone(),
@@ -241,6 +268,17 @@ pub(crate) async fn handle_inbound_sealed(
         }
     }
 
+    // Decode before claiming: invalid base64 must not leave an ACK-only retry.
+    let sealed_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.sealed_inner) {
+        Ok(b) => b,
+        Err(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid base64 in sealed_inner"})),
+            ));
+        }
+    };
+
     // ── Anti-replay: claim message_id after signature verifies ───────────
     if !claim_federation_message_id(&context, &req.origin_server, &req.message_id).await? {
         info!(
@@ -257,17 +295,7 @@ pub(crate) async fn handle_inbound_sealed(
         ));
     }
 
-    // ── Decode sealed_inner and dispatch ─────────────────────────────────
-    let sealed_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.sealed_inner) {
-        Ok(b) => b,
-        Err(_) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid base64 in sealed_inner"})),
-            ));
-        }
-    };
-
+    // ── Dispatch decoded sealed_inner ─────────────────────────────────────
     use construct_server_shared::shared::proto::core::v1 as proto_core;
     let sealed_envelope = proto_core::SealedSenderEnvelope {
         recipient_server: String::new(),
@@ -316,10 +344,29 @@ pub(crate) async fn handle_inbound_message(
     State(context): State<Arc<MessagingServiceContext>>,
     Json(req): Json<InboundMessageRequest>,
 ) -> Result<(StatusCode, Json<FederationResponse>), (StatusCode, Json<serde_json::Value>)> {
+    receive_message(context, req, fetch_origin_key).await
+}
+
+// Only key discovery is replaceable in tests; signature checks, Redis claims and dispatch
+// below are the same functions the HTTP handler executes.
+async fn receive_message(
+    context: Arc<MessagingServiceContext>,
+    req: InboundMessageRequest,
+    lookup_key: impl AsyncFnOnce(String) -> Result<String, SigningError>,
+) -> Result<(StatusCode, Json<FederationResponse>), FedHttpErr> {
     if !context.config.federation.enabled {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "federation not enabled"})),
+        ));
+    }
+
+    // Empty signed addresses are reserved for sealed requests. Without this gate a
+    // sealed signature can be replayed here to claim its ID without sealed delivery.
+    if req.from.is_empty() || req.to.is_empty() {
+        return Err(fed_err(
+            StatusCode::BAD_REQUEST,
+            "from and to required for regular messages",
         ));
     }
 
@@ -344,8 +391,7 @@ pub(crate) async fn handle_inbound_message(
             Json(serde_json::json!({"error": "server_signature required"})),
         )
     })?;
-    let cache = PublicKeyCache::new();
-    match cache.get_public_key(&req.origin_server).await {
+    match lookup_key(req.origin_server.clone()).await {
         Ok(remote_pk) => {
             let envelope = FederatedEnvelope {
                 message_id: req.message_id.clone(),
@@ -626,3 +672,6 @@ mod tests {
         assert_eq!(parsed["messageId"], "msg-001");
     }
 }
+
+#[cfg(test)]
+mod invariant_tests;
