@@ -1475,6 +1475,9 @@ async fn p2_one_stream_poll_drains_pages_including_an_empty_sibling_page() {
         // Redis orders by each stream's ids; the independent sequence counters can put the
         // legacy-only entry just before a device copy inserted in the same millisecond.
         received.sort();
+        // The page merge deduplicates within a page. Independent stream ids can
+        // straddle pages; across pages the contract is at-least-once.
+        received.dedup();
         expected.sort();
         assert_eq!(
             received, expected,
