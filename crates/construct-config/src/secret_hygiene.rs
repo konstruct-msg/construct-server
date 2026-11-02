@@ -27,7 +27,7 @@
 use anyhow::{Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
-/// Env var names whose PRESENT value must never carry surrounding quotes/whitespace.
+/// Env var names whose PRESENT value must never carry surrounding quotes.
 /// (env_file passes quotes literally, so `KEY="abc"` becomes the 5-char string `"abc"`.)
 const QUOTE_SENSITIVE: &[&str] = &[
     "SERVER_SIGNING_KEY",
@@ -51,7 +51,10 @@ const QUOTE_SENSITIVE: &[&str] = &[
 /// Known insecure default material that must never ship in production.
 pub const INSECURE_USERNAME_HMAC: &[u8] = b"construct-insecure-username-hmac";
 pub const INSECURE_CONTACT_HMAC: &[u8] = b"construct-insecure-contact-hmac";
-pub const INSECURE_ENVELOPE_KEY: &[u8] = b"construct-insecure-envelope-key!!";
+// The crypto consumer historically took the first 32 bytes of the 33-byte spelling
+// ending in "!!". Keep those effective bytes; now equality can also reject them as a
+// configured known insecure 32-byte key. This is not a key rotation.
+pub const INSECURE_ENVELOPE_KEY: &[u8] = b"construct-insecure-envelope-key!";
 pub const INSECURE_TURN_SECRET: &str = "changeme";
 
 /// True when the process is running in a production-like environment.
@@ -108,6 +111,7 @@ fn reject_known_insecure_string(name: &str, value: &str) -> Result<()> {
     ) || t == "construct-insecure-username-hmac"
         || t == "construct-insecure-contact-hmac"
         || t == "construct-insecure-envelope-key!!"
+        || t.as_bytes() == INSECURE_ENVELOPE_KEY
         || t == "change-me-in-production";
     if bad && !allow_insecure_secrets() {
         bail!(
@@ -116,6 +120,23 @@ fn reject_known_insecure_string(name: &str, value: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Load the shared Privacy Pass issuer key for identity and messaging.
+/// Unset/blank disables the feature; every nonblank malformed value is a boot error,
+/// even if this loader is called without the global configuration hygiene check.
+pub fn load_token_issuer_key() -> Result<Option<[u8; 32]>> {
+    let value = match std::env::var("TOKEN_ISSUER_KEY") {
+        Ok(value) if value.trim().is_empty() => return Ok(None),
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => bail!("TOKEN_ISSUER_KEY must be valid UTF-8 hex"),
+    };
+    require_hex_len("TOKEN_ISSUER_KEY", &value, 32)?;
+    let mut key = [0u8; 32];
+    hex::decode_to_slice(value.trim(), &mut key)
+        .map_err(|_| anyhow::anyhow!("TOKEN_ISSUER_KEY must be exactly 64 hex chars"))?;
+    Ok(Some(key))
 }
 
 /// Fail if a present value is wrapped in literal quotes — the classic env_file mistake.
@@ -169,6 +190,9 @@ fn require_hex_len(name: &str, value: &str, bytes: usize) -> Result<()> {
 pub fn validate() -> Result<()> {
     // 1. No secret may carry literal surrounding quotes.
     for name in QUOTE_SENSITIVE {
+        if matches!(std::env::var(name), Err(std::env::VarError::NotUnicode(_))) {
+            bail!("{name} must be valid UTF-8 text");
+        }
         if let Some(v) = present(name) {
             reject_quotes(name, &v)?;
             reject_known_insecure_string(name, &v)?;

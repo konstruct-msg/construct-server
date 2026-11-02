@@ -307,10 +307,10 @@ impl CsrfConfig {
             .unwrap_or(true); // Enabled by default for security
 
         let secret = match std::env::var("CSRF_SECRET") {
-            Ok(s) if s.len() >= 32 => s,
+            Ok(s) if s.len() >= 32 && !s.trim().is_empty() => s,
             Ok(s) => {
                 anyhow::bail!(
-                    "CSRF_SECRET must be at least 32 characters long (got {}). \
+                    "CSRF_SECRET must be nonblank and at least 32 characters long (got {}). \
                     Generate with: openssl rand -hex 32",
                     s.len()
                 );
