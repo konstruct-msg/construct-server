@@ -696,9 +696,9 @@ impl AuthService for IdentityGrpcService {
         if req.identifier.is_empty() {
             return Err(Status::invalid_argument("identifier is required"));
         }
-        if req.challenge.is_empty() && req.recovery_public_key.is_empty() {
+        if req.recovery_public_key.is_empty() {
             return Err(Status::invalid_argument(
-                "challenge or recovery_public_key is required",
+                "hybrid recovery_public_key is required",
             ));
         }
         if req.recovery_signature.is_empty() {
@@ -713,22 +713,15 @@ impl AuthService for IdentityGrpcService {
 
         let db = self.context.db_pool.as_ref();
 
-        // A claim with the hybrid key is the new format whatever else is set; only one without it
-        // falls back to the legacy challenge.
-        let claim = if req.recovery_public_key.is_empty() {
-            recovery::RecoveryClaim::Legacy {
-                challenge: &req.challenge,
-                signature: &req.recovery_signature,
-            }
-        } else {
-            recovery::RecoveryClaim::Hybrid {
-                public_key: &req.recovery_public_key,
-                timestamp: req.timestamp,
-                signature: &req.recovery_signature,
-                device_id: &new_device.device_id,
-                verifying_key: &public_keys.verifying_key,
-                identity_public: &public_keys.identity_public,
-            }
+        // The legacy challenge field stays on the wire for schema compatibility, but
+        // cannot authorize recovery. Every proof binds the hybrid key and this device.
+        let claim = recovery::RecoveryClaim {
+            public_key: &req.recovery_public_key,
+            timestamp: req.timestamp,
+            signature: &req.recovery_signature,
+            device_id: &new_device.device_id,
+            verifying_key: &public_keys.verifying_key,
+            identity_public: &public_keys.identity_public,
         };
         let user_id = recovery::verify_recovery_signature(
             db,

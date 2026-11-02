@@ -343,6 +343,20 @@ Verification is `ed25519-dalek` 2.2 `Verifier::verify` — not `verify_strict`, 
 - Revocation blocklist: `invalidated_token:{jti}` in Redis (checked on verify and in
   messaging's Bearer path, fail-closed)
 
+### Account Recovery
+
+- `SetRecoveryKey` and `RecoverAccount` accept only the 1984-byte hybrid public key
+  (Ed25519 32 + ML-DSA-65 1952), verified with both signature parts. The old 32-byte
+  setup and challenge-only proof were retired on 2026-11-01; their writer/verifier
+  and calendar gate are removed. The legacy proto field stays for schema compatibility
+  and cannot authorize recovery.
+- Historical Ed25519-only account rows remain supported: a valid hybrid setup or
+  device-bound claim of the same phrase adds the ML-DSA half. The stored Ed25519 key,
+  `identity_public_key`, `route_id` and recovery fingerprint remain unchanged.
+- Signing bytes and freshness checks come from `construct-server-trust::recovery`;
+  clients use the core's `sign_recovery_setup` / `sign_recovery_claim`, without
+  exporting private keys or constructing their own signing messages.
+
 ### Sender Certificate (sealed sender)
 
 Issued by `AuthService::GetSenderCertificate` (via identity-service):

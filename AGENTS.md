@@ -75,6 +75,11 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 
 - PASETO v4.public only; a token without the `v4.public.` prefix is rejected. Issuer from `AUTH_TOKEN_ISSUER` (fallback `JWT_ISSUER`). Framing is `nonce(32) || message || sig(64)` — client slicing offsets are not a bug. TTL `ACCESS_TOKEN_TTL_HOURS` (24 h).
 - Logout needs `access_token` in the body (empty → `INVALID_ARGUMENT`) and writes `invalidated_token:{jti}`; `RevokeAll` walks the `user_tokens:{user}` index, not all keys.
+- Recovery setup and claims require the 1984-byte hybrid key and both signatures;
+  no Ed25519-only setup, challenge verifier or calendar gate. Stored
+  `recovery_public_key` stays 32 bytes and names the account address. A legacy row
+  with no ML-DSA half remains recoverable by a valid hybrid claim of the same phrase,
+  which adds that half without changing the address or fingerprint.
 - messaging gRPC uses `extract_authed_user_id()`: Bearer required, verify + blocklist, fail-closed on Redis error. `x-user-id` / `x-device-id` must match claims; headers alone are never trusted. Caddy injects no `x-user-id`; gateway `:9443` has no token auth. Each service validates with `construct-auth::AuthManager`.
 - `ops/Caddyfile`: `flush_interval -1` only for streaming RPCs (`MessageStream`, `SignalingService`); on unary RPCs it emits DATA+END_STREAM and grpc-swift reports "EOS alongside a data frame" instead of `privacy_pass:…`. Caddyfile is a single-file bind mount: `up -d --force-recreate caddy` after edits.
 
