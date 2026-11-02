@@ -369,6 +369,13 @@ Issued by `AuthService::GetSenderCertificate` (via identity-service):
 - Ed25519 signed, 24-hour TTL
 - Contains: sender user_id, device_id, identity_key, domain, expiry, server signature
 - Used for cross-server anonymous message routing
+- Required `x-device-id` must agree with a device-bound access token; the selected device
+  must be active and belong to the token's account. `BUNDLE_SIGNING_KEY` is required.
+
+Device link/join tokens are consumed atomically with Redis `GETDEL` (Redis 6.2+, production
+uses Redis 7). Approval and Privacy Pass issuance use the common token/header consistency
+check. Invite signatures require an active issuing device belonging to the signed account;
+rejected invites do not burn their jti. The wire formats, key bytes and TTLs are unchanged.
 
 ---
 
@@ -436,6 +443,13 @@ Most integration tests are gated with `#[ignore]` and skipped in CI unless the f
 ```bash
 cargo test -p construct-server-shared -- --ignored   # run skipped integration tests
 ```
+
+Identity contracts (actual RPC/core paths, random accounts/keys, cleanup on assertion failure):
+`cargo test -p identity-service contract_tests -- --include-ignored --test-threads=1`.
+Requires `DATABASE_URL` (migrated Postgres) and `REDIS_URL`. Checks issuance validation/cap/DLEQ,
+certificate binding/signature/lifetime, link/join single-use across 16 connections, private link
+results, invite signature/account/address/expiry/burn/revoke and mutual contacts. PoW's external
+vector remains in `construct-pow`; unused negotiation is tracked for removal in task 241.
 
 ### cargo check / clippy
 
