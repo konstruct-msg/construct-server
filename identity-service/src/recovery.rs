@@ -17,10 +17,10 @@
 // - Recovery key is immutable once set (DB triggers prevent changes); an Ed25519 key is completed
 //   to a hybrid one once, by a signature of both halves
 // - 7-day cooldown after each recovery
-// - A hybrid claim names the new device and is fresh within ten minutes
-//   (`construct_server_trust::recovery`). The legacy claim signs a client timestamp nobody
-//   checks and names no device, so it is replayable; it is accepted only from an account that
-//   is not hybrid, and a hybrid account never takes it (no downgrade).
+// - Every setup/claim requires a hybrid key and both signatures. A claim names the new device
+//   and is fresh within ten minutes (`construct_server_trust::recovery`). The retired
+//   Ed25519-only writer and challenge verifier are gone. Stored Ed25519-only accounts remain
+//   recoverable with their phrase's hybrid proof, which completes the existing key.
 // construct-docs todo/222-recovery-key-hybrid-pq.md
 // ============================================================================
 
@@ -29,7 +29,6 @@ use chrono::{DateTime, Utc};
 use construct_crypto::hash_username;
 use construct_crypto::pqc::hybrid::verify_hybrid_signature;
 use construct_crypto::server_trust::recovery as claim_bytes;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -55,33 +54,24 @@ pub struct RecoveryStatus {
 /// Length of a hybrid recovery key: Ed25519 (32) ‖ ML-DSA-65 (1952).
 pub const HYBRID_RECOVERY_KEY_LEN: usize = 32 + 1952;
 
-/// 2026-11-01T00:00:00Z. From this instant the legacy formats are refused — the 32-byte Ed25519
-/// setup and the claim over `challenge` — and every recovery key is set, and every account
-/// recovered, with the hybrid key (owner, 2026-10-26). An account still on its Ed25519 key loses
-/// nothing: the hybrid claim of its phrase recovers it and completes its key.
-pub const LEGACY_RECOVERY_CUTOFF: i64 = 1_793_491_200;
-
-/// Whether the legacy formats are still accepted at `now`.
-pub fn legacy_recovery_accepted(now: i64) -> bool {
-    now < LEGACY_RECOVERY_CUTOFF
+/// A hybrid proof bound to the new device. The retired challenge-only format has no
+/// representation here; existing Ed25519 account rows are upgraded by a valid hybrid proof.
+pub struct RecoveryClaim<'a> {
+    pub public_key: &'a [u8],
+    pub timestamp: i64,
+    pub signature: &'a [u8],
+    pub device_id: &'a str,
+    pub verifying_key: &'a [u8],
+    pub identity_public: &'a [u8],
 }
 
-/// How a RecoverAccount request proves the phrase.
-pub enum RecoveryClaim<'a> {
-    /// Ed25519 over a client-chosen string. Binds nothing; refused by a hybrid account.
-    Legacy {
-        challenge: &'a str,
-        signature: &'a [u8],
-    },
-    /// Hybrid over `claim_signable`: the key, the time and the device it hands the account to.
-    Hybrid {
-        public_key: &'a [u8],
-        timestamp: i64,
-        signature: &'a [u8],
-        device_id: &'a str,
-        verifying_key: &'a [u8],
-        identity_public: &'a [u8],
-    },
+fn require_hybrid_recovery_key(public_key: &[u8]) -> Result<()> {
+    if public_key.len() != HYBRID_RECOVERY_KEY_LEN {
+        anyhow::bail!(
+            "Invalid recovery key: expected {HYBRID_RECOVERY_KEY_LEN}-byte hybrid public key"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -96,7 +86,7 @@ pub struct RecoveryResult {
 // ============================================================================
 
 /// Set recovery public key for a user (one-time, immutable) — or complete the Ed25519 key set
-/// there to the hybrid key whose Ed25519 half it is. The key's length names its kind.
+/// there to the hybrid key whose Ed25519 half it is. Only the hybrid wire format is accepted.
 pub async fn set_recovery_key(
     db: &PgPool,
     user_id: Uuid,
@@ -127,38 +117,17 @@ pub async fn set_recovery_key_at(
     encrypted_backup: Option<&[u8]>,
     now: i64,
 ) -> Result<String> {
-    match recovery_public_key.len() {
-        32 if !legacy_recovery_accepted(now) => anyhow::bail!(
-            "Invalid recovery key: Ed25519-only keys are no longer accepted, send the hybrid key"
-        ),
-        32 => {
-            set_ed25519_recovery_key(
-                db,
-                user_id,
-                recovery_public_key,
-                setup_signature,
-                timestamp,
-                encrypted_backup,
-                now,
-            )
-            .await
-        }
-        HYBRID_RECOVERY_KEY_LEN => {
-            set_hybrid_recovery_key(
-                db,
-                user_id,
-                recovery_public_key,
-                setup_signature,
-                timestamp,
-                encrypted_backup,
-                now,
-            )
-            .await
-        }
-        _ => anyhow::bail!(
-            "recovery_public_key must be 32 bytes (Ed25519) or {HYBRID_RECOVERY_KEY_LEN} (hybrid)"
-        ),
-    }
+    require_hybrid_recovery_key(recovery_public_key)?;
+    set_hybrid_recovery_key(
+        db,
+        user_id,
+        recovery_public_key,
+        setup_signature,
+        timestamp,
+        encrypted_backup,
+        now,
+    )
+    .await
 }
 
 /// A hybrid setup: both halves sign `setup_signable`. On an account with no key it sets both; on
@@ -239,94 +208,6 @@ async fn set_hybrid_recovery_key(
 /// The account's recovery key as stored: the Ed25519 key and the ML-DSA-65 half.
 type StoredRecoveryKey = (Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// The Ed25519 setup, as before 0.59.0.
-async fn set_ed25519_recovery_key(
-    db: &PgPool,
-    user_id: Uuid,
-    recovery_public_key: &[u8],
-    setup_signature: &[u8],
-    timestamp: i64,
-    encrypted_backup: Option<&[u8]>,
-    now: i64,
-) -> Result<String> {
-    // 2. Validate signature freshness (reject timestamps older than 5 minutes)
-    if (now - timestamp).abs() > 300 {
-        anyhow::bail!("Setup signature has expired");
-    }
-
-    // 3. Parse the Ed25519 public key
-    let verifying_key = VerifyingKey::from_bytes(
-        recovery_public_key
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Invalid key bytes"))?,
-    )
-    .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
-
-    // 4. Verify setup signature
-    // Message: "CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}"
-    let message = format!("CONSTRUCT_RECOVERY_SETUP:{}:{}", user_id, timestamp);
-    let sig_bytes: [u8; 64] = setup_signature
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
-    let signature = Signature::from_bytes(&sig_bytes);
-
-    verifying_key
-        .verify(message.as_bytes(), &signature)
-        .map_err(|_| anyhow::anyhow!("Invalid setup signature"))?;
-
-    // 5. Check if recovery key already set
-    let existing: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT recovery_public_key FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await?
-            .flatten();
-
-    // The same key again is the same setup again: a client that registered its key silently
-    // and lost the answer retries with it (construct-docs
-    // `decisions/recovery-key-backup-is-deferred-not-skipped.md`, review point 1). The signature
-    // above already proved the caller holds it. Any other key is still refused.
-    match existing {
-        Some(stored) if stored == recovery_public_key => {
-            return Ok(key_fingerprint(recovery_public_key));
-        }
-        Some(_) => anyhow::bail!("Recovery key already set and cannot be changed"),
-        None => {}
-    }
-
-    // 6. Validate optional encrypted backup size before write
-    if let Some(backup) = encrypted_backup
-        && backup.len() > MAX_RECOVERY_BACKUP_BYTES
-    {
-        anyhow::bail!(
-            "encrypted_backup too large (max {} bytes)",
-            MAX_RECOVERY_BACKUP_BYTES
-        );
-    }
-
-    // 7. Store recovery key (DB trigger enforces immutability), optional backup, and the address
-    // the key names — in one statement, so an account never has one without the other
-    // (construct-docs `decisions/pubkey-as-identity.md`, "Which key is the address").
-    let (key_type, route_id) = construct_db::account_address_columns(recovery_public_key);
-    sqlx::query(
-        "UPDATE users SET recovery_public_key = $1, \
-             recovery_encrypted_backup = COALESCE($2, recovery_encrypted_backup), \
-             identity_public_key = $1, identity_key_type = $3, route_id = $4 \
-         WHERE id = $5",
-    )
-    .bind(recovery_public_key)
-    .bind(encrypted_backup)
-    .bind(key_type)
-    .bind(&route_id)
-    .bind(user_id)
-    .execute(db)
-    .await?;
-
-    // 8. Return fingerprint
-    let fingerprint = key_fingerprint(recovery_public_key);
-    Ok(fingerprint)
-}
-
 // ============================================================================
 // GetRecoveryStatus
 // ============================================================================
@@ -384,6 +265,16 @@ pub async fn verify_recovery_signature_at(
     hmac_secret: &[u8],
     now: i64,
 ) -> Result<Uuid> {
+    let RecoveryClaim {
+        public_key,
+        timestamp,
+        signature,
+        device_id,
+        verifying_key,
+        identity_public,
+    } = claim;
+    require_hybrid_recovery_key(public_key)?;
+
     // 1. Find user by UUID or username_hash (privacy-first)
     // Trim first so surrounding whitespace doesn't break either branch.
     let identifier = identifier.trim();
@@ -437,96 +328,47 @@ pub async fn verify_recovery_signature_at(
         }
     }
 
-    // 4. Verify the claim
-    match claim {
-        RecoveryClaim::Legacy {
-            challenge,
-            signature,
-        } => {
-            // A hybrid account takes no Ed25519-only claim: that is the downgrade the ML-DSA
-            // half exists to refuse.
-            if row.recovery_mldsa_public_key.is_some() {
-                anyhow::bail!("Invalid recovery signature: this account takes hybrid claims only");
-            }
-            if !legacy_recovery_accepted(now) {
-                anyhow::bail!("Invalid recovery signature: legacy claims are no longer accepted");
-            }
-            verify_ed25519_claim(&recovery_public_key, challenge, signature)?;
-        }
-        RecoveryClaim::Hybrid {
-            public_key,
-            timestamp,
-            signature,
-            device_id,
-            verifying_key,
-            identity_public,
-        } => {
-            if public_key.len() != HYBRID_RECOVERY_KEY_LEN {
-                anyhow::bail!("Invalid recovery key length");
-            }
-            let (ed25519, mldsa) = public_key.split_at(32);
-            if ed25519 != recovery_public_key.as_slice() {
-                anyhow::bail!("Invalid recovery signature");
-            }
-            if let Some(stored) = &row.recovery_mldsa_public_key
-                && stored.as_slice() != mldsa
-            {
-                anyhow::bail!("Invalid recovery signature");
-            }
-            let after_last = row
-                .last_recovery_at
-                .is_none_or(|last| timestamp > last.timestamp());
-            if !claim_bytes::fresh(timestamp, now) || !after_last {
-                anyhow::bail!("Invalid recovery signature: the claim is not fresh");
-            }
-            let message = claim_bytes::claim_signable(
-                public_key,
-                timestamp,
-                device_id,
-                verifying_key,
-                identity_public,
-            )
-            .map_err(|_| anyhow::anyhow!("Invalid recovery claim"))?;
-            verify_hybrid_signature(public_key, &message, signature)
-                .map_err(|_| anyhow::anyhow!("Invalid recovery signature"))?;
+    // 4. Verify both halves of the device-bound hybrid claim.
+    let (ed25519, mldsa) = public_key.split_at(32);
+    if ed25519 != recovery_public_key.as_slice() {
+        anyhow::bail!("Invalid recovery signature");
+    }
+    if let Some(stored) = &row.recovery_mldsa_public_key
+        && stored.as_slice() != mldsa
+    {
+        anyhow::bail!("Invalid recovery signature");
+    }
+    let after_last = row
+        .last_recovery_at
+        .is_none_or(|last| timestamp > last.timestamp());
+    if !claim_bytes::fresh(timestamp, now) || !after_last {
+        anyhow::bail!("Invalid recovery signature: the claim is not fresh");
+    }
+    let message = claim_bytes::claim_signable(
+        public_key,
+        timestamp,
+        device_id,
+        verifying_key,
+        identity_public,
+    )
+    .map_err(|_| anyhow::anyhow!("Invalid recovery claim"))?;
+    verify_hybrid_signature(public_key, &message, signature)
+        .map_err(|_| anyhow::anyhow!("Invalid recovery signature"))?;
 
-            // An account recovered with the hybrid key keeps its ML-DSA half: from now on it
-            // takes hybrid claims only.
-            if row.recovery_mldsa_public_key.is_none() {
-                sqlx::query(
-                    "UPDATE users SET recovery_mldsa_public_key = $1 \
-                     WHERE id = $2 AND recovery_mldsa_public_key IS NULL",
-                )
-                .bind(mldsa)
-                .bind(row.id)
-                .execute(db)
-                .await?;
-            }
-        }
+    // An account recovered with the hybrid key keeps its ML-DSA half: from now on it
+    // takes hybrid claims only.
+    if row.recovery_mldsa_public_key.is_none() {
+        sqlx::query(
+            "UPDATE users SET recovery_mldsa_public_key = $1 \
+             WHERE id = $2 AND recovery_mldsa_public_key IS NULL",
+        )
+        .bind(mldsa)
+        .bind(row.id)
+        .execute(db)
+        .await?;
     }
 
     Ok(row.id)
-}
-
-fn verify_ed25519_claim(
-    recovery_public_key: &[u8],
-    challenge: &str,
-    recovery_signature: &[u8],
-) -> Result<()> {
-    let key_bytes: [u8; 32] = recovery_public_key
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Stored recovery key has invalid length"))?;
-    let verifying_key = VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid stored recovery key: {}", e))?;
-
-    let sig_bytes: [u8; 64] = recovery_signature
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Signature must be 64 bytes"))?;
-    let signature = Signature::from_bytes(&sig_bytes);
-
-    verifying_key
-        .verify(challenge.as_bytes(), &signature)
-        .map_err(|_| anyhow::anyhow!("Invalid recovery signature"))
 }
 
 /// Revoke all devices for a user (during recovery)
@@ -594,10 +436,8 @@ struct RecoveryKeyRow {
 mod address_tests {
     use super::*;
 
-    /// The tests' clock: a day before the legacy cutoff, so the suite does not change its verdicts
-    /// when the date passes. The tests of the cutoff itself use `AFTER_CUTOFF`.
-    const NOW: i64 = LEGACY_RECOVERY_CUTOFF - 86_400;
-    const AFTER_CUTOFF: i64 = LEGACY_RECOVERY_CUTOFF + 86_400;
+    /// Frozen after retirement (2026-11-02); freshness tests never depend on the wall clock.
+    const NOW: i64 = 1_793_577_600;
     use ed25519_dalek::{Signer, SigningKey};
 
     /// Local Postgres from `ops/docker-compose.dev.yml`; the test skips without it, except
@@ -643,23 +483,12 @@ mod address_tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        let public = signing.verifying_key().to_bytes();
-        let timestamp = NOW;
-        let signature =
-            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
+        let phrase = Phrase::new();
+        let (public, signature, timestamp) = phrase.hybrid_setup(user_id);
 
-        set_recovery_key_at(
-            &db,
-            user_id,
-            &public,
-            &signature.to_bytes(),
-            timestamp,
-            None,
-            NOW,
-        )
-        .await
-        .unwrap();
+        set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
+            .await
+            .unwrap();
 
         let (identity, key_type, route_id): (Option<Vec<u8>>, i16, Option<String>) =
             sqlx::query_as(
@@ -669,7 +498,7 @@ mod address_tests {
             .fetch_one(&db)
             .await
             .unwrap();
-        assert_eq!(identity.as_deref(), Some(public.as_slice()));
+        assert_eq!(identity.as_deref(), Some(&public[..32]));
         assert_eq!(key_type, 1, "Ed25519");
         let found = construct_db::get_user_by_route_id(&db, route_id.as_deref().unwrap())
             .await
@@ -681,17 +510,6 @@ mod address_tests {
             .bind(user_id)
             .execute(&db)
             .await;
-    }
-
-    fn signed_setup(signing: &SigningKey, user_id: Uuid) -> ([u8; 32], [u8; 64], i64) {
-        let timestamp = NOW;
-        let signature =
-            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{timestamp}").as_bytes());
-        (
-            signing.verifying_key().to_bytes(),
-            signature.to_bytes(),
-            timestamp,
-        )
     }
 
     /// A retry with the key already set answers like the first call; another key is refused.
@@ -707,20 +525,20 @@ mod address_tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let phrase = Phrase::new();
 
-        let (public, signature, timestamp) = signed_setup(&signing, user_id);
+        let (public, signature, timestamp) = phrase.hybrid_setup(user_id);
         let first = set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
             .await
             .unwrap();
-        let (public, signature, timestamp) = signed_setup(&signing, user_id);
+        let (public, signature, timestamp) = phrase.hybrid_setup(user_id);
         let again = set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
             .await
             .expect("the same key again is accepted");
         assert_eq!(first, again);
 
-        let other = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        let (public, signature, timestamp) = signed_setup(&other, user_id);
+        let other = Phrase::new();
+        let (public, signature, timestamp) = other.hybrid_setup(user_id);
         assert!(
             set_recovery_key_at(&db, user_id, &public, &signature, timestamp, None, NOW)
                 .await
@@ -809,11 +627,14 @@ mod address_tests {
             .await;
     }
 
+    /// A historical database row, not a call to the retired production writer. Keep its
+    /// account address exactly as it was so setup/recovery upgrades prove compatibility.
     async fn set_legacy(db: &PgPool, user_id: Uuid, phrase: &Phrase) {
-        let (public, signature, timestamp) = signed_setup(&phrase.legacy(), user_id);
-        set_recovery_key_at(db, user_id, &public, &signature, timestamp, None, NOW)
-            .await
-            .unwrap();
+        let public = phrase.legacy().verifying_key().to_bytes();
+        let (key_type, route_id) = construct_db::account_address_columns(&public);
+        sqlx::query("UPDATE users SET recovery_public_key = $1, identity_public_key = $1, identity_key_type = $2, route_id = $3 WHERE id = $4")
+            .bind(public.as_slice()).bind(key_type).bind(route_id).bind(user_id)
+            .execute(db).await.unwrap();
     }
 
     async fn set_hybrid(db: &PgPool, user_id: Uuid, phrase: &Phrase) -> Result<String> {
@@ -832,7 +653,7 @@ mod address_tests {
         verify_recovery_signature_at(
             db,
             &user_id.to_string(),
-            RecoveryClaim::Hybrid {
+            RecoveryClaim {
                 public_key,
                 timestamp,
                 signature,
@@ -846,20 +667,13 @@ mod address_tests {
         .await
     }
 
+    /// A retired 64-byte proof cannot be smuggled into a hybrid-shaped request either.
     async fn legacy_claim(db: &PgPool, user_id: Uuid, phrase: &Phrase) -> Result<Uuid> {
         let challenge = NOW.to_string();
         let signature = phrase.legacy().sign(challenge.as_bytes()).to_bytes();
-        verify_recovery_signature_at(
-            db,
-            &user_id.to_string(),
-            RecoveryClaim::Legacy {
-                challenge: &challenge,
-                signature: &signature,
-            },
-            b"test",
-            NOW,
-        )
-        .await
+        let (_, public) = phrase.hybrid();
+        let device = Device::new();
+        claim(db, user_id, &public, NOW, &signature, &device).await
     }
 
     async fn is_hybrid(db: &PgPool, user_id: Uuid) -> bool {
@@ -930,7 +744,10 @@ mod address_tests {
         set_hybrid(&db, user_id, &phrase).await.unwrap();
 
         let err = legacy_claim(&db, user_id, &phrase).await.unwrap_err();
-        assert!(err.to_string().contains("hybrid claims only"), "{err}");
+        assert!(
+            err.to_string().contains("Invalid recovery signature"),
+            "{err}"
+        );
 
         let device = Device::new();
         let now = NOW;
@@ -994,9 +811,10 @@ mod address_tests {
         let user_id = new_user(&db).await;
         let phrase = Phrase::new();
         set_legacy(&db, user_id, &phrase).await;
-        legacy_claim(&db, user_id, &phrase)
-            .await
-            .expect("an Ed25519 account still takes the legacy claim");
+        assert!(
+            legacy_claim(&db, user_id, &phrase).await.is_err(),
+            "a legacy account must also prove both halves"
+        );
 
         let device = Device::new();
         let now = NOW;
@@ -1009,91 +827,195 @@ mod address_tests {
         drop_user(&db, user_id).await;
     }
 
-    // ── The legacy cutoff, 2026-11-01 ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn the_legacy_formats_close_at_the_cutoff() {
-        assert!(legacy_recovery_accepted(LEGACY_RECOVERY_CUTOFF - 1));
-        assert!(!legacy_recovery_accepted(LEGACY_RECOVERY_CUTOFF));
+    /// A valid signature under a different phrase never recovers this account. Once the
+    /// ML-DSA half is stored, even another hybrid key with the same Ed25519 half is refused.
+    #[tokio::test]
+    async fn a_hybrid_claim_cannot_substitute_either_stored_key_half() {
+        let Some(db) = try_db().await else {
+            return;
+        };
+        for hybrid in [false, true] {
+            let user_id = new_user(&db).await;
+            let phrase = Phrase::new();
+            if hybrid {
+                set_hybrid(&db, user_id, &phrase).await.unwrap();
+            } else {
+                set_legacy(&db, user_id, &phrase).await;
+            }
+            let device = Device::new();
+            let attacker = Phrase::new();
+            let (public, signature) = attacker.hybrid_claim(NOW, &device);
+            assert!(
+                claim(&db, user_id, &public, NOW, &signature, &device)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                is_hybrid(&db, user_id).await,
+                hybrid,
+                "a failed claim changed the key"
+            );
+            if hybrid {
+                let attacker = Phrase {
+                    ed25519: phrase.ed25519,
+                    mldsa: rand::random(),
+                };
+                let (public, signature) = attacker.hybrid_claim(NOW, &device);
+                assert!(
+                    claim(&db, user_id, &public, NOW, &signature, &device)
+                        .await
+                        .is_err(),
+                    "stored ML-DSA half was substituted"
+                );
+            }
+            // Neither failed proof may poison a valid proof from the original phrase.
+            let (public, signature) = phrase.hybrid_claim(NOW, &device);
+            assert_eq!(
+                claim(&db, user_id, &public, NOW, &signature, &device)
+                    .await
+                    .unwrap(),
+                user_id
+            );
+            drop_user(&db, user_id).await;
+        }
     }
 
-    /// After the cutoff no account gets an Ed25519-only recovery key.
-    ///
-    /// Mutation: drop the cutoff from the 32-byte setup — the key is set; this reddens.
     #[tokio::test]
-    async fn after_the_cutoff_an_ed25519_key_is_not_set() {
+    async fn hybrid_setup_checks_both_signatures_and_freshness_before_writing() {
+        let Some(db) = try_db().await else {
+            return;
+        };
+        for legacy in [false, true] {
+            let user_id = new_user(&db).await;
+            let phrase = Phrase::new();
+            if legacy {
+                set_legacy(&db, user_id, &phrase).await;
+            }
+            let (public, signature, timestamp) = phrase.hybrid_setup(user_id);
+            for byte in [0, 64] {
+                // Ed25519 and ML-DSA parts, respectively.
+                let mut altered = signature.clone();
+                altered[byte] ^= 1;
+                assert!(
+                    set_recovery_key_at(&db, user_id, &public, &altered, timestamp, None, NOW)
+                        .await
+                        .is_err()
+                );
+                assert!(!is_hybrid(&db, user_id).await);
+                assert_eq!(
+                    get_recovery_status(&db, user_id).await.unwrap().is_setup,
+                    legacy
+                );
+            }
+            let stale = NOW - claim_bytes::MAX_SKEW_SECS - 1;
+            let (private, _) = phrase.hybrid();
+            let message =
+                claim_bytes::setup_signable(&user_id.to_string(), stale, &public).unwrap();
+            let stale_signature = hybrid_sign(&private, &message).unwrap();
+            assert!(
+                set_recovery_key_at(&db, user_id, &public, &stale_signature, stale, None, NOW)
+                    .await
+                    .is_err()
+            );
+            assert!(!is_hybrid(&db, user_id).await);
+            set_hybrid(&db, user_id, &phrase).await.unwrap();
+            assert!(is_hybrid(&db, user_id).await);
+            drop_user(&db, user_id).await;
+        }
+    }
+
+    /// Retirement is permanent: rolling the server clock back cannot enable old setup.
+    #[tokio::test]
+    async fn retired_setup_is_rejected_even_if_the_server_clock_goes_back() {
         let Some(db) = try_db().await else {
             return;
         };
         let user_id = new_user(&db).await;
         let signing = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        let signature =
-            signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{AFTER_CUTOFF}").as_bytes());
-        let err = set_recovery_key_at(
-            &db,
-            user_id,
-            &signing.verifying_key().to_bytes(),
-            &signature.to_bytes(),
-            AFTER_CUTOFF,
-            None,
-            AFTER_CUTOFF,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("no longer accepted"), "{err}");
-        assert!(!get_recovery_status(&db, user_id).await.unwrap().is_setup);
+        for now in [1_793_404_800, NOW] {
+            let signature =
+                signing.sign(format!("CONSTRUCT_RECOVERY_SETUP:{user_id}:{now}").as_bytes());
+            let result = set_recovery_key_at(
+                &db,
+                user_id,
+                &signing.verifying_key().to_bytes(),
+                &signature.to_bytes(),
+                now,
+                None,
+                now,
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "retired Ed25519 setup was re-enabled by a pre-cutoff clock"
+            );
+            assert!(!get_recovery_status(&db, user_id).await.unwrap().is_setup);
+        }
         drop_user(&db, user_id).await;
     }
 
-    /// After the cutoff an account still on its Ed25519 key refuses the legacy claim, and its
-    /// phrase's hybrid claim recovers it and completes the key — nobody is locked out.
-    ///
-    /// Mutation: drop the cutoff from the legacy claim — it is accepted; this reddens.
     #[tokio::test]
-    async fn after_the_cutoff_an_ed25519_account_is_recovered_by_its_hybrid_claim_only() {
+    async fn malformed_or_legacy_keys_are_rejected_before_database_access() {
+        // No connection is established. A DB lookup before the shape check fails this test.
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://postgres@127.0.0.1:9/unreachable")
+            .unwrap();
+        let device = Device::new();
+        for len in [
+            0,
+            31,
+            32,
+            HYBRID_RECOVERY_KEY_LEN - 1,
+            HYBRID_RECOVERY_KEY_LEN + 1,
+        ] {
+            let public = vec![0; len];
+            let setup = set_recovery_key_at(&db, Uuid::new_v4(), &public, &[0; 64], NOW, None, NOW)
+                .await
+                .unwrap_err();
+            assert!(
+                setup.to_string().contains("1984-byte hybrid public key"),
+                "{setup}"
+            );
+            let recovery = claim(&db, Uuid::new_v4(), &public, NOW, &[0; 64], &device)
+                .await
+                .unwrap_err();
+            assert!(
+                recovery.to_string().contains("1984-byte hybrid public key"),
+                "{recovery}"
+            );
+        }
+    }
+
+    /// A historical account is recovered by its phrase's hybrid proof and keeps its address.
+    #[tokio::test]
+    async fn a_legacy_account_recovers_with_the_same_address_after_retirement() {
         let Some(db) = try_db().await else {
             return;
         };
         let user_id = new_user(&db).await;
         let phrase = Phrase::new();
         set_legacy(&db, user_id, &phrase).await;
-
-        let challenge = AFTER_CUTOFF.to_string();
-        let signature = phrase.legacy().sign(challenge.as_bytes()).to_bytes();
-        let err = verify_recovery_signature_at(
-            &db,
-            &user_id.to_string(),
-            RecoveryClaim::Legacy {
-                challenge: &challenge,
-                signature: &signature,
-            },
-            b"test",
-            AFTER_CUTOFF,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("no longer accepted"), "{err}");
-
+        let before = get_recovery_status(&db, user_id).await.unwrap();
+        let address_before: (Option<Vec<u8>>, Option<String>) =
+            sqlx::query_as("SELECT identity_public_key, route_id FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         let device = Device::new();
-        let (public, signature) = phrase.hybrid_claim(AFTER_CUTOFF, &device);
-        let recovered = verify_recovery_signature_at(
-            &db,
-            &user_id.to_string(),
-            RecoveryClaim::Hybrid {
-                public_key: &public,
-                timestamp: AFTER_CUTOFF,
-                signature: &signature,
-                device_id: &device.id,
-                verifying_key: &device.verifying_key,
-                identity_public: &device.identity_public,
-            },
-            b"test",
-            AFTER_CUTOFF,
-        )
-        .await
-        .unwrap();
+        let (public, signature) = phrase.hybrid_claim(NOW, &device);
+        let recovered = claim(&db, user_id, &public, NOW, &signature, &device)
+            .await
+            .unwrap();
         assert_eq!(recovered, user_id);
-        assert!(is_hybrid(&db, user_id).await);
+        let after = get_recovery_status(&db, user_id).await.unwrap();
+        assert!(after.is_hybrid);
+        assert_eq!(after.fingerprint, before.fingerprint);
+        let stored: (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>) = sqlx::query_as("SELECT recovery_public_key, recovery_mldsa_public_key, identity_public_key, route_id FROM users WHERE id = $1").bind(user_id).fetch_one(&db).await.unwrap();
+        assert_eq!(stored.0, public[..32]);
+        assert_eq!(stored.1, public[32..]);
+        assert_eq!((stored.2, stored.3), address_before);
         drop_user(&db, user_id).await;
     }
 }
