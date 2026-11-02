@@ -3345,22 +3345,10 @@ async fn main() -> Result<()> {
     // Privacy Pass token issuer key + its public commitment (Phase C verifiable VOPRF). Loaded
     // before the context so the derived commitment K = k·G can be published in well-known and
     // pinned by clients.
-    let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
-        Ok(hex_str) => match construct_crypto::privacy_pass::issuer_key_from_hex(&hex_str) {
-            Some(k) => {
-                info!("Privacy Pass token issuer key loaded — IssueTokens enabled");
-                Some(k)
-            }
-            None => {
-                tracing::warn!("TOKEN_ISSUER_KEY must be 64 hex chars — IssueTokens disabled");
-                None
-            }
-        },
-        Err(_) => {
-            info!("TOKEN_ISSUER_KEY not set — IssueTokens disabled");
-            None
-        }
-    };
+    let token_issuer_key = construct_config::load_token_issuer_key()?;
+    if token_issuer_key.is_some() {
+        info!("Privacy Pass token issuer key loaded — IssueTokens enabled");
+    }
     let token_issuer_key_version: u32 = env::var("TOKEN_ISSUER_KEY_VERSION")
         .ok()
         .and_then(|s| s.parse().ok())

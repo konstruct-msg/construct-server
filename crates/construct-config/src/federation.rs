@@ -335,38 +335,25 @@ impl FederationConfig {
             .unwrap_or(false);
         let signing_key_seed = std::env::var("SERVER_SIGNING_KEY").ok();
 
-        // SECURITY: Federation signing key is REQUIRED if federation is enabled
-        // Disable federation if key is missing rather than allowing unsigned messages
-        let (enabled, signing_key_seed) = if enabled && signing_key_seed.is_none() {
-            tracing::error!(
-                "FEDERATION_ENABLED=true but SERVER_SIGNING_KEY is not set. \
-                 Federation will be DISABLED for security. \
-                 Generate key with: openssl rand -base64 32"
-            );
-            (false, None)
-        } else if enabled {
-            // Validate signing key strength if provided
-            if let Some(ref key) = signing_key_seed {
-                // Base64-encoded 32 bytes should be 44 characters (without padding) or 43-44 with padding
-                // Use the same validation logic as ServerSigner::from_seed_base64
-                let decoded = match BASE64.decode(key.trim()) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        anyhow::bail!("SERVER_SIGNING_KEY is not valid base64: {}", e);
-                    }
-                };
-                if decoded.len() != 32 {
-                    anyhow::bail!(
-                        "SERVER_SIGNING_KEY must decode to exactly 32 bytes (got {} bytes). \
-                         Generate with: openssl rand -base64 32",
-                        decoded.len()
-                    );
-                }
+        // An explicitly enabled feature with no signing key is a configuration error,
+        // never a successful boot with silently disabled federation.
+        if enabled {
+            let key = signing_key_seed
+                .as_ref()
+                .filter(|key| !key.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("FEDERATION_ENABLED=true requires SERVER_SIGNING_KEY")
+                })?;
+            let decoded = BASE64
+                .decode(key.trim())
+                .map_err(|_| anyhow::anyhow!("SERVER_SIGNING_KEY is not valid base64"))?;
+            if decoded.len() != 32 {
+                anyhow::bail!(
+                    "SERVER_SIGNING_KEY must decode to exactly 32 bytes (got {})",
+                    decoded.len()
+                );
             }
-            (true, signing_key_seed)
-        } else {
-            (false, signing_key_seed)
-        };
+        }
 
         // Parse pinned certificates from environment variable
         // Format: "domain1:fingerprint1,domain2:fingerprint2"

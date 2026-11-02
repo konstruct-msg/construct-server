@@ -35,7 +35,7 @@ pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::{RedisChannels, RedisKeyPrefixes};
 pub use secret_hygiene::{
     INSECURE_CONTACT_HMAC, INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
-    allow_insecure_secrets, is_production_environment,
+    allow_insecure_secrets, is_production_environment, load_token_issuer_key,
 };
 pub use secret_needs::SecretNeeds;
 pub use security::{CsrfConfig, SecurityConfig};
@@ -454,3 +454,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

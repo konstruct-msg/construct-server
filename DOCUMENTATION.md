@@ -57,6 +57,12 @@ Non-gRPC services (not routed through Caddy):
 
 Each service is an independent Rust binary. `main()` in each service:
 1. Loads `Config::from_env_for(SecretNeeds::<SERVICE>)` (crate `construct-config`) — only the secrets that service uses are required
+   Malformed encoded secrets and literal quotes fail independently of the slice. Optional blank
+   values mean unconfigured; required log salt and CSRF reject whitespace-only values.
+   Explicitly enabled federation fails boot without its signing key. Identity and
+   messaging share `construct_config::load_token_issuer_key` (blank → disabled,
+   malformed → error). The contract matrix in `crates/construct-config/src/contract_tests.rs`
+   runs each env scenario in a separate process with a cleared environment and empty `.env`.
 2. Creates a DB pool (`construct-db`) and Redis connection
 3. Builds a tonic gRPC server and binds to its port
 

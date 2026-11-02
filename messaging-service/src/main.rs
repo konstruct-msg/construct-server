@@ -192,24 +192,10 @@ async fn main() -> Result<()> {
 
     // Privacy Pass token issuer key (stealth-sealed-sender-v2 Phase 1) — same
     // TOKEN_ISSUER_KEY secret as identity-service's IssueTokens, loaded the same way.
-    let token_issuer_key: Option<[u8; 32]> = match env::var("TOKEN_ISSUER_KEY") {
-        Ok(hex_str) => match construct_crypto::privacy_pass::issuer_key_from_hex(&hex_str) {
-            Some(k) => {
-                info!("Privacy Pass token issuer key loaded — sealed-sender redemption enabled");
-                Some(k)
-            }
-            None => {
-                tracing::warn!(
-                    "TOKEN_ISSUER_KEY must be 64 hex chars — sealed-sender redemption disabled"
-                );
-                None
-            }
-        },
-        Err(_) => {
-            info!("TOKEN_ISSUER_KEY not set — sealed-sender redemption disabled");
-            None
-        }
-    };
+    let token_issuer_key = construct_config::load_token_issuer_key()?;
+    if token_issuer_key.is_some() {
+        info!("Privacy Pass token issuer key loaded — sealed-sender redemption enabled");
+    }
 
     // X25519 static secret for opening SealedInner.token_bytes — derived independently
     // from the same signing_key_seed identity-service uses to publish the public half.

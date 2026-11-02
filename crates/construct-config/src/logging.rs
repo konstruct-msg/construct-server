@@ -25,7 +25,7 @@ impl LoggingConfig {
                 let salt = std::env::var("LOG_HASH_SALT").unwrap_or_default();
                 if !require_salt {
                     salt
-                } else if salt.is_empty() || salt == "default-salt-please-change" {
+                } else if salt.trim().is_empty() || salt.trim() == "default-salt-please-change" {
                     anyhow::bail!("LOG_HASH_SALT must be set to a unique, secret value");
                 } else {
                     salt
