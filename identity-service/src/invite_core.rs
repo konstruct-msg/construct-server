@@ -34,6 +34,14 @@ impl std::fmt::Display for InviteSignatureError {
 
 impl std::error::Error for InviteSignatureError {}
 
+pub(crate) fn invite_signer_matches(
+    device_user: Option<Uuid>,
+    active: bool,
+    claimed_user: Uuid,
+) -> bool {
+    active && device_user == Some(claimed_user)
+}
+
 pub async fn verify_invite_signature(
     pool: &DbPool,
     invite: &InviteToken,
@@ -42,6 +50,11 @@ pub async fn verify_invite_signature(
         .await
         .map_err(|e| InviteSignatureError::DatabaseError(e.to_string()))?
         .ok_or(InviteSignatureError::DeviceNotFound)?;
+    // A signature by a valid device key is not authority for another account's invite.
+    // Revoked devices cannot mint new contacts either. Both facts are already in the directory.
+    if !invite_signer_matches(device.user_id, device.is_active, invite.uuid) {
+        return Err(InviteSignatureError::DeviceNotFound);
+    }
     let verifying_key_bytes = device.verifying_key;
 
     tracing::debug!(

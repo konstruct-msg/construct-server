@@ -75,6 +75,10 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 
 - PASETO v4.public only; a token without the `v4.public.` prefix is rejected. Issuer from `AUTH_TOKEN_ISSUER` (fallback `JWT_ISSUER`). Framing is `nonce(32) || message || sig(64)` — client slicing offsets are not a bug. TTL `ACCESS_TOKEN_TTL_HOURS` (24 h).
 - Logout needs `access_token` in the body (empty → `INVALID_ARGUMENT`) and writes `invalidated_token:{jti}`; `RevokeAll` walks the `user_tokens:{user}` index, not all keys.
+- Identity `GetSenderCertificate`, `ApproveJoinRequest`, `IssueTokens` use the common
+  token/header consistency check. Certificates bind an active device of the token's account;
+  invite signers must be active devices of the signed account. Link/join tokens use Redis
+  `GETDEL`, never separate GET and DEL (a mutex covers one process only).
 - Recovery setup and claims require the 1984-byte hybrid key and both signatures;
   no Ed25519-only setup, challenge verifier or calendar gate. Stored
   `recovery_public_key` stays 32 bytes and names the account address. A legacy row

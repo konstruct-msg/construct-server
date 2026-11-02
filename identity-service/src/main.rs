@@ -945,12 +945,10 @@ impl AuthService for IdentityGrpcService {
             ));
         }
 
-        let token = request_token(request.metadata())?;
-        let claims = self
-            .context
-            .auth_manager
-            .verify_token(&token)
-            .map_err(|e| Status::unauthenticated(format!("invalid token: {}", e)))?;
+        let claims = construct_server_shared::auth_utils::verify_access_token(
+            &self.context.auth_manager,
+            request.metadata(),
+        )?;
         let user_id = &claims.sub;
 
         let device_id = request
@@ -1037,18 +1035,16 @@ impl AuthService for IdentityGrpcService {
         &self,
         request: Request<proto::ApproveJoinRequestRequest>,
     ) -> Result<Response<proto::ApproveJoinRequestResponse>, Status> {
-        let token = request_token(request.metadata())?;
+        let claims = construct_server_shared::auth_utils::verify_access_token(
+            &self.context.auth_manager,
+            request.metadata(),
+        )?;
         let req = request.into_inner();
 
         if req.pending_device_id.is_empty() {
             return Err(Status::invalid_argument("pending_device_id is required"));
         }
 
-        let claims = self
-            .context
-            .auth_manager
-            .verify_token(&token)
-            .map_err(|_| Status::unauthenticated("invalid access token"))?;
         let user_id = uuid::Uuid::parse_str(&claims.sub)
             .map_err(|_| Status::internal("invalid user id in token"))?;
 
@@ -1175,12 +1171,10 @@ impl AuthService for IdentityGrpcService {
             .ok_or_else(|| Status::unavailable("privacy pass: token issuance not configured"))?;
         let k = Scalar::from_bytes_mod_order(k_bytes);
 
-        let token = request_token(request.metadata())?;
-        let claims = self
-            .context
-            .auth_manager
-            .verify_token(&token)
-            .map_err(|e| Status::unauthenticated(format!("invalid token: {}", e)))?;
+        let claims = construct_server_shared::auth_utils::verify_access_token(
+            &self.context.auth_manager,
+            request.metadata(),
+        )?;
         let user_id = claims.sub.clone();
 
         let blinded_points = &request.get_ref().blinded_points;
@@ -3856,3 +3850,8 @@ mod device_certificate_tests {
         assert!(!certificate_names_signer(&cert(1, SIGNER)[..16], SIGNER));
     }
 }
+
+#[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
+mod test_config;

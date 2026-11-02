@@ -235,12 +235,11 @@ impl<'a> TokenManager<'a> {
         token: &str,
     ) -> Result<Option<String>> {
         let key = format!("device_link:{}", token);
-        // GET then DEL — fine for our scale (single Redis, no race condition risk)
-        let user_id: Option<String> = self.client.get(&key).await?;
-        if user_id.is_some() {
-            let _: i64 = self.client.del(&key).await?;
-        }
-        Ok(user_id)
+        // A process-local mutex does not serialize consumers on other replicas.
+        Ok(redis::cmd("GETDEL")
+            .arg(&key)
+            .query_async(self.client.connection_mut())
+            .await?)
     }
 
     /// Whether a device link token is still unused, and for whom: the user_id, without
@@ -304,18 +303,18 @@ impl<'a> TokenManager<'a> {
         Ok(payload)
     }
 
-    /// Atomically consume a join request (GET + DEL).
+    /// Atomically consume a join request (GETDEL).
     /// Returns the payload if it existed.
     pub(crate) async fn consume_join_request(
         &mut self,
         pending_device_id: &str,
     ) -> Result<Option<Vec<u8>>> {
         let key = format!("join_req:{}", pending_device_id);
-        let payload: Option<Vec<u8>> = self.client.get(&key).await?;
-        if payload.is_some() {
-            let _: i64 = self.client.del(&key).await?;
-        }
-        Ok(payload)
+        // A process-local mutex does not serialize consumers on other replicas.
+        Ok(redis::cmd("GETDEL")
+            .arg(&key)
+            .query_async(self.client.connection_mut())
+            .await?)
     }
 
     /// Store approved join result with tokens, 2-minute TTL.

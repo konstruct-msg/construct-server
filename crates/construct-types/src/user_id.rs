@@ -272,6 +272,47 @@ impl std::str::FromStr for RouteId {
 mod tests {
     use super::*;
 
+    /// External hashlib vectors pin the algorithm prefix, byte order and full key length.
+    #[test]
+    fn route_id_pq_and_hybrid_known_answers() {
+        for (kind, len, expected) in [
+            (
+                2,
+                1952,
+                "248e7ecccf5b6139810e8fa61431ec53768bef9b499d56bf16f8e29763be1164",
+            ),
+            (
+                3,
+                1984,
+                "3b665eca1aef92c7c17f8fec584fde365e83def575b8394474303b8d3818ba8d",
+            ),
+        ] {
+            let key: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+            assert_eq!(RouteId::compute(&key, kind).as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn route_id_parser_accepts_hex_normalizes_case_and_rejects_other_shapes() {
+        let lower = "abcdef0123456789".repeat(4);
+        assert_eq!(lower.parse::<RouteId>().unwrap().as_str(), lower);
+        assert_eq!(
+            lower.to_uppercase().parse::<RouteId>().unwrap().as_str(),
+            lower
+        );
+        for bad in [
+            String::new(),
+            "0".repeat(63),
+            "0".repeat(65),
+            "g".repeat(64),
+            "０".repeat(64),
+            format!(" {lower}"),
+            format!("{lower}\n"),
+        ] {
+            assert!(bad.parse::<RouteId>().is_err(), "accepted {bad:?}");
+        }
+    }
+
     #[test]
     fn test_parse_local_user_id() {
         let input = "550e8400-e29b-41d4-a716-446655440000";
