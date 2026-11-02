@@ -885,7 +885,7 @@ async fn invite_accept_burns_once_links_both_accounts_and_revoke_prevents_accept
     let a = construct_db::contact_link_hmac(secret, &accepter);
     let b = construct_db::contact_link_hmac(secret, &user);
     let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contact_links WHERE (user_hmac = $1 AND peer_hmac = $2) OR (user_hmac = $2 AND peer_hmac = $1)")
-        .bind(&a).bind(&b).fetch_one(ctx.db_pool.as_ref()).await.unwrap();
+        .bind(a).bind(b).fetch_one(ctx.db_pool.as_ref()).await.unwrap();
     assert_eq!(links, 2, "mutual contact link missing");
     let err = accept_invite(
         ctx,
