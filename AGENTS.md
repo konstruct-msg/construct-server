@@ -96,6 +96,13 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 
 ### Config
 
+- Federation signatures: escape `%` → `%25`, `:` → `%3A` in each of the seven signed
+  fields before joining with `:`; never fall back to raw concatenation. Destination
+  comes from local `INSTANCE_DOMAIN`. Empty signed `from`/`to` are sealed-only.
+  Replay claim `fed:v2:msg:<SHA-256(length-framed origin, message_id)>` is taken after
+  signature verification and sealed base64 decoding; dispatch failure releases it,
+  Redis error fails closed. See `crates/construct-federation/README.md`.
+
 - Known debt: `AppContext` APNs/token_encryption are set only by identity's `to_app_context()` (messaging pushes through `notification_core`); signaling's in-memory `user_channels` is empty after restart (clients reconnect).
 - `INSTANCE_DOMAIN` is required on every Rust service (mismatch breaks federation).
 - Never re-declare an `app.env` secret as bare `${VAR}` under compose `environment:` (unset shell var blanks it). Rotate with `up -d --force-recreate`, not `restart`.

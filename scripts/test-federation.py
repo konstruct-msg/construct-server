@@ -64,6 +64,12 @@ def sha256_b64(data: bytes) -> str:
     return base64.b64encode(hashlib.sha256(data).digest()).decode()
 
 
+def canonical_envelope_bytes(message_id, sender, recipient, origin, dest, timestamp, payload_hash):
+    """Match construct-federation's escaped seven-field signing representation."""
+    fields = (message_id, sender, recipient, origin, dest, str(timestamp), payload_hash)
+    return ":".join(field.replace("%", "%25").replace(":", "%3A") for field in fields).encode()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Federation two-VPS integration test")
     parser.add_argument("--server-a", required=True, help="URL of server A (origin)")
@@ -168,11 +174,11 @@ def main():
     # ── Step 5: Sign the FederatedEnvelope ───────────────────────────────
     print("\n5. Signing FederatedEnvelope with server A's key...")
 
-    # Canonical: message_id:from:to:origin:dest:timestamp:payload_hash
+    # Canonical fields escape % -> %25 and : -> %3A before joining with colons.
     # from/to are empty for sealed sender (sender-blind on the wire).
-    canonical = f"{message_id}:::{origin}:{dest}:{timestamp}:{payload_hash}"
+    canonical = canonical_envelope_bytes(message_id, "", "", origin, dest, timestamp, payload_hash)
     print(f"  canonical origin={origin} dest={dest}")
-    signature = sk.sign(canonical.encode())
+    signature = sk.sign(canonical)
     signature_b64 = base64.b64encode(signature).decode()
     ok(f"Signature: {signature_b64[:16]}...")
 

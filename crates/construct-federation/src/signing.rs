@@ -200,19 +200,35 @@ pub struct FederatedEnvelope {
 impl FederatedEnvelope {
     /// Create canonical bytes for signing
     ///
-    /// Format: message_id || from || to || origin || dest || timestamp || payload_hash
+    /// Seven UTF-8 fields, separated by `:`. Within each field `%` is `%25` and
+    /// `:` is `%3A`; all other bytes are unchanged. Escaping `%` makes literal
+    /// escape sequences distinct. Fields without either character retain their
+    /// original S2S signatures; ambiguous legacy signatures are never retried.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let canonical_string = format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            self.message_id,
-            self.from,
-            self.to,
-            self.origin_server,
-            self.destination_server,
-            self.timestamp,
-            self.payload_hash
-        );
-        canonical_string.into_bytes()
+        let timestamp = self.timestamp.to_string();
+        let fields = [
+            self.message_id.as_str(),
+            self.from.as_str(),
+            self.to.as_str(),
+            self.origin_server.as_str(),
+            self.destination_server.as_str(),
+            timestamp.as_str(),
+            self.payload_hash.as_str(),
+        ];
+        let mut canonical = Vec::new();
+        for (index, field) in fields.iter().enumerate() {
+            if index != 0 {
+                canonical.push(b':');
+            }
+            for byte in field.bytes() {
+                match byte {
+                    b'%' => canonical.extend_from_slice(b"%25"),
+                    b':' => canonical.extend_from_slice(b"%3A"),
+                    _ => canonical.push(byte),
+                }
+            }
+        }
+        canonical
     }
 
     /// Create payload hash from ciphertext
@@ -468,5 +484,121 @@ mod tests {
         // Different input = different hash
         let hash3 = FederatedEnvelope::hash_payload("different content");
         assert_ne!(hash, hash3);
+    }
+}
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+
+    fn signer() -> ServerSigner {
+        ServerSigner::from_seed_base64(&BASE64.encode([37; 32]), "origin.example".into()).unwrap()
+    }
+
+    fn envelope() -> FederatedEnvelope {
+        FederatedEnvelope {
+            message_id: "message".into(),
+            from: "alice".into(),
+            to: "bob".into(),
+            origin_server: "origin.example".into(),
+            destination_server: "dest.example".into(),
+            timestamp: 1_793_491_200,
+            payload_hash: FederatedEnvelope::hash_payload("ciphertext"),
+        }
+    }
+
+    #[test]
+    fn delimiter_shift_cannot_reuse_a_signature() {
+        let signer = signer();
+        // The sender field can contain ':' (e.g. a key address). The old concatenation
+        // let a transit party change both the claimed sender and replay identifier.
+        let mut original = envelope();
+        original.message_id = "message:alice".into();
+        let mut substituted = original.clone();
+        substituted.message_id = "message".into();
+        substituted.from = "alice:alice".into();
+        let signature = signer.sign_message(&original);
+        assert!(
+            ServerSigner::verify_signature(&signer.public_key_base64(), &original, &signature)
+                .is_ok()
+        );
+        assert!(
+            ServerSigner::verify_signature(&signer.public_key_base64(), &substituted, &signature)
+                .is_err(),
+            "a valid signature accepted a different message_id and sender"
+        );
+        assert_ne!(original.canonical_bytes(), substituted.canonical_bytes());
+    }
+
+    #[test]
+    fn legacy_signatures_work_only_when_their_fields_need_no_escaping() {
+        let signer = signer();
+        let mut e = envelope();
+        // Independent literal input to sign_bytes pins compatibility, rather than having
+        // the same buggy canonicalizer sign and verify its own output.
+        e.payload_hash = "hash".into();
+        let raw = b"message:alice:bob:origin.example:dest.example:1793491200:hash";
+        let signature = BASE64.encode(signer.sign_bytes(raw));
+        assert!(
+            ServerSigner::verify_signature(&signer.public_key_base64(), &e, &signature).is_ok()
+        );
+        e.message_id = "message:alice".into();
+        let raw = b"message:alice:alice:bob:origin.example:dest.example:1793491200:hash";
+        let ambiguous_signature = BASE64.encode(signer.sign_bytes(raw));
+        assert!(
+            ServerSigner::verify_signature(&signer.public_key_base64(), &e, &ambiguous_signature)
+                .is_err(),
+            "an unsafe legacy fallback reintroduced the delimiter ambiguity"
+        );
+    }
+
+    #[test]
+    fn every_signed_field_is_bound_for_regular_and_sealed_envelopes() {
+        let signer = signer();
+        for sealed in [false, true] {
+            let mut original = envelope();
+            if sealed {
+                original.from.clear();
+                original.to.clear();
+            }
+            let signature = signer.sign_message(&original);
+            for field in 0..7 {
+                let mut changed = original.clone();
+                match field {
+                    0 => changed.message_id.push('x'),
+                    1 => changed.from.push('x'),
+                    2 => changed.to.push('x'),
+                    3 => changed.origin_server.push('x'),
+                    4 => changed.destination_server.push('x'),
+                    5 => changed.timestamp += 1,
+                    6 => changed.payload_hash.push('x'),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    ServerSigner::verify_signature(
+                        &signer.public_key_base64(),
+                        &changed,
+                        &signature
+                    )
+                    .is_err(),
+                    "sealed={sealed}, field={field} was not signed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_canonical_bytes_have_a_literal_wire_vector() {
+        let mut e = envelope();
+        e.message_id = "id:%3A".into();
+        e.from = "ed25519:ab".into();
+        e.to = "bob@dest.example:8443".into();
+        e.origin_server = "origin.example:443".into();
+        e.destination_server = "dest.example:8443".into();
+        e.payload_hash = "hash:with%percent".into();
+        assert_eq!(e.canonical_bytes(), b"id%3A%253A:ed25519%3Aab:bob@dest.example%3A8443:origin.example%3A443:dest.example%3A8443:1793491200:hash%3Awith%25percent");
+        let mut literal_escape = e.clone();
+        literal_escape.from = "ed25519%3Aab".into();
+        assert_ne!(e.canonical_bytes(), literal_escape.canonical_bytes());
     }
 }

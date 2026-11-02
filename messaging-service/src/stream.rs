@@ -1247,7 +1247,12 @@ mod catchup_drains_pages {
             ids.contains(&own_id),
             "one poll must walk past the sibling page, got {ids:?}"
         );
-        assert_eq!(ids.iter().filter(|id| *id == &own_id).count(), 1);
+        // Independent user/device stream ids can place the two copies on different
+        // pages. At-least-once allows that repeat; siblings must still never appear.
+        assert!(
+            ids.iter().all(|id| id == &own_id),
+            "unexpected delivery: {ids:?}"
+        );
 
         queue.delete_mailbox(&user_s).await.expect("cleanup");
     }

@@ -1551,6 +1551,55 @@ mod mailbox_merge_tests {
         assert_eq!(page.sibling_skipped, 1);
     }
 
+    /// Independent sequences in the same Redis millisecond can put a device copy before
+    /// the current user horizon and its legacy twin on the next page. Delivery is
+    /// at-least-once across pages, with scoped dedup *within* each merge. Fixed ids make
+    /// this regression independent of Redis throughput and host clock granularity.
+    #[test]
+    fn paged_merge_preserves_every_message_with_independent_sequence_numbers() {
+        let device = vec![
+            ("1000-0".to_string(), Some(env_for("own", "a"))),
+            ("1000-6".to_string(), Some(env_for("next", "a"))),
+        ];
+        let user = vec![
+            ("1000-0".to_string(), Some(env_for("sibling-1", "b"))),
+            ("1000-1".to_string(), Some(env_for("sibling-2", "b"))),
+            ("1000-2".to_string(), Some(env_for("sibling-3", "b"))),
+            ("1000-3".to_string(), Some(env_for("sibling-4", "b"))),
+            ("1000-4".to_string(), Some(env("legacy-only"))),
+            ("1000-5".to_string(), Some(env_for("own", "a"))),
+        ];
+        let mut cursor = "0".to_string();
+        let mut received = Vec::new();
+        let mut complete = false;
+        for _ in 0..10 {
+            let read = |source: &Vec<(String, Option<MessageEnvelope>)>| {
+                source
+                    .iter()
+                    .filter(|(id, _)| compare_stream_id_watermarks(id, &cursor).is_gt())
+                    .take(2)
+                    .cloned()
+                    .collect()
+            };
+            let page = merge_mailbox_pages(read(&device), read(&user), 1, 2, "a");
+            received.extend(ids(&page).into_iter().map(str::to_string));
+            let next = page.resume_after(Some(&cursor)).unwrap();
+            if !page.has_more {
+                complete = true;
+                break;
+            }
+            assert!(
+                compare_stream_id_watermarks(&next, &cursor).is_gt(),
+                "paging stalled"
+            );
+            cursor = next;
+        }
+        assert!(complete, "paging must terminate");
+        received.sort();
+        received.dedup(); // Across pages: at-least-once; the client deduplicates message ids.
+        assert_eq!(received, ["legacy-only", "next", "own"]);
+    }
+
     fn ids(page: &MailboxPage) -> Vec<&str> {
         page.entries
             .iter()
