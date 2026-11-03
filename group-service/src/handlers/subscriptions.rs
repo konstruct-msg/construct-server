@@ -51,6 +51,12 @@ pub(crate) async fn subscribe_channel(
             .map_err(|e| Status::internal(format!("DB error: {}", e)))?
             .ok_or_else(|| Status::not_found("Invite link not found"))?;
 
+        if invite.channel_id != channel_id {
+            return Err(Status::permission_denied(
+                "Invite link belongs to another channel",
+            ));
+        }
+
         let now = Utc::now();
         if invite.revoked_at.is_some() {
             return Err(Status::permission_denied("Invite link has been revoked"));
@@ -66,9 +72,15 @@ pub(crate) async fn subscribe_channel(
             return Err(Status::resource_exhausted("Invite link fully used"));
         }
 
-        db_channel::increment_channel_invite_link_usage(svc.db.as_ref(), &invite_token)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to record invite usage: {}", e)))?;
+        let consumed =
+            db_channel::increment_channel_invite_link_usage(svc.db.as_ref(), &invite_token)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to record invite usage: {}", e)))?;
+        if !consumed {
+            return Err(Status::resource_exhausted(
+                "Invite link no longer available",
+            ));
+        }
     }
 
     if channel.max_subscribers > 0 {

@@ -2,6 +2,7 @@ mod admin;
 mod channel_admin;
 mod channel_lifecycle;
 mod comment_groups;
+mod db_contracts;
 mod group_lifecycle;
 mod invite_links;
 mod key_packages;
