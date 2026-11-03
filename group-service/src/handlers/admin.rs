@@ -172,7 +172,13 @@ pub(crate) async fn transfer_ownership(
 
     db_mls::transfer_group_ownership(&mut tx, group_id, &device_id, &req.new_owner_device_id)
         .await
-        .map_err(|e| Status::internal(format!("Failed to transfer ownership: {}", e)))?;
+        .map_err(|e| {
+            if e.is::<db_mls::OwnershipTransferRejected>() {
+                Status::permission_denied("Ownership or target admin role changed")
+            } else {
+                Status::internal(format!("Failed to transfer ownership: {}", e))
+            }
+        })?;
 
     tx.commit()
         .await

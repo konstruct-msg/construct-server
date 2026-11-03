@@ -11,6 +11,18 @@ pub struct GroupAdminAccess {
     pub is_full_admin: bool,
 }
 
+/// The directory changed after the RPC checked the owner's signed request.
+#[derive(Debug)]
+pub struct OwnershipTransferRejected;
+
+impl std::fmt::Display for OwnershipTransferRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ownership transfer requires the current owner and a different full admin")
+    }
+}
+
+impl std::error::Error for OwnershipTransferRejected {}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct GroupStateRecord {
     pub epoch: i64,
@@ -405,23 +417,51 @@ pub async fn transfer_group_ownership(
     old_owner_device_id: &str,
     new_owner_device_id: &str,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE group_admins SET is_creator = FALSE WHERE group_id = $1 AND device_id = $2",
+    // Serialize transfers on the same group, then recheck the directory under
+    // that lock. RPC checks before BEGIN cannot authorize a stale previous owner.
+    lock_group_epoch_for_update(tx, group_id).await?;
+    let eligible: bool = sqlx::query_scalar(
+        r#"
+        SELECT $2 <> $3
+          AND EXISTS(SELECT 1 FROM group_admins
+                     WHERE group_id = $1 AND device_id = $2 AND is_creator = TRUE)
+          AND EXISTS(SELECT 1 FROM group_admins
+                     WHERE group_id = $1 AND device_id = $3 AND role = 1)
+        "#,
+    )
+    .bind(group_id)
+    .bind(old_owner_device_id)
+    .bind(new_owner_device_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("Failed to recheck MLS group ownership")?;
+    if !eligible {
+        return Err(OwnershipTransferRejected.into());
+    }
+
+    let demoted = sqlx::query(
+        "UPDATE group_admins SET is_creator = FALSE WHERE group_id = $1 AND device_id = $2 AND is_creator = TRUE",
     )
     .bind(group_id)
     .bind(old_owner_device_id)
     .execute(&mut **tx)
     .await
     .context("Failed to demote previous MLS group owner")?;
+    if demoted.rows_affected() != 1 {
+        return Err(OwnershipTransferRejected.into());
+    }
 
-    sqlx::query(
-        "UPDATE group_admins SET is_creator = TRUE, role = 1 WHERE group_id = $1 AND device_id = $2",
+    let promoted = sqlx::query(
+        "UPDATE group_admins SET is_creator = TRUE, role = 1 WHERE group_id = $1 AND device_id = $2 AND role = 1",
     )
     .bind(group_id)
     .bind(new_owner_device_id)
     .execute(&mut **tx)
     .await
     .context("Failed to promote new MLS group owner")?;
+    if promoted.rows_affected() != 1 {
+        return Err(OwnershipTransferRejected.into());
+    }
 
     Ok(())
 }

@@ -439,7 +439,8 @@ cargo test -p construct-server-shared                         # all shared integ
 cargo test -p construct-server-shared --test e2e_crypto_test
 ```
 
-Most integration tests are gated with `#[ignore]` and skipped in CI unless the full stack is up:
+Most integration tests are gated with `#[ignore]`. CI starts Redis/Postgres and runs
+them in a separate service-backed step; locally, run them explicitly:
 ```bash
 cargo test -p construct-server-shared -- --ignored   # run skipped integration tests
 ```
@@ -450,6 +451,22 @@ Requires `DATABASE_URL` (migrated Postgres) and `REDIS_URL`. Checks issuance val
 certificate binding/signature/lifetime, link/join single-use across 16 connections, private link
 results, invite signature/account/address/expiry/burn/revoke and mutual contacts. PoW's external
 vector remains in `construct-pow`; unused negotiation is tracked for removal in task 241.
+
+SQL contracts in `crates/construct-db/tests/contracts.rs` run the production queries
+against a separate PostgreSQL schema per test, with all migrations applied. They cover
+single-use KeyPackages and invite JTIs under contention, selection scope/expiry,
+directional blocklists, route lookup, ownership transfer, membership removal, epoch
+locking, channel invite usage and sender-key rotation. `shared/test_support/postgres.rs`
+owns schema creation/cleanup, including cleanup on failed mutations; it contains no
+delivery or authorization implementation. Set `DATABASE_URL`, then run
+`cargo test -p construct-db --test contracts -- --ignored`.
+
+Their RPC consumers run with Redis too:
+`cargo test -p group-service tests::db_contracts -- --ignored`. These tests call the
+real signed ownership, SubmitCommit and SubscribeChannel paths. Lock contention is
+observed through PostgreSQL lock waits, rather than assumed from a sleep. Ownership
+is rechecked within the transaction; private invites are channel-bound and their
+atomic SQL refusal is honored; redistributing a sender key clears `rotated_at`.
 
 ### cargo check / clippy
 

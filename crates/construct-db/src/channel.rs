@@ -807,7 +807,8 @@ pub async fn store_channel_sender_key(
         INSERT INTO channel_sender_keys (channel_id, device_id, encrypted_sender_key)
         VALUES ($1, $2, $3)
         ON CONFLICT (channel_id, device_id)
-        DO UPDATE SET encrypted_sender_key = EXCLUDED.encrypted_sender_key, distributed_at = NOW()
+        DO UPDATE SET encrypted_sender_key = EXCLUDED.encrypted_sender_key,
+                      distributed_at = NOW(), rotated_at = NULL
         "#,
     )
     .bind(channel_id)
