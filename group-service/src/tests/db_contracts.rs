@@ -1,6 +1,5 @@
 //! RPC consumers of the SQL invariants; no copied authorization or commit algorithm.
-#[path = "../../../shared/test_support/postgres.rs"]
-mod postgres;
+use super::postgres;
 
 use super::test_helpers::{
     create_metadata, create_test_device, create_test_group_in_db, make_test_service,
@@ -104,11 +103,11 @@ async fn private_channel_concurrent_subscriptions_cannot_exceed_a_one_use_invite
         clients.push((u, d));
     }
     let users: Vec<Uuid> = clients.iter().map(|(u, _)| *u).collect();
-    // Hold the invite's UPDATE lock until multiple RPCs have finished their SELECT.
+    // Hold the admission row until multiple RPCs are waiting on the channel lock.
     // The observer counts pg_stat_activity lock waits instead of sleeping.
     let mut lock = db.pool.begin().await.unwrap();
-    sqlx::query("SELECT token FROM channel_invite_links WHERE token=$1 FOR UPDATE")
-        .bind(&token)
+    sqlx::query("SELECT channel_id FROM channels WHERE channel_id=$1 FOR UPDATE")
+        .bind(a)
         .execute(&mut *lock)
         .await
         .unwrap();
@@ -130,7 +129,7 @@ async fn private_channel_concurrent_subscriptions_cannot_exceed_a_one_use_invite
     // The pool has spare connections for an observer while all eight RPCs wait.
     let ready = tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE application_name=current_setting('application_name') AND wait_event_type='Lock' AND query LIKE '%UPDATE channel_invite_links%' AND query NOT LIKE '%pg_stat_activity%'")
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE application_name=current_setting('application_name') AND wait_event_type='Lock' AND query LIKE '%SELECT visibility::TEXT, max_subscribers FROM channels%' AND query NOT LIKE '%pg_stat_activity%'")
                 .fetch_one(&db.pool).await.unwrap();
             if count >= 2 { break; }
             tokio::task::yield_now().await;

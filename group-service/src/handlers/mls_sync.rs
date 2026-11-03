@@ -52,6 +52,7 @@ pub(crate) async fn submit_commit(
         .map_err(|e| Status::internal(format!("Failed to lock group epoch: {}", e)))?;
 
     if req.epoch != current_epoch as u64 {
+        crate::metrics::inc_epoch_mismatches();
         tx.rollback().await.ok();
         return Err(Status::aborted("EPOCH_MISMATCH"));
     }
@@ -113,6 +114,7 @@ pub(crate) async fn submit_commit(
         new_epoch = new_epoch,
         "Commit submitted"
     );
+    crate::metrics::inc_commits_submitted();
 
     Ok(Response::new(proto::SubmitCommitResponse {
         success: true,

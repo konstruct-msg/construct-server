@@ -676,15 +676,15 @@ async fn handle_outbound_signal(
     // ACCEPTED_ELSEWHERE hangups to the callee's other devices. The Answer arm that reached it is
     // refused as of 2026-08-21, so none of that had a producer left — and none of it had one before
     // either, because no shipped client has sent an Answer on this stream since call signalling
-    // moved into MessagingService. Those two metrics have therefore been reporting nothing, and
+    // moved into MessagingService. Audit 239 removed those unproduced metrics and the dashboard
+    // target; they cannot measure an E2EE Answer this service never receives. Meanwhile,
     // multi-device ACCEPTED_ELSEWHERE has not been happening at all.
     //
     // Not moved to the `Connected` arm in the same change, deliberately. `Connected` is sent by
     // *either* peer once media is up, so the accounting has to establish which side it came from
     // before it can hang up "the callee's other devices" — driving that fan-out from the caller's
     // own signal would hang up devices in a live call. `note_connected` already sets
-    // `answered_at_ms`, which is what the reaper needs; the metrics and the fan-out are their own
-    // piece of work.
+    // `answered_at_ms`, which is what the reaper needs; the fan-out is its own piece of work.
 
     Ok(())
 }

@@ -458,81 +458,89 @@ pub async fn delete_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<bool
     Ok(result.rows_affected() > 0)
 }
 
-/// Delete media file from storage and database
-pub async fn delete_media(pool: &sqlx::PgPool, storage_dir: &Path, media_id: &str) -> Result<bool> {
-    let metadata = get_metadata(pool, media_id).await?;
-
-    if let Some(meta) = metadata {
-        if let Ok(file_path) = safe_object_path(storage_dir, &meta.storage_key)
-            && file_path.exists()
-        {
-            fs::remove_file(&file_path).await?;
-        }
-        // Also drop any leftover partial
-        let partial = storage_dir.join(format!("{}.partial", meta.media_id));
-        if partial.exists() {
-            let _ = fs::remove_file(&partial).await;
-        }
-
-        delete_metadata(pool, media_id).await?;
-        Ok(true)
-    } else {
-        Ok(false)
+/// A missing file is already deleted. Other filesystem errors leave the DB
+/// record intact so the next sweep can retry instead of silently orphaning bytes.
+async fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
-/// Delete all DB rows + files past expires_at. Returns count deleted.
+/// Delete expired media only after its object and partial file are removed.
+/// A failed row stays retryable; other rows still make progress. Errors reach
+/// the worker after the sweep, including orphan-partial filesystem failures.
 pub async fn cleanup_expired_media(pool: &sqlx::PgPool, storage_dir: &Path) -> Result<u64> {
-    // Runtime query (not query!) so SQLX_OFFLINE builds don't need a cache refresh.
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        r#"
-        SELECT media_id, storage_key
-        FROM media_files
-        WHERE expires_at < NOW()
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut deleted = 0u64;
-    for (media_id, storage_key) in rows {
-        let id = media_id.to_string();
-        if let Ok(path) = safe_object_path(storage_dir, &storage_key)
-            && path.exists()
-        {
-            let _ = fs::remove_file(&path).await;
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT media_id,storage_key FROM media_files WHERE expires_at < NOW()")
+            .fetch_all(pool)
+            .await?;
+    let mut deleted = 0;
+    let mut failure = None;
+    for (id, key) in rows {
+        let removal: Result<()> = async {
+            let path = safe_object_path(storage_dir, &key)?;
+            remove_if_present(&path)
+                .await
+                .context("Failed to remove expired media object")?;
+            remove_if_present(&storage_dir.join(format!("{id}.partial")))
+                .await
+                .context("Failed to remove expired media partial")?;
+            Ok(())
         }
-        let partial = storage_dir.join(format!("{id}.partial"));
-        if partial.exists() {
-            let _ = fs::remove_file(&partial).await;
+        .await;
+        if let Err(error) = removal {
+            tracing::error!(media_id=%id,error=%error,"Media cleanup failed; metadata retained for retry");
+            if failure.is_none() {
+                failure = Some(error);
+            }
+            continue;
         }
-        if delete_metadata(pool, &id).await? {
+        if delete_metadata(pool, &id.to_string()).await? {
             deleted += 1;
         }
     }
-
-    // Orphan partials older than 1 hour (crashed uploads)
-    if let Ok(mut entries) = fs::read_dir(storage_dir).await {
+    let orphans: Result<()> = async {
+        let mut entries = match fs::read_dir(storage_dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
         let now = std::time::SystemTime::now();
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if !name.ends_with(".partial") {
                 continue;
             }
-            if let Ok(meta) = fs::metadata(&path).await
-                && let Ok(modified) = meta.modified()
-                && now
-                    .duration_since(modified)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-                    > 3600
+            let meta = match fs::metadata(&path).await {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if now
+                .duration_since(meta.modified()?)
+                .unwrap_or_default()
+                .as_secs()
+                > 3600
             {
-                let _ = fs::remove_file(&path).await;
+                remove_if_present(&path)
+                    .await
+                    .context("Failed to remove orphan media partial")?;
             }
         }
+        Ok(())
     }
-
+    .await;
+    if let Err(error) = orphans
+        && failure.is_none()
+    {
+        failure = Some(error);
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
     Ok(deleted)
 }
 

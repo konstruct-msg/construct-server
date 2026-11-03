@@ -1,4 +1,3 @@
-use chrono::Utc;
 use construct_db::channel as db_channel;
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use tonic::{Request, Response, Status};
@@ -33,69 +32,34 @@ pub(crate) async fn subscribe_channel(
     )
     .await?;
 
-    let channel = db_channel::get_channel_by_id(svc.db.as_ref(), channel_id)
-        .await
-        .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-        .ok_or_else(|| Status::not_found("Channel not found"))?;
-
-    if channel.visibility == "PRIVATE" {
-        let invite_token = req.invite_token.clone();
-        if invite_token.is_empty() {
+    use db_channel::ChannelSubscription as S;
+    let outcome = db_channel::subscribe_channel_atomic(
+        svc.db.as_ref(),
+        channel_id,
+        &device_id,
+        &req.invite_token,
+    )
+    .await
+    .map_err(|e| Status::internal(format!("Failed to subscribe: {e}")))?;
+    let subscribed_at = match outcome {
+        S::Subscribed(at) => at,
+        S::NotFound => return Err(Status::not_found("Channel not found")),
+        S::Full => return Err(Status::resource_exhausted("Channel is full")),
+        S::InviteRequired => {
             return Err(Status::permission_denied(
                 "PRIVATE channel requires an invite token",
             ));
         }
-
-        let invite = db_channel::resolve_channel_invite_link(svc.db.as_ref(), &invite_token)
-            .await
-            .map_err(|e| Status::internal(format!("DB error: {}", e)))?
-            .ok_or_else(|| Status::not_found("Invite link not found"))?;
-
-        if invite.channel_id != channel_id {
+        S::InviteNotFound => return Err(Status::not_found("Invite link not found")),
+        S::WrongChannel => {
             return Err(Status::permission_denied(
                 "Invite link belongs to another channel",
             ));
         }
-
-        let now = Utc::now();
-        if invite.revoked_at.is_some() {
-            return Err(Status::permission_denied("Invite link has been revoked"));
-        }
-        if let Some(expires_at) = invite.expires_at
-            && expires_at < now
-        {
-            return Err(Status::permission_denied("Invite link has expired"));
-        }
-        if let Some(max_uses) = invite.max_uses
-            && invite.use_count >= max_uses
-        {
-            return Err(Status::resource_exhausted("Invite link fully used"));
-        }
-
-        let consumed =
-            db_channel::increment_channel_invite_link_usage(svc.db.as_ref(), &invite_token)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to record invite usage: {}", e)))?;
-        if !consumed {
-            return Err(Status::resource_exhausted(
-                "Invite link no longer available",
-            ));
-        }
-    }
-
-    if channel.max_subscribers > 0 {
-        let count = db_channel::get_channel_subscriber_count(svc.db.as_ref(), channel_id)
-            .await
-            .unwrap_or(0);
-        if count >= channel.max_subscribers as i64 {
-            return Err(Status::resource_exhausted("Channel is full"));
-        }
-    }
-
-    let subscribed_at =
-        db_channel::subscribe_to_channel(svc.db.as_ref(), channel_id, &device_id, false)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to subscribe: {}", e)))?;
+        S::InviteRevoked => return Err(Status::permission_denied("Invite link has been revoked")),
+        S::InviteExpired => return Err(Status::permission_denied("Invite link has expired")),
+        S::InviteExhausted => return Err(Status::resource_exhausted("Invite link fully used")),
+    };
 
     let encrypted_sender_key =
         db_channel::get_channel_sender_key(svc.db.as_ref(), channel_id, &device_id)

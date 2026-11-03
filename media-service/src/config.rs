@@ -21,8 +21,6 @@ pub struct MediaConfig {
     pub hmac_secret: String,
     /// Server bind address (health/metrics only)
     pub bind_address: String,
-    /// Enable debug logging
-    pub debug: bool,
     /// Max GenerateUploadToken calls per user per hour
     pub rate_limit_per_hour: u32,
     /// Max StickerService calls per client IP per hour, all four RPCs together. Generous on
@@ -40,7 +38,6 @@ impl Default for MediaConfig {
             // Empty — callers must load via from_env() which rejects insecure values.
             hmac_secret: String::new(),
             bind_address: "0.0.0.0:8082".to_string(),
-            debug: false,
             rate_limit_per_hour: 50,
             sticker_rate_limit_per_hour: 600,
         }
@@ -74,9 +71,6 @@ impl MediaConfig {
             hmac_secret,
             bind_address: std::env::var("MEDIA_BIND_ADDRESS")
                 .unwrap_or_else(|_| "0.0.0.0:8082".to_string()),
-            debug: std::env::var("MEDIA_DEBUG")
-                .map(|s| s == "true")
-                .unwrap_or(false),
             rate_limit_per_hour: std::env::var("MEDIA_RATE_LIMIT_PER_HOUR")
                 .ok()
                 .and_then(|s| s.parse().ok())

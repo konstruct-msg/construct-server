@@ -119,15 +119,6 @@ pub static CALLS_INITIATED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register CALLS_INITIATED_TOTAL metric")
 });
 
-/// Total connected calls (offer -> answer).
-pub static CALLS_CONNECTED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(opts!(
-        "construct_calls_connected_total",
-        "Total number of calls successfully connected (offer -> answer)"
-    ))
-    .expect("Failed to register CALLS_CONNECTED_TOTAL metric")
-});
-
 /// Total missed calls (ringing -> timeout without answer).
 pub static CALLS_MISSED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(opts!(
@@ -187,15 +178,6 @@ pub static SIGNALING_SDP_REFUSED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
         &["signal"]
     )
     .expect("Failed to register SIGNALING_SDP_REFUSED_TOTAL metric")
-});
-
-/// Call setup duration (seconds) from offer receipt to answer.
-pub static CALL_SETUP_DURATION_SECONDS: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "construct_call_setup_duration_seconds",
-        "Call setup duration in seconds (offer -> answer)"
-    )
-    .expect("Failed to register CALL_SETUP_DURATION_SECONDS metric")
 });
 
 /// Current number of active calls (including pending attempts).
@@ -846,11 +828,9 @@ pub fn force_veil_bootstrap_voucher_metrics() {
 pub fn init_registry() {
     Lazy::force(&MESSAGES_SENT_TOTAL);
     Lazy::force(&MESSAGE_DELIVERY_TIME);
-    Lazy::force(&CALLS_CONNECTED_TOTAL);
     Lazy::force(&CALLS_MISSED_TOTAL);
     Lazy::force(&CALLS_DECLINED_TOTAL);
     Lazy::force(&CALLS_FAILED_TOTAL);
-    Lazy::force(&CALL_SETUP_DURATION_SECONDS);
     Lazy::force(&ACTIVE_CALLS);
     Lazy::force(&MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL);
     Lazy::force(&MSG_PUSH_SKIPPED_ONLINE_TOTAL);
@@ -942,6 +922,27 @@ pub fn init_registry() {
     Lazy::force(&MSG_ABUSE_FAIL_OPEN_TOTAL);
     Lazy::force(&MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL);
     Lazy::force(&AUTH_SECURITY_FAIL_OPEN_TOTAL);
+}
+
+#[cfg(test)]
+mod audit_239 {
+    #[test]
+    fn registry_does_not_publish_unobservable_call_connection_series() {
+        super::init_registry();
+        let names: Vec<String> = prometheus::gather()
+            .iter()
+            .map(|f| f.name().to_owned())
+            .collect();
+        for name in [
+            "construct_calls_connected_total",
+            "construct_call_setup_duration_seconds",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == name),
+                "{name} has no producer; a registered zero would mislead operators"
+            );
+        }
+    }
 }
 
 /// Gather all registered metrics and encode as Prometheus text format

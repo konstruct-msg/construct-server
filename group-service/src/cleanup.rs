@@ -23,6 +23,10 @@ pub async fn run_cleanup(db: &PgPool) -> Result<Vec<CleanupStats>, sqlx::Error> 
     Ok(stats)
 }
 
+fn cleanup_period_seconds(hours: u64) -> u64 {
+    hours.max(1).checked_mul(3600).unwrap_or(24 * 3600)
+}
+
 pub async fn cleanup_worker(
     db: PgPool,
     interval_hours: u64,
@@ -33,8 +37,14 @@ pub async fn cleanup_worker(
         "Starting MLS cleanup worker"
     );
 
-    let mut interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(interval_hours * 3600));
+    let seconds = cleanup_period_seconds(interval_hours);
+    let period = std::time::Duration::from_secs(seconds);
+    let period = if tokio::time::Instant::now().checked_add(period).is_some() {
+        period
+    } else {
+        std::time::Duration::from_secs(24 * 3600)
+    };
+    let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tokio::pin!(shutdown_signal);
@@ -53,6 +63,7 @@ pub async fn cleanup_worker(
                         let mut total = 0;
                         for stat in &stats {
                             if stat.deleted_count > 0 {
+                                crate::metrics::inc_cleanup_operations(stat.deleted_count as u64);
                                 info!(
                                     operation = %stat.operation,
                                     deleted = stat.deleted_count,
@@ -82,6 +93,14 @@ pub fn start_cleanup_worker(db: PgPool, interval_hours: u64) -> tokio::task::Joi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_239_cleanup_period_has_a_nonzero_floor_and_overflow_fallback() {
+        assert_eq!(cleanup_period_seconds(0), 3600);
+        assert_eq!(cleanup_period_seconds(1), 3600);
+        assert_eq!(cleanup_period_seconds(24), 86400);
+        assert_eq!(cleanup_period_seconds(u64::MAX), 86400);
+    }
 
     #[tokio::test]
     #[ignore]

@@ -65,6 +65,7 @@ pub(crate) async fn send_group_message(
 
     let current_epoch = get_group_epoch(&svc.db, group_id).await?;
     if req.epoch != current_epoch as u64 {
+        crate::metrics::inc_epoch_mismatches();
         return Err(Status::failed_precondition(format!(
             "Epoch mismatch: client has {}, server is at {}",
             req.epoch, current_epoch
@@ -120,6 +121,7 @@ pub(crate) async fn send_group_message(
         Status::internal("Failed to store message")
     })?;
 
+    crate::metrics::inc_group_messages_sent(1);
     let envelope = group_message_row_to_envelope(&row);
     svc.hub.publish(
         group_id,
