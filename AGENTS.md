@@ -104,6 +104,8 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 - Identity: `route_id` = `SHA-256(type || key)` hex; `dispatch_sealed_sender` resolves route_id → UUID before delivery; everything after is UUID-based (migration 064, `construct-types` / `construct-db`).
 - Group ownership transfers lock the group row and recheck the current owner and target FULL admin inside the transaction. A stale signed request gets `PERMISSION_DENIED`.
 - Private channel invites must name the requested channel; a false SQL usage increment denies the subscription. Redistributing an opaque channel sender key clears its `rotated_at` marker.
+- Channel admission locks the channel row and commits invite usage, membership and counter together; an existing subscriber keeps its timestamp without another use. Unsubscribe commits deletion and counter together under the same lock.
+- Media cleanup retains metadata on object/partial deletion errors and reports failure for retry; a missing file counts as already removed. Sticker tables have no TTL. `DeleteMedia` is retired (`UNIMPLEMENTED`); there is no issued client deletion capability or owner column.
 
 ### Config
 

@@ -203,7 +203,10 @@ fn app_error_to_status(e: construct_error::AppError) -> Status {
         AppError::TooManyRequests(msg) => Status::resource_exhausted(msg.clone()),
         AppError::Forbidden(msg) => Status::permission_denied(msg.clone()),
         AppError::Conflict(msg) => Status::already_exists(msg.clone()),
-        _ => Status::internal(e.to_string()),
+        _ => {
+            e.log();
+            Status::internal("Internal server error")
+        }
     }
 }
 
@@ -3632,6 +3635,52 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_239_app_error_statuses_preserve_codes_and_hide_internal_details() {
+        use construct_error::{AppError as E, DeviceRefusal};
+        use tonic::Code;
+        for (error, code) in [
+            (E::Auth("invalid credentials".into()), Code::Unauthenticated),
+            (
+                E::DeviceRefused(DeviceRefusal::Removed),
+                Code::Unauthenticated,
+            ),
+            (
+                E::DeviceRefused(DeviceRefusal::NotFound),
+                Code::Unauthenticated,
+            ),
+            (E::Validation("invalid field".into()), Code::InvalidArgument),
+            (E::NotFound("resource".into()), Code::NotFound),
+            (
+                E::TooManyRequests("limited".into()),
+                Code::ResourceExhausted,
+            ),
+            (E::Forbidden("denied".into()), Code::PermissionDenied),
+            (E::Conflict("duplicate".into()), Code::AlreadyExists),
+        ] {
+            assert_eq!(app_error_to_status(error).code(), code);
+        }
+        for error in [
+            E::Internal("secret-239".into()),
+            E::Config("secret-239".into()),
+            E::Federation("secret-239".into()),
+            E::Message("secret-239".into()),
+            E::Unknown(anyhow::anyhow!("secret-239")),
+            E::Io(std::io::Error::other("secret-239")),
+            E::Database(sqlx::Error::Protocol("secret-239".into())),
+        ] {
+            let status = app_error_to_status(error);
+            assert_eq!(status.code(), Code::Internal);
+            assert_eq!(status.message(), "Internal server error");
+            assert!(!status.message().contains("secret-239"));
+        }
+        let status = app_error_to_status(E::DeviceRefused(DeviceRefusal::Removed));
+        assert_eq!(
+            status.metadata().get(DeviceRefusal::METADATA_KEY).unwrap(),
+            "1"
+        );
+    }
 
     fn sample_join_request() -> JoinRequestData {
         JoinRequestData {

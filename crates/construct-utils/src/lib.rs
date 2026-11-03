@@ -374,6 +374,51 @@ fn normalize_ip(ip: IpAddr) -> String {
 }
 
 #[cfg(test)]
+mod audit_239 {
+    use super::*;
+    #[test]
+    fn forwarded_ip_uses_only_the_rightmost_valid_hop_then_real_then_direct() {
+        let direct: IpAddr = "192.0.2.3".parse().unwrap();
+        for (xff, real, expected) in [
+            (
+                Some("203.0.113.9, 192.0.2.1"),
+                Some("192.0.2.2"),
+                "192.0.2.1",
+            ),
+            (Some("203.0.113.9, 2001:db8::1"), None, "2001:db8::1"),
+            (
+                Some("203.0.113.9, invalid"),
+                Some(" 192.0.2.2 "),
+                "192.0.2.2",
+            ),
+            (Some("203.0.113.9, "), None, "192.0.2.3"),
+            (Some("bad"), Some("bad"), "192.0.2.3"),
+            (None, Some("2001:db8::2"), "2001:db8::2"),
+            (None, None, "192.0.2.3"),
+        ] {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(s) = xff {
+                headers.insert("x-forwarded-for", s.parse().unwrap());
+            }
+            if let Some(s) = real {
+                headers.insert("x-real-ip", s.parse().unwrap());
+            }
+            assert_eq!(extract_client_ip(&headers, Some(direct)), expected);
+        }
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert_eq!(extract_client_ip(&headers, Some(direct)), "192.0.2.3");
+        assert_eq!(
+            extract_client_ip(&axum::http::HeaderMap::new(), None),
+            "unknown"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -1,4 +1,5 @@
 mod admin;
+mod audit_239;
 mod channel_admin;
 mod channel_lifecycle;
 mod comment_groups;
@@ -10,6 +11,8 @@ mod membership;
 mod message_stream;
 mod messaging;
 mod mls_sync;
+#[path = "../../../shared/test_support/postgres.rs"]
+mod postgres;
 mod posts;
 mod subscriptions;
 mod test_helpers;

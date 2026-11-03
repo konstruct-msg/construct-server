@@ -20,7 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-DASH = Path("/Users/maximeliseyev/Code/construct-server/ops/grafana/dashboards/construct-overview.json")
+DASH = Path(__file__).resolve().parents[1] / "ops/grafana/dashboards/construct-overview.json"
 DS = {"type": "prometheus", "uid": "construct-prometheus"}
 
 # (row, title, [(expr, legend)], type, unit, desc, idle)
@@ -224,14 +224,13 @@ panel(R5, "Открытые дескрипторы", [("process_open_fds", "{{jo
 # ── ЖДЁТ СОБЫТИЙ ────────────────────────────────────────────────────────────
 R6 = "ЖДЁТ СОБЫТИЙ — производитель есть, событие не наступало"
 
-panel(R6, "Звонки: соединено / пропущено / отклонено / неуспешно",
-      [("sum(rate(construct_calls_connected_total[5m]))", "соединено"),
-       ("sum(rate(construct_calls_missed_total[5m]))", "пропущено"),
+panel(R6, "Звонки: пропущено / отклонено / неуспешно",
+      [("sum(rate(construct_calls_missed_total[5m]))", "пропущено"),
        ("sum(rate(construct_calls_declined_total[5m]))", "отклонено"),
        ("sum(rate(construct_calls_failed_total[5m]))", "неуспешно")],
       idle=True, w=12,
       desc="Счётчики регистрируются при первом инкременте, поэтому до первого "
-           "звонка серий нет. Пишет signaling-service — проверено по исходникам.")
+           "звонка серий нет. Пишет signaling-service. Соединение и время установки не измеряются: SDP answer идёт E2EE через messaging, а не signaling.")
 
 panel(R6, "Деградация лимитера (fail-open)",
       [("sum by (control) (rate(construct_msg_abuse_fail_open_total[5m]))", "msg {{control}}"),

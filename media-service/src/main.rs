@@ -38,7 +38,7 @@ use proto::sticker_service_server::StickerServiceServer;
 // The binary links the library rather than re-declaring its modules: `sticker-publish`
 // (src/bin) shares `stickers` with the service, and one compilation of each module is what
 // keeps the two binaries agreeing on what a pack is.
-use media_service::{config, core, rate_limit, sticker_grpc, utils};
+use media_service::{config, core, rate_limit, sticker_grpc};
 
 use config::MediaConfig;
 use rate_limit::SlidingWindowLimiter;
@@ -47,7 +47,7 @@ pub struct MediaServiceContext {
     pub db_pool: Arc<DbPool>,
     pub media_config: Arc<MediaConfig>,
     pub public_host: String,
-    /// Verifies Bearer access tokens for authenticated RPCs (token mint / delete).
+    /// Verifies Bearer access tokens for upload-token minting.
     pub auth: Arc<AuthManager>,
     /// Per-user mint rate limit (GenerateUploadToken).
     pub mint_limiter: Arc<SlidingWindowLimiter>,
@@ -406,63 +406,10 @@ impl MediaService for MediaGrpcService {
         &self,
         request: Request<proto::DeleteMediaRequest>,
     ) -> Result<Response<proto::DeleteMediaResponse>, Status> {
-        let _caller = require_authed_user(self.context.auth.as_ref(), request.metadata())?;
-        let req = request.into_inner();
-
-        if req.admin_token.is_empty() {
-            return Err(Status::permission_denied("Admin token required"));
-        }
-
-        let parts: Vec<&str> = req.admin_token.split('|').collect();
-        if parts.len() != 3 {
-            return Err(Status::permission_denied("Invalid admin token format"));
-        }
-
-        let token_media_id = parts[0];
-        let timestamp_str = parts[1];
-        let signature = parts[2];
-
-        if token_media_id != req.media_id {
-            return Err(Status::permission_denied("Token media_id mismatch"));
-        }
-        if Uuid::parse_str(&req.media_id).is_err() {
-            return Err(Status::invalid_argument("media_id must be a UUID"));
-        }
-
-        let timestamp: i64 = timestamp_str
-            .parse()
-            .map_err(|_| Status::permission_denied("Invalid timestamp in token"))?;
-        let now = Utc::now().timestamp();
-        if (now - timestamp).abs() > 300 {
-            return Err(Status::permission_denied("Token expired"));
-        }
-
-        let message = format!("{}|{}", token_media_id, timestamp_str);
-        let expected_sig = utils::compute_hmac(&message, &self.context.media_config.hmac_secret);
-        if !utils::hmac_eq(signature, &expected_sig) {
-            return Err(Status::permission_denied("Invalid signature"));
-        }
-
-        let deleted = core::delete_media(
-            &self.context.db_pool,
-            &self.context.media_config.storage_dir,
-            &req.media_id,
-        )
-        .await
-        .map_err(|e| Status::internal(format!("Delete failed: {}", e)))?;
-
-        if deleted {
-            info!(media_id = %req.media_id, "Media deleted");
-            Ok(Response::new(proto::DeleteMediaResponse {
-                success: true,
-                message: "Media deleted successfully".to_string(),
-            }))
-        } else {
-            Ok(Response::new(proto::DeleteMediaResponse {
-                success: false,
-                message: "Media not found".to_string(),
-            }))
-        }
+        let _ = request;
+        Err(Status::unimplemented(
+            "DeleteMedia is retired; media expires through retention cleanup",
+        ))
     }
 
     // =========================================================================
@@ -671,6 +618,39 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn audit_239_retired_delete_media_is_explicitly_unimplemented() {
+        let auth = Arc::new(make_auth());
+        let svc = MediaGrpcService {
+            context: Arc::new(MediaServiceContext {
+                db_pool: Arc::new(
+                    sqlx::postgres::PgPoolOptions::new()
+                        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+                        .unwrap(),
+                ),
+                media_config: Arc::new(MediaConfig::default()),
+                public_host: String::new(),
+                auth: auth.clone(),
+                mint_limiter: Arc::new(SlidingWindowLimiter::new(50, Duration::from_secs(3600))),
+            }),
+        };
+        for authed in [false, true] {
+            let mut req = Request::new(proto::DeleteMediaRequest {
+                media_id: Uuid::new_v4().to_string(),
+                admin_token: "unused".into(),
+            });
+            if authed {
+                let (token, _, _) = auth.create_token(&Uuid::new_v4()).unwrap();
+                req.metadata_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            assert_eq!(
+                svc.delete_media(req).await.unwrap_err().code(),
+                tonic::Code::Unimplemented
+            );
+        }
+    }
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
         DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia,

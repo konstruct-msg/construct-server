@@ -468,6 +468,26 @@ observed through PostgreSQL lock waits, rather than assumed from a sleep. Owners
 is rechecked within the transaction; private invites are channel-bound and their
 atomic SQL refusal is honored; redistributing a sender key clears `rotated_at`.
 
+Audit 239 contracts run with `cargo test -p group-service -p media-service
+-p identity-service -p construct-utils -p construct-metrics audit_239 -- --include-ignored`.
+They check channel admission/usage/counter rollback, last-slot contention, idempotent
+retry, atomic unsubscribe, invite revocation while SQL waits, and channel read access.
+Media tests use a private schema and temporary directory: expired blobs/partials
+disappear, filesystem failures retain retry records, missing files are harmless,
+and non-expiring sticker packs survive. The identity error mapper preserves auth
+codes/device-refusal metadata while keeping internal details in server logs.
+
+The MLS worker floors a zero interval to one hour and falls back to 24 hours for
+overflow/unrepresentable timers. Real send/commit/epoch-refusal/cleanup events now
+produce their Prometheus counters; tests inspect the resulting series. Unproduced
+gauges and connection/setup call metrics were removed, including the dashboard's
+connected-call target: signaling does not observe E2EE SDP Answers.
+
+`DeleteMedia` returns `UNIMPLEMENTED`; its unissued admin HMAC deletion path was
+removed. The vendored proto declaration stays wire compatible; client blobs expire
+through retention cleanup. `MEDIA_DEBUG` and the unread config field were removed;
+service logging is configured through `RUST_LOG`.
+
 ### cargo check / clippy
 
 ```bash

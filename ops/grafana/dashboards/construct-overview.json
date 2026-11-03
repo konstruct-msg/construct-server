@@ -2400,21 +2400,10 @@
           "sort": "desc"
         }
       },
-      "title": "Звонки: соединено / пропущено / отклонено / неуспешно",
-      "description": "Счётчики регистрируются при первом инкременте, поэтому до первого звонка серий нет. Пишет signaling-service — проверено по исходникам.",
+      "title": "Звонки: пропущено / отклонено / неуспешно",
+      "description": "Счётчики регистрируются при первом инкременте, поэтому до первого звонка серий нет. Пишет signaling-service. Соединение и время установки не измеряются: SDP answer идёт E2EE через messaging, а не signaling.",
       "type": "timeseries",
       "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "construct-prometheus"
-          },
-          "expr": "sum(rate(construct_calls_connected_total[5m]))",
-          "legendFormat": "соединено",
-          "refId": "A",
-          "instant": false,
-          "format": "time_series"
-        },
         {
           "datasource": {
             "type": "prometheus",

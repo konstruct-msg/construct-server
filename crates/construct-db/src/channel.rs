@@ -61,6 +61,125 @@ pub struct ChannelInviteLinkRecord {
 // Channel Lifecycle
 // ============================================================================
 
+#[derive(Debug)]
+pub enum ChannelSubscription {
+    Subscribed(DateTime<Utc>),
+    NotFound,
+    Full,
+    InviteRequired,
+    InviteNotFound,
+    WrongChannel,
+    InviteRevoked,
+    InviteExpired,
+    InviteExhausted,
+}
+
+/// Admission, invite consumption, membership and its counter are one transaction.
+/// The channel lock serializes admission to the last slot. An existing subscriber
+/// gets the original timestamp without spending another invite use.
+pub async fn subscribe_channel_atomic(
+    pool: &PgPool,
+    channel_id: Uuid,
+    device_id: &str,
+    invite_token: &str,
+) -> Result<ChannelSubscription> {
+    use ChannelSubscription::*;
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin channel subscription")?;
+    let result = admit_channel_subscription(&mut tx, channel_id, device_id, invite_token).await;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            tx.rollback()
+                .await
+                .context("Failed to roll back subscription")?;
+            return Err(e);
+        }
+    };
+    if matches!(outcome, Subscribed(_)) {
+        tx.commit().await.context("Failed to commit subscription")?;
+    } else {
+        tx.rollback()
+            .await
+            .context("Failed to roll back refused subscription")?;
+    }
+    Ok(outcome)
+}
+
+async fn admit_channel_subscription(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    channel_id: Uuid,
+    device_id: &str,
+    invite_token: &str,
+) -> Result<ChannelSubscription> {
+    use ChannelSubscription::*;
+    let channel: Option<(String,i32)> = sqlx::query_as(
+        "SELECT visibility::TEXT, max_subscribers FROM channels WHERE channel_id=$1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(channel_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((visibility, max_subscribers)) = channel else {
+        return Ok(NotFound);
+    };
+    let existing: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT subscribed_at FROM channel_subscribers WHERE channel_id=$1 AND device_id=$2",
+    )
+    .bind(channel_id)
+    .bind(device_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(at) = existing {
+        return Ok(Subscribed(at));
+    }
+    let private = visibility == "PRIVATE";
+    if private {
+        if invite_token.is_empty() {
+            return Ok(InviteRequired);
+        }
+        let Some(invite) = resolve_channel_invite_link(&mut **tx, invite_token).await? else {
+            return Ok(InviteNotFound);
+        };
+        if invite.channel_id != channel_id {
+            return Ok(WrongChannel);
+        }
+        if invite.revoked_at.is_some() {
+            return Ok(InviteRevoked);
+        }
+        if invite.expires_at.is_some_and(|at| at <= Utc::now()) {
+            return Ok(InviteExpired);
+        }
+        if invite.max_uses.is_some_and(|max| invite.use_count >= max) {
+            return Ok(InviteExhausted);
+        }
+    }
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channel_subscribers WHERE channel_id=$1")
+            .bind(channel_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if max_subscribers > 0 && count >= i64::from(max_subscribers) {
+        return Ok(Full);
+    }
+    if private && !increment_channel_invite_link_usage(&mut **tx, invite_token).await? {
+        return Ok(InviteExhausted);
+    }
+    let at = sqlx::query_scalar(
+        "INSERT INTO channel_subscribers(channel_id,device_id,role,is_owner) VALUES($1,$2,'SUBSCRIBER',FALSE) RETURNING subscribed_at",
+    )
+    .bind(channel_id)
+    .bind(device_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE channels SET subscriber_count=(SELECT COUNT(*) FROM channel_subscribers WHERE channel_id=$1),updated_at=NOW() WHERE channel_id=$1")
+        .bind(channel_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(Subscribed(at))
+}
+
 pub async fn create_channel(
     pool: &PgPool,
     owner_device_id: &str,
@@ -240,6 +359,15 @@ pub async fn unsubscribe_from_channel(
     channel_id: Uuid,
     device_id: &str,
 ) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin channel unsubscribe")?;
+    sqlx::query("SELECT channel_id FROM channels WHERE channel_id=$1 FOR UPDATE")
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to lock channel unsubscribe")?;
     // Owner cannot unsubscribe (must delete channel or transfer ownership first)
     let result = sqlx::query(
         r#"
@@ -251,7 +379,7 @@ pub async fn unsubscribe_from_channel(
     )
     .bind(channel_id)
     .bind(device_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to unsubscribe from channel")?;
 
@@ -261,11 +389,14 @@ pub async fn unsubscribe_from_channel(
              WHERE channel_id = $1",
         )
         .bind(channel_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to decrement subscriber_count")?;
     }
 
+    tx.commit()
+        .await
+        .context("Failed to commit channel unsubscribe")?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -756,8 +887,8 @@ pub async fn revoke_channel_invite_link(
     Ok(row.0)
 }
 
-pub async fn resolve_channel_invite_link(
-    pool: &PgPool,
+pub async fn resolve_channel_invite_link<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    executor: E,
     token: &str,
 ) -> Result<Option<ChannelInviteLinkRecord>> {
     sqlx::query_as::<_, ChannelInviteLinkRecord>(
@@ -768,12 +899,18 @@ pub async fn resolve_channel_invite_link(
         "#,
     )
     .bind(token)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .context("Failed to resolve channel invite link")
 }
 
-pub async fn increment_channel_invite_link_usage(pool: &PgPool, token: &str) -> Result<bool> {
+pub async fn increment_channel_invite_link_usage<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    executor: E,
+    token: &str,
+) -> Result<bool> {
     let result = sqlx::query(
         r#"
         UPDATE channel_invite_links
@@ -785,7 +922,7 @@ pub async fn increment_channel_invite_link_usage(pool: &PgPool, token: &str) -> 
         "#,
     )
     .bind(token)
-    .execute(pool)
+    .execute(executor)
     .await
     .context("Failed to increment invite link usage")?;
 
