@@ -261,8 +261,6 @@ services:
       # APNS_KEY_ID actually changed. The two must always name the same key.
       MAX_MESSAGES_PER_HOUR: ${MAX_MESSAGES_PER_HOUR:-1000}
       DELIVERY_QUEUE_PREFIX: ${DELIVERY_QUEUE_PREFIX:-delivery}
-      OFFLINE_QUEUE_PREFIX: ${OFFLINE_QUEUE_PREFIX:-offline}
-      ONLINE_CHANNEL: ${ONLINE_CHANNEL:-online}
       ICE_ENABLED: ${ICE_ENABLED:-true}
       # ICE_SERVER_KEY, USERNAME_HMAC_SECRET, CONTACT_HMAC_SECRET come from env_file
       # (app.env). Do NOT re-list as ${VAR} — an unset interpolation blanks them.

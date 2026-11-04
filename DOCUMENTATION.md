@@ -488,6 +488,23 @@ removed. The vendored proto declaration stays wire compatible; client blobs expi
 through retention cleanup. `MEDIA_DEBUG` and the unread config field were removed;
 service logging is configured through `RUST_LOG`.
 
+Queue cleanup (audit 240) removes the unused delivery-worker list registry/poller,
+sleep-only notification API, replay/cache/connection wrappers and dormant counters.
+There is one mailbox write entry point: `write_message_to_device_streams`; its
+internal legacy-user XADD remains behind the existing cutover flag. User/device
+read helpers are private and no longer accept an unused server-instance argument.
+Legacy session creation/validation helpers are gone; device deactivation still
+calls `revoke_all_sessions` to remove residual indexed keys. Refresh store/rotation,
+bulk revocation, access/device blocklists and Privacy Pass cap reads/reservations stay.
+
+The obsolete `RedisChannels`, `ONLINE_CHANNEL`, `OFFLINE_QUEUE_PREFIX` and
+`DELIVERY_POLL_INTERVAL_MS` configuration is removed, including compose's unused
+overrides. **`DELIVERY_QUEUE_PREFIX` stays:** it addresses the active mailbox streams.
+`construct-queue` no longer needs its direct crypto dependency or a production Tokio
+dependency (Tokio remains a dev dependency). Shared `queue_test.rs` was removed:
+its nine tests exercised retired counters/registry or raw Redis commands, not the
+live queue. The actual Redis mailbox, sealed-dispatch and identity contracts remain.
+
 ### cargo check / clippy
 
 ```bash

@@ -32,7 +32,7 @@ pub use logging::LoggingConfig;
 pub use media::MediaConfig;
 pub use messaging::{MessagingConfig, StealthTokenPolicy};
 pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
-pub use redis::{RedisChannels, RedisKeyPrefixes};
+pub use redis::RedisKeyPrefixes;
 pub use secret_hygiene::{
     INSECURE_CONTACT_HMAC, INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
     allow_insecure_secrets, is_production_environment, load_token_issuer_key,
@@ -90,10 +90,7 @@ pub struct Config {
     /// Issuer (`iss`) claim of PASETO access tokens. Env: `AUTH_TOKEN_ISSUER`, falling
     /// back to `JWT_ISSUER` (the name deployments set before 0.20.0); default `construct-server`.
     pub token_issuer: String,
-    pub online_channel: String,
-    pub offline_queue_prefix: String,
     pub delivery_queue_prefix: String,
-    pub delivery_poll_interval_ms: u64,
     /// HTTP/2 keepalive PING interval for gRPC servers (seconds).
     /// Applied to all microservices via `grpc_server()`. Default: 45
     pub grpc_keepalive_interval_secs: u64,
@@ -110,7 +107,6 @@ pub struct Config {
     pub db: DbConfig,
     pub deeplinks: DeepLinksConfig,
     pub redis_key_prefixes: RedisKeyPrefixes,
-    pub redis_channels: RedisChannels,
     pub media: MediaConfig,
     pub csrf: CsrfConfig,
     pub messaging: MessagingConfig,
@@ -218,7 +214,6 @@ impl Config {
         let db = DbConfig::from_env();
         let deeplinks = DeepLinksConfig::from_env();
         let redis_key_prefixes = RedisKeyPrefixes::from_env();
-        let redis_channels = RedisChannels::from_env();
         let media = MediaConfig::from_env();
         let csrf = CsrfConfig::from_env(needs.csrf)?;
         let microservices = MicroservicesConfig::from_env();
@@ -289,19 +284,8 @@ impl Config {
                 .or_else(|_| std::env::var("JWT_ISSUER"))
                 .unwrap_or_else(|_| "construct-server".to_string()),
 
-            online_channel: std::env::var("ONLINE_CHANNEL")
-                .unwrap_or_else(|_| "construct:online".to_string()),
-
-            offline_queue_prefix: std::env::var("OFFLINE_QUEUE_PREFIX")
-                .unwrap_or_else(|_| "queue:".to_string()),
-
             delivery_queue_prefix: std::env::var("DELIVERY_QUEUE_PREFIX")
                 .unwrap_or_else(|_| "delivery".to_string()),
-
-            delivery_poll_interval_ms: std::env::var("DELIVERY_POLL_INTERVAL_MS")
-                .ok()
-                .and_then(|d| d.parse().ok())
-                .unwrap_or(DEFAULT_DELIVERY_POLL_INTERVAL_MS),
 
             grpc_keepalive_interval_secs: std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
                 .ok()
@@ -322,7 +306,6 @@ impl Config {
             db,
             deeplinks,
             redis_key_prefixes,
-            redis_channels,
             media,
             csrf,
             messaging,

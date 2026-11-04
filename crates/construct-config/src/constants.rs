@@ -22,12 +22,6 @@ pub(crate) const DEFAULT_SESSION_TTL_DAYS: i64 = 30;
 // Refresh token TTL: 90 days (long-lived for user convenience)
 pub(crate) const DEFAULT_REFRESH_TOKEN_TTL_DAYS: i64 = 90;
 
-// Default polling interval (in milliseconds)
-// OPTIMIZED: Increased default polling interval from 10s to 30s to reduce Redis commands
-// This reduces Redis command usage by ~66% while maintaining acceptable latency for real-time messaging
-// OPTIMIZED: Increased from 30s to 60s to reduce Redis commands by 50%
-pub(crate) const DEFAULT_DELIVERY_POLL_INTERVAL_MS: u64 = 60000;
-
 // Time conversion constants
 pub const SECONDS_PER_MINUTE: i64 = 60;
 pub const SECONDS_PER_HOUR: i64 = 3600;

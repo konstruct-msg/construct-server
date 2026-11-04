@@ -16,8 +16,7 @@ use construct_auth::AuthManager;
 use construct_config::{
     ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
     DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MessagingConfig,
-    MicroservicesConfig, MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
-    StealthTokenPolicy,
+    MicroservicesConfig, MtlsConfig, RedisKeyPrefixes, SecurityConfig, StealthTokenPolicy,
 };
 use construct_db::DbPool;
 use construct_queue::MessageQueue;
@@ -118,10 +117,9 @@ pub(crate) fn make_config(
         session_ttl_days: 30,
         refresh_token_ttl_days: 7,
         token_issuer: "construct-test".to_string(),
-        online_channel: "online".to_string(),
-        offline_queue_prefix: "queue:".to_string(),
+
         delivery_queue_prefix: "delivery".to_string(),
-        delivery_poll_interval_ms: 100,
+
         grpc_keepalive_interval_secs: 45,
         grpc_keepalive_timeout_secs: 5,
         rust_log: "error".to_string(),
@@ -205,11 +203,6 @@ pub(crate) fn make_config(
             blocked: "blocked:".to_string(),
             key_bundle: "key_bundle:".to_string(),
             connections: "connections:".to_string(),
-        },
-        redis_channels: RedisChannels {
-            dead_letter_queue: "dlq".to_string(),
-            delivery_message: "delivery_message:{}".to_string(),
-            delivery_notification: "delivery_notification:{}".to_string(),
         },
         media: MediaConfig {
             enabled: false,
@@ -1437,7 +1430,7 @@ async fn p2_one_stream_poll_drains_pages_including_an_empty_sibling_page() {
                 // Keep one user-only entry between device pages: neither source can be
                 // advanced past the shorter read's horizon without actually delivering it.
                 queue
-                    .write_message_to_user_stream(&account, &env)
+                    .write_message_to_device_streams(&account, &[], &env)
                     .await
                     .expect("legacy backlog");
             }

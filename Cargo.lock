@@ -812,7 +812,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "construct-config",
- "construct-crypto",
  "construct-message",
  "construct-redis",
  "hex",

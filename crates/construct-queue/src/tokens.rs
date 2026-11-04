@@ -35,50 +35,6 @@ impl<'a> TokenManager<'a> {
         Ok(())
     }
 
-    /// Check if refresh token is valid (exists and not revoked)
-    pub(crate) async fn check_refresh_token(&mut self, jti: &str) -> Result<Option<String>> {
-        let key = format!("refresh_token:{}", jti);
-        let user_id: Option<String> = self.client.get(&key).await?;
-        Ok(user_id)
-    }
-
-    /// Revoke refresh token (soft logout)
-    pub(crate) async fn revoke_refresh_token(&mut self, jti: &str) -> Result<()> {
-        let key = format!("refresh_token:{}", jti);
-        let _: i64 = self.client.del(&key).await?;
-        Ok(())
-    }
-
-    /// Consume refresh token atomically: check existence and delete in one operation.
-    /// Returns Some(user_id) if token was valid and consumed.
-    /// Returns None if token doesn't exist or was already consumed.
-    /// This prevents race conditions where two parallel refresh requests could both succeed.
-    pub(crate) async fn consume_refresh_token(&mut self, jti: &str) -> Result<Option<String>> {
-        let key = format!("refresh_token:{}", jti);
-        let script = redis::Script::new(
-            r#"
-            local val = redis.call('GET', KEYS[1])
-            if val then
-                redis.call('DEL', KEYS[1])
-                return val
-            else
-                return false
-            end
-            "#,
-        );
-        let result: redis::Value = script
-            .key(&key)
-            .invoke_async(self.client.connection_mut())
-            .await?;
-
-        match result {
-            redis::Value::BulkString(bytes) => {
-                Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
-            }
-            _ => Ok(None),
-        }
-    }
-
     /// Atomically rotate a refresh token: consume the old JTI and store the new one
     /// in a single Lua script (one Redis round-trip, no crash window between the two).
     ///

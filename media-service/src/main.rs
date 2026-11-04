@@ -654,7 +654,7 @@ mod tests {
     use construct_config::{
         ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
         DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia,
-        MicroservicesConfig, MtlsConfig, RedisChannels, RedisKeyPrefixes, SecurityConfig,
+        MicroservicesConfig, MtlsConfig, RedisKeyPrefixes, SecurityConfig,
     };
 
     fn make_auth() -> AuthManager {
@@ -677,10 +677,9 @@ mod tests {
             session_ttl_days: 30,
             refresh_token_ttl_days: 7,
             token_issuer: "construct-test".into(),
-            online_channel: "online".into(),
-            offline_queue_prefix: "queue:".into(),
+
             delivery_queue_prefix: "delivery:".into(),
-            delivery_poll_interval_ms: 100,
+
             grpc_keepalive_interval_secs: 45,
             grpc_keepalive_timeout_secs: 5,
             rust_log: "error".into(),
@@ -764,11 +763,6 @@ mod tests {
                 blocked: "blocked:".into(),
                 key_bundle: "key_bundle:".into(),
                 connections: "connections:".into(),
-            },
-            redis_channels: RedisChannels {
-                dead_letter_queue: "dlq".into(),
-                delivery_message: "delivery_message:{}".into(),
-                delivery_notification: "delivery_notification:{}".into(),
             },
             media: CfgMedia {
                 enabled: false,
