@@ -5,7 +5,7 @@ use construct_auth::AuthManager;
 use construct_config::{
     ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
     DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MicroservicesConfig, MtlsConfig,
-    RedisChannels, RedisKeyPrefixes, SecurityConfig,
+    RedisKeyPrefixes, SecurityConfig,
 };
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -41,10 +41,9 @@ fn test_auth_config(paseto_priv: String, paseto_pub: String) -> Config {
         session_ttl_days: 30,
         refresh_token_ttl_days: 7,
         token_issuer: "construct-test".to_string(),
-        online_channel: "online".to_string(),
-        offline_queue_prefix: "queue:".to_string(),
+
         delivery_queue_prefix: "delivery:".to_string(),
-        delivery_poll_interval_ms: 100,
+
         grpc_keepalive_interval_secs: 45,
         grpc_keepalive_timeout_secs: 5,
         rust_log: "error".to_string(),
@@ -128,11 +127,6 @@ fn test_auth_config(paseto_priv: String, paseto_pub: String) -> Config {
             blocked: "blocked:".to_string(),
             key_bundle: "key_bundle:".to_string(),
             connections: "connections:".to_string(),
-        },
-        redis_channels: RedisChannels {
-            dead_letter_queue: "dlq".to_string(),
-            delivery_message: "delivery_message:{}".to_string(),
-            delivery_notification: "delivery_notification:{}".to_string(),
         },
         media: MediaConfig {
             enabled: false,

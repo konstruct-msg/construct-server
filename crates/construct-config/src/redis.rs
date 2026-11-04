@@ -48,27 +48,3 @@ impl RedisKeyPrefixes {
         }
     }
 }
-
-/// Redis channel names configuration
-#[derive(Clone, Debug)]
-pub struct RedisChannels {
-    /// Dead letter queue channel name
-    pub dead_letter_queue: String,
-    /// Delivery message channel template: "delivery_message:{server_instance_id}"
-    pub delivery_message: String,
-    /// Delivery notification channel template: "delivery_notification:{server_instance_id}"
-    pub delivery_notification: String,
-}
-
-impl RedisChannels {
-    pub(crate) fn from_env() -> Self {
-        Self {
-            dead_letter_queue: std::env::var("REDIS_CHANNEL_DEAD_LETTER_QUEUE")
-                .unwrap_or_else(|_| "dead_letter_queue".to_string()),
-            delivery_message: std::env::var("REDIS_CHANNEL_DELIVERY_MESSAGE")
-                .unwrap_or_else(|_| "delivery_message:".to_string()),
-            delivery_notification: std::env::var("REDIS_CHANNEL_DELIVERY_NOTIFICATION")
-                .unwrap_or_else(|_| "delivery_notification:".to_string()),
-        }
-    }
-}

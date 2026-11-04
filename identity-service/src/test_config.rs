@@ -18,10 +18,9 @@ pub(super) fn config() -> Config {
         grpc_keepalive_interval_secs: 45,
         grpc_keepalive_timeout_secs: 5,
         token_issuer: "construct-test".to_string(),
-        online_channel: "test-online-channel".to_string(),
-        offline_queue_prefix: "test_queue:".to_string(),
+
         delivery_queue_prefix: "test_delivery_queue".to_string(),
-        delivery_poll_interval_ms: 1000,
+
         rust_log: "info".to_string(),
         messaging: construct_config::MessagingConfig::default(),
         logging: construct_config::LoggingConfig {
@@ -105,11 +104,6 @@ pub(super) fn config() -> Config {
             blocked: "blocked:".to_string(),
             key_bundle: "key_bundle:".to_string(),
             connections: "connections:".to_string(),
-        },
-        redis_channels: construct_config::RedisChannels {
-            dead_letter_queue: "dead_letter_queue".to_string(),
-            delivery_message: "delivery_message:{}".to_string(),
-            delivery_notification: "delivery_notification:{}".to_string(),
         },
         // Legacy aliases
         instance_domain: "test.local".to_string(),
