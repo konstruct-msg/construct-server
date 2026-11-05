@@ -24,15 +24,6 @@ pub struct ChannelRecord {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ChannelSubscriberRecord {
-    pub channel_id: Uuid,
-    pub device_id: String,
-    pub subscribed_at: DateTime<Utc>,
-    pub role: String,
-    pub is_owner: bool,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChannelPostRecord {
     pub post_id: Uuid,
     pub channel_id: Uuid,
@@ -932,31 +923,6 @@ pub async fn increment_channel_invite_link_usage<
 // ============================================================================
 // Sender Keys
 // ============================================================================
-
-pub async fn store_channel_sender_key(
-    pool: &PgPool,
-    channel_id: Uuid,
-    device_id: &str,
-    encrypted_sender_key: &[u8],
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO channel_sender_keys (channel_id, device_id, encrypted_sender_key)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (channel_id, device_id)
-        DO UPDATE SET encrypted_sender_key = EXCLUDED.encrypted_sender_key,
-                      distributed_at = NOW(), rotated_at = NULL
-        "#,
-    )
-    .bind(channel_id)
-    .bind(device_id)
-    .bind(encrypted_sender_key)
-    .execute(pool)
-    .await
-    .context("Failed to store channel sender key")?;
-
-    Ok(())
-}
 
 pub async fn get_channel_sender_key(
     pool: &PgPool,

@@ -44,8 +44,6 @@ pub mod build_info {
     pub const GIT_SHA_SHORT: &str = env!("CONSTRUCT_GIT_SHA_SHORT");
     /// Workspace semver. Still useful, just not sufficient on its own.
     pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-    /// Seconds since the epoch at compile time.
-    pub const BUILT_UNIX: &str = env!("CONSTRUCT_BUILD_UNIX");
 
     /// `0.17.4+a1b2c3d4e5f6` — one string that identifies a build exactly.
     pub fn full() -> String {

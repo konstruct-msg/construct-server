@@ -632,7 +632,6 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "base64",
- "construct-error",
  "dotenvy",
  "hex",
  "rand 0.10.1",

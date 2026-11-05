@@ -72,8 +72,6 @@ pub struct AuthManager {
 
     // ── TTLs / issuer ─────────────────────────────────────────────────────────
     access_token_ttl_hours: i64,
-    #[allow(dead_code)]
-    session_ttl_days: i64,
     refresh_token_ttl_days: i64,
     /// Issuer claim (`iss`) of issued tokens, checked on verify.
     issuer: String,
@@ -162,7 +160,6 @@ impl AuthManager {
             paseto_verifying_key,
             paseto_verifying_keys_previous,
             access_token_ttl_hours: config.access_token_ttl_hours,
-            session_ttl_days: config.session_ttl_days,
             refresh_token_ttl_days: config.refresh_token_ttl_days,
             issuer: config.token_issuer.clone(),
         })

@@ -19,7 +19,6 @@ use tokio::sync::Mutex;
 
 /// Messaging Service context
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct MessagingServiceContext {
     pub db_pool: Arc<DbPool>,
     pub queue: Arc<Mutex<MessageQueue>>,
@@ -68,12 +67,6 @@ impl MessagingServiceContext {
         builder
             .build()
             .expect("Failed to build AppContext for messaging service")
-    }
-}
-
-impl construct_db::HasDbPool for MessagingServiceContext {
-    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
-        &self.db_pool
     }
 }
 

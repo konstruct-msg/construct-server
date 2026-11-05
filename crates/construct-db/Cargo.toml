@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-construct-crypto = { path = "../construct-crypto", features = ["e2ee"] }
+construct-crypto = { path = "../construct-crypto" }
 construct-config = { path = "../construct-config" }
 construct-types = { path = "../construct-types" }
 crypto-agility = { path = "../crypto-agility" }

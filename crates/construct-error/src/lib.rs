@@ -1,11 +1,6 @@
 use axum::{http::StatusCode, response::IntoResponse};
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::Response;
 use serde_json::json;
 use thiserror::Error;
-
-pub type AppResult<T> = Result<T, AppError>;
 
 /// Application error type with comprehensive error handling
 ///
@@ -363,62 +358,5 @@ impl AppError {
     /// Create a configuration error
     pub fn config(msg: impl Into<String>) -> Self {
         AppError::Config(msg.into())
-    }
-
-    /// Convert AppError to hyper::Response for use in non-Axum handlers
-    /// This is used in lib.rs where we use hyper directly instead of Axum
-    pub fn to_hyper_response(self) -> Response<Full<Bytes>> {
-        // Log the error with appropriate level
-        self.log();
-
-        let status = self.status_code();
-        let error_code = self.error_code();
-        let user_message = self.user_message();
-
-        // For invite errors, use spec-compliant format (INVITE_LINKS_QR_API_SPEC.md Section 10)
-        let is_invite_error = matches!(
-            self,
-            AppError::InviteExpired
-                | AppError::InviteInvalidSignature
-                | AppError::InviteAlreadyUsed
-                | AppError::PublicKeyNotFound
-        );
-
-        let response_body = if status.is_server_error() {
-            // For server errors, don't expose internal details to client
-            json!({
-                "error": "Internal server error",
-                "error_code": error_code,
-                "status": status.as_u16(),
-            })
-        } else if is_invite_error {
-            // Invite errors use spec-compliant format
-            json!({
-                "error": error_code,
-                "status": status.as_u16(),
-            })
-        } else {
-            // Standard format for other errors
-            json!({
-                "error": user_message,
-                "error_code": error_code,
-                "status": status.as_u16(),
-            })
-        };
-
-        let json_bytes = serde_json::to_vec(&response_body).unwrap_or_else(|_| {
-            // Fallback if JSON serialization fails
-            b"{\"error\":\"Internal server error\"}".to_vec()
-        });
-
-        let mut response = Response::new(Full::new(Bytes::from(json_bytes)));
-        *response.status_mut() = status;
-
-        // Set Content-Type header
-        if let Ok(content_type) = "application/json".parse() {
-            response.headers_mut().insert("content-type", content_type);
-        }
-
-        response
     }
 }

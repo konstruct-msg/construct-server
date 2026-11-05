@@ -74,13 +74,6 @@ fn require_hybrid_recovery_key(public_key: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct RecoveryResult {
-    pub user_id: Uuid,
-    pub devices_revoked: u32,
-}
-
 // ============================================================================
 // SetRecoveryKey
 // ============================================================================

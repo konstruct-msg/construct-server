@@ -9,7 +9,6 @@
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_config::Config;
-use construct_context::AppContext;
 use construct_db::DbPool;
 use construct_queue::MessageQueue;
 use std::sync::Arc;
@@ -27,27 +26,4 @@ pub struct NotificationServiceContext {
     pub apns_sandbox_client: Arc<ApnsClient>,
     pub token_encryption: Arc<DeviceTokenEncryption>,
     pub config: Arc<Config>,
-}
-
-impl NotificationServiceContext {
-    /// Convert to AppContext for use with existing handlers
-    /// This is a temporary adapter until handlers are refactored to use traits
-    pub fn to_app_context(&self) -> AppContext {
-        AppContext::builder()
-            .with_db_pool(self.db_pool.clone())
-            .with_queue(self.queue.clone())
-            .with_auth_manager(self.auth_manager.clone())
-            .with_config(self.config.clone())
-            .with_apns_client(self.apns_client.clone())
-            .with_token_encryption(self.token_encryption.clone())
-            .with_server_instance_id(uuid::Uuid::new_v4().to_string())
-            .build()
-            .expect("Failed to build AppContext for notification service")
-    }
-}
-
-impl construct_db::HasDbPool for NotificationServiceContext {
-    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
-        &self.db_pool
-    }
 }

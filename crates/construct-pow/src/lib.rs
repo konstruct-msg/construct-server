@@ -43,11 +43,6 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString},
 };
 
-/// Proof of Work difficulty level (leading zero bits required)
-pub const POW_DIFFICULTY_NORMAL: u32 = 8; // 3-5 minutes
-pub const POW_DIFFICULTY_ATTACK: u32 = 12; // 1-2 hours
-pub const POW_DIFFICULTY_EXTREME: u32 = 16; // ~24 hours
-
 /// Salt prefix for PoW v2 (challenge-based salt)
 const POW_SALT_PREFIX: &str = "kpow2:";
 

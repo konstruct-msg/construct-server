@@ -53,19 +53,3 @@ pub async fn metrics_handler() -> axum::response::Response<String> {
             .unwrap(),
     }
 }
-
-/// Call this once at service startup to mark the service as healthy in Prometheus.
-///
-/// Sets `gateway_service_health{service="<name>"}` = 1.0 so the INFRA dashboard
-/// panel shows a green UP tile immediately after boot. The value stays 1 for the
-/// lifetime of the process — it drops out of Prometheus scrape results (and the
-/// panel turns grey) if the service crashes and stops responding to `/metrics`.
-///
-/// ```ignore
-/// construct_server_shared::metrics::register_service_health("messaging");
-/// ```
-pub fn register_service_health(service: &'static str) {
-    GATEWAY_SERVICE_HEALTH
-        .with_label_values(&[service])
-        .set(1.0);
-}

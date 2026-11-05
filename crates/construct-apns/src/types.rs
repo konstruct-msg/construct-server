@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Push notification type according to notification-philosophy.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,20 +18,6 @@ pub enum NotificationPriority {
     High,
     /// Power-efficient delivery (for silent notifications)
     Low,
-}
-
-/// Notification filter level (Phase 2)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum NotificationFilter {
-    /// All messages trigger notifications
-    All,
-    /// Only direct 1-on-1 messages
-    DirectMessagesOnly,
-    /// Only @mentions in groups
-    MentionsOnly,
-    /// Only messages from contacts
-    FromContactsOnly,
 }
 
 /// APNs payload structure
@@ -114,25 +100,6 @@ pub struct ConstructCallData {
 }
 
 impl ApnsPayload {
-    /// Create silent push notification (Phase 1: Option B from docs)
-    /// Wakes app in background, no user-visible notification
-    pub fn silent(conversation_id: Option<String>) -> Self {
-        Self {
-            aps: ApsData {
-                content_available: Some(1),
-                alert: None,
-                sound: None,
-                badge: None,
-                mutable_content: None,
-            },
-            construct: Some(ConstructData {
-                notification_type: "new_message".to_string(),
-                conversation_id,
-            }),
-            construct_call: None,
-        }
-    }
-
     /// Create key-rotation wake push (Phase 3B).
     ///
     /// Silent background push that tells the device to rotate its Signed Pre-Key
@@ -150,29 +117,6 @@ impl ApnsPayload {
             construct: Some(ConstructData {
                 notification_type: "rotate_keys".to_string(),
                 conversation_id: None,
-            }),
-            construct_call: None,
-        }
-    }
-
-    /// Create visible push notification (Phase 2: Option C from docs)
-    /// Shows notification to user
-    /// IMPORTANT: Never include message content in payload! (privacy)
-    pub fn visible(sender_name: &str, conversation_id: Option<String>) -> Self {
-        Self {
-            aps: ApsData {
-                content_available: None,
-                alert: Some(AlertData::Text {
-                    title: sender_name.to_string(),
-                    body: "New message".to_string(), // Generic, no content!
-                }),
-                sound: Some("default".to_string()),
-                badge: Some(1),
-                mutable_content: None,
-            },
-            construct: Some(ConstructData {
-                notification_type: "new_message".to_string(),
-                conversation_id,
             }),
             construct_call: None,
         }

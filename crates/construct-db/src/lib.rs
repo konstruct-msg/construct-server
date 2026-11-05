@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use construct_crypto::{UploadableKeyBundle, envelope_decrypt, envelope_encrypt, hmac_sha256};
+use construct_crypto::{envelope_decrypt, envelope_encrypt, hmac_sha256};
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use uuid::Uuid;
 
@@ -50,27 +48,6 @@ pub struct BlockedUser {
     pub user_id: Uuid,
     pub blocked_at: DateTime<Utc>,
     pub reason: Option<String>,
-}
-
-use construct_config::DbConfig;
-
-pub async fn create_pool(database_url: &str, db_config: &DbConfig) -> Result<DbPool> {
-    let pool = PgPoolOptions::new()
-        .max_connections(db_config.max_connections)
-        .min_connections(db_config.min_connections)
-        .acquire_timeout(std::time::Duration::from_secs(
-            db_config.acquire_timeout_secs,
-        ))
-        .idle_timeout(Some(std::time::Duration::from_secs(
-            db_config.idle_timeout_secs,
-        )))
-        // Proactively verify connections before use. On Docker networks this costs ~1 ms but
-        // prevents silent failures when Postgres restarted and the pool holds stale sockets.
-        .test_before_acquire(true)
-        .connect(database_url)
-        .await?;
-
-    Ok(pool)
 }
 
 // ============================================================================
@@ -137,33 +114,6 @@ pub async fn update_user_username(
     .fetch_one(pool)
     .await
     .context("Failed to update username hash")?;
-
-    Ok(user)
-}
-
-/// Create a new user (passwordless, device-based).
-///
-/// `username_hash` — pass the output of `construct_crypto::hash_username` for users
-/// that want a searchable handle, or `None` for anonymous accounts.
-/// The plaintext username is never stored.
-pub async fn create_user_passwordless(
-    pool: &DbPool,
-    username_hash: Option<&[u8]>,
-    primary_device_id: &str,
-) -> Result<User> {
-    let user = sqlx::query_as::<_, User>(
-        r#"
-        INSERT INTO users (id, username_hash, primary_device_id)
-        VALUES (gen_random_uuid(), $1, $2)
-        RETURNING id, username_hash, recovery_public_key, identity_public_key, identity_key_type,
-                  route_id, last_recovery_at, primary_device_id
-        "#,
-    )
-    .bind(username_hash)
-    .bind(primary_device_id)
-    .fetch_one(pool)
-    .await
-    .context("Failed to create passwordless user")?;
 
     Ok(user)
 }
@@ -353,26 +303,6 @@ pub async fn delete_user_account(
     Ok(())
 }
 
-/// Find a user by their identity_public_key (Epic E).
-pub async fn get_user_by_identity_pubkey(
-    pool: &DbPool,
-    identity_public_key: &[u8],
-) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, User>(
-        r#"
-        SELECT id, username_hash, recovery_public_key, identity_public_key,
-               identity_key_type, route_id, last_recovery_at, primary_device_id
-        FROM users
-        WHERE identity_public_key = $1
-        "#,
-    )
-    .bind(identity_public_key)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(user)
-}
-
 /// Make an account's address its recovery key: `identity_public_key`, `identity_key_type` and
 /// `route_id` (`RouteId::of_account`). Written in the same statement as the recovery key by
 /// recovery setup, and by `backfill_account_addresses` for accounts that set it before this
@@ -445,26 +375,6 @@ pub async fn get_user_by_route_id(pool: &DbPool, route_id: &str) -> Result<Optio
     .await?;
 
     Ok(user)
-}
-
-/// Get all distinct home relay domains for a user's active devices.
-/// Used by Epics E/F to determine where to forward messages addressed by route_id.
-pub async fn get_user_home_relays(pool: &DbPool, user_id: &Uuid) -> Result<Vec<String>> {
-    let relays = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT d.server_hostname
-        FROM devices d
-        WHERE d.user_id = $1
-          AND d.is_active = TRUE
-        ORDER BY d.server_hostname
-        "#,
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .context("Failed to get user home relays")?;
-
-    Ok(relays)
 }
 
 /// Check if `user_id` has enabled discoverable search (`searchable = TRUE`).
@@ -610,256 +520,6 @@ pub async fn are_mutual_contacts(pool: &DbPool, a_hmac: &[u8], b_hmac: &[u8]) ->
     .await
     .context("Failed to check mutual contacts")?;
     Ok(ok)
-}
-
-/// Retrieves a key bundle in the crypto-agile format along with username.
-/// Returns (bundle, username) tuple.
-///
-/// Constructs the bundle from the devices table (passwordless auth users).
-pub async fn get_key_bundle(
-    pool: &DbPool,
-    user_id: &Uuid,
-) -> Result<Option<(UploadableKeyBundle, String)>> {
-    get_key_bundle_from_device(pool, user_id).await
-}
-
-/// Device key bundle record from database
-#[derive(sqlx::FromRow)]
-struct DeviceKeyBundle {
-    pub verifying_key: Vec<u8>,
-    pub identity_public: Vec<u8>,
-    pub signed_prekey_public: Vec<u8>,
-    /// Ed25519 signature of (prologue || signed_prekey_public)
-    /// May be None for legacy devices
-    pub signed_prekey_signature: Option<Vec<u8>>,
-    pub crypto_suites: serde_json::Value,
-}
-
-/// Extended key bundle data including separate verifying key
-/// Per INVITE_LINKS_QR_API_SPEC.md - verifyingKey must be separate from masterIdentityKey
-#[derive(Debug, Clone)]
-pub struct ExtendedKeyBundle {
-    /// The key bundle (bundleData, masterIdentityKey as X25519)
-    pub bundle: UploadableKeyBundle,
-    /// Always empty — server no longer stores plaintext username.
-    /// Kept for API compatibility; client generates display name locally.
-    pub username: String,
-    /// Ed25519 verifying key (base64-encoded)
-    pub verifying_key: String,
-    /// X25519 identity key (base64-encoded) - for masterIdentityKey field
-    pub identity_key: String,
-}
-
-/// Retrieves a key bundle from the devices table for passwordless auth users
-/// Uses the user's primary device (or first active device) to construct the bundle
-async fn get_key_bundle_from_device(
-    pool: &DbPool,
-    user_id: &Uuid,
-) -> Result<Option<(UploadableKeyBundle, String)>> {
-    use construct_crypto::{BundleData, SuiteKeyMaterial};
-
-    let device = sqlx::query_as::<_, DeviceKeyBundle>(
-        r#"
-        SELECT
-            d.verifying_key,
-            d.identity_public,
-            d.signed_prekey_public,
-            d.signed_prekey_signature,
-            d.crypto_suites
-        FROM devices d
-        JOIN users u ON d.user_id = u.id
-        WHERE d.user_id = $1 AND d.is_active = true
-        ORDER BY
-            CASE WHEN d.device_id = u.primary_device_id THEN 0 ELSE 1 END,
-            d.registered_at ASC
-        LIMIT 1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(d) = device else {
-        return Ok(None);
-    };
-
-    // Parse crypto_suites to determine crypto_suite_id
-    let suites: Vec<String> = serde_json::from_value(d.crypto_suites.clone())
-        .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
-
-    // Determine crypto_suite_id from first suite
-    let crypto_suite_id: u32 = if suites
-        .iter()
-        .any(|s| s.contains("Kyber") || s.contains("PQ"))
-    {
-        2 // PQ_HYBRID_KYBER
-    } else {
-        1 // CLASSIC_X25519
-    };
-
-    // Prefer stored signed_prekey_signature (migration 016+). Missing → empty
-    // placeholder + warn (client should re-upload keys); never invent a fake sig
-    // without logging.
-    let signed_prekey_sig = match &d.signed_prekey_signature {
-        Some(sig) if sig.len() == 64 => BASE64.encode(sig),
-        Some(sig) => {
-            tracing::warn!(
-                user_id = %user_id,
-                sig_len = sig.len(),
-                "signed_prekey_signature has unexpected length"
-            );
-            BASE64.encode(vec![0u8; 64])
-        }
-        None => {
-            tracing::warn!(
-                user_id = %user_id,
-                "Device missing signed_prekey_signature in get_key_bundle_from_device"
-            );
-            BASE64.encode(vec![0u8; 64])
-        }
-    };
-
-    // Construct SuiteKeyMaterial from device keys
-    let suite_key = SuiteKeyMaterial {
-        suite_id: crypto_suite_id,
-        identity_key: BASE64.encode(&d.identity_public),
-        signed_prekey: BASE64.encode(&d.signed_prekey_public),
-        signed_prekey_signature: signed_prekey_sig,
-        one_time_prekeys: vec![], // Not used for initial key exchange
-    };
-
-    // Construct BundleData
-    let bundle_data = BundleData {
-        user_id: user_id.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        supported_suites: vec![suite_key],
-    };
-
-    // Serialize bundle_data to JSON bytes
-    let bundle_data_bytes =
-        serde_json::to_vec(&bundle_data).context("Failed to serialize bundle_data")?;
-
-    // Outer `UploadableKeyBundle.signature` is a legacy envelope field; clients
-    // verify `signed_prekey_signature` (and invite signatures), not this bytes
-    // field. Kept as zeros until a stored bundle signature is protocolized.
-    let bundle = UploadableKeyBundle {
-        master_identity_key: BASE64.encode(&d.verifying_key),
-        bundle_data: BASE64.encode(&bundle_data_bytes),
-        signature: BASE64.encode(vec![0u8; 64]),
-        nonce: None,
-        timestamp: None,
-    };
-
-    Ok(Some((bundle, String::new())))
-}
-
-/// Retrieves extended key bundle with separate verifying_key and identity_key
-/// Per INVITE_LINKS_QR_API_SPEC.md - verifyingKey (Ed25519) must be separate from masterIdentityKey (X25519)
-pub async fn get_extended_key_bundle(
-    pool: &DbPool,
-    user_id: &Uuid,
-) -> Result<Option<ExtendedKeyBundle>> {
-    use construct_crypto::{BundleData, SuiteKeyMaterial};
-
-    // Get the user's primary device or first active device
-    let device = sqlx::query_as::<_, DeviceKeyBundle>(
-        r#"
-        SELECT
-            d.verifying_key,
-            d.identity_public,
-            d.signed_prekey_public,
-            d.signed_prekey_signature,
-            d.crypto_suites
-        FROM devices d
-        JOIN users u ON d.user_id = u.id
-        WHERE d.user_id = $1 AND d.is_active = true
-        ORDER BY
-            CASE WHEN d.device_id = u.primary_device_id THEN 0 ELSE 1 END,
-            d.registered_at ASC
-        LIMIT 1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(d) = device else {
-        return Ok(None);
-    };
-
-    // Parse crypto_suites to determine crypto_suite_id
-    let suites: Vec<String> = serde_json::from_value(d.crypto_suites.clone())
-        .unwrap_or_else(|_| vec!["Curve25519+Ed25519".to_string()]);
-
-    // Determine crypto_suite_id from first suite
-    let crypto_suite_id: u32 = if suites
-        .iter()
-        .any(|s| s.contains("Kyber") || s.contains("PQ"))
-    {
-        2 // PQ_HYBRID_KYBER
-    } else {
-        1 // CLASSIC_X25519
-    };
-
-    // Get signed_prekey_signature - required for session initialization
-    // If missing, device needs to re-upload their key bundle
-    let signed_prekey_sig = match &d.signed_prekey_signature {
-        Some(sig) if sig.len() == 64 => BASE64.encode(sig),
-        _ => {
-            tracing::warn!(
-                user_id = %user_id,
-                "Device missing signed_prekey_signature - needs key bundle re-upload"
-            );
-            // Return empty signature - client will fail and prompt user to re-upload
-            BASE64.encode(vec![0u8; 64])
-        }
-    };
-
-    // Construct SuiteKeyMaterial from device keys
-    let suite_key = SuiteKeyMaterial {
-        suite_id: crypto_suite_id,
-        identity_key: BASE64.encode(&d.identity_public),
-        signed_prekey: BASE64.encode(&d.signed_prekey_public),
-        signed_prekey_signature: signed_prekey_sig,
-        one_time_prekeys: vec![],
-    };
-
-    // Construct BundleData
-    let bundle_data = BundleData {
-        user_id: user_id.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        supported_suites: vec![suite_key],
-    };
-
-    // Serialize bundle_data to JSON bytes
-    let bundle_data_bytes =
-        serde_json::to_vec(&bundle_data).context("Failed to serialize bundle_data")?;
-
-    // Separate keys per spec:
-    // - verifying_key: Ed25519 (for invite signatures)
-    // - identity_public: X25519 (for key exchange/sessions)
-    let verifying_key = BASE64.encode(&d.verifying_key);
-    let identity_key = BASE64.encode(&d.identity_public);
-
-    // Outer bundle envelope signature is unused by current clients (they verify
-    // signed_prekey_signature / invite sigs). Zeros are intentional until protocol
-    // stores a real bundle signature — do not treat as X3DH material.
-    let bundle = UploadableKeyBundle {
-        master_identity_key: identity_key.clone(), // X25519 for sessions
-        bundle_data: BASE64.encode(&bundle_data_bytes),
-        signature: BASE64.encode(vec![0u8; 64]),
-        nonce: None,
-        timestamp: None,
-    };
-
-    // Return empty string for username (privacy-focused — server has no plaintext)
-    // Client will generate friendly display name (e.g., "Blue Penguin")
-    Ok(Some(ExtendedKeyBundle {
-        bundle,
-        username: String::new(),
-        verifying_key,
-        identity_key,
-    }))
 }
 
 // ============================================================================
@@ -1273,105 +933,11 @@ pub async fn deactivate_device(pool: &DbPool, device_id: &str) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Get user's primary device (or first active device)
-/// Per INVITE_LINKS_QR_API_SPEC.md - used for updating verifying key
-pub async fn get_user_primary_device(pool: &DbPool, user_id: &Uuid) -> Result<Option<Device>> {
-    let device = sqlx::query_as::<_, Device>(
-        r#"
-        SELECT
-            d.device_id,
-            d.server_hostname,
-            d.user_id,
-            d.verifying_key,
-            d.identity_public,
-            d.signed_prekey_public,
-            d.signed_prekey_signature,
-            d.crypto_suites,
-            d.registered_at,
-            d.is_active,
-            d.supports_pq_ratchet,
-            d.sealed_metadata
-        FROM devices d
-        JOIN users u ON d.user_id = u.id
-        WHERE d.user_id = $1 AND d.is_active = true
-        ORDER BY
-            CASE WHEN d.device_id = u.primary_device_id THEN 0 ELSE 1 END,
-            d.registered_at ASC
-        LIMIT 1
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        // Log detailed error for debugging
-        tracing::error!(
-            error = %e,
-            error_type = ?e,
-            user_id = %user_id,
-            "Database error while fetching user's primary device"
-        );
-
-        // Provide context based on error type
-        match &e {
-            sqlx::Error::ColumnDecode { index, source } => {
-                anyhow::anyhow!(
-                    "Failed to decode device column at index {}: {}. \
-                    This may indicate a schema mismatch between database and code. \
-                    Check migration 016 (signed_prekey_signature).",
-                    index,
-                    source
-                )
-            }
-            sqlx::Error::RowNotFound => {
-                anyhow::anyhow!("Device query returned no rows (unexpected - should return None)")
-            }
-            sqlx::Error::PoolTimedOut => {
-                anyhow::anyhow!(
-                    "Database connection pool timeout. \
-                    The database may be overloaded or network issues exist."
-                )
-            }
-            sqlx::Error::Database(db_err) => {
-                anyhow::anyhow!(
-                    "Database error: {} (code: {:?}). \
-                    Query: get_user_primary_device for user_id={}",
-                    db_err.message(),
-                    db_err.code(),
-                    user_id
-                )
-            }
-            _ => {
-                anyhow::anyhow!("Failed to get user's primary device: {}", e)
-            }
-        }
-    })?;
-
-    Ok(device)
-}
-
-/// Update device's verifying key (Ed25519 public key)
-/// Per INVITE_LINKS_QR_API_SPEC.md Section 6B
-pub async fn update_device_verifying_key(
-    pool: &DbPool,
-    device_id: &str,
-    verifying_key: &[u8],
-) -> Result<()> {
-    sqlx::query("UPDATE devices SET verifying_key = $1 WHERE device_id = $2")
-        .bind(verifying_key)
-        .bind(device_id)
-        .execute(pool)
-        .await
-        .context("Failed to update device verifying key")?;
-
-    Ok(())
-}
-
 // ============================================================================
 // Crypto-Agility Functions (from legacy construct-db)
 // ============================================================================
 
-use crypto_agility::{CryptoSuite, InviteTokenRecord, ProtocolVersion, UserCapabilities};
+use crypto_agility::{CryptoSuite, ProtocolVersion, UserCapabilities};
 
 /// Get user capabilities (protocol version and supported crypto suites)
 pub async fn get_user_capabilities(
@@ -1419,144 +985,9 @@ pub async fn get_user_capabilities(
     }
 }
 
-/// Update user's protocol version and crypto suites
-pub async fn update_user_protocol(
-    pool: &DbPool,
-    user_id: &Uuid,
-    protocol_version: ProtocolVersion,
-) -> Result<()> {
-    let version_int = match protocol_version {
-        ProtocolVersion::V1Classic => 1,
-        ProtocolVersion::V2HybridPQ => 2,
-    };
-
-    let crypto_suites = match protocol_version {
-        ProtocolVersion::V1Classic => vec![CryptoSuite::ClassicX25519],
-        ProtocolVersion::V2HybridPQ => vec![
-            CryptoSuite::HybridKyber1024X25519,
-            CryptoSuite::ClassicX25519,
-        ],
-    };
-
-    let suites_json =
-        serde_json::to_value(&crypto_suites).context("Failed to serialize crypto_suites")?;
-
-    sqlx::query(
-        r#"
-        UPDATE users
-        SET protocol_version = $1, crypto_suites = $2
-        WHERE id = $3
-        "#,
-    )
-    .bind(version_int)
-    .bind(suites_json)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 // ============================================================================
 // Invite Token Functions
 // ============================================================================
-
-/// Create a new invite token
-pub async fn create_invite_token(
-    pool: &DbPool,
-    jti: &Uuid,
-    user_id: &Uuid,
-    ephemeral_key: &[u8],
-    signature: &[u8],
-) -> Result<InviteTokenRecord> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        jti: Uuid,
-        user_id: Uuid,
-        ephemeral_key: Vec<u8>,
-        signature: Vec<u8>,
-        created_at: DateTime<Utc>,
-        used_at: Option<DateTime<Utc>>,
-    }
-
-    let row = sqlx::query_as::<_, Row>(
-        r#"
-        INSERT INTO invite_tokens (jti, user_id, ephemeral_key, signature)
-        VALUES ($1, $2, $3, $4)
-        RETURNING jti, user_id, ephemeral_key, signature, created_at, used_at
-        "#,
-    )
-    .bind(jti)
-    .bind(user_id)
-    .bind(ephemeral_key)
-    .bind(signature)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(InviteTokenRecord {
-        jti: row.jti,
-        user_id: row.user_id,
-        device_id: None,
-        ephemeral_key: row.ephemeral_key,
-        signature: row.signature,
-        created_at: row.created_at,
-        used_at: row.used_at,
-    })
-}
-
-/// Get an invite token by jti
-pub async fn get_invite_token(pool: &DbPool, jti: &Uuid) -> Result<Option<InviteTokenRecord>> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        jti: Uuid,
-        user_id: Uuid,
-        ephemeral_key: Vec<u8>,
-        signature: Vec<u8>,
-        created_at: DateTime<Utc>,
-        used_at: Option<DateTime<Utc>>,
-    }
-
-    let row = sqlx::query_as::<_, Row>(
-        r#"
-        SELECT jti, user_id, ephemeral_key, signature, created_at, used_at
-        FROM invite_tokens
-        WHERE jti = $1
-        "#,
-    )
-    .bind(jti)
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(r) => Ok(Some(InviteTokenRecord {
-            jti: r.jti,
-            user_id: r.user_id,
-            device_id: None,
-            ephemeral_key: r.ephemeral_key,
-            signature: r.signature,
-            created_at: r.created_at,
-            used_at: r.used_at,
-        })),
-        None => Ok(None),
-    }
-}
-
-/// Atomically mark an invite token as used (burn it)
-/// Returns true if the token was successfully burned, false if already used or not found
-pub async fn burn_invite_token(pool: &DbPool, jti: &Uuid) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        UPDATE invite_tokens
-        SET used_at = NOW()
-        WHERE jti = $1 AND used_at IS NULL
-        "#,
-    )
-    .bind(jti)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
 
 /// Atomically burn a JTI in the used_invites table (anti-replay for dynamic invites).
 /// Returns true if the JTI was inserted (first use), false if already present (replay).
@@ -1583,43 +1014,6 @@ pub async fn burn_used_invite(
     .await?;
 
     Ok(result.is_some())
-}
-
-/// Check if an invite token is valid (exists and not yet used)
-pub async fn is_invite_token_valid(pool: &DbPool, jti: &Uuid) -> Result<bool> {
-    let result = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM invite_tokens
-            WHERE jti = $1 AND used_at IS NULL
-        )
-        "#,
-    )
-    .bind(jti)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(result)
-}
-
-/// Cleanup expired invite tokens
-pub async fn cleanup_expired_invites(pool: &DbPool) -> Result<u64> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM invite_tokens
-        WHERE created_at < NOW() - INTERVAL '5 minutes'
-          AND used_at IS NULL
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected())
-}
-
-/// Trait for types that provide a database pool
-pub trait HasDbPool {
-    fn db_pool(&self) -> &std::sync::Arc<DbPool>;
 }
 
 // ============================================================================
@@ -1649,14 +1043,11 @@ pub struct SentContactRequest {
 
 /// Raw DB row — used internally before decryption.
 #[derive(sqlx::FromRow)]
-#[allow(dead_code)]
 struct RawContactRequest {
     id: Uuid,
     from_enc: Vec<u8>,
     from_identity_enc: Option<Vec<u8>>,
-    status: String,
     created_at: DateTime<Utc>,
-    resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1844,19 +1235,6 @@ pub async fn get_sent_contact_requests(
             created_at: r.created_at,
         })
         .collect())
-}
-
-/// Check if a pending request from `from_user_id` to `to_user_id` exists.
-/// Used by `send_contact_request` handler to detect duplicates without exposing IDs.
-pub async fn has_pending_contact_request(
-    pool: &DbPool,
-    from_user_id: Uuid,
-    to_user_id: Uuid,
-    hmac_secret: &[u8],
-) -> Result<bool> {
-    get_pending_contact_request_id(pool, from_user_id, to_user_id, hmac_secret)
-        .await
-        .map(|opt| opt.is_some())
 }
 
 /// Return the UUID of an existing pending request from `from_user_id` → `to_user_id`,
@@ -2113,6 +1491,7 @@ mod tests {
 #[cfg(test)]
 mod deletion_tests {
     use super::*;
+    use sqlx::postgres::PgPoolOptions;
 
     const SECRET: &[u8] = b"deletion-test-contact-hmac-secret";
 
