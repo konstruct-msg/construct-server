@@ -8,7 +8,6 @@ edition.workspace = true
 construct-rate-limit = { path = "../construct-rate-limit" }
 # Core runtime
 anyhow      = { workspace = true }
-thiserror   = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 

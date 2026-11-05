@@ -10,13 +10,11 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 
 tonic = "0.14"
-prost = "0.14"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 axum = "0.8"
-serde_json = "1"
 
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "uuid", "chrono"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -41,7 +39,6 @@ construct-redis = { path = "../crates/construct-redis" }
 construct-config = { path = "../crates/construct-config" }
 construct-auth = { path = "../crates/construct-auth" }
 construct-rate-limit = { path = "../crates/construct-rate-limit" }
-construct-metrics = { path = "../crates/construct-metrics" }
 
 # Test-only crypto helpers (TEST_AUTH keygen in tests/test_helpers.rs)
 ed25519-compact = { version = "2.0", features = ["pem", "random"] }

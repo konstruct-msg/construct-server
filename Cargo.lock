@@ -299,45 +299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bb8"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
-dependencies = [
- "futures-util",
- "parking_lot",
- "portable-atomic",
- "tokio",
-]
-
-[[package]]
-name = "bb8-tonic"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f800a9d7c9e85dd9421474bd83c69763696539b6ee40b783fd33f38f2368cb"
-dependencies = [
- "bb8",
- "bytes",
- "futures",
- "http",
- "tonic",
- "tower-service",
-]
-
-[[package]]
-name = "bcrypt"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b1866ecef4f2d06a0bb77880015fdf2b89e25a1c2e5addacb87e459c86dc67e"
-dependencies = [
- "base64",
- "blowfish",
- "getrandom 0.2.17",
- "subtle",
- "zeroize",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,16 +341,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
 dependencies = [
  "generic-array",
-]
-
-[[package]]
-name = "blowfish"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e412e2cd0f2b2d93e02543ceae7917b3c70331573df19ee046bcbc35e45e87d7"
-dependencies = [
- "byteorder",
- "cipher 0.4.4",
 ]
 
 [[package]]
@@ -597,31 +548,21 @@ dependencies = [
 name = "construct-auth-service"
 version = "0.20.0"
 dependencies = [
- "anyhow",
  "axum",
- "base64",
  "chrono",
- "construct-apns",
- "construct-auth",
  "construct-config",
  "construct-context",
  "construct-crypto",
  "construct-db",
  "construct-error",
- "construct-federation",
- "construct-message",
  "construct-metrics",
  "construct-pow",
- "construct-queue",
- "construct-types",
  "construct-utils",
  "ed25519-dalek",
  "hex",
  "serde",
- "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -634,8 +575,6 @@ dependencies = [
  "base64",
  "dotenvy",
  "hex",
- "rand 0.10.1",
- "serde",
  "tracing",
  "uuid",
 ]
@@ -644,13 +583,11 @@ dependencies = [
 name = "construct-context"
 version = "0.20.0"
 dependencies = [
- "anyhow",
  "construct-apns",
  "construct-auth",
  "construct-config",
  "construct-db",
  "construct-federation",
- "construct-message",
  "construct-queue",
  "tokio",
  "tracing",
@@ -664,7 +601,6 @@ dependencies = [
  "base64",
  "chacha20",
  "chacha20poly1305",
- "chrono",
  "construct-server-trust",
  "curve25519-dalek",
  "ed25519-dalek",
@@ -672,18 +608,12 @@ dependencies = [
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "ml-dsa",
- "prost",
  "rand 0.10.1",
  "rand_core 0.6.4",
- "serde",
- "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "sha2 0.11.0",
  "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
  "x25519-dalek",
  "zeroize",
 ]
@@ -693,13 +623,10 @@ name = "construct-db"
 version = "0.20.0"
 dependencies = [
  "anyhow",
- "base64",
  "chrono",
- "construct-config",
  "construct-crypto",
  "construct-types",
  "crypto-agility",
- "prost",
  "serde",
  "serde_json",
  "sqlx",
@@ -714,17 +641,13 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "axum",
- "bytes",
- "http-body-util",
  "hyper",
  "redis",
  "reqwest",
  "rmp-serde",
- "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -735,15 +658,12 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "base64",
- "construct-types",
  "ed25519-dalek",
  "reqwest",
  "rustls",
  "rustls-pki-types",
  "serde",
- "serde_json",
  "sha2 0.11.0",
- "tokio",
  "tracing",
 ]
 
@@ -754,19 +674,12 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
- "construct-config",
- "construct-types",
  "hex",
- "once_cell",
- "prometheus",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
  "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -786,12 +699,9 @@ dependencies = [
  "construct-apns",
  "construct-auth",
  "construct-config",
- "construct-context",
  "construct-db",
  "construct-queue",
  "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -829,10 +739,8 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
- "construct-error",
  "redis",
  "sqlx",
- "tracing",
  "uuid",
 ]
 
@@ -856,7 +764,6 @@ dependencies = [
  "construct-rate-limit",
  "redis",
  "sqlx",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -865,25 +772,12 @@ dependencies = [
 name = "construct-server-shared"
 version = "0.20.0"
 dependencies = [
- "anyhow",
- "apns-h2",
- "argon2",
- "async-trait",
  "axum",
- "base64",
- "bb8",
- "bb8-tonic",
- "bcrypt",
- "bytes",
- "chacha20",
- "chacha20poly1305",
- "chrono",
  "construct-apns",
  "construct-auth",
  "construct-auth-service",
  "construct-config",
  "construct-context",
- "construct-crypto",
  "construct-db",
  "construct-error",
  "construct-federation",
@@ -893,54 +787,17 @@ dependencies = [
  "construct-pow",
  "construct-queue",
  "construct-rate-limit",
- "construct-redis",
  "construct-sentinel-service",
  "construct-types",
  "construct-utils",
- "crypto-agility",
- "dotenvy",
  "ed25519-compact",
- "ed25519-dalek",
- "futures-core",
- "futures-util",
- "hex",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "once_cell",
- "prometheus",
  "prost",
- "prost-build",
  "prost-types",
- "rand 0.10.1",
- "redis",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "serde_json",
- "serial_test",
- "sha2 0.11.0",
- "socket2 0.5.10",
- "sqlx",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tokio-native-tls",
- "tokio-stream",
  "tonic",
- "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
- "tower",
- "tower-http",
  "tracing",
- "tracing-subscriber",
  "uuid",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -957,13 +814,7 @@ dependencies = [
 name = "construct-types"
 version = "0.20.0"
 dependencies = [
- "chrono",
- "construct-crypto",
  "hex",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "serde_json",
  "sha2 0.11.0",
  "uuid",
 ]
@@ -974,12 +825,6 @@ version = "0.20.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64",
- "construct-types",
- "ed25519-dalek",
- "hex",
- "hyper",
- "serde_json",
  "sha2 0.11.0",
  "socket2 0.5.10",
  "tokio",
@@ -1088,15 +933,12 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 name = "crypto-agility"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "base64",
  "chrono",
  "ed25519-dalek",
  "hex",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
- "tokio",
  "uuid",
 ]
 
@@ -1510,21 +1352,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
-name = "futures"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
-dependencies = [
- "futures-channel",
- "futures-core",
- "futures-executor",
- "futures-io",
- "futures-sink",
- "futures-task",
- "futures-util",
-]
-
-[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1597,7 +1424,6 @@ version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
- "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -1613,50 +1439,23 @@ name = "gateway"
 version = "0.20.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "base64",
- "bcrypt",
- "bytes",
  "chrono",
  "construct-config",
  "construct-crypto",
- "construct-db",
- "construct-error",
  "construct-federation",
  "construct-server-shared",
- "construct-types",
- "construct-utils",
  "construct-veil",
- "crypto-agility",
- "dotenvy",
- "hex",
- "hmac 0.13.0",
- "http-body-util",
- "hyper",
- "hyper-util",
- "prometheus",
- "prost",
- "rand 0.10.1",
- "redis",
- "reqwest",
  "rustls",
  "rustls-pemfile",
- "serde",
  "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "subtle",
- "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "uuid",
  "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -1721,7 +1520,6 @@ dependencies = [
  "construct-auth",
  "construct-config",
  "construct-db",
- "construct-metrics",
  "construct-rate-limit",
  "construct-redis",
  "construct-server-shared",
@@ -1731,10 +1529,8 @@ dependencies = [
  "hex",
  "lazy_static",
  "prometheus",
- "prost",
  "rand 0.8.6",
  "redis",
- "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "tokio",
@@ -1974,7 +1770,6 @@ dependencies = [
  "socket2 0.5.10",
  "system-configuration",
  "tokio",
- "tower-layer",
  "tower-service",
  "tracing",
  "windows-registry",
@@ -2111,14 +1906,11 @@ dependencies = [
  "ed25519-compact",
  "ed25519-dalek",
  "hex",
- "hkdf 0.13.0",
- "prometheus",
  "prost",
  "rand 0.10.1",
  "rmp-serde",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "sqlx",
  "tokio",
  "tokio-stream",
@@ -2312,14 +2104,10 @@ dependencies = [
  "construct-server-shared",
  "ed25519-dalek",
  "hex",
- "prost",
- "rand 0.8.6",
  "redis",
- "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
- "thiserror 2.0.18",
  "tokio",
  "tonic",
  "tower",
@@ -2466,12 +2254,10 @@ dependencies = [
  "construct-auth",
  "construct-config",
  "construct-server-shared",
- "dotenvy",
  "ed25519-compact",
  "hex",
  "hmac 0.13.0",
  "prost",
- "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2480,8 +2266,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2523,11 +2307,9 @@ dependencies = [
  "futures-core",
  "hex",
  "hkdf 0.13.0",
- "hmac 0.13.0",
  "prost",
  "rand 0.10.1",
  "redis",
- "reqwest",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -3011,12 +2793,6 @@ dependencies = [
  "cpufeatures 0.3.0",
  "universal-hash 0.6.1",
 ]
-
-[[package]]
-name = "portable-atomic"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "potential_utf"
@@ -3952,20 +3728,17 @@ dependencies = [
  "base64",
  "construct-auth",
  "construct-config",
- "construct-crypto",
  "construct-db",
  "construct-redis",
  "construct-server-shared",
  "hex",
  "hmac 0.13.0",
  "prost",
- "prost-types",
  "redis",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "sqlx",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -4895,7 +4668,6 @@ name = "veil-service"
 version = "0.20.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -4903,12 +4675,9 @@ dependencies = [
  "construct-config",
  "construct-metrics",
  "construct-server-shared",
- "dotenvy",
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
- "prometheus",
- "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",

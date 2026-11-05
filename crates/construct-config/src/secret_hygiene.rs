@@ -41,7 +41,6 @@ const QUOTE_SENSITIVE: &[&str] = &[
     "CONTACT_HMAC_SECRET",
     "MEDIA_HMAC_SECRET",
     "MEDIA_UPLOAD_TOKEN_SECRET",
-    "CSRF_SECRET",
     "LOG_HASH_SALT",
     "TURN_SECRET",
     "REQUEST_ENVELOPE_KEY",
@@ -185,7 +184,7 @@ fn require_hex_len(name: &str, value: &str, bytes: usize) -> Result<()> {
 ///
 /// - PRESENT-but-malformed values always error (wrong length/encoding/quotes).
 /// - Known insecure constants error unless `ALLOW_INSECURE_SECRETS=true`.
-/// - HMAC / envelope / CSRF presence is per-service (`SecretNeeds` /
+/// - HMAC / envelope presence is per-service (`SecretNeeds` /
 ///   `SecurityConfig::from_env`). This function still rejects `changeme` TURN.
 pub fn validate() -> Result<()> {
     // 1. No secret may carry literal surrounding quotes.
@@ -234,7 +233,7 @@ pub fn validate() -> Result<()> {
         require_hex_len("REQUEST_ENVELOPE_KEY", &v, 32)?;
     }
 
-    // Presence of HMAC / envelope / CSRF / DB URLs is per-service (`SecretNeeds`).
+    // Presence of HMAC / envelope / DB URLs is per-service (`SecretNeeds`).
     // This function only rejects present-but-malformed values, plus the media
     // HMAC pair when MEDIA_ENABLED (media-service also fail-fasts itself).
     if is_production_environment() && !allow_insecure_secrets() {

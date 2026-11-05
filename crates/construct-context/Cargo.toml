@@ -10,9 +10,7 @@ construct-auth          = { path = "../construct-auth" }
 construct-db            = { path = "../construct-db" }
 construct-federation    = { path = "../construct-federation" }
 construct-config        = { path = "../construct-config" }
-construct-message        = { path = "../construct-message" }
 construct-queue         = { path = "../construct-queue" }
 
 tokio  = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }

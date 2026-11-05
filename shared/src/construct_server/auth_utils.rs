@@ -172,9 +172,8 @@ pub fn device_refusal_status(refusal: construct_error::DeviceRefusal) -> Status 
 mod tests {
     use super::*;
     use construct_config::{
-        ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
-        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig, MicroservicesConfig,
-        MtlsConfig, RedisKeyPrefixes, SecurityConfig,
+        ApnsConfig, ApnsEnvironment, Config, DbConfig, DeepLinksConfig, FederationConfig,
+        LoggingConfig, MediaConfig, MtlsConfig, RedisKeyPrefixes, SecurityConfig,
     };
 
     fn make_ed25519_keypair() -> (String, String) {
@@ -233,7 +232,7 @@ mod tests {
                 max_requests_per_user_ip_per_hour: 500,
                 max_long_poll_requests_per_window: 100,
                 long_poll_rate_limit_window_secs: 60,
-                request_signing_required: false,
+
                 metrics_auth_enabled: false,
                 metrics_ip_whitelist: vec![],
                 metrics_bearer_token: None,
@@ -281,15 +280,7 @@ mod tests {
                 android_cert_fingerprint: String::new(),
             },
             redis_key_prefixes: RedisKeyPrefixes {
-                processed_msg: "processed_msg:".to_string(),
                 user: "user:".to_string(),
-                session: "session:".to_string(),
-                user_sessions: "user_sessions:".to_string(),
-                msg_hash: "msg_hash:".to_string(),
-                rate: "rate:".to_string(),
-                blocked: "blocked:".to_string(),
-                key_bundle: "key_bundle:".to_string(),
-                connections: "connections:".to_string(),
             },
             media: MediaConfig {
                 enabled: false,
@@ -298,29 +289,9 @@ mod tests {
                 max_file_size: 10 * 1024 * 1024,
                 rate_limit_per_hour: 100,
             },
-            csrf: CsrfConfig {
-                enabled: false,
-                secret: "test-csrf-secret-at-least-32-chars!!".to_string(),
-                token_ttl_secs: 3600,
-                allowed_origins: vec![],
-                cookie_name: "csrf_token".to_string(),
-                header_name: "X-CSRF-Token".to_string(),
-            },
+
             messaging: construct_config::MessagingConfig::default(),
-            microservices: MicroservicesConfig {
-                enabled: false,
-                auth_service_url: "http://localhost:8001".to_string(),
-                messaging_service_url: "http://localhost:8002".to_string(),
-                user_service_url: "http://localhost:8003".to_string(),
-                notification_service_url: "http://localhost:8004".to_string(),
-                discovery_mode: "static".to_string(),
-                service_timeout_secs: 30,
-                circuit_breaker: CircuitBreakerConfig {
-                    failure_threshold: 5,
-                    success_threshold: 2,
-                    timeout_secs: 60,
-                },
-            },
+
             instance_domain: "test.local".to_string(),
             federation_base_domain: "test.local".to_string(),
             federation_enabled: false,

@@ -20,18 +20,14 @@ construct-server-shared = { path = "../shared" }
 # Workspace deps
 tokio = { workspace = true }
 anyhow = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-dotenvy = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
 sqlx = { workspace = true }
 axum = { workspace = true }
-prometheus = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }

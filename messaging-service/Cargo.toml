@@ -43,14 +43,12 @@ tokio-stream = "0.1"
 
 # Messaging specific
 rmp-serde = "1.3"
-hmac = "0.13"
 rand = "0.10"
 sha2 = "0.11"
 subtle = "2.6"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 serial_test = "3"
 tokio = { workspace = true }
 uuid = { workspace = true }
@@ -63,3 +61,8 @@ hkdf = "0.13"
 sha2-dalek-compat = { package = "sha2", version = "0.10" }
 ed25519-compact = { version = "2.0", features = ["pem", "random"] }
 
+
+# Deliberate version constraint: chacha20poly1305 0.11 permits yanked
+# chacha20 0.10.0/0.10.1; keep the patched 0.10.2 floor for standalone builds.
+[package.metadata.cargo-machete]
+ignored = ["chacha20"]

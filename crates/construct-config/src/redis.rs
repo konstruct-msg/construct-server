@@ -6,45 +6,14 @@
 /// Redis key prefixes configuration
 #[derive(Clone, Debug)]
 pub struct RedisKeyPrefixes {
-    /// Prefix for processed message deduplication keys: "processed_msg:{message_id}"
-    pub processed_msg: String,
     /// Prefix for user-related keys: "user:{user_id}:..."
     pub user: String,
-    /// Prefix for session keys: "session:{jti}"
-    pub session: String,
-    /// Prefix for user sessions set: "user_sessions:{user_id}"
-    pub user_sessions: String,
-    /// Prefix for message hash replay protection: "msg_hash:{hash}"
-    pub msg_hash: String,
-    /// Prefix for rate limiting keys: "rate:{type}:{id}"
-    pub rate: String,
-    /// Prefix for blocked users: "blocked:{user_id}"
-    pub blocked: String,
-    /// Prefix for key bundle cache: "key_bundle:{user_id}"
-    pub key_bundle: String,
-    /// Prefix for connection tracking: "connections:{user_id}"
-    pub connections: String,
 }
 
 impl RedisKeyPrefixes {
     pub(crate) fn from_env() -> Self {
         Self {
-            processed_msg: std::env::var("REDIS_KEY_PREFIX_PROCESSED_MSG")
-                .unwrap_or_else(|_| "processed_msg:".to_string()),
             user: std::env::var("REDIS_KEY_PREFIX_USER").unwrap_or_else(|_| "user:".to_string()),
-            session: std::env::var("REDIS_KEY_PREFIX_SESSION")
-                .unwrap_or_else(|_| "session:".to_string()),
-            user_sessions: std::env::var("REDIS_KEY_PREFIX_USER_SESSIONS")
-                .unwrap_or_else(|_| "user_sessions:".to_string()),
-            msg_hash: std::env::var("REDIS_KEY_PREFIX_MSG_HASH")
-                .unwrap_or_else(|_| "msg_hash:".to_string()),
-            rate: std::env::var("REDIS_KEY_PREFIX_RATE").unwrap_or_else(|_| "rate:".to_string()),
-            blocked: std::env::var("REDIS_KEY_PREFIX_BLOCKED")
-                .unwrap_or_else(|_| "blocked:".to_string()),
-            key_bundle: std::env::var("REDIS_KEY_PREFIX_KEY_BUNDLE")
-                .unwrap_or_else(|_| "key_bundle:".to_string()),
-            connections: std::env::var("REDIS_KEY_PREFIX_CONNECTIONS")
-                .unwrap_or_else(|_| "connections:".to_string()),
         }
     }
 }

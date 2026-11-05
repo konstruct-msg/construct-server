@@ -14,7 +14,6 @@ mod federation;
 mod logging;
 mod media;
 mod messaging;
-mod microservices;
 mod redis;
 mod secret_hygiene;
 mod secret_needs;
@@ -31,14 +30,13 @@ pub use federation::{ApnsConfig, ApnsEnvironment, ApnsEnvironments, FederationCo
 pub use logging::LoggingConfig;
 pub use media::MediaConfig;
 pub use messaging::{MessagingConfig, StealthTokenPolicy};
-pub use microservices::{CircuitBreakerConfig, MicroservicesConfig};
 pub use redis::RedisKeyPrefixes;
 pub use secret_hygiene::{
     INSECURE_CONTACT_HMAC, INSECURE_ENVELOPE_KEY, INSECURE_TURN_SECRET, INSECURE_USERNAME_HMAC,
     allow_insecure_secrets, is_production_environment, load_token_issuer_key,
 };
 pub use secret_needs::SecretNeeds;
-pub use security::{CsrfConfig, SecurityConfig};
+pub use security::SecurityConfig;
 
 use anyhow::Result;
 use constants::*;
@@ -108,9 +106,8 @@ pub struct Config {
     pub deeplinks: DeepLinksConfig,
     pub redis_key_prefixes: RedisKeyPrefixes,
     pub media: MediaConfig,
-    pub csrf: CsrfConfig,
+
     pub messaging: MessagingConfig,
-    pub microservices: MicroservicesConfig,
 
     // Legacy aliases (for backward compatibility)
     // TODO: Remove after updating all usages to config.federation.*
@@ -185,8 +182,7 @@ impl Config {
 
     /// Load configuration from environment variables.
     ///
-    /// Requires every secret [`SecretNeeds::ALL`] names — the historical behaviour,
-    /// kept so tests and anything that has not switched still boot the same way.
+    /// Requires every consumed secret [`SecretNeeds::ALL`] names.
     /// Production services should call [`Self::from_env_for`] with their slice.
     pub fn from_env() -> Result<Self> {
         Self::from_env_for(SecretNeeds::ALL)
@@ -215,8 +211,6 @@ impl Config {
         let deeplinks = DeepLinksConfig::from_env();
         let redis_key_prefixes = RedisKeyPrefixes::from_env();
         let media = MediaConfig::from_env();
-        let csrf = CsrfConfig::from_env(needs.csrf)?;
-        let microservices = MicroservicesConfig::from_env();
         let messaging = MessagingConfig::from_env();
 
         // Legacy federation aliases
@@ -307,9 +301,8 @@ impl Config {
             deeplinks,
             redis_key_prefixes,
             media,
-            csrf,
+
             messaging,
-            microservices,
 
             // Legacy aliases
             instance_domain,
