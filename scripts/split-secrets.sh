@@ -96,7 +96,7 @@ if [[ -f "$inherit_file" ]]; then
     [[ -n "$s" ]] && services+=("$s")
   done <"$inherit_file"
 fi
-# Services that have a section but do not inherit config_common (quic, masque).
+# Services that have a section but do not inherit config_common (quic).
 for f in "$WORK/sec/"*; do
   [[ -f "$f" ]] || continue
   name="$(basename "$f")"

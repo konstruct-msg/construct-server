@@ -97,7 +97,7 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 
 ### Services, APNs, Sentinel
 
-- Ports: identity 50051, messaging 50053 (+ HTTP 8083, `/federation/v1/*`), media 50056 (also `StickerService`: public packs, no TTL, published by `sticker-publish`, never via the request path), `veil-service` 50056 (separate deploy), key 50057, group 50058, signaling 50060, masque WS 9200 (built, not deployed). Rest: `ops/docker-compose.prod.yml`.
+- Ports: identity 50051, messaging 50053 (+ HTTP 8083, `/federation/v1/*`), media 50056 (also `StickerService`: public packs, no TTL, published by `sticker-publish`, never via the request path), `veil-service` 50056 (separate deploy), key 50057, group 50058, signaling 50060. Rest: `ops/docker-compose.prod.yml`.
 - Auth/user/notification/sentinel are not separate deployables. Production delivery lives only in `messaging-service/src/core.rs`; a test drives it, never a copy of it (the old `shared/tests/test_utils.rs` dispatcher is gone).
 - APNs: delete a token only on `BadDeviceToken` / `Unregistered`; 403 is provider auth — never delete. Registration accepts ≤512 chars. Prod + sandbox by `device_tokens.push_environment`.
 - Sentinel is in-process in messaging, fail-open on Redis/internal errors; its ids are 32-char hex device ids, not user UUIDs.

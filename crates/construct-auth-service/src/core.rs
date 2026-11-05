@@ -454,7 +454,6 @@ mod deactivation_guard_tests {
             "group-service",
             "signaling-service",
             "veil-service",
-            "masque-service",
             "gateway",
             "shared/src",
             "shared/tests",

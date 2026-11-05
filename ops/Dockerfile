@@ -49,16 +49,8 @@ COPY key-service ./key-service
 COPY group-service ./group-service
 COPY signaling-service ./signaling-service
 COPY veil-service ./veil-service
-# Required because Cargo.toml lists masque-service as a workspace member
-# (cargo fails to load the workspace if the path is missing). Not installed
-# into the runtime image — deploy masque separately if needed.
-COPY masque-service ./masque-service
 
-# Build release bins for the multi-service image. Exclude masque (separate
-# deploy surface; still present as a workspace member for local/dev builds).
-# `--workspace` is required: cargo rejects `--exclude` without it. The root is a
-# virtual manifest with no `default-members`, so `--workspace` selects the same
-# set the bare `--bins` did — this only drops masque, nothing else changes.
+# Build release bins for the multi-service image.
 # The commit this image was built from, baked into every binary by
 # shared/build.rs. Declared immediately before the build so the layer cache is
 # only invalidated by the SHA changing — which it must, or the image would not
@@ -67,7 +59,7 @@ COPY masque-service ./masque-service
 ARG GIT_SHA=""
 ENV GIT_SHA=$GIT_SHA
 
-RUN cargo build --release --workspace --bins --exclude masque-service
+RUN cargo build --release --workspace --bins
 
 # Runtime stage
 FROM debian:bookworm-slim

@@ -80,12 +80,9 @@ assert "media has MEDIA_HMAC_SECRET"              slice_has   media     MEDIA_HM
 assert "identity lacks MEDIA_HMAC_SECRET"         slice_lacks identity  MEDIA_HMAC_SECRET
 assert "messaging lacks MEDIA_HMAC_SECRET"        slice_lacks messaging MEDIA_HMAC_SECRET
 
-assert "masque has MASQUE_AUTH_TOKEN"             slice_has   masque    MASQUE_AUTH_TOKEN
-assert "gateway lacks MASQUE_AUTH_TOKEN"          slice_lacks gateway   MASQUE_AUTH_TOKEN
-
 unlisted=0
 for f in "$OUT"/*.env; do
-  if grep -q 'SOME_UNLISTED_SECRET' "$f"; then
+  if grep -qE 'SOME_UNLISTED_SECRET|MASQUE_AUTH_TOKEN' "$f"; then
     unlisted=1
     break
   fi

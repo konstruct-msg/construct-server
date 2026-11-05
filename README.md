@@ -37,7 +37,6 @@ not inject trusted user identity headers.
 | `key` | `key-service` | 50057 | X3DH and ML-KEM prekeys |
 | `group` | `group-service` | 50058 | MLS groups and broadcast channels |
 | `signaling` | `signaling-service` | 50060 | WebRTC signaling |
-| `masque` | `masque-service` | 9200 WS | MASQUE-lite relay; built, not deployed or used |
 
 Data stores:
 
@@ -121,7 +120,6 @@ construct-server/
   group-service/         MLS and broadcast channels
   signaling-service/     WebRTC signaling
   veil-service/          VEIL capability issuer
-  masque-service/        MASQUE-lite relay (not deployed)
   shared/                protobufs, migrations, shared tests
   crates/                shared Rust crates
   fuzz/                  cargo-fuzz targets (sealed sender, Privacy Pass)
