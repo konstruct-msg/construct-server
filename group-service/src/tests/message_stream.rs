@@ -236,3 +236,106 @@ async fn a_stream_that_falls_behind_is_closed_not_left_with_a_gap() {
     assert_eq!(status.code(), tonic::Code::DataLoss);
     assert!(client.down.recv().await.is_none());
 }
+
+/// Revoking a device happens in identity-service and leaves its `group_members` row; deleting
+/// one cascades the row away. Neither reaches this process's hub, so the stream asks at each
+/// frame. Mutations: forward frames without the check; drop `d.is_active` from the query.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_device_removed_outside_the_hub_hears_nothing_more() {
+    for removal in [
+        "UPDATE devices SET is_active = false WHERE device_id = $1",
+        "DELETE FROM devices WHERE device_id = $1",
+    ] {
+        let db = get_test_db().await;
+        let svc = make_test_service(db.clone()).await;
+        let (sender_user, sender_device, _) = create_test_device(&db).await;
+        let group_id = create_test_group_in_db(&db, &sender_device).await;
+        let (_, member_device, _) = create_test_device(&db).await;
+        add_member(&db, group_id, &member_device, 1).await;
+
+        let mut member = Client::open(db.clone(), svc.hub.clone(), &member_device);
+        member.subscribe(group_id).await;
+        assert!(member.until_heartbeat_ack().await.is_empty());
+        let first = send_message(&svc, &sender_user, &sender_device, group_id).await;
+        assert_eq!(member.next_message_id().await, first, "{removal}");
+
+        sqlx::query(removal)
+            .bind(&member_device)
+            .execute(&*db)
+            .await
+            .expect("remove the device");
+        send_message(&svc, &sender_user, &sender_device, group_id).await;
+
+        match member.next().await.expect("no stream error").response {
+            Some(Out::Error(e)) => {
+                assert_eq!(
+                    e.error_code,
+                    proto::GroupErrorCode::NotMember as i32,
+                    "{removal}"
+                );
+            }
+            other => panic!("expected NOT_MEMBER after {removal}, got {other:?}"),
+        }
+
+        // The group is off this stream now: a later message is not even asked about.
+        send_message(&svc, &sender_user, &sender_device, group_id).await;
+        assert!(member.until_heartbeat_ack().await.is_empty(), "{removal}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(member.down.try_recv().is_err(), "{removal}");
+    }
+}
+
+/// A revoked device still holds a token that verifies for up to its TTL, so `Subscribe` must not
+/// take its stale `group_members` row as permission. Mutation: use `is_group_member` in
+/// `subscribe`.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_revoked_device_cannot_subscribe() {
+    let db = get_test_db().await;
+    let svc = make_test_service(db.clone()).await;
+    let (_, owner_device, _) = create_test_device(&db).await;
+    let group_id = create_test_group_in_db(&db, &owner_device).await;
+    let (_, member_device, _) = create_test_device(&db).await;
+    add_member(&db, group_id, &member_device, 1).await;
+    sqlx::query("UPDATE devices SET is_active = false WHERE device_id = $1")
+        .bind(&member_device)
+        .execute(&*db)
+        .await
+        .expect("revoke");
+
+    let mut member = Client::open(db.clone(), svc.hub.clone(), &member_device);
+    member.subscribe(group_id).await;
+    match member.until_heartbeat_ack().await.as_slice() {
+        [Out::Error(e)] => assert_eq!(e.error_code, proto::GroupErrorCode::NotMember as i32),
+        other => panic!("expected one NOT_MEMBER error, got {other:?}"),
+    }
+}
+
+/// A frame whose permission cannot be checked is neither forwarded nor dropped silently: the stream
+/// closes and the client re-fetches. Mutation: forward on `Err`.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_failed_membership_check_closes_the_stream() {
+    let db = get_test_db().await;
+    let hub = GroupHub::new();
+    let (_, device, _) = create_test_device(&db).await;
+    let group_id = create_test_group_in_db(&db, &device).await;
+
+    let mut client = Client::open(db.clone(), hub.clone(), &device);
+    client.subscribe(group_id).await;
+    assert!(client.until_heartbeat_ack().await.is_empty());
+
+    db.close().await;
+    hub.publish(
+        group_id,
+        proto::GroupStreamResponse {
+            response: None,
+            response_id: None,
+        },
+    );
+
+    let status = client.next().await.expect_err("the stream closes");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(client.down.recv().await.is_none());
+}

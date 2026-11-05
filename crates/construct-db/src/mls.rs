@@ -232,6 +232,27 @@ pub async fn is_group_member(pool: &DbPool, group_id: Uuid, device_id: &str) -> 
     .context("Failed to check group membership")
 }
 
+/// Membership of a device that is still active. Revoking a device happens in identity-service and
+/// leaves its `group_members` rows, so `is_group_member` alone keeps answering yes for it.
+pub async fn is_active_group_member(
+    pool: &DbPool,
+    group_id: Uuid,
+    device_id: &str,
+) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM group_members m
+            JOIN devices d ON d.device_id = m.device_id
+            WHERE m.group_id = $1 AND m.device_id = $2 AND d.is_active
+        )",
+    )
+    .bind(group_id)
+    .bind(device_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check active group membership")
+}
+
 pub async fn device_belongs_to_user(pool: &DbPool, device_id: &str, user_id: Uuid) -> Result<bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM devices WHERE device_id = $1 AND user_id = $2)")
         .bind(device_id)

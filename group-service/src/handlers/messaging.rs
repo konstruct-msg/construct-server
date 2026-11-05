@@ -1,5 +1,6 @@
 use construct_db::mls::{
-    NewGroupMessage, get_group_retention_days, insert_group_message, list_group_messages,
+    NewGroupMessage, get_group_retention_days, insert_group_message, is_active_group_member,
+    list_group_messages,
 };
 use construct_server_shared::shared::proto::services::v1::{self as proto};
 use std::sync::Arc;
@@ -264,7 +265,33 @@ pub(crate) async fn serve_message_stream<S>(
             },
             // An empty map yields `None` at once, which disables this branch for this turn.
             Some((group_id, event)) = groups.next() => match event {
-                Ok(HubEvent::Frame(frame)) => Some(frame),
+                // The hub hears removals made in this process only. A device revoked in
+                // identity-service or deleted with its account reaches no hub, so each frame
+                // asks the database whether this stream may still carry it.
+                Ok(HubEvent::Frame(frame)) => {
+                    match is_active_group_member(&db, group_id, &device_id).await {
+                        Ok(true) => Some(frame),
+                        Ok(false) => {
+                            groups.remove(&group_id);
+                            Some(stream_error(
+                                String::new(),
+                                proto::GroupErrorCode::NotMember,
+                                format!("No longer an active member of {group_id}"),
+                            ))
+                        }
+                        // Unknown is not "yes", and dropping the frame would be a silent gap:
+                        // close, and the client re-fetches from its last sequence number.
+                        Err(e) => {
+                            tracing::warn!(group_id = %group_id, "MessageStream membership check failed: {e:#}");
+                            let _ = tx
+                                .send(Err(Status::unavailable(format!(
+                                    "group {group_id}: membership check failed; FetchGroupMessages from the last sequence_number"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    }
+                }
                 Ok(HubEvent::Removed(removed)) => {
                     if removed == device_id {
                         groups.remove(&group_id);
@@ -313,12 +340,14 @@ async fn subscribe(
             continue;
         }
         let rx = hub.subscribe(gid);
-        match check_group_member(db, gid, device_id).await {
+        match is_active_group_member(db, gid, device_id).await {
             Ok(true) => {
                 groups.insert(gid, BroadcastStream::new(rx));
             }
             Ok(false) => {}
-            Err(e) => tracing::warn!(group_id = %gid, "MessageStream membership check failed: {e}"),
+            Err(e) => {
+                tracing::warn!(group_id = %gid, "MessageStream membership check failed: {e:#}")
+            }
         }
     }
 }
