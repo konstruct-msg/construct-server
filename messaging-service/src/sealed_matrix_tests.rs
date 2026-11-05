@@ -555,6 +555,118 @@ async fn i1_warn_mode_delivers_without_token() {
         .unwrap_or(());
 }
 
+// ── S1/S2: the answer names the recipient's devices (construct-docs todo/263) ────
+
+/// An account with `recovery_key` and two active devices, and those devices' ids sorted.
+async fn account_with_two_devices(
+    db: &DbPool,
+    recovery_key: &[u8; 32],
+) -> (uuid::Uuid, Vec<String>) {
+    let user_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (id, recovery_public_key) VALUES (gen_random_uuid(), $1) RETURNING id",
+    )
+    .bind(recovery_key.as_slice())
+    .fetch_one(db)
+    .await
+    .expect("create an account");
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let device_id = hex::encode(&random_bytes32()[..16]);
+        sqlx::query(
+            "INSERT INTO devices (device_id, user_id, server_hostname, verifying_key,
+                                  identity_public, signed_prekey_public, signed_prekey_signature,
+                                  crypto_suites, registered_at, is_active)
+             VALUES ($1, $2, 'test', $3, $4, $5, $6, '[]'::jsonb, NOW(), TRUE)",
+        )
+        .bind(&device_id)
+        .bind(user_id)
+        .bind(random_bytes32().as_slice())
+        .bind(random_bytes32().as_slice())
+        .bind(random_bytes32().as_slice())
+        .bind([0u8; 64].as_slice())
+        .execute(db)
+        .await
+        .expect("create a device");
+        ids.push(device_id);
+    }
+    ids.sort();
+    (user_id, ids)
+}
+
+async fn forget_account(h: &TestHarness, user_id: uuid::Uuid, device_ids: &[String]) {
+    let mut conn = h.ctx.redis_conn.clone();
+    let mut keys = vec![format!("delivery:offline:{user_id}")];
+    keys.extend(
+        device_ids
+            .iter()
+            .map(|d| format!("delivery:offline:{user_id}:{d}")),
+    );
+    let _: () = redis::cmd("DEL")
+        .arg(keys)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(());
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&*h.ctx.db_pool)
+        .await;
+}
+
+/// A send to an account id is answered with that account's devices, and a replay reads the same
+/// as the delivery it repeats.
+#[tokio::test]
+#[serial]
+async fn s1_the_answer_names_the_recipients_devices_and_a_replay_reads_the_same() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let (user_id, device_ids) = account_with_two_devices(&h.ctx.db_pool, &random_bytes32()).await;
+    let sealed = build_sealed_envelope(&user_id, &random_bytes32(), None, None);
+
+    let first = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("delivered");
+    assert_eq!(first.recipient_active_devices, device_ids);
+    let replay = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("a replay succeeds");
+    assert_eq!(replay.recipient_active_devices, device_ids);
+
+    forget_account(&h, user_id, &device_ids).await;
+}
+
+/// The key door hides which addresses have accounts: an address with devices answers exactly as an
+/// address with no account does (K2), with no devices named.
+#[tokio::test]
+#[serial]
+async fn s2_a_key_address_is_answered_with_no_devices() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let recovery_key = random_bytes32();
+    let (user_id, device_ids) = account_with_two_devices(&h.ctx.db_pool, &recovery_key).await;
+    construct_db::backfill_account_addresses(&h.ctx.db_pool)
+        .await
+        .expect("the account gets its address");
+    let address = format!("ed25519:{}", hex::encode(recovery_key));
+    let mut conn = h.ctx.redis_conn.clone();
+    let before = stream_len(&mut conn, &user_id).await;
+
+    let resp = dispatch_sealed_sender(
+        &h.ctx,
+        &build_sealed_envelope_to(&address, &random_bytes32()),
+    )
+    .await
+    .expect("delivered");
+    assert!(
+        stream_len(&mut conn, &user_id).await > before,
+        "the address must have reached this account, or the empty answer proves nothing"
+    );
+    assert!(resp.recipient_active_devices.is_empty());
+
+    forget_account(&h, user_id, &device_ids).await;
+}
+
 // ── I2: enforce + missing token → TokenRejected ──────────────────────────────
 
 #[tokio::test]

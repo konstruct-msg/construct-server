@@ -52,6 +52,27 @@ async fn fetch_recipient_device_ids(
     fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
 }
 
+/// What `SendMessageResponse.recipient_active_devices` says for a sealed send.
+///
+/// **Nothing for a recipient addressed by key.** That door answers the same whether or not the
+/// address has an account, and the key service does not resolve key addresses, so the set would say
+/// which addresses have accounts, and its device ids would tie an address to its account id. For an
+/// account id it repeats what `GetPreKeyBundles` tells any caller.
+///
+/// Sorted because the lookup orders by `registered_at`, and which device is newest is not part of
+/// the answer. An empty lookup stays empty: it can mean a failed read, and the field then says
+/// nothing rather than "no devices".
+pub(crate) fn reported_active_devices(
+    addressed_by_key: bool,
+    mut active_devices: Vec<String>,
+) -> Vec<String> {
+    if addressed_by_key {
+        return Vec::new();
+    }
+    active_devices.sort_unstable();
+    active_devices
+}
+
 /// Turn a wire device id into the internal `Option<String>`, in one place.
 ///
 /// **An empty id is the same as no id.** Both wire spellings of "no device" —
@@ -334,7 +355,8 @@ mod tests {
         );
     }
     use super::{
-        normalize_device_id, push_announces, select_target_devices, should_send_wake_push,
+        normalize_device_id, push_announces, reported_active_devices, select_target_devices,
+        should_send_wake_push,
     };
 
     #[test]
@@ -392,6 +414,20 @@ mod tests {
         let (targets, routing) = select_target_devices(&all, Some("dev-gone"));
         assert_eq!(targets, all);
         assert_eq!(routing, "unknown_device");
+    }
+
+    #[test]
+    fn the_send_answer_names_an_account_ids_devices_in_an_order_that_says_nothing() {
+        // The lookup returns newest first; the answer must not say which device is the new one.
+        assert_eq!(
+            reported_active_devices(false, devices(&["dev-c", "dev-a", "dev-b"])),
+            devices(&["dev-a", "dev-b", "dev-c"])
+        );
+    }
+
+    #[test]
+    fn the_send_answer_names_no_devices_for_a_recipient_addressed_by_key() {
+        assert!(reported_active_devices(true, devices(&["dev-a", "dev-b"])).is_empty());
     }
 
     #[test]
