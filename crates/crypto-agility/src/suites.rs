@@ -23,9 +23,6 @@ impl CryptoSuite {
             _ => None,
         }
     }
-    pub fn is_post_quantum(&self) -> bool {
-        matches!(self, Self::HybridKyber1024X25519)
-    }
 }
 
 impl Serialize for CryptoSuite {

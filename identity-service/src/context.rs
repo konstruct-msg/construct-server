@@ -78,9 +78,3 @@ impl IdentityServiceContext {
             .expect("Failed to build AppContext in identity service")
     }
 }
-
-impl construct_server_shared::db::HasDbPool for IdentityServiceContext {
-    fn db_pool(&self) -> &Arc<DbPool> {
-        &self.db_pool
-    }
-}

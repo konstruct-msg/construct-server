@@ -22,7 +22,6 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::config::MediaConfig;
 use crate::utils::{compute_hmac, hmac_eq};
 
 // ============================================================================
@@ -36,8 +35,6 @@ pub struct MediaMetadata {
     pub file_hash: String,
     pub created_at: i64,
     pub expires_at: i64,
-    #[allow(dead_code)]
-    pub storage_backend: String,
     pub storage_key: String,
 }
 
@@ -45,8 +42,6 @@ pub struct MediaMetadata {
 #[derive(Debug, Clone)]
 pub struct UploadTokenClaims {
     pub media_id: String,
-    #[allow(dead_code)]
-    pub expires_at: i64,
     /// Max bytes this upload may write (bound into the HMAC).
     pub max_size: i64,
     pub user_id: Uuid,
@@ -134,7 +129,6 @@ pub fn validate_upload_token(token: &str, secret: &str) -> Result<UploadTokenCla
 
     Ok(UploadTokenClaims {
         media_id: media_id.to_string(),
-        expires_at,
         max_size,
         user_id,
     })
@@ -171,8 +165,6 @@ pub fn safe_object_path(storage_dir: &Path, key: &str) -> Result<PathBuf> {
 /// final UUID path on finalize. Final path uses `create_new` semantics via rename
 /// over non-existing target — if final already exists, finalize fails (one-time).
 pub struct UploadState {
-    #[allow(dead_code)]
-    pub media_id: String,
     pub max_size: i64,
     pub partial_path: PathBuf,
     pub final_path: PathBuf,
@@ -199,7 +191,6 @@ impl UploadState {
         let file = open_exclusive_0600(&partial_path).await?;
 
         Ok(Self {
-            media_id,
             max_size,
             partial_path,
             final_path,
@@ -400,7 +391,6 @@ pub async fn save_metadata(
     Ok(MediaMetadata {
         media_id: record.0.to_string(),
         size_bytes: record.1,
-        storage_backend: record.2,
         storage_key: record.3,
         file_hash: record.4,
         created_at: record.5,
@@ -436,7 +426,6 @@ pub async fn get_metadata(pool: &sqlx::PgPool, media_id: &str) -> Result<Option<
         file_hash: r.file_hash,
         created_at: r.created_at,
         expires_at: r.expires_at,
-        storage_backend: r.storage_backend,
         storage_key: r.storage_key,
     }))
 }
@@ -542,18 +531,6 @@ pub async fn cleanup_expired_media(pool: &sqlx::PgPool, storage_dir: &Path) -> R
         return Err(error);
     }
     Ok(deleted)
-}
-
-/// Validate file size limits
-#[allow(dead_code)]
-pub fn validate_file_size(size: i64, config: &MediaConfig) -> Result<(), &'static str> {
-    if size <= 0 {
-        return Err("File size must be positive");
-    }
-    if size > config.max_file_size as i64 {
-        return Err("File exceeds maximum size limit");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

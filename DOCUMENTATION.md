@@ -450,7 +450,7 @@ Identity contracts (actual RPC/core paths, random accounts/keys, cleanup on asse
 Requires `DATABASE_URL` (migrated Postgres) and `REDIS_URL`. Checks issuance validation/cap/DLEQ,
 certificate binding/signature/lifetime, link/join single-use across 16 connections, private link
 results, invite signature/account/address/expiry/burn/revoke and mutual contacts. PoW's external
-vector remains in `construct-pow`; unused negotiation is tracked for removal in task 241.
+vector remains in `construct-pow`; the unused server-side negotiation API was removed in audit 241.
 
 SQL contracts in `crates/construct-db/tests/contracts.rs` run the production queries
 against a separate PostgreSQL schema per test, with all migrations applied. They cover
@@ -466,7 +466,9 @@ Their RPC consumers run with Redis too:
 real signed ownership, SubmitCommit and SubscribeChannel paths. Lock contention is
 observed through PostgreSQL lock waits, rather than assumed from a sleep. Ownership
 is rechecked within the transaction; private invites are channel-bound and their
-atomic SQL refusal is honored; redistributing a sender key clears `rotated_at`.
+atomic SQL refusal is honored; sender-key reads exclude rotated rows, and rotation is
+scoped to channel and device. Audit 241 removes the unused sender-key writer; the
+reader/rotation test seeds residual rows directly and still calls the production queries.
 
 Audit 239 contracts run with `cargo test -p group-service -p media-service
 -p identity-service -p construct-utils -p construct-metrics audit_239 -- --include-ignored`.
@@ -504,6 +506,60 @@ overrides. **`DELIVERY_QUEUE_PREFIX` stays:** it addresses the active mailbox st
 dependency (Tokio remains a dev dependency). Shared `queue_test.rs` was removed:
 its nine tests exercised retired counters/registry or raw Redis commands, not the
 live queue. The actual Redis mailbox, sealed-dispatch and identity contracts remain.
+
+### Crate-by-crate dead-code review (audit 241)
+
+All 30 workspace members were checked against definitions, complete references,
+re-exports, same-named protobuf/library methods, tests and feature gates. The retired
+REST chain crosses DB, crypto, types and message crates, so its removal is one
+connected change. It does not remove an HTTP/gRPC route: none of these retired
+handlers or converters had a service caller. Vendored protobuf and the stored
+`MessageEnvelope` schema, including legacy binary/string readers and MLS/federated
+enum spellings, remain unchanged.
+
+| Member | Review result |
+|---|---|
+| `construct-db` | Remove 16 unused public functions, the old bundle builder/records and unused pool-provider trait. Keep account deletion, capabilities, atomic invite burn, MLS/channel queries, reader/rotation and all 13 SQL contracts. No migrations or data cleanup. |
+| `construct-crypto` | Remove the uncalled REST validator/types, unused delivery-ack hashes and obsolete PQ wire wrappers/validators. Keep Privacy Pass, hybrid signatures, server trust, at-rest encryption, username/HMAC hashing and the hybrid size constants actually read by signatures. |
+| `construct-types` | Remove the old REST/WebSocket request/response and `ChatMessage` family. Keep account `UserId` and `RouteId` and their tests. |
+| `construct-message` | Remove the uncalled `ChatMessage` conversions and reset constructor. Keep proto conversion, all stored-envelope variants and all current serialization/read contracts; remove redundant `allow(dead_code)`. |
+| `construct-utils` | Remove unused REST request signing and security-header helpers. Keep network/TLS/Redis helpers and the validators used by services. |
+| `construct-redis` | Remove 10 unused list/counter/set/script/stream convenience methods. Keep connection timeouts and the active mailbox stream operations. |
+| `construct-context` | Remove unused provider traits, grouping views, direct constructor, conversion trait and sandbox setter. Keep the service-used builder, dependency fields and signer initialization. |
+| `construct-error` | Remove unused `AppResult` and Hyper response adapter. Keep Axum responses, conversions, refusal metadata and error redaction. |
+| `crypto-agility` | Remove unused negotiation, capability helpers, legacy invite record and unused error family. Keep the persisted protocol/suite labels, capability records and actual invite validation/signature contracts. |
+| `construct-rate-limit` | Remove the uncalled action-based Redis/PG fallback limiter. Keep sliding windows, warmup cache, account-age lookup, address buckets and the degraded limiter. No live limit values change. |
+| `construct-apns` | Remove unused silent/visible convenience methods, payload constructors, filter enum and version getter. Keep actual APNs send/VoIP, payload fields, environment probing and invalid-token policy. |
+| `construct-auth` | Remove unread session TTL copy in `AuthManager`. Keep token TTL config where presence uses it, token verification/rotation/revocation and all auth tests. |
+| `construct-auth-service` | Remove unused REST profile handler/request/key wrappers and unused `AuthServiceContext`. Keep binary registration/authentication core, PoW and refresh/logout/device deactivation. |
+| `construct-notification-service` | Remove uncalled AppContext adapter and pool-provider implementation. Keep the notification context and every field used by messaging's in-process APNs path. |
+| `construct-sentinel-service` | Remove an uncalled breaker-state accessor. Keep actual permission/quota/device/admin paths and degraded-limiter metrics. |
+| `construct-pow` | Remove three unreferenced named difficulty constants. Keep the challenge verifier, measured adaptive policies and external vector. |
+| `construct-federation` | Remove uncalled old identified-send client and write-only trust timestamps. Keep inbound identified/sealed routes, outbound sealed send, signing, SSRF and TLS. A narrow `expect(dead_code)` preserves required remote `messageId` deserialization instead of weakening the response contract. |
+| `construct-config` | Remove unused `error-types` feature and redundant suppressions. Other dormant env/config candidates remain task 242. |
+| `construct-metrics` | Remove a redundant suppression on the actively observed delivery histogram. Keep registry and live series. |
+| `construct-queue` | Reviewed after 240; active implementation unchanged. Mailbox, retention, scoped dedup, token operations and fresh Privacy Pass retry rule remain. |
+| `construct-server-shared` | Remove dead re-exports, unused combined identity extractor, unused health wrapper/build timestamp constant and empty `integration-tests` feature. Keep proto/adapters, metrics registration and build SHA reporting. |
+| `identity-service` | Remove unused `RecoveryResult` and pool-provider implementation. Keep all identity/recovery/certificate/token/invite consumers. |
+| `messaging-service` | Remove blanket context suppression and unused pool-provider implementation. Keep all context fields, actual dispatch/stream/receipt/sealed/APNs/Sentinel paths. |
+| `media-service` | Remove unused file-size helper and unread result/state fields. Keep HMAC/expiry/size verification, storage SQL, cleanup retries and stickers. |
+| `group-service` | Remove blanket test-helper suppression. Signed RPC handlers, MLS worker, SQL admission/ownership/commit logic and their tests remain. |
+| `key-service` | Reviewed; actual prekey, archive, hybrid signature and KT consumers remain unchanged. |
+| `signaling-service` | Reviewed; call registry/participant/auth/VoIP consumers remain unchanged. |
+| `veil-service` | Reviewed; voucher issuance and signed config/capability producers/consumers remain unchanged. |
+| `gateway` | Reviewed; current HTTP/2 forwarding/TLS paths remain unchanged. Dependency cleanup is task 242. |
+| `masque-service` | Reviewed and compiled; deployment/retirement choice stays with the dedicated ADR task 243. |
+
+`FederationClient::new_with_mtls` has no service call site, but is retained with its
+TLS support because `construct-docs/decisions/domestic-island-deployment.md` explicitly
+plans this surface. Current `new`/`new_with_signer` use platform CA verification;
+the island plan must wire and test pinning before claiming it is deployed.
+
+The test-count delta is explicit: retire 29 tests of removed REST/wire-wrapper/hash/
+action-limiter APIs (10 types, 7 shared REST messages, 9 crypto and 3 limiter tests).
+The sender-key SQL test is adapted and renamed, not retired. No test of the active
+mailbox, sealed dispatch, account identifiers, auth, identity, group or media path
+is dropped. Dependency pruning and other env deletion remain task 242.
 
 ### cargo check / clippy
 

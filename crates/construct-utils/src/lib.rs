@@ -1,4 +1,3 @@
-use hyper::header::HeaderValue;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
@@ -245,73 +244,6 @@ pub fn validate_secret_strength(secret: &str, min_length: usize) -> Result<(), S
     Ok(())
 }
 
-/// Adds security headers to HTTP responses
-///
-/// This function adds standard security headers to protect against:
-/// - Clickjacking (X-Frame-Options)
-/// - MIME sniffing (X-Content-Type-Options)
-/// - XSS attacks (Content-Security-Policy, X-XSS-Protection)
-/// - Man-in-the-middle attacks (Strict-Transport-Security, if HTTPS)
-/// - Information leakage (Referrer-Policy)
-/// - Unwanted browser features (Permissions-Policy)
-///
-/// # Arguments
-/// * `headers` - Mutable reference to response headers
-/// * `is_https` - Whether the connection is HTTPS (affects HSTS header)
-///
-/// # Note
-/// This function handles header parsing errors gracefully, logging them but
-/// not failing the request if a header cannot be set.
-pub fn add_security_headers(headers: &mut hyper::HeaderMap, is_https: bool) {
-    // Security headers for all HTTP responses
-    // Note: HeaderValue::from_static() is infallible for static strings
-
-    // 1. X-Frame-Options: Prevent clickjacking by disabling iframe embedding
-    headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
-
-    // 2. X-Content-Type-Options: Prevent MIME type sniffing
-    headers.insert(
-        "X-Content-Type-Options",
-        HeaderValue::from_static("nosniff"),
-    );
-
-    // 3. Content-Security-Policy: Restrict resource loading (for API, allow all but prevent XSS)
-    // For REST API endpoints, we use a permissive CSP since we don't serve HTML
-    // This still provides some protection against injected scripts
-    headers.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static("default-src 'self'; script-src 'none'; object-src 'none';"),
-    );
-
-    // 4. X-XSS-Protection: Legacy XSS protection (for older browsers)
-    // Modern browsers use CSP instead, but this helps with older clients
-    headers.insert(
-        "X-XSS-Protection",
-        HeaderValue::from_static("1; mode=block"),
-    );
-
-    // 5. Referrer-Policy: Control referrer information leakage
-    // strict-origin-when-cross-origin: Send full URL for same-origin, origin-only for HTTPS->HTTPS, nothing for downgrade
-    headers.insert(
-        "Referrer-Policy",
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-
-    // 6. Permissions-Policy: Disable unnecessary browser features
-    // For API endpoints, we disable geolocation, microphone, camera, etc.
-    headers.insert("Permissions-Policy", HeaderValue::from_static("geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()"));
-
-    // 7. Strict-Transport-Security (HSTS): Force HTTPS connections (only for HTTPS responses)
-    // max-age=31536000 = 1 year, includeSubDomains = apply to all subdomains
-    // preload = allow inclusion in HSTS preload lists (optional but recommended for production)
-    if is_https {
-        headers.insert(
-            "Strict-Transport-Security",
-            HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
-        );
-    }
-}
-
 /// Extracts client IP address from HTTP request headers
 ///
 /// Checks headers in order of priority:
@@ -556,4 +488,3 @@ mod tests {
 }
 
 pub mod net;
-pub mod request_signing;

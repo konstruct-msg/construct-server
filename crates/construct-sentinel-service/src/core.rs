@@ -170,11 +170,6 @@ impl SentinelCore {
         }
     }
 
-    /// Current breaker state, for `/health` and dashboards.
-    pub fn rate_limit_breaker_state(&self) -> BreakerState {
-        self.limiter.state(now_ms())
-    }
-
     /// Cheap clone of the shared `ConnectionManager` (Arc-based internally).
     async fn redis(&self) -> Result<redis::aio::ConnectionManager> {
         Ok(self.redis.clone())

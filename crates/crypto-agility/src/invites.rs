@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -207,19 +207,6 @@ impl InviteToken {
 
         Ok(())
     }
-}
-
-/// Database record for invite token tracking
-#[derive(Debug, Clone)]
-pub struct InviteTokenRecord {
-    pub jti: Uuid,
-    pub user_id: Uuid,
-    /// Device ID (v2 only, None for v1 invites)
-    pub device_id: Option<String>,
-    pub ephemeral_key: Vec<u8>,
-    pub signature: Vec<u8>,
-    pub created_at: DateTime<Utc>,
-    pub used_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

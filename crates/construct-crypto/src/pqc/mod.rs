@@ -41,10 +41,5 @@ pub use hybrid::{
     verify_kyber_prekey_signature_v2,
 };
 
-/// Post-quantum cryptography types and constants
+/// Key and signature size constants used by hybrid cryptography.
 pub mod types;
-
-/// Post-quantum cryptography validation utilities
-pub mod validation;
-
-pub use types::*;

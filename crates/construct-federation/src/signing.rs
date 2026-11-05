@@ -377,19 +377,6 @@ impl PublicKeyCache {
 
         Ok(public_key)
     }
-
-    /// Clear the cache (for testing or key rotation)
-    #[allow(dead_code)]
-    pub fn clear(&self) {
-        match self.cache.write() {
-            Ok(mut cache) => {
-                cache.clear();
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to clear public key cache");
-            }
-        }
-    }
 }
 
 impl Default for PublicKeyCache {

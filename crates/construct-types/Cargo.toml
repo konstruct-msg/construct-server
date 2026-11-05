@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 # Crypto types
-construct-crypto = { path = "../construct-crypto", features = ["e2ee"] }
+construct-crypto = { path = "../construct-crypto" }
 
 # Serialization
 serde = { workspace = true }

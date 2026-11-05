@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use chrono::Utc;
 use construct_auth::AuthManager;
 use construct_config::{

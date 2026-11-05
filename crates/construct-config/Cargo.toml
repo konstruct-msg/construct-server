@@ -15,10 +15,5 @@ base64 = "0.22"
 rand = "0.10"
 hex = "0.4"
 
-# Feature dependencies
-construct-error = { path = "../construct-error", optional = true }
-
 [features]
 default = []
-# Enable error types from construct-error
-error-types = ["construct-error"]

@@ -8,8 +8,5 @@
 //
 // ============================================================================
 
-pub mod context;
 pub mod core;
 pub mod devices;
-
-pub use context::AuthServiceContext;

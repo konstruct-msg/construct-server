@@ -8,9 +8,7 @@ license = "AGPL-3.0-only"
 
 [features]
 default = ["full"]
-full = ["e2ee", "delivery-ack", "pqc"]
-e2ee = []           # End-to-end encryption (Signal Protocol)
-delivery-ack = []   # Privacy-preserving delivery acknowledgments
+full = ["pqc"]
 pqc = ["post-quantum"]  # Post-quantum cryptography
 post-quantum = [
     "dep:ml-dsa",

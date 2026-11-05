@@ -34,11 +34,8 @@ pub struct FederationTrustStore {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct TrustedCert {
     fingerprint: String,
-    first_seen: std::time::Instant,
-    last_verified: std::time::Instant,
 }
 
 impl FederationTrustStore {
@@ -56,14 +53,12 @@ impl FederationTrustStore {
             domain.to_string(),
             TrustedCert {
                 fingerprint: fingerprint.to_string(),
-                first_seen: std::time::Instant::now(),
-                last_verified: std::time::Instant::now(),
             },
         );
     }
 
     pub fn is_trusted(&self, domain: &str, fingerprint: &str) -> bool {
-        let is_trusted = {
+        {
             let store = match self.trusted_fingerprints.read() {
                 Ok(store) => store,
                 Err(e) => {
@@ -74,16 +69,7 @@ impl FederationTrustStore {
             store
                 .get(domain)
                 .is_some_and(|trusted| trusted.fingerprint == fingerprint)
-        };
-
-        if is_trusted
-            && let Ok(mut store) = self.trusted_fingerprints.write()
-            && let Some(trusted) = store.get_mut(domain)
-        {
-            trusted.last_verified = std::time::Instant::now();
         }
-
-        is_trusted
     }
 
     pub fn get_trusted_fingerprint(&self, domain: &str) -> Option<String> {
@@ -118,8 +104,6 @@ impl FederationTrustStore {
                 domain.to_string(),
                 TrustedCert {
                     fingerprint: fingerprint.to_string(),
-                    first_seen: std::time::Instant::now(),
-                    last_verified: std::time::Instant::now(),
                 },
             );
             true

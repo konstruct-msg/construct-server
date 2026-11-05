@@ -152,24 +152,6 @@ pub fn extract_device_id(
         .ok_or_else(|| Status::unauthenticated("Missing device identity"))
 }
 
-/// Extract both user_id and device_id (device required). Single token verify.
-pub fn extract_user_and_device(
-    auth_manager: &AuthManager,
-    metadata: &MetadataMap,
-) -> Result<(Uuid, String), Status> {
-    let caller = extract_authed_caller(auth_manager, metadata)?;
-    let device_id = match caller.device_id {
-        Some(did) => did,
-        None => metadata
-            .get("x-device-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .ok_or_else(|| Status::unauthenticated("Missing device identity"))?,
-    };
-    Ok((caller.user_id, device_id))
-}
-
 /// The status the server refuses a device with: UNAUTHENTICATED, the text it always had, and the
 /// reason's number in the trailing metadata key `construct-device-refusal`. A client decides
 /// whether to erase itself from the number (construct-protos `DeviceRefusal`), never the text.

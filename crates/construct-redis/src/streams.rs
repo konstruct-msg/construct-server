@@ -169,15 +169,6 @@ impl RedisClient {
         Ok(entries)
     }
 
-    /// XACK - Acknowledge stream entries
-    pub async fn xack<K, ID>(&mut self, stream_key: K, group: &str, ids: &[ID]) -> Result<i64>
-    where
-        K: redis::ToRedisArgs + Send + Sync,
-        ID: redis::ToRedisArgs + Send + Sync,
-    {
-        self.connection_mut().xack(stream_key, group, ids).await
-    }
-
     /// XRANGE - Read a range of entries from a stream (binary values).
     ///
     /// Use `start = "-"` and `end = "+"` to read all entries.
@@ -232,20 +223,6 @@ impl RedisClient {
         K: redis::ToRedisArgs + Send + Sync,
     {
         self.connection_mut().xlen(stream_key).await
-    }
-
-    /// XTRIM - Trim stream to approximate size
-    pub async fn xtrim<K>(&mut self, stream_key: K, max_len: i64) -> Result<i64>
-    where
-        K: redis::ToRedisArgs + Send + Sync,
-    {
-        redis::cmd("XTRIM")
-            .arg(stream_key)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(max_len)
-            .query_async(self.connection_mut())
-            .await
     }
 }
 

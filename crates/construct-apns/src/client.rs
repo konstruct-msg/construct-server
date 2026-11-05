@@ -269,45 +269,6 @@ impl ApnsClient {
         }
     }
 
-    /// Send silent push notification (background wake-up, no visible alert).
-    ///
-    /// Returns `Err(ApnsSendError::InvalidToken)` if the token is dead — caller
-    /// should disable it in the database.
-    pub async fn send_silent_push(
-        &self,
-        device_token: &str,
-        conversation_id: Option<String>,
-    ) -> Result<(), ApnsSendError> {
-        let payload = ApnsPayload::silent(conversation_id);
-        self.send_notification(
-            device_token,
-            payload,
-            PushType::Silent,
-            NotificationPriority::Low,
-        )
-        .await
-    }
-
-    /// Send visible push notification (shows alert banner).
-    ///
-    /// Returns `Err(ApnsSendError::InvalidToken)` if the token is dead — caller
-    /// should disable it in the database.
-    pub async fn send_visible_push(
-        &self,
-        device_token: &str,
-        sender_name: &str,
-        conversation_id: Option<String>,
-    ) -> Result<(), ApnsSendError> {
-        let payload = ApnsPayload::visible(sender_name, conversation_id);
-        self.send_notification(
-            device_token,
-            payload,
-            PushType::Visible,
-            NotificationPriority::High,
-        )
-        .await
-    }
-
     /// Send VoIP push notification (incoming call wake-up).
     ///
     /// Requires `APNS_VOIP_TOPIC` (or `APNS_VOIP_BUNDLE_ID`) to be set.
@@ -340,11 +301,6 @@ impl ApnsClient {
             NotificationPriority::High,
         )
         .await
-    }
-
-    /// Check if APNs is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled
     }
 }
 

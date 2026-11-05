@@ -1,16 +1,4 @@
-// ============================================================================
-// AppContext - Phase 2.7 Refactoring
-// ============================================================================
-//
-// Phase 2.7 improvements:
-// - Logical grouping methods (db(), messages(), auth(), etc.)
-// - Builder pattern (AppContextBuilder)
-// - Trait-based interfaces for testing (see context/traits.rs)
-//
-// ============================================================================
-
-// Trait-based interfaces for testing and dependency injection (Phase 2.7)
-pub mod traits;
+//! Shared service dependencies and their builder.
 
 use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
@@ -18,22 +6,11 @@ use construct_config::Config;
 use construct_db::DbPool;
 use construct_federation::{PublicKeyCache, ServerSigner};
 
-// MessageGatewayClient removed - was only used for WebSocket message processing
 use construct_queue::MessageQueue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Application context containing shared dependencies
-///
-/// **Phase 2.7 Refactoring:** This structure will be refactored into logical groups:
-/// - DatabaseContext (db_pool)
-/// - MessageContext (queue)
-/// - AuthContext (auth_manager, clients)
-/// - NotificationContext (apns_client, token_encryption)
-/// - FederationContext (server_signer, public_key_cache)
-/// - ConfigContext (config, server_instance_id)
-///
-/// For now, we keep the flat structure for backward compatibility.
 #[derive(Clone)]
 pub struct AppContext {
     pub db_pool: Arc<DbPool>,
@@ -51,10 +28,6 @@ pub struct AppContext {
     pub token_encryption: Option<Arc<DeviceTokenEncryption>>,
     /// Unique identifier for this server instance (`user:{id}:server_instance_id`)
     pub server_instance_id: String,
-    /// Message Gateway client for delegating message processing (Phase 2+)
-    /// When None: process messages locally (legacy mode)
-    /// When Some: forward to Message Gateway service via gRPC
-    // gateway_client removed — WebSocket/message-gateway is gone; product APIs are gRPC.
     /// Server signer for S2S federation authentication
     /// When None: federation signing is disabled (messages sent unsigned)
     /// When Some: sign outgoing S2S messages with Ed25519
@@ -64,48 +37,12 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    /// Creates a new application context
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        db_pool: Arc<DbPool>,
-        queue: Arc<Mutex<MessageQueue>>,
-        auth_manager: Arc<AuthManager>,
-        config: Arc<Config>,
-        apns_client: Option<Arc<ApnsClient>>,
-        apns_sandbox_client: Option<Arc<ApnsClient>>,
-        token_encryption: Option<Arc<DeviceTokenEncryption>>,
-        server_instance_id: String,
-    ) -> Self {
-        // Initialize server signer if signing key is configured
-        let server_signer = Self::init_server_signer(&config);
-
-        Self {
-            db_pool,
-            queue,
-            auth_manager,
-            config,
-            apns_client,
-            apns_sandbox_client,
-            token_encryption,
-            server_instance_id,
-            // gateway_client removed
-            server_signer,
-            public_key_cache: Arc::new(PublicKeyCache::new()),
-        }
-    }
-
-    // new_with_gateway removed - message gateway was only used for WebSocket
-
     /// Create a new AppContext using builder pattern (Phase 2.7)
     pub fn builder() -> AppContextBuilder {
         AppContextBuilder::new()
     }
 
-    /// Initialize server signer from config (Phase 2.8: Extract duplicated logic)
-    ///
-    /// This function extracts the duplicated server signer initialization logic
-    /// that was previously in AppContext::new(), AppContext::new_with_gateway(),
-    /// and AppContextBuilder::build().
+    /// Initialize the builder's server signer from config.
     fn init_server_signer(config: &Config) -> Option<Arc<ServerSigner>> {
         Self::init_server_signer_pub(config)
     }
@@ -127,101 +64,7 @@ impl AppContext {
                     .ok()
             })
     }
-
-    // ============================================================================
-    // Phase 2.7: Logical grouping methods (for better organization)
-    // ============================================================================
-
-    /// Get database context (Phase 2.7)
-    pub fn db(&self) -> DatabaseContextRef<'_> {
-        DatabaseContextRef {
-            pool: &self.db_pool,
-        }
-    }
-
-    /// Get message context (Phase 2.7)
-    pub fn messages(&self) -> MessageContextRef<'_> {
-        MessageContextRef {
-            queue: &self.queue,
-            // gateway_client removed
-        }
-    }
-
-    /// Get auth context (Phase 2.7)
-    pub fn auth(&self) -> AuthContextRef<'_> {
-        AuthContextRef {
-            manager: &self.auth_manager,
-        }
-    }
-
-    /// Get notification context (Phase 2.7)
-    pub fn notifications(&self) -> NotificationContextRef<'_> {
-        NotificationContextRef {
-            apns_client: self.apns_client.as_ref(),
-            apns_sandbox_client: self.apns_sandbox_client.as_ref(),
-            token_encryption: self.token_encryption.as_ref(),
-        }
-    }
-
-    /// Get federation context (Phase 2.7)
-    pub fn federation(&self) -> FederationContextRef<'_> {
-        FederationContextRef {
-            server_signer: self.server_signer.as_ref(),
-            public_key_cache: &self.public_key_cache,
-        }
-    }
-
-    /// Get config context (Phase 2.7)
-    pub fn config_ctx(&self) -> ConfigContextRef<'_> {
-        ConfigContextRef {
-            config: &self.config,
-            server_instance_id: &self.server_instance_id,
-        }
-    }
 }
-
-// ============================================================================
-// Phase 2.7: Logical grouping reference types
-// ============================================================================
-
-/// Database context reference (Phase 2.7)
-pub struct DatabaseContextRef<'a> {
-    pub pool: &'a Arc<DbPool>,
-}
-
-/// Message context reference (Phase 2.7)
-pub struct MessageContextRef<'a> {
-    pub queue: &'a Arc<Mutex<MessageQueue>>,
-    // gateway_client removed
-}
-
-/// Auth context reference (Phase 2.7)
-pub struct AuthContextRef<'a> {
-    pub manager: &'a Arc<AuthManager>,
-}
-
-/// Notification context reference (Phase 2.7)
-pub struct NotificationContextRef<'a> {
-    pub apns_client: Option<&'a Arc<ApnsClient>>,
-    pub apns_sandbox_client: Option<&'a Arc<ApnsClient>>,
-    pub token_encryption: Option<&'a Arc<DeviceTokenEncryption>>,
-}
-
-/// Federation context reference (Phase 2.7)
-pub struct FederationContextRef<'a> {
-    pub server_signer: Option<&'a Arc<ServerSigner>>,
-    pub public_key_cache: &'a Arc<PublicKeyCache>,
-}
-
-/// Config context reference (Phase 2.7)
-pub struct ConfigContextRef<'a> {
-    pub config: &'a Arc<Config>,
-    pub server_instance_id: &'a str,
-}
-
-// ============================================================================
-// Phase 2.7: Builder pattern for AppContext
-// ============================================================================
 
 /// Builder for AppContext (simplifies creation)
 pub struct AppContextBuilder {
@@ -233,7 +76,6 @@ pub struct AppContextBuilder {
     apns_sandbox_client: Option<Arc<ApnsClient>>,
     token_encryption: Option<Arc<DeviceTokenEncryption>>,
     server_instance_id: Option<String>,
-    // gateway_client removed
     server_signer_override: Option<Arc<ServerSigner>>,
 }
 
@@ -248,7 +90,6 @@ impl AppContextBuilder {
             apns_sandbox_client: None,
             token_encryption: None,
             server_instance_id: None,
-            // gateway_client removed
             server_signer_override: None,
         }
     }
@@ -278,11 +119,6 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn with_apns_sandbox_client(mut self, apns_sandbox_client: Arc<ApnsClient>) -> Self {
-        self.apns_sandbox_client = Some(apns_sandbox_client);
-        self
-    }
-
     pub fn with_token_encryption(mut self, token_encryption: Arc<DeviceTokenEncryption>) -> Self {
         self.token_encryption = Some(token_encryption);
         self
@@ -292,8 +128,6 @@ impl AppContextBuilder {
         self.server_instance_id = Some(server_instance_id);
         self
     }
-
-    // with_gateway_client removed - message gateway was only used for WebSocket
 
     pub fn with_server_signer(mut self, signer: Arc<ServerSigner>) -> Self {
         self.server_signer_override = Some(signer);
@@ -328,7 +162,6 @@ impl AppContextBuilder {
             server_instance_id: self
                 .server_instance_id
                 .ok_or_else(|| "server_instance_id is required".to_string())?,
-            // gateway_client removed
             server_signer,
             public_key_cache: Arc::new(PublicKeyCache::new()),
         })
@@ -338,20 +171,5 @@ impl AppContextBuilder {
 impl Default for AppContextBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-pub trait IntoAppContext {
-    fn to_app_context(&self) -> AppContext;
-}
-
-impl IntoAppContext for AppContext {
-    fn to_app_context(&self) -> AppContext {
-        self.clone()
-    }
-}
-
-impl construct_db::HasDbPool for AppContext {
-    fn db_pool(&self) -> &std::sync::Arc<construct_db::DbPool> {
-        &self.db_pool
     }
 }

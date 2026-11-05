@@ -4,7 +4,6 @@
 //
 // Client auth is gRPC-only (identity-service). REST handlers were removed.
 
-pub use construct_auth_service::context::AuthServiceContext;
 pub use construct_auth_service::devices;
 
 pub mod core {

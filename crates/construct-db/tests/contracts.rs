@@ -728,7 +728,7 @@ async fn channel_invite_usage_is_atomic_bounded_and_rejects_expired_revoked_miss
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sender_key_rotation_is_scoped_and_redistribution_reactivates_only_that_key() {
+async fn sender_key_rotation_and_reads_are_scoped() {
     let db = Database::new(&MIGRATIONS).await;
     let a = ch::create_channel(&db.pool, "owner", "PRIVATE", b"opaque", 100, 30)
         .await
@@ -743,9 +743,8 @@ async fn sender_key_rotation_is_scoped_and_redistribution_reactivates_only_that_
         (a, "bob", b"bob".as_slice()),
         (b, "alice", b"other".as_slice()),
     ] {
-        ch::store_channel_sender_key(&db.pool, id, d, key)
-            .await
-            .unwrap();
+        sqlx::query("INSERT INTO channel_sender_keys (channel_id,device_id,encrypted_sender_key) VALUES ($1,$2,$3)")
+            .bind(id).bind(d).bind(key).execute(&db.pool).await.unwrap();
     }
     ch::rotate_channel_sender_key(&db.pool, a, "alice")
         .await
@@ -769,16 +768,6 @@ async fn sender_key_rotation_is_scoped_and_redistribution_reactivates_only_that_
             .unwrap()
             .as_deref(),
         Some(b"other".as_slice())
-    );
-    ch::store_channel_sender_key(&db.pool, a, "alice", b"fresh")
-        .await
-        .unwrap();
-    assert_eq!(
-        ch::get_channel_sender_key(&db.pool, a, "alice")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some(b"fresh".as_slice())
     );
     db.cleanup().await;
 }

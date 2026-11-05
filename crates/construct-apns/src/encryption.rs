@@ -130,11 +130,6 @@ impl DeviceTokenEncryption {
         self.current_version
     }
 
-    /// Get all active key versions
-    pub fn active_versions(&self) -> Vec<u8> {
-        self.keys.keys().copied().collect()
-    }
-
     /// Encrypt device token with versioning
     /// Returns: version (1 byte) || nonce (12 bytes) || ciphertext || tag (16 bytes)
     pub fn encrypt(&self, plaintext: &str) -> Result<Vec<u8>> {

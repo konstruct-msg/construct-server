@@ -91,45 +91,9 @@ impl RedisClient {
         self.conn.incr(key, 1).await
     }
 
-    /// INCRBY - Increment by specific amount
-    pub async fn incr_by(&mut self, key: &str, delta: i64) -> Result<i64> {
-        self.conn.incr(key, delta).await
-    }
-
-    /// DECR - Decrement integer value
-    pub async fn decr(&mut self, key: &str) -> Result<i64> {
-        self.conn.decr(key, 1).await
-    }
-
     // ============================================================================
     // List Operations
     // ============================================================================
-
-    /// LPUSH - Push to head of list
-    pub async fn lpush<V>(&mut self, key: &str, value: V) -> Result<i64>
-    where
-        V: redis::ToRedisArgs + Send + Sync,
-    {
-        self.conn.lpush(key, value).await
-    }
-
-    /// RPUSH - Push to tail of list
-    pub async fn rpush<V>(&mut self, key: &str, value: V) -> Result<i64>
-    where
-        V: redis::ToRedisArgs + Send + Sync,
-    {
-        self.conn.rpush(key, value).await
-    }
-
-    /// LPOP - Pop from head of list
-    pub async fn lpop<T: redis::FromRedisValue>(&mut self, key: &str) -> Result<Option<T>> {
-        self.conn.lpop(key, None).await
-    }
-
-    /// LLEN - Get list length
-    pub async fn llen(&mut self, key: &str) -> Result<i64> {
-        self.conn.llen(key).await
-    }
 
     // ============================================================================
     // Set Operations
@@ -151,23 +115,9 @@ impl RedisClient {
         self.conn.sismember(key, member).await
     }
 
-    /// SREM - Remove member from set
-    pub async fn srem<V>(&mut self, key: &str, member: V) -> Result<i64>
-    where
-        V: redis::ToRedisArgs + Send + Sync,
-    {
-        self.conn.srem(key, member).await
-    }
-
     // ============================================================================
     // Lua Scripts
     // ============================================================================
-
-    /// Execute Lua script
-    /// Note: For complex scripts, consider using redis::Script directly
-    pub fn create_script(code: &str) -> redis::Script {
-        redis::Script::new(code)
-    }
 }
 
 #[cfg(test)]

@@ -17,11 +17,9 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use construct_utils::hash_client_ip;
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -144,40 +142,7 @@ pub fn adaptive_pow_params_registration(base_difficulty: u32, reg_count: i64) ->
 // Request/Response Types
 // ============================================================================
 
-/// Public keys for device registration
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DevicePublicKeys {
-    /// Ed25519 verifying key for request signature verification (base64, 32 bytes)
-    pub verifying_key: String,
-
-    /// Identity public key for E2EE (base64, varies by suite)
-    pub identity_public: String,
-
-    /// Signed prekey public for Double Ratchet (base64)
-    pub signed_prekey_public: String,
-
-    /// Ed25519 signature of (prologue || signed_prekey_public) (base64, 64 bytes)
-    /// Required for X3DH session initialization
-    /// Prologue = "KonstruktX3DH-v1" || suite_id (2 bytes BE)
-    pub signed_prekey_signature: String,
-
-    /// Crypto suite identifier (e.g., "Curve25519+Ed25519", "ML-KEM-768+Ed25519")
-    #[serde(default = "default_crypto_suite")]
-    pub crypto_suite: String,
-
-    /// Whether this device supports SuiteID::PQ_RATCHET (3) for sparse continuous PQ ratchet.
-    /// Default false for backward compat.
-    #[serde(default)]
-    pub supports_pq_ratchet: bool,
-}
-
-fn default_crypto_suite() -> String {
-    "Curve25519+Ed25519".to_string()
-}
-
-/// Binary public keys — used internally after base64 decoding at the REST/JSON boundary,
-/// or received directly from the gRPC path as proto `bytes` fields.
+/// Binary public keys received from the gRPC path as proto `bytes` fields.
 #[derive(Debug, Clone)]
 pub struct DevicePublicKeysBinary {
     pub verifying_key: Vec<u8>,
@@ -187,27 +152,8 @@ pub struct DevicePublicKeysBinary {
     /// Crypto suite identifier (e.g., "Curve25519+Ed25519")
     pub crypto_suite: String,
 
-    /// PQ ratchet support flag (see DevicePublicKeys).
+    /// Client capability for the post-quantum ratchet.
     pub supports_pq_ratchet: bool,
-}
-
-/// Request to register a new device (privacy-focused)
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisterDeviceRequest {
-    /// Username (optional, for search/discovery)
-    /// None or empty string = maximum privacy (QR/invite only)
-    /// Some(username) = searchable via @username
-    pub username: Option<String>,
-
-    /// Device ID (client-computed: SHA256(identity_public)[0..16])
-    pub device_id: String,
-
-    /// Public keys for authentication and E2EE
-    pub public_keys: DevicePublicKeys,
-
-    /// Proof of Work solution
-    pub pow_solution: PowSolution,
 }
 
 /// Proof of Work solution
@@ -245,36 +191,13 @@ pub struct RegisterDeviceResponse {
     pub expires_in: u64,
 }
 
-/// Public profile response
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceProfileResponse {
-    pub device_id: String,
-    pub server: String,
-    pub registered_at: String,
-
-    // Public keys for establishing E2EE
-    pub public_keys: DevicePublicKeys,
-}
-
-/// Request to update user profile
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateProfileRequest {
-    pub username: Option<String>,
-    pub display_name: Option<String>,
-    pub bio: Option<String>,
-}
-
 // ============================================================================
 // Registration Endpoint
 // ============================================================================
 
 /// Core registration logic with binary key inputs.
 ///
-/// Called from:
-/// - REST path (via `handlers.rs` which decodes base64 at the JSON boundary)
-/// - gRPC path (proto `bytes` fields are already `Vec<u8>`)
+/// Called by the gRPC adapter; proto `bytes` fields are already `Vec<u8>`.
 #[allow(clippy::too_many_arguments)]
 pub async fn register_device_core(
     app_context: Arc<AppContext>,
@@ -816,59 +739,6 @@ pub async fn authenticate_device_core(
 // ============================================================================
 // Profile Endpoints
 // ============================================================================
-
-/// GET /api/v1/users/:device_id/profile
-///
-/// Get public profile for a device.
-///
-/// This is a PUBLIC endpoint - no authentication required.
-/// Used for looking up users before starting a chat.
-pub async fn get_device_profile(
-    State(app_context): State<Arc<AppContext>>,
-    Path(device_id): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    // Fetch device from database
-    let device = db::get_device_by_id(&app_context.db_pool, &device_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to fetch device");
-            AppError::Unknown(e)
-        })?
-        .ok_or_else(|| AppError::NotFound("Device not found".to_string()))?;
-
-    let server_hostname = app_context.config.instance_domain.clone();
-
-    // Extract first suite from crypto_suites JSONB array
-    let crypto_suite = device
-        .crypto_suites
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str())
-        .unwrap_or("Curve25519+Ed25519")
-        .to_string();
-
-    // Return public profile
-    // signed_prekey_signature may be None for legacy devices
-    let signed_prekey_signature = device
-        .signed_prekey_signature
-        .as_ref()
-        .map(|s| BASE64.encode(s))
-        .unwrap_or_else(|| BASE64.encode(vec![0u8; 64]));
-
-    Ok(Json(DeviceProfileResponse {
-        device_id: device.device_id,
-        server: server_hostname,
-        registered_at: device.registered_at.to_rfc3339(),
-        public_keys: DevicePublicKeys {
-            verifying_key: BASE64.encode(&device.verifying_key),
-            identity_public: BASE64.encode(&device.identity_public),
-            signed_prekey_public: BASE64.encode(&device.signed_prekey_public),
-            signed_prekey_signature,
-            crypto_suite,
-            supports_pq_ratchet: device.supports_pq_ratchet,
-        },
-    }))
-}
 
 // ============================================================================
 // TODO: Add authenticated endpoints

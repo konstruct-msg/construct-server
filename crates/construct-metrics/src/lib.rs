@@ -48,7 +48,6 @@ pub static LEGACY_EDIT_USAGE_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Histogram of message delivery times
-#[allow(dead_code)]
 pub static MESSAGE_DELIVERY_TIME: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "construct_message_delivery_time_seconds",

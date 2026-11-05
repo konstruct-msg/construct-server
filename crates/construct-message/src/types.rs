@@ -166,27 +166,21 @@ pub enum MessageType {
     ControlMessage,
 
     /// MLS group message (application message)
-    #[allow(dead_code)]
     MLSMessage,
 
     /// MLS KeyPackage for adding user to group
-    #[allow(dead_code)]
     MLSKeyPackage,
 
     /// MLS Welcome message for new group members
-    #[allow(dead_code)]
     MLSWelcome,
 
     /// MLS Commit (group state change)
-    #[allow(dead_code)]
     MLSCommit,
 
     /// MLS Proposal (proposed group change)
-    #[allow(dead_code)]
     MLSProposal,
 
     /// Federated S2S message from another server
-    #[allow(dead_code)]
     FederatedMessage,
 
     /// Sealed sender message — sender identity is hidden from server.
@@ -429,46 +423,6 @@ impl MessageEnvelope {
         }
     }
 
-    /// Create a SESSION_RESET control envelope.
-    ///
-    /// Used by the server to signal that the receiving party should discard their
-    /// current session state and re-initialise (fetch a fresh prekey bundle).
-    ///
-    /// `trigger_user_id` — the user whose decryption failed (triggers the reset).
-    /// `recipient_id` — who receives this SESSION_RESET signal (original sender).
-    pub fn new_session_reset(trigger_user_id: String, recipient_id: String) -> Self {
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let payload = b"SESSION_RESET".to_vec();
-
-        let mut hasher = Sha256::new();
-        hasher.update(message_id.as_bytes());
-        hasher.update(&payload);
-        let content_hash = hex::encode(hasher.finalize());
-
-        Self {
-            message_id,
-            sender_id: trigger_user_id,
-            recipient_id,
-            timestamp: chrono::Utc::now().timestamp(),
-            message_type: MessageType::ControlMessage,
-            ephemeral_public_key: None,
-            message_number: None,
-            mls_payload: None,
-            group_id: None,
-            encrypted_payload: payload,
-            content_hash,
-            crypto_suite_id: 0,
-            origin_server: None,
-            federated: false,
-            server_signature: None,
-            is_sealed_sender: false,
-            sealed_inner: None,
-            max_queue_len: None,
-            proto_content_type: None,
-            recipient_device: None,
-        }
-    }
-
     /// Create a KEY_SYNC control envelope.
     /// Recipient will perform a full X3DH re-init with `sender_user_id`.
     pub fn new_key_sync(sender_user_id: String, recipient_id: String) -> Self {
@@ -535,7 +489,7 @@ impl MessageEnvelope {
                 // Note: ephemeral_public_key and message_number are optional here.
                 // For E2EE opaque payloads (gRPC path), these fields live inside
                 // encrypted_payload and are NOT visible to the server.
-                // Only the REST/ChatMessage path populates them externally.
+                // Legacy fields remain readable from already stored envelopes.
             }
             MessageType::ControlMessage => {
                 // Control messages (END_SESSION) have no encryption fields
@@ -629,106 +583,6 @@ impl MessageEnvelope {
         }
     }
 }
-
-// ============================================================================
-// Conversions from existing message types
-// ============================================================================
-
-impl From<&construct_types::ChatMessage> for MessageEnvelope {
-    fn from(msg: &construct_types::ChatMessage) -> Self {
-        use construct_types::MessageType as ConstructMessageType;
-
-        match msg.message_type {
-            ConstructMessageType::Regular => {
-                // ChatMessage.content is historically a base64 string; normalize to
-                // raw bytes for Redis storage (same dual-read rule as legacy streams).
-                let payload = payload_bytes::decode_legacy_str(
-                    msg.content
-                        .as_ref()
-                        .expect("Regular message must have content"),
-                );
-                let mut hasher = Sha256::new();
-                hasher.update(msg.id.as_bytes());
-                hasher.update(
-                    msg.ephemeral_public_key
-                        .as_ref()
-                        .expect("Regular message must have ephemeral_public_key"),
-                );
-                hasher.update(&payload);
-                let content_hash = hex::encode(hasher.finalize());
-
-                Self {
-                    message_id: msg.id.clone(),
-                    sender_id: msg.from.clone(),
-                    recipient_id: msg.to.clone(),
-                    timestamp: msg.timestamp as i64,
-                    message_type: MessageType::DirectMessage,
-                    ephemeral_public_key: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        msg.ephemeral_public_key.as_ref().unwrap(),
-                    )),
-                    message_number: msg.message_number,
-                    mls_payload: None,
-                    group_id: None,
-                    encrypted_payload: payload,
-                    content_hash,
-                    crypto_suite_id: 0, // ChaCha20-Poly1305 (classic Double Ratchet)
-                    origin_server: None,
-                    federated: false,
-                    server_signature: None,
-                    is_sealed_sender: false,
-                    sealed_inner: None,
-                    max_queue_len: None,
-                    proto_content_type: None,
-                    recipient_device: None,
-                }
-            }
-            ConstructMessageType::EndSession => {
-                // For control messages, hash only message_id and timestamp
-                let mut hasher = Sha256::new();
-                hasher.update(msg.id.as_bytes());
-                hasher.update(msg.timestamp.to_string().as_bytes());
-                hasher.update(b"END_SESSION");
-                let content_hash = hex::encode(hasher.finalize());
-
-                Self {
-                    message_id: msg.id.clone(),
-                    sender_id: msg.from.clone(),
-                    recipient_id: msg.to.clone(),
-                    timestamp: msg.timestamp as i64,
-                    message_type: MessageType::ControlMessage,
-                    ephemeral_public_key: None,
-                    message_number: None,
-                    mls_payload: None,
-                    group_id: None,
-                    // Use encrypted_payload to store control message type
-                    encrypted_payload: b"END_SESSION".to_vec(),
-                    content_hash,
-                    crypto_suite_id: 0,
-                    origin_server: None,
-                    federated: false,
-                    server_signature: None,
-                    is_sealed_sender: false,
-                    sealed_inner: None,
-                    max_queue_len: None,
-                    proto_content_type: None,
-                    recipient_device: None,
-                }
-            }
-        }
-    }
-}
-
-// For convenience, also implement From<ChatMessage> (owned)
-impl From<construct_types::ChatMessage> for MessageEnvelope {
-    fn from(msg: construct_types::ChatMessage) -> Self {
-        Self::from(&msg)
-    }
-}
-
-// ============================================================================
-// Conversion from EncryptedMessage (REST API v1)
-// ============================================================================
 
 /// Context for creating MessageEnvelope from a proto Envelope.
 ///
