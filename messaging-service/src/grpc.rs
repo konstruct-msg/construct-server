@@ -471,6 +471,7 @@ impl MessagingService for MessagingGrpcService {
                         error: None,
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+                        recipient_active_devices: Vec::new(),
                     }));
                 }
                 Ok(false) => {} // first time — proceed to rate check
@@ -507,6 +508,7 @@ impl MessagingService for MessagingGrpcService {
                 }),
                 attempt_id: attempt_id.clone(),
                 intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+                recipient_active_devices: Vec::new(),
             }));
         }
 
@@ -569,6 +571,7 @@ impl MessagingService for MessagingGrpcService {
                         }),
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+                        recipient_active_devices: Vec::new(),
                     }));
                 } else {
                     tracing::info!(
@@ -590,6 +593,7 @@ impl MessagingService for MessagingGrpcService {
                         }),
                         attempt_id: attempt_id.clone(),
                         intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+                        recipient_active_devices: Vec::new(),
                     }));
                 }
             }
@@ -631,6 +635,7 @@ impl MessagingService for MessagingGrpcService {
                     )),
                     attempt_id: attempt_id.clone(),
                     intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+                    recipient_active_devices: Vec::new(),
                 }));
             }
         } else {
@@ -681,6 +686,7 @@ impl MessagingService for MessagingGrpcService {
             error: None,
             attempt_id,
             intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+            recipient_active_devices: Vec::new(),
         }))
     }
 

@@ -227,6 +227,8 @@ pub(crate) async fn dispatch_sealed_sender(
             attempt_id: None,
             // The recipient's server holds its tags; this one has nothing to say.
             intake_verdict: proto::IntakeVerdict::Unspecified as i32,
+            // Nor does this one hold the recipient's devices.
+            recipient_active_devices: Vec::new(),
         });
     }
 
@@ -249,7 +251,8 @@ pub(crate) async fn dispatch_sealed_sender(
     // A key address names the recipient's account by its recovery key (`RouteId::of_account`).
     // Resolve it to the internal UUID, then keep all delivery and recipient-bound credential
     // logic UUID-based.
-    let recipient_id = if recipient_address.starts_with("ed25519:") {
+    let addressed_by_key = recipient_address.starts_with("ed25519:");
+    let recipient_id = if addressed_by_key {
         let parsed = construct_server_shared::UserId::parse(&recipient_address)
             .map_err(|e| anyhow::anyhow!("Invalid sealed recipient address: {e}"))?;
         let Some(route_id) = parsed.route_id() else {
@@ -295,6 +298,7 @@ pub(crate) async fn dispatch_sealed_sender(
                     error: None,
                     attempt_id: None,
                     intake_verdict: intake_verdict as i32,
+                    recipient_active_devices: Vec::new(),
                 });
             }
         }
@@ -419,6 +423,13 @@ pub(crate) async fn dispatch_sealed_sender(
         } // if intake.owes_token()
     }
 
+    // Read before the replay check: a replay must read exactly like a delivery, and past this point
+    // the recipient is a UUID whether or not it was addressed by one.
+    let recipient_active_devices = core::reported_active_devices(
+        addressed_by_key,
+        core::fetch_recipient_device_ids_for_user(&context.db_pool, &recipient_id).await,
+    );
+
     // ── Delivery-tag anti-replay (two-layer) ───────────────────────────────
     // SealedInner.delivery_tag is a per-message random nonce (32 bytes).
     // We check it against:
@@ -452,6 +463,7 @@ pub(crate) async fn dispatch_sealed_sender(
                     // Same answer as the first send of this envelope got: a replay must read
                     // exactly like a delivery.
                     intake_verdict: intake_verdict as i32,
+                    recipient_active_devices,
                 });
             }
             Err(e) => {
@@ -511,6 +523,7 @@ pub(crate) async fn dispatch_sealed_sender(
         error: None,
         attempt_id: None,
         intake_verdict: intake_verdict as i32,
+        recipient_active_devices,
     })
 }
 

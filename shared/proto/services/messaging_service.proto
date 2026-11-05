@@ -349,6 +349,21 @@ message SendMessageResponse {
   // Tells the sender nothing it would not learn under enforce from the refusal itself, and the
   // server nothing new. Unset on SendMessage and from a server that predates the field.
   IntakeVerdict intake_verdict = 8;
+
+  // SendSealedMessage only: the recipient's active devices as the server holds them now, sorted.
+  // The sender compares this with the devices it planned for; on a difference it asks
+  // GetPreKeyBundles, which carries the certificates, and sends the copies this message still
+  // owes. This set is a reason to ask and never a list of keys to trust. Empty says nothing:
+  // a server older than the field, a failed lookup, a recipient on another server, or a recipient
+  // addressed by key.
+  //
+  // Tells a sender of a recipient addressed by account id what GetPreKeyBundlesResponse
+  // .active_devices tells any caller. Never set for a recipient addressed by key: that door
+  // answers the same whether or not the address has an account, and the key service does not
+  // resolve key addresses. The field would say which addresses have accounts, and device ids
+  // would tie an address to its account id. construct-docs
+  // decisions/the-send-answer-names-the-device-set.md.
+  repeated string recipient_active_devices = 9;
 }
 
 // The server's answer to an envelope's intake credential.
