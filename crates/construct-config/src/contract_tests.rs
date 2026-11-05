@@ -108,7 +108,6 @@ const SENSITIVE: &[&str] = &[
     "LOG_HASH_SALT",
     "TURN_SECRET",
     "REQUEST_ENVELOPE_KEY",
-    "MASQUE_AUTH_TOKEN",
 ];
 fn encode(len: usize, hex: bool) -> String {
     use base64::Engine as _;

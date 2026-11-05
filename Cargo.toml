@@ -14,7 +14,6 @@ members = [
     # Optional edge binary (WS/UDP relay). Workspace member for local builds;
     # Dockerfile COPYs sources for workspace resolve but excludes the bin from
     # the multi-service release image (separate deploy surface — see P2-5).
-    "masque-service",
 
     # modular crates
     "crates/construct-types",

@@ -149,11 +149,6 @@ if [[ -z "$turn" || "$turn" == "changeme" ]]; then
   err "TURN_SECRET absent or set to 'changeme' — required for signaling (openssl rand -hex 32)."
 fi
 
-masque="$(raw_value MASQUE_AUTH_TOKEN)"
-if [[ -z "$masque" ]]; then
-  warn "MASQUE_AUTH_TOKEN absent — masque-service will fail-boot in production (open relay)."
-fi
-
 # --- 5. per-service slices (dry-run; compose still reads app.env) ------------
 # Does not write slices/ next to app.env. Catches an allowlist that would leak
 # PASETO_PRIVATE_KEY into media, or identity/messaging TOKEN_ISSUER_KEY drift,

@@ -39,9 +39,6 @@ Caddy :443   (edge TLS termination, Let's Encrypt; routes by /shared.proto.servi
   ├─► group-service       :50058  (MlsService, ChannelService)
   ├─► signaling-service   :50060  (SignalingService — WebRTC call signaling)
   └─► gateway             :3000   (HTTP: /health, /.well-known incl. the federation key; veil/obfs4 proxy :9443)
-
-Non-gRPC services (not routed through Caddy):
-  └─► masque-service      :9200   (WebSocket MASQUE-lite QUIC datagram relay)
 ```
 
 **Shared infrastructure:**
@@ -75,7 +72,6 @@ Each service is an independent Rust binary. `main()` in each service:
 | key-service | `key-service/src/main.rs` | 50057 | `KEY_SERVICE_GRPC_ADDR` |
 | group-service | `group-service/src/main.rs` | 50058 | `PORT` (metrics: `METRICS_PORT` 8097) |
 | signaling-service | `signaling-service/src/main.rs` | 50060 | *(PORT env var)* |
-| masque-service | `masque-service/src/main.rs` | — (WS :9200) | `MASQUE_LISTEN_ADDR` |
 | gateway | `gateway/src/main.rs` | — (HTTP; code default 8080, compose sets 3000) | `PORT` |
 
 ### Runtime configuration reference
@@ -117,7 +113,6 @@ limits, PoW tiers, retention or cutover policy still require measured evidence.
 | Signaling | `TURN_SECRET`, `TURN_HOSTS` (fallback `TURN_HOST`), `TURN_CREDENTIALS_TTL_SECONDS`, `RATE_LIMIT_PEER_SALT`, `INSTANCE_ID`, `RATE_LIMIT_CALL_MAX`, `RATE_LIMIT_CALL_WINDOW_SECS`, `RATE_LIMIT_PEER_MAX`, `RATE_LIMIT_PEER_WINDOW_SECS`, `RATE_LIMIT_DECLINE_COOLDOWN_SECS`, `RATE_LIMIT_TURN_MAX`, `RATE_LIMIT_TURN_WINDOW_SECS`; signaling main/turn/rate-limiter code. |
 | Sentinel administration | `ADMIN_TOKEN`; the Sentinel gRPC adapter still checks admin request metadata. No admin/auth policy changes in this cleanup. |
 | VEIL | `VEIL_ENABLED`, `VEIL_PORT`, `VEIL_SERVER_KEY`, `VEIL_IAT_MODE`, `VEIL_UPSTREAM`, `VEIL_TLS_CERT_PATH`, `VEIL_TLS_KEY_PATH`, `VEIL_COVER_UPSTREAM`, `VEIL_RELAY_ADDRESSES`; gateway/config. `VEIL_RELAYS`, legacy `VEIL_RELAY_ADDRESS`/`VEIL_RELAY_SCOPE`/`VEIL_RELAY_SPKI`/`VEIL_RELAY_SNI`, `VEIL_ISSUER_SEED`, `VEIL_BOOTSTRAP_VOUCHER`, `VEIL_VOUCHER_QUOTA`; veil-service main/core. |
-| Optional MASQUE | `MASQUE_LISTEN_ADDR`, `MASQUE_TARGET_HOST`, `MASQUE_TARGET_PORT`, `MASQUE_AUTH_TOKEN`; `masque-service/src/main.rs`. This binary's deployment/retirement choice remains task 243. |
 | Logging/deep links | `LOG_MESSAGE_METADATA`, `LOG_USER_IDENTIFIERS`, `LOG_HASH_SALT`; `construct-config/src/logging.rs`. `APPLE_TEAM_ID`, `ANDROID_PACKAGE_NAME`, `ANDROID_CERT_FINGERPRINT`, `DEEP_LINK_BASE_URL`; deep-link loader and entry points. |
 | Compatibility config | `PREKEY_TTL_DAYS`, `PREKEY_MIN_TTL_DAYS`, `PREKEY_MAX_TTL_DAYS`, `MAX_MESSAGES_PER_HOUR`, `MAX_MESSAGES_PER_IP_PER_HOUR`, `MAX_KEY_ROTATIONS_PER_DAY`, `MAX_PASSWORD_CHANGES_PER_DAY`, `MAX_CONNECTIONS_PER_USER`, `KEY_BUNDLE_CACHE_HOURS`, `RATE_LIMIT_BLOCK_SECONDS`, `IP_RATE_LIMITING_ENABLED`, `MAX_REQUESTS_PER_IP_PER_HOUR`, `COMBINED_RATE_LIMITING_ENABLED`, `MAX_REQUESTS_PER_USER_IP_PER_HOUR`, `MAX_LONG_POLL_REQUESTS_PER_WINDOW`, `LONG_POLL_RATE_LIMIT_WINDOW_SECS`, `METRICS_AUTH_ENABLED`, `METRICS_IP_WHITELIST`, `METRICS_BEARER_TOKEN`, `HEARTBEAT_INTERVAL_SECS`, `SERVER_REGISTRY_TTL_SECS`, `MEDIA_ENABLED`, `MEDIA_BASE_URL` remain loaded. Legacy `MAX_MESSAGES_PER_HOUR` is advertised by identity, not used for active `MSG_HOURLY_LIMIT_*` enforcement. Loaded compatibility fields do not imply an active limiter, cache, REST route or metrics-auth gate. |
 
@@ -145,7 +140,6 @@ preflight no longer request it. No production secret file is edited by this chan
 | group-service | `MlsService`, `ChannelService` |
 | signaling-service | `SignalingService` |
 | veil-service | `VeilService` |
-| masque-service | none (WebSocket relay) |
 | gateway | none (HTTP proxy) |
 
 Proto package: `shared.proto.services.v1`  
@@ -594,7 +588,6 @@ enum spellings, remain unchanged.
 | `signaling-service` | Reviewed; call registry/participant/auth/VoIP consumers remain unchanged. |
 | `veil-service` | Reviewed; voucher issuance and signed config/capability producers/consumers remain unchanged. |
 | `gateway` | Reviewed; current HTTP/2 forwarding/TLS paths remain unchanged. Dependency cleanup is task 242. |
-| `masque-service` | Reviewed and compiled; deployment/retirement choice stays with the dedicated ADR task 243. |
 
 `FederationClient::new_with_mtls` has no service call site, but is retained with its
 TLS support because `construct-docs/decisions/domestic-island-deployment.md` explicitly
@@ -814,7 +807,6 @@ cannot fan out to other users. Empty `token_spend_id` keeps legacy per-envelope 
 - MLS group messaging (`group-service` — RFC 9420, partial)
 - Broadcast channels (`group-service`)
 - WebRTC call signaling (`signaling-service`)
-- MASQUE-lite WS relay (`masque-service` — transport / DPI resistance; not in `ops/docker-compose.prod.yml`)
 
 ---
 
