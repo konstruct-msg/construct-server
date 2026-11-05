@@ -154,7 +154,10 @@ pub async fn check_hourly_rate(
     .arg(limit)
     .invoke_async(redis)
     .await
-    .unwrap_or((1, 0));
+    .unwrap_or_else(|_| {
+        construct_metrics::record_abuse_fail_open("rate_trust");
+        (1, 0)
+    });
 
     if allowed == 1 {
         Ok(value)
@@ -209,7 +212,10 @@ pub async fn check_fanout_rate(
     .arg(limit)
     .invoke_async(redis)
     .await
-    .unwrap_or((1, 0));
+    .unwrap_or_else(|_| {
+        construct_metrics::record_abuse_fail_open("rate_trust");
+        (1, 0)
+    });
 
     if allowed == 1 {
         Ok(count as u64)
