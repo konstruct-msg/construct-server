@@ -122,8 +122,8 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 - `secret_hygiene` fails boot on malformed secrets; run `scripts/preflight-secrets.sh` before deploy. Binaries load `Config::from_env_for(SecretNeeds::*)`. No Vault-on-box, no `app.env` encrypted with a key beside it.
 - `FEDERATION_ENABLED=true` requires a valid `SERVER_SIGNING_KEY`; missing key fails boot.
   Identity and messaging use `construct_config::load_token_issuer_key`: unset/blank is
-  disabled, malformed is an error. Required log salt and CSRF secrets cannot be only
-  whitespace. Config contract tests run in isolated subprocesses with cleared env and
+  disabled, malformed is an error. Required log salt cannot be only whitespace. CSRF configuration is retired;
+  native gRPC services have no CSRF consumer. Config contract tests run in isolated subprocesses with cleared env and
   an empty `.env`; do not add process-global env mutations to that matrix.
 - tonic 0.14.x has no `http2_keepalive_while_idle`; the app HeartbeatAck is the keepalive.
 

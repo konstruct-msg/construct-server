@@ -8,10 +8,7 @@ edition.workspace = true
 construct-apns           = { path = "../construct-apns" }
 construct-auth           = { path = "../construct-auth" }
 construct-config         = { path = "../construct-config" }
-construct-context        = { path = "../construct-context" }
 construct-db             = { path = "../construct-db" }
 construct-queue          = { path = "../construct-queue" }
 
 tokio      = { version = "1", features = ["sync"] }
-tracing    = "0.1"
-uuid       = { version = "1.11", features = ["v4"] }

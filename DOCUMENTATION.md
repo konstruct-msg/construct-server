@@ -78,15 +78,61 @@ Each service is an independent Rust binary. `main()` in each service:
 | masque-service | `masque-service/src/main.rs` | — (WS :9200) | `MASQUE_LISTEN_ADDR` |
 | gateway | `gateway/src/main.rs` | — (HTTP; code default 8080, compose sets 3000) | `PORT` |
 
-### Required environment variables (all services)
+### Runtime configuration reference
 
 ```
 DATABASE_URL=postgres://user:pass@localhost:5432/construct_test
 REDIS_URL=redis://localhost:6379
 ```
 
-Additional per-service vars: `PASETO_PRIVATE_KEY`, `PASETO_PUBLIC_KEY`, `AUTH_TOKEN_ISSUER`, `REDIS_URL`, etc.  
-See `crates/construct-config/src/lib.rs` for the full list and defaults.
+These connection values apply where consumed. Requirements follow
+`Config::from_env_for(SecretNeeds::<ROLE>)` and the service entry point; gateway,
+for example, does not require database/HMAC secrets. Secret names belong to the
+per-service allowlist in `ops/secrets-allowlist.ini`; values stay in the operator's
+secret store. Never copy secret values into this reference.
+
+The table is the operator index for the retained settings. Named loaders define
+parsing and defaults; audit 242 changes none of their live values. Changes to
+limits, PoW tiers, retention or cutover policy still require measured evidence.
+
+| Area | Settings and consumer/default authority |
+|---|---|
+| Service/connection | `INSTANCE_DOMAIN`, `SERVER_HOSTNAME`, `DATABASE_URL`, `REDIS_URL`, `PORT`, `HEALTH_PORT`, `METRICS_PORT`, `SERVICE_NAME`, `RUST_LOG`; service entry points and `crates/construct-config/src/lib.rs`. Domain is required by Config; DB/Redis requirements are per role. |
+| Production/secret policy | `ENVIRONMENT`, `PRODUCTION`, `ALLOW_INSECURE_SECRETS`, `FLY_APP_NAME`, `FLY_REGION`, `RAILWAY_ENVIRONMENT`; `crates/construct-config/src/secret_hygiene.rs`. Present malformed active secrets still fail boot. |
+| Auth | `PASETO_PRIVATE_KEY`, `PASETO_PUBLIC_KEY`, `PASETO_PUBLIC_KEY_PREVIOUS`, `AUTH_TOKEN_ISSUER` (fallback **`JWT_ISSUER`**), `ACCESS_TOKEN_TTL_HOURS`, `REFRESH_TOKEN_TTL_DAYS`; `construct-config/src/lib.rs` and `construct-auth`. `SESSION_TTL_DAYS` also remains: presence uses it. |
+| Privacy identifiers | `USERNAME_HMAC_SECRET`, `CONTACT_HMAC_SECRET`, `REQUEST_ENVELOPE_KEY`, `LOG_HASH_SALT`; `construct-config/src/security.rs`, `logging.rs`, `secret_needs.rs`. Requirements stay unchanged for all six remaining role bits. |
+| DB pools | `DB_MAX_CONNECTIONS`, `DB_MIN_CONNECTIONS`, `DB_ACQUIRE_TIMEOUT_SECS`, `DB_IDLE_TIMEOUT_SECS`; `crates/construct-config/src/database.rs` and service entry points. |
+| Redis timeouts | Pinned code constants in `crates/construct-redis/src/connect.rs`: response 500 ms, connect 1 s, reconnect cap 2 s. These are not env settings. |
+| Presence/mailbox | **`REDIS_KEY_PREFIX_USER`**, **`DELIVERY_QUEUE_PREFIX`**, `DEDUP_SAFETY_MARGIN_HOURS`; config loaders and `construct-queue`. Active namespaces are unchanged. Mailbox age retention remains the code constant, not a newly introduced env knob. |
+| gRPC | `GRPC_KEEPALIVE_INTERVAL_SECS`, `GRPC_KEEPALIVE_TIMEOUT_SECS`, plus service-specific bind variables `IDENTITY_GRPC_BIND_ADDRESS`, `MESSAGING_GRPC_BIND_ADDRESS`, `MEDIA_GRPC_BIND_ADDRESS`, `KEY_SERVICE_GRPC_ADDR`, `KEY_SERVICE_HTTP_ADDR`, `VEIL_GRPC_BIND_ADDRESS`; `construct-utils::net` and service entry points. |
+| Message trust/send limits | `MSG_TRUST_NEW_MAX_AGE_HOURS`, `MSG_TRUST_WARMING_MAX_AGE_HOURS`, `MSG_HOURLY_LIMIT_NEW`, `MSG_HOURLY_LIMIT_WARMING`, `MSG_HOURLY_LIMIT_TRUSTED`, `MSG_FANOUT_LIMIT_NEW`, `MSG_FANOUT_LIMIT_WARMING`; `construct-config/src/messaging.rs` and `messaging-service/src/trust.rs`. |
+| Message streams | `MSG_QUEUE_MAXLEN_STANDARD`, `MSG_STREAM_HEARTBEAT_INTERVAL_SECS`, `MSG_STREAM_POLL_FALLBACK_SECS`, `MSG_STREAM_XREAD_SLOW_MS`; `construct-config/src/messaging.rs`, queue and stream code. |
+| Sealed/Privacy Pass | `MSG_STEALTH_TOKEN_POLICY`, `MSG_SEALED_IP_RATE_LIMIT_PER_MIN`, `MSG_REJECT_LEGACY_SEALED_SENDER`, `MSG_MAILBOX_USER_WRITE`, `TOKEN_ISSUER_KEY`, `TOKEN_ISSUER_KEY_VERSION`, `TOKEN_ENCRYPTION_PUBLIC_KEY`, `TOKEN_ISSUANCE_MAX_PER_HOUR`, `TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR`, `TOKEN_ISSUANCE_MATURITY_HOURS`; messaging/gateway/identity entry points and messaging config. Fresh-token retries and measured mailbox cutover gates remain. |
+| Identity abuse limits | `MAX_POW_CHALLENGES_PER_HOUR`, `MAX_REGISTRATIONS_PER_HOUR`, `MAX_FAILED_LOGIN_ATTEMPTS`, `POW_DIFFICULTY`; `construct-config/src/security.rs` and `construct-auth-service/src/devices.rs`. Adaptive policy values are unchanged. |
+| Federation/signing | `FEDERATION_ENABLED`, `FEDERATION_BASE_DOMAIN`, `SERVER_SIGNING_KEY`, `FEDERATION_MAX_PER_ORIGIN_PER_HOUR`, `FEDERATION_MTLS_REQUIRED`, `FEDERATION_CLIENT_CERT_PATH`, `FEDERATION_CLIENT_KEY_PATH`, `FEDERATION_VERIFY_SERVER_CERT`, `FEDERATION_PINNED_CERTS`; `construct-config/src/federation.rs`. Outbound mTLS/pinning still needs the island-plan wiring described in audit 241; a loaded setting is not proof it is connected. |
+| Server trust | `BUNDLE_SIGNING_KEY`, `BUNDLE_SIGNING_PUBLIC_KEY`, `SERVER_TRUST_DIR`, `SERVER_TRUST_ROOTS`, `SERVER_TRUST_SENDER_CERT_KEY`, `SERVER_TRUST_KT_HEAD_KEY`; `construct-crypto/src/server_trust.rs`, identity/key/sticker entry points. |
+| APNs | `APNS_ENABLED`, `APNS_ENVIRONMENT`, `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_TOPIC`, `APNS_VOIP_TOPIC` (fallback `APNS_VOIP_BUNDLE_ID`), `APNS_DEVICE_TOKEN_ENCRYPTION_KEY`; `construct-config/src/federation.rs`, `construct-apns` and in-process notification core. |
+| Notification clients | **`NOTIFICATION_SERVICE_URL` remains live** in identity/key/group for contact-accepted, low-prekey and MLS pushes; **`NOTIFICATION_GRPC_ENDPOINT` remains live** in signaling. The old `MicroservicesConfig` wrapper was not their consumer. Actual notification-client circuit breakers are unchanged. |
+| MLS/media | `MLS_CLEANUP_INTERVAL_HOURS`; group entry point. `MEDIA_UPLOAD_TOKEN_SECRET` (fallback `MEDIA_HMAC_SECRET`), `MEDIA_STORAGE_DIR`, `MEDIA_MAX_FILE_SIZE`, `MEDIA_FILE_TTL_SECONDS`, `MEDIA_BIND_ADDRESS`, `MEDIA_PUBLIC_HOST`, `MEDIA_RATE_LIMIT_PER_HOUR`, `STICKER_RATE_LIMIT_PER_HOUR`; `media-service/src/config.rs` and main. |
+| Signaling | `TURN_SECRET`, `TURN_HOSTS` (fallback `TURN_HOST`), `TURN_CREDENTIALS_TTL_SECONDS`, `RATE_LIMIT_PEER_SALT`, `INSTANCE_ID`, `RATE_LIMIT_CALL_MAX`, `RATE_LIMIT_CALL_WINDOW_SECS`, `RATE_LIMIT_PEER_MAX`, `RATE_LIMIT_PEER_WINDOW_SECS`, `RATE_LIMIT_DECLINE_COOLDOWN_SECS`, `RATE_LIMIT_TURN_MAX`, `RATE_LIMIT_TURN_WINDOW_SECS`; signaling main/turn/rate-limiter code. |
+| Sentinel administration | `ADMIN_TOKEN`; the Sentinel gRPC adapter still checks admin request metadata. No admin/auth policy changes in this cleanup. |
+| VEIL | `VEIL_ENABLED`, `VEIL_PORT`, `VEIL_SERVER_KEY`, `VEIL_IAT_MODE`, `VEIL_UPSTREAM`, `VEIL_TLS_CERT_PATH`, `VEIL_TLS_KEY_PATH`, `VEIL_COVER_UPSTREAM`, `VEIL_RELAY_ADDRESSES`; gateway/config. `VEIL_RELAYS`, legacy `VEIL_RELAY_ADDRESS`/`VEIL_RELAY_SCOPE`/`VEIL_RELAY_SPKI`/`VEIL_RELAY_SNI`, `VEIL_ISSUER_SEED`, `VEIL_BOOTSTRAP_VOUCHER`, `VEIL_VOUCHER_QUOTA`; veil-service main/core. |
+| Optional MASQUE | `MASQUE_LISTEN_ADDR`, `MASQUE_TARGET_HOST`, `MASQUE_TARGET_PORT`, `MASQUE_AUTH_TOKEN`; `masque-service/src/main.rs`. This binary's deployment/retirement choice remains task 243. |
+| Logging/deep links | `LOG_MESSAGE_METADATA`, `LOG_USER_IDENTIFIERS`, `LOG_HASH_SALT`; `construct-config/src/logging.rs`. `APPLE_TEAM_ID`, `ANDROID_PACKAGE_NAME`, `ANDROID_CERT_FINGERPRINT`, `DEEP_LINK_BASE_URL`; deep-link loader and entry points. |
+| Compatibility config | `PREKEY_TTL_DAYS`, `PREKEY_MIN_TTL_DAYS`, `PREKEY_MAX_TTL_DAYS`, `MAX_MESSAGES_PER_HOUR`, `MAX_MESSAGES_PER_IP_PER_HOUR`, `MAX_KEY_ROTATIONS_PER_DAY`, `MAX_PASSWORD_CHANGES_PER_DAY`, `MAX_CONNECTIONS_PER_USER`, `KEY_BUNDLE_CACHE_HOURS`, `RATE_LIMIT_BLOCK_SECONDS`, `IP_RATE_LIMITING_ENABLED`, `MAX_REQUESTS_PER_IP_PER_HOUR`, `COMBINED_RATE_LIMITING_ENABLED`, `MAX_REQUESTS_PER_USER_IP_PER_HOUR`, `MAX_LONG_POLL_REQUESTS_PER_WINDOW`, `LONG_POLL_RATE_LIMIT_WINDOW_SECS`, `METRICS_AUTH_ENABLED`, `METRICS_IP_WHITELIST`, `METRICS_BEARER_TOKEN`, `HEARTBEAT_INTERVAL_SECS`, `SERVER_REGISTRY_TTL_SECS`, `MEDIA_ENABLED`, `MEDIA_BASE_URL` remain loaded. Legacy `MAX_MESSAGES_PER_HOUR` is advertised by identity, not used for active `MSG_HOURLY_LIMIT_*` enforcement. Loaded compatibility fields do not imply an active limiter, cache, REST route or metrics-auth gate. |
+
+Audit 242 retires **24 unused env readers**: `AUTH_SERVICE_URL`,
+`USER_SERVICE_URL`, `MESSAGING_SERVICE_URL`, `MICROSERVICES_ENABLED`,
+`SERVICE_DISCOVERY_MODE`, `SERVICE_TIMEOUT_SECS`, the three old
+`CIRCUIT_BREAKER_{FAILURE_THRESHOLD,SUCCESS_THRESHOLD,TIMEOUT_SECS}` values,
+all six `CSRF_*` values, `REQUEST_SIGNING_REQUIRED`, and eight unused
+`REDIS_KEY_PREFIX_*` overrides (all except `REDIS_KEY_PREFIX_USER`). The old
+`REDIS_CHANNEL_*` readers were already removed in 240. These retired values no
+longer configure a subsystem or impose a boot-secret requirement. Caddy's accepted
+header list and generic error variants are retained for compatibility; they do not
+constitute a CSRF implementation. The secret-split fixture deliberately contains a
+retired CSRF key so filtering still sees obsolete input; production templates and
+preflight no longer request it. No production secret file is edited by this change.
 
 ### gRPC services per binary
 

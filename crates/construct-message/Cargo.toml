@@ -5,30 +5,21 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-construct-config = { path = "../construct-config" }
-construct-types = { path = "../construct-types" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_bytes = "0.11"
 
-# Async
-tokio = { version = "1.40", features = ["full"] }
+# Error handling
 anyhow = "1.0"
-thiserror = "2"
-tracing = "0.1"
 
 # Utils
 sha2 = "0.11"
 hex = { workspace = true }
-once_cell = "1.21"
 base64 = { workspace = true }
 uuid = { version = "1.11", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-
-# Metrics
-prometheus = { version = "0.14", features = ["process"] }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

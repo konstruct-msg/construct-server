@@ -46,7 +46,7 @@ pub(super) fn config() -> Config {
             max_requests_per_user_ip_per_hour: 500,
             max_long_poll_requests_per_window: 100,
             long_poll_rate_limit_window_secs: 60,
-            request_signing_required: false,
+
             metrics_auth_enabled: false,
             metrics_ip_whitelist: vec![],
             metrics_bearer_token: None,
@@ -95,15 +95,7 @@ pub(super) fn config() -> Config {
             android_cert_fingerprint: "".to_string(),
         },
         redis_key_prefixes: construct_config::RedisKeyPrefixes {
-            processed_msg: "processed_msg:".to_string(),
             user: "user:".to_string(),
-            session: "session:".to_string(),
-            user_sessions: "user_sessions:".to_string(),
-            msg_hash: "msg_hash:".to_string(),
-            rate: "rate:".to_string(),
-            blocked: "blocked:".to_string(),
-            key_bundle: "key_bundle:".to_string(),
-            connections: "connections:".to_string(),
         },
         // Legacy aliases
         instance_domain: "test.local".to_string(),
@@ -120,28 +112,7 @@ pub(super) fn config() -> Config {
             max_file_size: 100 * 1024 * 1024,
             rate_limit_per_hour: 100,
         },
-        microservices: construct_config::MicroservicesConfig {
-            enabled: false,
-            auth_service_url: "http://localhost:8001".to_string(),
-            messaging_service_url: "http://localhost:8002".to_string(),
-            user_service_url: "http://localhost:8003".to_string(),
-            notification_service_url: "http://localhost:8004".to_string(),
-            discovery_mode: "static".to_string(),
-            service_timeout_secs: 30,
-            circuit_breaker: construct_config::CircuitBreakerConfig {
-                failure_threshold: 5,
-                success_threshold: 2,
-                timeout_secs: 60,
-            },
-        },
-        csrf: construct_config::CsrfConfig {
-            enabled: false, // Disabled for tests
-            secret: "test-csrf-secret-at-least-32-characters".to_string(),
-            token_ttl_secs: 3600,
-            allowed_origins: vec![],
-            cookie_name: "csrf_token".to_string(),
-            header_name: "X-CSRF-Token".to_string(),
-        },
+
         veil_enabled: false,
         veil_port: 9443,
         veil_server_key: None,

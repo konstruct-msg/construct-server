@@ -6,9 +6,7 @@ edition.workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 thiserror = "2"
-anyhow = "1.0"
 uuid = { version = "1.0", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
@@ -16,4 +14,3 @@ hex = "0.4"
 
 [dev-dependencies]
 ed25519-dalek = "2"
-tokio = { version = "1.0", features = ["full"] }

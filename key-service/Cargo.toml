@@ -9,11 +9,9 @@ license = "AGPL-3.0-only"
 # Core runtime
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-thiserror = "2"
 
 # gRPC / Tonic
 tonic = "0.14"
-prost = "0.14"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "uuid", "chrono"] }
@@ -30,10 +28,8 @@ ed25519-dalek = { version = "2.1" }
 base64 = "0.22"
 
 # Post-quantum signatures (ML-DSA-65) — via construct-crypto with feature = "pqc"
-rand = "0.8"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP + Tracing

@@ -3,7 +3,7 @@
 // ============================================================================
 //
 // `Config::from_env()` used to demand DATABASE_URL, REDIS_URL, the HMAC trio,
-// LOG_HASH_SALT and CSRF_SECRET of every binary that called it. That forced
+// LOG_HASH_SALT of every binary that called it. That forced
 // media/gateway/quic to hold identity keys they never use.
 //
 // Present-but-malformed still fails everywhere (`secret_hygiene::validate`).
@@ -22,12 +22,11 @@ pub struct SecretNeeds {
     pub request_envelope: bool,
     /// Receipt-routing hash in messaging, plus `log_safe_id` in identity.
     pub log_hash_salt: bool,
-    pub csrf: bool,
 }
 
 impl SecretNeeds {
-    /// Every loader-required secret. Tests and anything that still calls
-    /// [`crate::Config::from_env`] use this so behaviour stays as before.
+    /// Every currently consumed loader-required secret. Tests and callers of
+    /// [`crate::Config::from_env`] use this set; retired CSRF has no requirement.
     pub const ALL: Self = Self {
         database_url: true,
         redis_url: true,
@@ -35,7 +34,6 @@ impl SecretNeeds {
         contact_hmac: true,
         request_envelope: true,
         log_hash_salt: true,
-        csrf: true,
     };
 
     pub const IDENTITY: Self = Self {
@@ -45,7 +43,6 @@ impl SecretNeeds {
         contact_hmac: true,
         request_envelope: true,
         log_hash_salt: true,
-        csrf: false,
     };
 
     pub const MESSAGING: Self = Self {
@@ -55,7 +52,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: true,
-        csrf: false,
     };
 
     pub const KEY: Self = Self {
@@ -65,7 +61,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 
     pub const GROUP: Self = Self {
@@ -75,7 +70,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 
     pub const MEDIA: Self = Self {
@@ -85,7 +79,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 
     /// Signaling reads DATABASE_URL / REDIS_URL / CONTACT_HMAC itself.
@@ -97,7 +90,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 
     pub const GATEWAY: Self = Self {
@@ -107,7 +99,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 
     pub const VEIL: Self = Self {
@@ -117,7 +108,6 @@ impl SecretNeeds {
         contact_hmac: false,
         request_envelope: false,
         log_hash_salt: false,
-        csrf: false,
     };
 }
 
@@ -183,8 +173,6 @@ mod tests {
             "CONTACT_HMAC_SECRET",
             "REQUEST_ENVELOPE_KEY",
             "LOG_HASH_SALT",
-            "CSRF_SECRET",
-            "CSRF_ENABLED",
             "SERVER_SIGNING_KEY",
             "TOKEN_ISSUER_KEY",
             "PASETO_PRIVATE_KEY",
@@ -204,7 +192,6 @@ mod tests {
         env.set("DATABASE_URL", "postgres://u:p@localhost/db");
         env.set("REDIS_URL", "redis://localhost");
         env.set("LOG_HASH_SALT", SALT);
-        env.set("CSRF_SECRET", "csrf-secret-at-least-32-characters-ok");
         env.blank("APNS_ENABLED");
         env.blank("MEDIA_ENABLED");
         env.blank("USERNAME_HMAC_SECRET");

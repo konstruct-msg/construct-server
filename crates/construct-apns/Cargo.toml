@@ -22,3 +22,8 @@ hex              = { workspace = true }
 rand             = { version = "0.8", features = ["std"] }
 serde_json       = "1.0"
 thiserror        = { workspace = true }
+
+# Deliberate version constraint: chacha20poly1305 0.11 permits yanked
+# chacha20 0.10.0/0.10.1; keep the patched 0.10.2 floor for standalone builds.
+[package.metadata.cargo-machete]
+ignored = ["chacha20"]

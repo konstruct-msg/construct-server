@@ -35,8 +35,7 @@ pub struct SecurityConfig {
     pub max_long_poll_requests_per_window: u32,
     /// Long-polling rate limit window in seconds (default: 60)
     pub long_poll_rate_limit_window_secs: i64,
-    /// Whether request signing is required for critical operations (key upload, account deletion)
-    pub request_signing_required: bool,
+
     /// Metrics endpoint protection
     pub metrics_auth_enabled: bool,
     /// IP whitelist for /metrics endpoint (comma-separated)
@@ -155,11 +154,7 @@ impl SecurityConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60), // 60 seconds window by default
-            // Request signing for critical operations (like Signal)
-            request_signing_required: std::env::var("REQUEST_SIGNING_REQUIRED")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(false), // Disabled by default (can be enabled for production)
+
             // Metrics endpoint protection
             metrics_auth_enabled: std::env::var("METRICS_AUTH_ENABLED")
                 .ok()
@@ -265,89 +260,5 @@ fn load_required_hex_secret(
             );
             Ok(insecure_default.to_vec())
         }
-    }
-}
-
-/// CSRF (Cross-Site Request Forgery) protection configuration
-#[derive(Clone, Debug)]
-pub struct CsrfConfig {
-    /// Whether CSRF protection is enabled (default: true)
-    pub enabled: bool,
-    /// Secret key for CSRF token generation (HMAC-SHA256)
-    /// Must be at least 32 characters for security
-    pub secret: String,
-    /// Token TTL in seconds (default: 3600 = 1 hour)
-    pub token_ttl_secs: u64,
-    /// Allowed origins for CORS/CSRF validation
-    /// Empty = allow same-origin only
-    pub allowed_origins: Vec<String>,
-    /// Cookie name for CSRF token (default: "csrf_token")
-    pub cookie_name: String,
-    /// Header name for CSRF token (default: "X-CSRF-Token")
-    pub header_name: String,
-}
-
-impl CsrfConfig {
-    pub(crate) fn from_env(required: bool) -> anyhow::Result<Self> {
-        if !required {
-            return Ok(Self {
-                enabled: false,
-                secret: String::new(),
-                token_ttl_secs: 3600,
-                allowed_origins: Vec::new(),
-                cookie_name: "csrf_token".to_string(),
-                header_name: "X-CSRF-Token".to_string(),
-            });
-        }
-
-        let is_production = crate::secret_hygiene::is_production_environment();
-
-        let enabled = std::env::var("CSRF_ENABLED")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(true); // Enabled by default for security
-
-        let secret = match std::env::var("CSRF_SECRET") {
-            Ok(s) if s.len() >= 32 && !s.trim().is_empty() => s,
-            Ok(s) => {
-                anyhow::bail!(
-                    "CSRF_SECRET must be nonblank and at least 32 characters long (got {}). \
-                    Generate with: openssl rand -hex 32",
-                    s.len()
-                );
-            }
-            Err(_) if is_production && enabled => {
-                anyhow::bail!(
-                    "CSRF_SECRET is REQUIRED in production when CSRF is enabled. \
-                    Generate with: openssl rand -hex 32. \
-                    Set it via: fly secrets set CSRF_SECRET=\"$(openssl rand -hex 32)\" -a <app-name>"
-                );
-            }
-            Err(_) => {
-                // Development only: generate random secret with warning
-                tracing::warn!(
-                    "CSRF_SECRET not set - using random secret. \
-                    This means CSRF tokens will be invalidated on restart. \
-                    Set CSRF_SECRET in production!"
-                );
-                use rand::distr::SampleString;
-                rand::distr::Alphanumeric.sample_string(&mut rand::rng(), 32)
-            }
-        };
-
-        Ok(Self {
-            enabled,
-            secret,
-            token_ttl_secs: std::env::var("CSRF_TOKEN_TTL_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3600), // 1 hour default
-            allowed_origins: std::env::var("CSRF_ALLOWED_ORIGINS")
-                .map(|s| s.split(',').map(|o| o.trim().to_string()).collect())
-                .unwrap_or_default(),
-            cookie_name: std::env::var("CSRF_COOKIE_NAME")
-                .unwrap_or_else(|_| "csrf_token".to_string()),
-            header_name: std::env::var("CSRF_HEADER_NAME")
-                .unwrap_or_else(|_| "X-CSRF-Token".to_string()),
-        })
     }
 }

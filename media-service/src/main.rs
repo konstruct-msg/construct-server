@@ -652,9 +652,8 @@ mod tests {
         }
     }
     use construct_config::{
-        ApnsConfig, ApnsEnvironment, CircuitBreakerConfig, Config, CsrfConfig, DbConfig,
-        DeepLinksConfig, FederationConfig, LoggingConfig, MediaConfig as CfgMedia,
-        MicroservicesConfig, MtlsConfig, RedisKeyPrefixes, SecurityConfig,
+        ApnsConfig, ApnsEnvironment, Config, DbConfig, DeepLinksConfig, FederationConfig,
+        LoggingConfig, MediaConfig as CfgMedia, MtlsConfig, RedisKeyPrefixes, SecurityConfig,
     };
 
     fn make_auth() -> AuthManager {
@@ -706,7 +705,7 @@ mod tests {
                 max_requests_per_user_ip_per_hour: 500,
                 max_long_poll_requests_per_window: 100,
                 long_poll_rate_limit_window_secs: 60,
-                request_signing_required: false,
+
                 metrics_auth_enabled: false,
                 metrics_ip_whitelist: vec![],
                 metrics_bearer_token: None,
@@ -754,15 +753,7 @@ mod tests {
                 android_cert_fingerprint: String::new(),
             },
             redis_key_prefixes: RedisKeyPrefixes {
-                processed_msg: "processed_msg:".into(),
                 user: "user:".into(),
-                session: "session:".into(),
-                user_sessions: "user_sessions:".into(),
-                msg_hash: "msg_hash:".into(),
-                rate: "rate:".into(),
-                blocked: "blocked:".into(),
-                key_bundle: "key_bundle:".into(),
-                connections: "connections:".into(),
             },
             media: CfgMedia {
                 enabled: false,
@@ -771,29 +762,9 @@ mod tests {
                 max_file_size: 10 * 1024 * 1024,
                 rate_limit_per_hour: 100,
             },
-            csrf: CsrfConfig {
-                enabled: false,
-                secret: "test-csrf-secret-at-least-32-chars!!".into(),
-                token_ttl_secs: 3600,
-                allowed_origins: vec![],
-                cookie_name: "csrf_token".into(),
-                header_name: "X-CSRF-Token".into(),
-            },
+
             messaging: Default::default(),
-            microservices: MicroservicesConfig {
-                enabled: false,
-                auth_service_url: "http://localhost:8001".into(),
-                messaging_service_url: "http://localhost:8002".into(),
-                user_service_url: "http://localhost:8003".into(),
-                notification_service_url: "http://localhost:8004".into(),
-                discovery_mode: "static".into(),
-                service_timeout_secs: 30,
-                circuit_breaker: CircuitBreakerConfig {
-                    failure_threshold: 5,
-                    success_threshold: 2,
-                    timeout_secs: 60,
-                },
-            },
+
             instance_domain: "test.local".into(),
             federation_base_domain: "test.local".into(),
             federation_enabled: false,

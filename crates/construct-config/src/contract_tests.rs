@@ -6,7 +6,6 @@ use std::{path::PathBuf, process::Command};
 const CHILD: &str = "CONSTRUCT_CONFIG_CONTRACT_CHILD";
 const HEX: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 const SALT: &str = "config-contract-unique-log-hash-salt";
-const CSRF: &str = "config-contract-csrf-secret-at-least-32";
 
 fn child() -> bool {
     std::env::var_os(CHILD).is_some()
@@ -106,7 +105,6 @@ const SENSITIVE: &[&str] = &[
     "CONTACT_HMAC_SECRET",
     "MEDIA_HMAC_SECRET",
     "MEDIA_UPLOAD_TOKEN_SECRET",
-    "CSRF_SECRET",
     "LOG_HASH_SALT",
     "TURN_SECRET",
     "REQUEST_ENVELOPE_KEY",
@@ -225,19 +223,18 @@ const REQUIRED: &[(&str, &str)] = &[
     ("CONTACT_HMAC_SECRET", HEX),
     ("REQUEST_ENVELOPE_KEY", HEX),
     ("LOG_HASH_SALT", SALT),
-    ("CSRF_SECRET", CSRF),
 ];
 // This table is the reviewed contract, not computed from SecretNeeds itself.
 const ROLES: &[(&str, &str)] = &[
-    ("ALL", "1111111"),
-    ("IDENTITY", "1111110"),
-    ("MESSAGING", "1100010"),
-    ("KEY", "1100000"),
-    ("GROUP", "1100000"),
-    ("MEDIA", "1000000"),
-    ("SIGNALING", "0000000"),
-    ("GATEWAY", "0000000"),
-    ("VEIL", "1000000"),
+    ("ALL", "111111"),
+    ("IDENTITY", "111111"),
+    ("MESSAGING", "110001"),
+    ("KEY", "110000"),
+    ("GROUP", "110000"),
+    ("MEDIA", "100000"),
+    ("SIGNALING", "000000"),
+    ("GATEWAY", "000000"),
+    ("VEIL", "100000"),
 ];
 #[test]
 fn every_service_requires_exactly_its_own_slice() {
@@ -250,7 +247,6 @@ fn every_service_requires_exactly_its_own_slice() {
             needs.contact_hmac,
             needs.request_envelope,
             needs.log_hash_salt,
-            needs.csrf,
         ];
         let mask = value("MASK");
         assert_eq!(
@@ -279,8 +275,6 @@ fn every_service_requires_exactly_its_own_slice() {
             );
         }
         assert_eq!(cfg.logging.hash_salt, if actual[5] { SALT } else { "" });
-        assert_eq!(cfg.csrf.secret, if actual[6] { CSRF } else { "" });
-        assert_eq!(cfg.csrf.enabled, actual[6]);
         return;
     }
     for &(name, mask) in ROLES {
@@ -469,20 +463,15 @@ fn production_media_requires_at_least_one_nonblank_secret() {
 }
 
 #[test]
-fn csrf_and_log_salt_cannot_be_only_whitespace() {
+fn log_salt_cannot_be_only_whitespace() {
     if child() {
-        check(Config::from_env_for(if value("TARGET") == "CSRF_SECRET" {
-            SecretNeeds::ALL
-        } else {
-            SecretNeeds::MESSAGING
-        }));
+        check(Config::from_env_for(SecretNeeds::MESSAGING));
         return;
     }
     for bad in ["default-salt-please-change", " default-salt-please-change "] {
         run(
-            "csrf_and_log_salt_cannot_be_only_whitespace",
+            "log_salt_cannot_be_only_whitespace",
             &[
-                ("TARGET", "LOG_HASH_SALT".into()),
                 ("ENVIRONMENT", "production".into()),
                 ("DATABASE_URL", "postgres://fixture/fixture".into()),
                 ("REDIS_URL", "redis://localhost".into()),
@@ -491,13 +480,11 @@ fn csrf_and_log_salt_cannot_be_only_whitespace() {
             "LOG_HASH_SALT",
         );
     }
-    for key in ["CSRF_SECRET", "LOG_HASH_SALT"] {
-        let mut vars = vec![("ENVIRONMENT", "production".into()), ("TARGET", key.into())];
-        vars.extend(REQUIRED.iter().map(|(k, v)| (*k, (*v).into())));
-        vars.retain(|(k, _)| k != &key);
-        vars.push((key, " ".repeat(40)));
-        run("csrf_and_log_salt_cannot_be_only_whitespace", &vars, key);
-    }
+    let mut vars = vec![("ENVIRONMENT", "production".into())];
+    vars.extend(REQUIRED.iter().map(|(k, v)| (*k, (*v).into())));
+    vars.retain(|(k, _)| k != &"LOG_HASH_SALT");
+    vars.push(("LOG_HASH_SALT", " ".repeat(40)));
+    run("log_salt_cannot_be_only_whitespace", &vars, "LOG_HASH_SALT");
 }
 
 #[test]

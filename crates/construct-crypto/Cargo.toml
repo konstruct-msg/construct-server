@@ -49,27 +49,18 @@ zeroize = { workspace = true }
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_bytes = "0.11"
-prost = "0.14"
 
 # Utilities
 anyhow = "1.0"
-thiserror = "2.0"
-chrono = { version = "0.4", features = ["serde"] }
 rand = "0.10"
-
-# Async runtime
-tokio = { version = "1.0", features = ["sync"] }
-
-# Logging
-tracing = "0.1"
-
-[dev-dependencies]
-tokio = { version = "1.0", features = ["full"] }
 
 # Makes a server key for the offline root to delegate; lists what is delegated.
 [[bin]]
 name = "server-trust-key"
 required-features = ["pqc"]
+
+# Deliberate version constraint: chacha20poly1305 0.11 permits yanked
+# chacha20 0.10.0/0.10.1; keep the patched 0.10.2 floor for standalone builds.
+[package.metadata.cargo-machete]
+ignored = ["chacha20"]
