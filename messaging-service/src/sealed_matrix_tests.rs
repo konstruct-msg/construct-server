@@ -1104,6 +1104,81 @@ impl CuttableRedis {
     }
 }
 
+/// A TCP forwarder to the test Redis that answers `-ERR` to any command naming the armed key
+/// fragment and forwards everything else. Isolates one read from others on the same connection,
+/// which `CuttableRedis` cannot. Commands on a connection here are one at a time.
+pub(crate) struct FaultyRedis {
+    pub(crate) url: String,
+    armed: tokio::sync::watch::Sender<Option<Vec<u8>>>,
+}
+
+impl FaultyRedis {
+    pub(crate) async fn start() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = redis_url()
+            .trim_start_matches("redis://")
+            .trim_end_matches('/')
+            .to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local port");
+        let url = format!("redis://{}", listener.local_addr().expect("local addr"));
+        let (armed, armed_rx) = tokio::sync::watch::channel(None::<Vec<u8>>);
+        tokio::spawn(async move {
+            while let Ok((inbound, _)) = listener.accept().await {
+                let target = target.clone();
+                let armed_rx = armed_rx.clone();
+                tokio::spawn(async move {
+                    let Ok(outbound) = tokio::net::TcpStream::connect(&target).await else {
+                        return;
+                    };
+                    let (mut client_read, client_write) = inbound.into_split();
+                    let (mut server_read, mut server_write) = outbound.into_split();
+                    let client_write = Arc::new(Mutex::new(client_write));
+                    let to_client = client_write.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 64 * 1024];
+                        while let Ok(n) = server_read.read(&mut buf).await {
+                            if n == 0 || to_client.lock().await.write_all(&buf[..n]).await.is_err()
+                            {
+                                return;
+                            }
+                        }
+                    });
+                    let mut buf = vec![0u8; 64 * 1024];
+                    while let Ok(n) = client_read.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let hit = armed_rx.borrow().as_ref().is_some_and(|needle| {
+                            buf[..n]
+                                .windows(needle.len())
+                                .any(|w| w == needle.as_slice())
+                        });
+                        let sent = if hit {
+                            client_write
+                                .lock()
+                                .await
+                                .write_all(b"-ERR injected by FaultyRedis\r\n")
+                                .await
+                        } else {
+                            server_write.write_all(&buf[..n]).await
+                        };
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self { url, armed }
+    }
+
+    pub(crate) fn fail_commands_naming(&self, fragment: &str) {
+        let _ = self.armed.send(Some(fragment.as_bytes().to_vec()));
+    }
+}
+
 async fn del(conn: &mut redis::aio::ConnectionManager, keys: &[String]) {
     let _: () = redis::cmd("DEL")
         .arg(keys)
@@ -1117,7 +1192,7 @@ async fn del(conn: &mut redis::aio::ConnectionManager, keys: &[String]) {
 /// — the device-less token is accepted after the cut.
 ///
 /// The device-revoked `Err` arm cannot be isolated this way: both reads go to the same Redis and
-/// the blocklist read fails first. Its `Ok(true)` arm is held here.
+/// the blocklist read fails first. `a2` isolates it; the `Ok(true)` arm is held here.
 #[tokio::test]
 #[serial]
 async fn a1_auth_fails_closed_when_the_blocklist_cannot_be_read() {
@@ -1940,4 +2015,575 @@ async fn t3_a_missing_delivery_tag_is_counted_and_does_not_block_delivery() {
         ],
     )
     .await;
+}
+
+// ── Audit residuals: stream wiring, SendMessage gates, fail-open arms, push rejections ───────
+
+fn abuse_fail_open(control: &str) -> u64 {
+    construct_metrics::MSG_ABUSE_FAIL_OPEN_TOTAL
+        .with_label_values(&[control])
+        .get()
+}
+
+fn with_sentinel(h: TestHarness) -> TestHarness {
+    let TestHarness {
+        ctx,
+        token_issuer_key,
+        token_enc_secret,
+    } = h;
+    let mut ctx = Arc::try_unwrap(ctx)
+        .ok()
+        .expect("sole owner of the context");
+    ctx.sentinel = Some(Arc::new(
+        construct_server_shared::sentinel_service::SentinelCore::new(
+            (*ctx.db_pool).clone(),
+            ctx.redis_conn.clone(),
+        ),
+    ));
+    TestHarness {
+        ctx: Arc::new(ctx),
+        token_issuer_key,
+        token_enc_secret,
+    }
+}
+
+fn direct_envelope(
+    sender: &uuid::Uuid,
+    recipient: &uuid::Uuid,
+    payload: Vec<u8>,
+    sender_device: Option<&str>,
+) -> core_proto::Envelope {
+    let env = construct_message::MessageEnvelope::new_direct_message(
+        uuid::Uuid::new_v4().to_string(),
+        sender.to_string(),
+        recipient.to_string(),
+        vec![0; 32],
+        0,
+        payload,
+        String::new(),
+    );
+    let mut proto_env = crate::envelope::convert_envelope_to_proto(env).unwrap();
+    proto_env.sender_device = sender_device.map(|device_id| core_proto::DeviceId {
+        device_id: device_id.to_string(),
+        ..Default::default()
+    });
+    proto_env
+}
+
+fn random_device() -> String {
+    hex::encode(&random_bytes32()[..16])
+}
+
+/// One `Send` through the real stream handler, as an open `MessageStream` of `token_device`.
+async fn stream_send(
+    h: &TestHarness,
+    sender: uuid::Uuid,
+    token_device: Option<&str>,
+    envelope: core_proto::Envelope,
+) -> (
+    anyhow::Result<()>,
+    Option<construct_server_shared::shared::proto::services::v1::message_stream_response::Response>,
+) {
+    use construct_server_shared::shared::proto::services::v1 as proto;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let mut user_id = Some(sender);
+    let mut queue = MessageQueue::new(&h.ctx.config).await.expect("queue");
+    let mut catchup = crate::stream::StreamCatchupState::default();
+    let result = crate::stream::handle_stream_request(
+        proto::MessageStreamRequest {
+            request: Some(proto::message_stream_request::Request::Send(envelope)),
+            request_id: "r1".into(),
+            ..Default::default()
+        },
+        &h.ctx,
+        &tx,
+        &mut user_id,
+        token_device,
+        &mut queue,
+        &mut catchup,
+        "127.0.0.1",
+    )
+    .await;
+    drop(tx);
+    let frame = rx
+        .recv()
+        .await
+        .and_then(|f| f.ok())
+        .and_then(|f| f.response);
+    (result, frame)
+}
+
+async fn unary_send(
+    h: &TestHarness,
+    sender: uuid::Uuid,
+    token_device: &str,
+    envelope: core_proto::Envelope,
+) -> Result<construct_server_shared::shared::proto::services::v1::SendMessageResponse, tonic::Status>
+{
+    use construct_server_shared::shared::proto::services::v1::{
+        SendMessageRequest, messaging_service_server::MessagingService,
+    };
+    let (token, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&sender, Some(token_device))
+        .expect("token");
+    let mut req = tonic::Request::new(SendMessageRequest {
+        message: Some(envelope),
+        ..Default::default()
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    crate::grpc::MessagingGrpcService {
+        context: h.ctx.clone(),
+    }
+    .send_message(req)
+    .await
+    .map(|r| r.into_inner())
+}
+
+async fn cleanup_sender(conn: &mut redis::aio::ConnectionManager, sender: &uuid::Uuid) {
+    let day = chrono::Utc::now().timestamp() / 86_400;
+    del(
+        conn,
+        &[
+            format!("trust:{sender}"),
+            format!("rate:msg:{{{sender}}}:hour"),
+            format!("fanout:{sender}:{day}"),
+            format!("fanout:{sender}:{day}:probe"),
+        ],
+    )
+    .await;
+}
+
+/// The stream path has the unary path's 64 KiB cap. Until 2026-10-29 it checked only for empty, so
+/// a stream send wrote anything up to the gRPC decode limit into someone's mailbox. The largest
+/// allowed payload goes through, so the refusal is not some other failure. Mutation: drop
+/// `validate_payload` from `handle_stream_request` — the oversized entry is written.
+#[tokio::test]
+#[serial]
+async fn s1_a_stream_send_is_held_to_the_payload_cap() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let mut conn = h.ctx.redis_conn.clone();
+
+    let over = direct_envelope(&sender, &recipient, vec![7; 64 * 1024 + 1], None);
+    let (result, _) = stream_send(&h, sender, Some(&device), over).await;
+    assert!(result.is_err(), "65537 bytes must be refused");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 0);
+
+    let at_cap = direct_envelope(&sender, &recipient, vec![7; 64 * 1024], None);
+    let (result, _) = stream_send(&h, sender, Some(&device), at_cap).await;
+    result.expect("64 KiB exactly is allowed");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+
+    del(&mut conn, &[format!("delivery:offline:{recipient}")]).await;
+    cleanup_sender(&mut conn, &sender).await;
+}
+
+/// The stream charges the token's device and refuses one naming another; a token without a device
+/// is refused too. Mutation: skip `sentinel_sender_device` in `handle_stream_request` — either
+/// refused send writes an entry.
+#[tokio::test]
+#[serial]
+async fn s2_a_stream_send_cannot_name_another_device() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let mut conn = h.ctx.redis_conn.clone();
+
+    let foreign = direct_envelope(&sender, &recipient, vec![7; 8], Some(&random_device()));
+    let (result, _) = stream_send(&h, sender, Some(&device), foreign).await;
+    assert!(result.is_err(), "another device's id must be refused");
+
+    let no_device = direct_envelope(&sender, &recipient, vec![7; 8], None);
+    let (result, _) = stream_send(&h, sender, None, no_device).await;
+    assert!(result.is_err(), "a token without a device must be refused");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 0);
+
+    let own = direct_envelope(&sender, &recipient, vec![7; 8], Some(&device));
+    let (result, _) = stream_send(&h, sender, Some(&device), own).await;
+    result.expect("the token's own device id goes through");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+
+    del(&mut conn, &[format!("delivery:offline:{recipient}")]).await;
+    cleanup_sender(&mut conn, &sender).await;
+}
+
+/// A banned device cannot escape Sentinel by leaving `sender_device` empty, on either path: the
+/// check runs on the token's device (the audit's finding: it used to run only when the envelope
+/// named one). Mutations: charge the envelope's field in place of the token's device, or remove
+/// the Sentinel block from either path — the banned send is written.
+#[tokio::test]
+#[serial]
+async fn s3_a_banned_device_is_refused_with_an_empty_sender_device() {
+    use construct_server_shared::shared::proto::services::v1 as proto;
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let h = with_sentinel(h);
+    let (sender, recipient, banned, allowed) = (
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        random_device(),
+        random_device(),
+    );
+    let mut conn = h.ctx.redis_conn.clone();
+    // The key `trust_level` reads first; `set_banned` also needs a registered device row.
+    let ban_key = format!("sentinel:ban:{banned}");
+    let _: () = redis::cmd("SET")
+        .arg(&ban_key)
+        .arg("1")
+        .arg("EX")
+        .arg(120)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let (result, frame) = stream_send(
+        &h,
+        sender,
+        Some(&banned),
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await;
+    result.expect("a refusal is an answer, not a stream error");
+    match frame {
+        Some(proto::message_stream_response::Response::Error(e)) => {
+            assert_eq!(e.error_code, proto::ErrorCode::Blocked as i32);
+            assert!(!e.retryable);
+        }
+        other => panic!("expected a Blocked frame, got {other:?}"),
+    }
+
+    let unary = unary_send(
+        &h,
+        sender,
+        &banned,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("a refusal is an answer, not a status");
+    assert!(!unary.success);
+    assert_eq!(
+        unary.error.expect("refusal").error_code,
+        proto::ErrorCode::Blocked as i32
+    );
+    assert_eq!(stream_len(&mut conn, &recipient).await, 0);
+
+    let unary = unary_send(
+        &h,
+        sender,
+        &allowed,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("send");
+    assert!(unary.success, "only the banned device is refused");
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+
+    del(
+        &mut conn,
+        &[format!("delivery:offline:{recipient}"), ban_key],
+    )
+    .await;
+    cleanup_sender(&mut conn, &sender).await;
+}
+
+/// `SendMessage` answers an exhausted hourly limit with `retry_after_ms` and writes nothing.
+/// `trust.rs` holds the counter; this holds the wire. Mutation: ignore `limited` in `send_message`
+/// — the entry is written.
+#[tokio::test]
+#[serial]
+async fn u1_send_message_refuses_past_the_hourly_limit() {
+    use construct_server_shared::shared::proto::services::v1 as proto;
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let mut conn = h.ctx.redis_conn.clone();
+    let _: () = redis::cmd("SET")
+        .arg(format!("rate:msg:{{{sender}}}:hour"))
+        .arg(u32::MAX)
+        .arg("EX")
+        .arg(120)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let resp = unary_send(
+        &h,
+        sender,
+        &device,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("a refusal is an answer, not a status");
+    assert!(!resp.success);
+    let error = resp.error.expect("refusal");
+    assert_eq!(error.error_code, proto::ErrorCode::RateLimit as i32);
+    assert!(error.retryable);
+    assert!(error.retry_after_ms.unwrap_or(0) > 0);
+    assert_eq!(stream_len(&mut conn, &recipient).await, 0);
+
+    cleanup_sender(&mut conn, &sender).await;
+}
+
+/// With the store holding the limits down, `SendMessage` still delivers, and says so on the
+/// fail-open counter. Before this test the counter could not move: `redis_conn()` is always `Ok`
+/// and the limit scripts swallowed their errors, so the outage alert never saw these skips.
+/// Mutations: drop both counts in `trust.rs`, or refuse on a script error.
+#[tokio::test]
+#[serial]
+async fn f1_send_message_delivers_and_counts_when_the_limit_store_is_down() {
+    let proxy = CuttableRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let before = abuse_fail_open("rate_trust");
+
+    proxy.cut();
+    let resp = unary_send(
+        &h,
+        sender,
+        &device,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("delivered without the limits");
+    assert!(resp.success);
+
+    assert!(abuse_fail_open("rate_trust") > before);
+    let mut mailbox = h.ctx.queue.lock().await.clone_redis_connection();
+    assert_eq!(stream_len(&mut mailbox, &recipient).await, 1);
+    del(&mut mailbox, &[format!("delivery:offline:{recipient}")]).await;
+}
+
+/// A Sentinel that cannot read its store lets the send through: an abuse-control outage is not a
+/// delivery outage. Mutation: refuse in the `Err` arm of `send_message` — the send is refused.
+#[tokio::test]
+#[serial]
+async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
+    let proxy = CuttableRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
+        return;
+    };
+    let h = with_sentinel(h);
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let before = abuse_fail_open("sentinel");
+
+    proxy.cut();
+    let resp = unary_send(
+        &h,
+        sender,
+        &device,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("delivered without Sentinel");
+    assert!(resp.success);
+    assert!(abuse_fail_open("sentinel") > before);
+
+    let mut mailbox = h.ctx.queue.lock().await.clone_redis_connection();
+    assert_eq!(stream_len(&mut mailbox, &recipient).await, 1);
+    del(&mut mailbox, &[format!("delivery:offline:{recipient}")]).await;
+}
+
+/// The device-revoked read fails while the blocklist read works: a device token is refused, a
+/// device-less one is not affected. The arm `a1` could not isolate. Mutation: let the device-revoked
+/// `Err` arm fall through — the device token is accepted.
+#[tokio::test]
+#[serial]
+async fn a2_auth_fails_closed_when_only_the_device_revocation_cannot_be_read() {
+    use crate::grpc::extract_authed_identity;
+    let proxy = FaultyRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+        return;
+    };
+    let bearer = |token: &str| {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        md
+    };
+    let user = uuid::Uuid::new_v4();
+    let device = random_device();
+    let (plain, _, _) = h.ctx.auth_manager.create_token(&user).expect("token");
+    let (with_device, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&user, Some(&device))
+        .expect("device token");
+    assert_eq!(
+        extract_authed_identity(&bearer(&with_device), &h.ctx).await,
+        Some((user, Some(device.clone()))),
+        "accepted before the fault, so the refusal below is the fault's"
+    );
+
+    proxy.fail_commands_naming("revoked_device:");
+    assert_eq!(
+        extract_authed_identity(&bearer(&with_device), &h.ctx).await,
+        None
+    );
+    assert_eq!(
+        extract_authed_identity(&bearer(&plain), &h.ctx).await,
+        Some((user, None))
+    );
+}
+
+/// The dedup reads fail while the mailbox works: the message is written and both fail-opens are
+/// counted, on the fast path and in dispatch. An unreadable dedup key may double-deliver; it must
+/// not lose the message. Mutation: return early from either `Err` arm — no entry, or no count.
+#[tokio::test]
+#[serial]
+async fn f3_an_unreadable_dedup_key_does_not_stop_delivery() {
+    let proxy = FaultyRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let (send_before, dispatch_before) = (
+        abuse_fail_open("send_dedup"),
+        abuse_fail_open("dispatch_dedup"),
+    );
+
+    proxy.fail_commands_naming("msg:dedup:");
+    let resp = unary_send(
+        &h,
+        sender,
+        &device,
+        direct_envelope(&sender, &recipient, vec![7; 8], None),
+    )
+    .await
+    .expect("delivered without the dedup read");
+    assert!(resp.success);
+    assert!(abuse_fail_open("send_dedup") > send_before);
+    assert!(abuse_fail_open("dispatch_dedup") > dispatch_before);
+
+    let mut conn = h.ctx.redis_conn.clone();
+    assert_eq!(stream_len(&mut conn, &recipient).await, 1);
+    del(&mut conn, &[format!("delivery:offline:{recipient}")]).await;
+    cleanup_sender(&mut conn, &sender).await;
+}
+
+async fn account_with_push_tokens(
+    db: &sqlx::PgPool,
+    environment: &str,
+) -> (uuid::Uuid, Vec<u8>, uuid::Uuid) {
+    let user: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO users (id) VALUES (gen_random_uuid()) RETURNING id")
+            .fetch_one(db)
+            .await
+            .expect("account");
+    let token = random_bytes32().to_vec();
+    sqlx::query(
+        "INSERT INTO device_tokens (user_id, device_token_hash, device_token_encrypted, push_environment) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user)
+    .bind(random_bytes32().as_slice())
+    .bind(&token)
+    .bind(environment)
+    .execute(db)
+    .await
+    .expect("device token");
+    let voip: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO voip_tokens (user_id, device_id, voip_token_hash, voip_token_encrypted, push_environment) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(user)
+    .bind(random_device())
+    .bind(random_bytes32().as_slice())
+    .bind(random_bytes32().as_slice())
+    .bind(environment)
+    .fetch_one(db)
+    .await
+    .expect("voip token");
+    (user, token, voip)
+}
+
+/// One declared environment rejecting widens the row and keeps the token, for both token tables.
+/// This was the 2026-08-18 loop, reopened on 2026-10-29 by the wake and VoIP senders. Mutation:
+/// `verdict_after_rejection` always deletes — the row is gone.
+#[tokio::test]
+#[serial]
+async fn r1_a_rejection_by_the_only_declared_environment_widens() {
+    use crate::notification_core::{settle_rejected_device_token, settle_rejected_voip_token};
+    let Some(db) = try_db_pool().await else {
+        return;
+    };
+    let (user, token, voip) = account_with_push_tokens(&db, "sandbox").await;
+
+    let (_, outcome) = settle_rejected_device_token(&db, &token, 1).await;
+    outcome.expect("sql");
+    let environment: String = sqlx::query_scalar(
+        "SELECT push_environment FROM device_tokens WHERE device_token_encrypted = $1",
+    )
+    .bind(&token)
+    .fetch_one(&*db)
+    .await
+    .expect("the token survives");
+    assert_eq!(
+        environment,
+        construct_config::ApnsEnvironments::both().to_string()
+    );
+
+    let (_, outcome) = settle_rejected_voip_token(&db, voip, 1).await;
+    outcome.expect("sql");
+    let (environment, enabled): (String, bool) =
+        sqlx::query_as("SELECT push_environment, enabled FROM voip_tokens WHERE id = $1")
+            .bind(voip)
+            .fetch_one(&*db)
+            .await
+            .expect("the VoIP token survives");
+    assert_eq!(
+        environment,
+        construct_config::ApnsEnvironments::both().to_string()
+    );
+    assert!(enabled);
+
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&*db)
+        .await;
+}
+
+/// Every declared environment rejecting ends the token: deleted, or disabled for VoIP. Mutation:
+/// swap the arms in either `settle_rejected_*` — the row stays as it was.
+#[tokio::test]
+#[serial]
+async fn r2_a_rejection_by_every_environment_ends_the_token() {
+    use crate::notification_core::{settle_rejected_device_token, settle_rejected_voip_token};
+    let Some(db) = try_db_pool().await else {
+        return;
+    };
+    let both = construct_config::ApnsEnvironments::both().to_string();
+    let (user, token, voip) = account_with_push_tokens(&db, &both).await;
+
+    let (_, outcome) = settle_rejected_device_token(&db, &token, 2).await;
+    outcome.expect("sql");
+    let left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens WHERE device_token_encrypted = $1")
+            .bind(&token)
+            .fetch_one(&*db)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
+
+    let (_, outcome) = settle_rejected_voip_token(&db, voip, 2).await;
+    outcome.expect("sql");
+    let enabled: bool = sqlx::query_scalar("SELECT enabled FROM voip_tokens WHERE id = $1")
+        .bind(voip)
+        .fetch_one(&*db)
+        .await
+        .expect("disabled, not deleted");
+    assert!(!enabled);
+
+    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user)
+        .execute(&*db)
+        .await;
 }

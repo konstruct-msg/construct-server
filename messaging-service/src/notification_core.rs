@@ -175,6 +175,49 @@ pub(crate) fn verdict_after_rejection(declared_environments: usize) -> Rejection
     }
 }
 
+/// Applies `verdict_after_rejection` to a device-token row. Message pushes and key-rotation wakes
+/// both end here, so neither can reopen the 2026-08-18 loop with SQL of its own.
+pub(crate) async fn settle_rejected_device_token(
+    db: &sqlx::PgPool,
+    token_encrypted: &[u8],
+    declared_environments: usize,
+) -> (RejectionVerdict, Result<(), sqlx::Error>) {
+    let verdict = verdict_after_rejection(declared_environments);
+    let query = match verdict {
+        RejectionVerdict::Widen => sqlx::query(
+            "UPDATE device_tokens SET push_environment = $1 WHERE device_token_encrypted = $2",
+        )
+        .bind(ApnsEnvironments::both().to_string())
+        .bind(token_encrypted),
+        RejectionVerdict::Delete => {
+            sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
+                .bind(token_encrypted)
+        }
+    };
+    (verdict, query.execute(db).await.map(|_| ()))
+}
+
+/// The same verdict for a VoIP token, whose last resort is disabling the row rather than deleting
+/// it.
+pub(crate) async fn settle_rejected_voip_token(
+    db: &sqlx::PgPool,
+    token_id: Uuid,
+    declared_environments: usize,
+) -> (RejectionVerdict, Result<(), sqlx::Error>) {
+    let verdict = verdict_after_rejection(declared_environments);
+    let query = match verdict {
+        RejectionVerdict::Widen => {
+            sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
+                .bind(ApnsEnvironments::both().to_string())
+                .bind(token_id)
+        }
+        RejectionVerdict::Delete => {
+            sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1").bind(token_id)
+        }
+    };
+    (verdict, query.execute(db).await.map(|_| ()))
+}
+
 /// The banner a push carries, if any: none for a device that asked for silent pushes, none for
 /// an envelope its sender sent to their own devices (`announce == false`), else the activity's.
 fn push_alert(filter: &str, announce: bool, activity_type: Option<&str>) -> Option<AlertData> {
@@ -480,54 +523,32 @@ pub async fn send_blind_notification(
         }
         if rejected_by_all {
             release_marker(context, outstanding_for).await;
-            match verdict_after_rejection(environments.len()) {
-                RejectionVerdict::Widen => {
-                    tracing::warn!(
-                        user_hash = %user_id_hash,
-                        push_environment = %token_row.push_environment,
-                        push_provider = %token_row.push_provider,
-                        "APNs: token rejected by its only declared environment — widening to both \
-                         rather than deleting; the declaration is the likelier error"
-                    );
-                    if let Err(db_err) = sqlx::query(
-                        "UPDATE device_tokens SET push_environment = $1 \
-                         WHERE device_token_encrypted = $2",
-                    )
-                    .bind(ApnsEnvironments::both().to_string())
-                    .bind(&token_row.device_token_encrypted)
-                    .execute(&*context.db_pool)
-                    .await
-                    {
-                        tracing::error!(
-                            error = %db_err,
-                            user_hash = %user_id_hash,
-                            "Failed to widen device token environment in DB"
-                        );
-                    }
-                    continue;
-                }
-                RejectionVerdict::Delete => {
-                    tracing::warn!(
-                        user_hash = %user_id_hash,
-                        push_environment = %token_row.push_environment,
-                        push_provider = %token_row.push_provider,
-                        "APNs: token rejected by every declared environment — deleting from DB"
-                    );
-                    if let Err(db_err) =
-                        sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                            .bind(&token_row.device_token_encrypted)
-                            .execute(&*context.db_pool)
-                            .await
-                    {
-                        tracing::error!(
-                            error = %db_err,
-                            user_hash = %user_id_hash,
-                            "Failed to delete invalid device token from DB"
-                        );
-                    }
-                    continue;
-                }
+            let (verdict, outcome) = settle_rejected_device_token(
+                &context.db_pool,
+                &token_row.device_token_encrypted,
+                environments.len(),
+            )
+            .await;
+            let action = match verdict {
+                RejectionVerdict::Widen => "widening to both",
+                RejectionVerdict::Delete => "deleting",
+            };
+            tracing::warn!(
+                user_hash = %user_id_hash,
+                push_environment = %token_row.push_environment,
+                push_provider = %token_row.push_provider,
+                action,
+                "APNs: token rejected by every declared environment"
+            );
+            if let Err(db_err) = outcome {
+                tracing::error!(
+                    error = %db_err,
+                    user_hash = %user_id_hash,
+                    action,
+                    "Failed to update device token after APNs rejection"
+                );
             }
+            continue;
         }
         let Some(environment) = succeeded_on else {
             release_marker(context, outstanding_for).await;
@@ -1083,21 +1104,15 @@ pub async fn send_key_rotation_wake(
             // Same verdict as a message push. Until 2026-10-29 this path deleted on a
             // rejection from the row's only declared environment — the 2026-08-18 loop
             // `verdict_after_rejection` exists to stop, reopened by any key-rotation wake.
-            let (query, action) = match verdict_after_rejection(environments.len()) {
-                RejectionVerdict::Widen => (
-                    sqlx::query(
-                        "UPDATE device_tokens SET push_environment = $1 \
-                         WHERE device_token_encrypted = $2",
-                    )
-                    .bind(ApnsEnvironments::both().to_string())
-                    .bind(&token_row.device_token_encrypted),
-                    "widening to both",
-                ),
-                RejectionVerdict::Delete => (
-                    sqlx::query("DELETE FROM device_tokens WHERE device_token_encrypted = $1")
-                        .bind(&token_row.device_token_encrypted),
-                    "deleting",
-                ),
+            let (verdict, outcome) = settle_rejected_device_token(
+                &context.db_pool,
+                &token_row.device_token_encrypted,
+                environments.len(),
+            )
+            .await;
+            let action = match verdict {
+                RejectionVerdict::Widen => "widening to both",
+                RejectionVerdict::Delete => "deleting",
             };
             tracing::warn!(
                 user_hash = %user_id_hash,
@@ -1105,7 +1120,7 @@ pub async fn send_key_rotation_wake(
                 action,
                 "APNs token rejected by every declared environment (key-rotation wake)"
             );
-            if let Err(db_err) = query.execute(&*context.db_pool).await {
+            if let Err(db_err) = outcome {
                 tracing::error!(
                     error = %db_err,
                     user_hash = %user_id_hash,
@@ -1322,18 +1337,11 @@ pub async fn send_voip_incoming_call(
             // Same verdict as a message push: a rejection from the only declared environment
             // condemns the pairing, not the token. Disabling here was the 2026-08-18 loop for
             // calls — a mislabelled VoIP token went dark on the first incoming call.
-            let (query, action) = match verdict_after_rejection(environments.len()) {
-                RejectionVerdict::Widen => (
-                    sqlx::query("UPDATE voip_tokens SET push_environment = $1 WHERE id = $2")
-                        .bind(ApnsEnvironments::both().to_string())
-                        .bind(token_id),
-                    "widening to both",
-                ),
-                RejectionVerdict::Delete => (
-                    sqlx::query("UPDATE voip_tokens SET enabled = FALSE WHERE id = $1")
-                        .bind(token_id),
-                    "disabling",
-                ),
+            let (verdict, outcome) =
+                settle_rejected_voip_token(&context.db_pool, token_id, environments.len()).await;
+            let action = match verdict {
+                RejectionVerdict::Widen => "widening to both",
+                RejectionVerdict::Delete => "disabling",
             };
             tracing::info!(
                 user_hash = %user_id_hash,
@@ -1341,7 +1349,7 @@ pub async fn send_voip_incoming_call(
                 action,
                 "VoIP token rejected by every declared environment"
             );
-            if let Err(db_err) = query.execute(&*context.db_pool).await {
+            if let Err(db_err) = outcome {
                 tracing::error!(
                     error = %db_err,
                     user_hash = %user_id_hash,
@@ -1402,6 +1410,25 @@ mod rejection_verdict_tests {
     #[test]
     fn no_environment_tried_never_deletes() {
         assert_eq!(verdict_after_rejection(0), RejectionVerdict::Widen);
+    }
+
+    /// There is no APNs seam in this crate, so what is held is the shape: all three senders act
+    /// through `settle_rejected_*`, and only those functions hold the verdict and the
+    /// last-resort SQL. A sender that stops calling them, or grows SQL of its own, fails here.
+    /// The SQL itself is exercised in `sealed_matrix_tests::r1` and `r2`.
+    #[test]
+    fn every_sender_settles_a_rejection_through_the_one_verdict() {
+        let source = include_str!("notification_core.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        for (needle, expected) in [
+            ("verdict_after_rejection(declared_environments)", 2),
+            ("verdict_after_rejection(", 3), // the definition and the two above
+            ("settle_rejected_device_token(", 3), // the definition, message push, wake
+            ("settle_rejected_voip_token(", 2), // the definition, VoIP
+            ("DELETE FROM device_tokens WHERE device_token_encrypted", 1),
+        ] {
+            assert_eq!(production.matches(needle).count(), expected, "{needle}");
+        }
     }
 }
 
