@@ -355,14 +355,14 @@ message SendMessageResponse {
   // GetPreKeyBundles, which carries the certificates, and sends the copies this message still
   // owes. This set is a reason to ask and never a list of keys to trust. Empty says nothing:
   // a server older than the field, a failed lookup, a recipient on another server, or a recipient
-  // addressed by key.
+  // addressed by key by an envelope that names none of its devices.
   //
   // Tells a sender of a recipient addressed by account id what GetPreKeyBundlesResponse
-  // .active_devices tells any caller. Never set for a recipient addressed by key: that door
-  // answers the same whether or not the address has an account, and the key service does not
-  // resolve key addresses. The field would say which addresses have accounts, and device ids
-  // would tie an address to its account id. construct-docs
-  // decisions/the-send-answer-names-the-device-set.md.
+  // .active_devices tells any caller. For a recipient addressed by key it is set only when
+  // SealedInner.recipient_device names a device of that account, signed out or not: that door
+  // answers the same whether or not the address has an account, and a key alone must not change
+  // that. A sender holding the key and the account id can check that they are one account.
+  // construct-docs decisions/the-send-answer-names-the-device-set.md.
   repeated string recipient_active_devices = 9;
 }
 
