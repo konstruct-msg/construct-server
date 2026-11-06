@@ -54,23 +54,59 @@ async fn fetch_recipient_device_ids(
 
 /// What `SendMessageResponse.recipient_active_devices` says for a sealed send.
 ///
-/// **Nothing for a recipient addressed by key.** That door answers the same whether or not the
-/// address has an account, and the key service does not resolve key addresses, so the set would say
-/// which addresses have accounts, and its device ids would tie an address to its account id. For an
-/// account id it repeats what `GetPreKeyBundles` tells any caller.
+/// **A recipient addressed by key is told about only when the envelope names one of its devices.**
+/// That door answers the same whether or not the address has an account, and a key alone must not
+/// change that: the set would say which addresses have accounts. Every copy a client sends names
+/// its device, so this is the normal case for a contact made from an invite. A sender who can name
+/// a device already knows the account id or holds the invite, because device ids come from there;
+/// what it can check here is that the key and the account are the same one. For an account id the
+/// answer repeats what `GetPreKeyBundles` tells any caller.
 ///
 /// Sorted because the lookup orders by `registered_at`, and which device is newest is not part of
 /// the answer. An empty lookup stays empty: it can mean a failed read, and the field then says
 /// nothing rather than "no devices".
 pub(crate) fn reported_active_devices(
     addressed_by_key: bool,
+    names_a_device_of_recipient: bool,
     mut active_devices: Vec<String>,
 ) -> Vec<String> {
-    if addressed_by_key {
+    if addressed_by_key && !names_a_device_of_recipient {
         return Vec::new();
     }
     active_devices.sort_unstable();
     active_devices
+}
+
+/// Whether `named` is a device of this account, signed out or not.
+///
+/// **A signed-out device counts.** A sender whose only known device has been replaced, as after a
+/// recovery, names that device, and it is the one sender that most needs the answer: its copy can
+/// reach nobody who can open it. Rows of signed-out devices are kept for this reason among others;
+/// only account deletion removes them, and then the key no longer resolves. A failed read says no,
+/// and the field says nothing.
+pub(crate) async fn names_a_device_of(
+    db_pool: &construct_db::DbPool,
+    recipient_id: &str,
+    named: Option<&str>,
+    active_devices: &[String],
+) -> bool {
+    let Some(named) = named else {
+        return false;
+    };
+    if active_devices.iter().any(|d| d == named) {
+        return true;
+    }
+    let Ok(recipient) = Uuid::parse_str(recipient_id) else {
+        return false;
+    };
+    match construct_db::get_device_by_id(db_pool, named).await {
+        Ok(Some(device)) => device.user_id == Some(recipient),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to read a named device for the send answer");
+            false
+        }
+    }
 }
 
 /// Turn a wire device id into the internal `Option<String>`, in one place.
@@ -420,14 +456,22 @@ mod tests {
     fn the_send_answer_names_an_account_ids_devices_in_an_order_that_says_nothing() {
         // The lookup returns newest first; the answer must not say which device is the new one.
         assert_eq!(
-            reported_active_devices(false, devices(&["dev-c", "dev-a", "dev-b"])),
+            reported_active_devices(false, false, devices(&["dev-c", "dev-a", "dev-b"])),
             devices(&["dev-a", "dev-b", "dev-c"])
         );
     }
 
     #[test]
-    fn the_send_answer_names_no_devices_for_a_recipient_addressed_by_key() {
-        assert!(reported_active_devices(true, devices(&["dev-a", "dev-b"])).is_empty());
+    fn the_send_answer_names_no_devices_for_a_key_alone() {
+        assert!(reported_active_devices(true, false, devices(&["dev-a", "dev-b"])).is_empty());
+    }
+
+    #[test]
+    fn the_send_answer_names_the_devices_for_a_key_and_one_of_its_devices() {
+        assert_eq!(
+            reported_active_devices(true, true, devices(&["dev-b", "dev-a"])),
+            devices(&["dev-a", "dev-b"])
+        );
     }
 
     #[test]

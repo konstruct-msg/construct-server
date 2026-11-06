@@ -423,11 +423,29 @@ pub(crate) async fn dispatch_sealed_sender(
         } // if intake.owes_token()
     }
 
+    // The one device this envelope was encrypted for, when the sender named it.
+    // Empty means "every active device of the recipient", which is what every sealed
+    // envelope meant before the field existed — and why a second device in one account
+    // received ciphertext it could not decrypt and a certificate it could not unseal.
+    // Same normaliser as the unsealed ingress path — one rule, one place.
+    let recipient_device = core::normalize_device_id(&sealed_inner.recipient_device);
+
     // Read before the replay check: a replay must read exactly like a delivery, and past this point
     // the recipient is a UUID whether or not it was addressed by one.
+    let active_devices =
+        core::fetch_recipient_device_ids_for_user(&context.db_pool, &recipient_id).await;
+    let names_a_device_of_recipient = addressed_by_key
+        && core::names_a_device_of(
+            &context.db_pool,
+            &recipient_id,
+            recipient_device.as_deref(),
+            &active_devices,
+        )
+        .await;
     let recipient_active_devices = core::reported_active_devices(
         addressed_by_key,
-        core::fetch_recipient_device_ids_for_user(&context.db_pool, &recipient_id).await,
+        names_a_device_of_recipient,
+        active_devices,
     );
 
     // ── Delivery-tag anti-replay (two-layer) ───────────────────────────────
@@ -478,13 +496,6 @@ pub(crate) async fn dispatch_sealed_sender(
     } else {
         construct_metrics::MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL.inc();
     }
-
-    // The one device this envelope was encrypted for, when the sender named it.
-    // Empty means "every active device of the recipient", which is what every sealed
-    // envelope meant before the field existed — and why a second device in one account
-    // received ciphertext it could not decrypt and a certificate it could not unseal.
-    // Same normaliser as the unsealed ingress path — one rule, one place.
-    let recipient_device = core::normalize_device_id(&sealed_inner.recipient_device);
 
     let msg_envelope = MessageEnvelope::from_sealed_sender(
         message_id.clone(),

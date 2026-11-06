@@ -635,8 +635,114 @@ async fn s1_the_answer_names_the_recipients_devices_and_a_replay_reads_the_same(
     forget_account(&h, user_id, &device_ids).await;
 }
 
+/// An account with two devices and the address it is reached by.
+async fn account_addressed_by_key(h: &TestHarness) -> (uuid::Uuid, Vec<String>, String) {
+    let recovery_key = random_bytes32();
+    let (user_id, device_ids) = account_with_two_devices(&h.ctx.db_pool, &recovery_key).await;
+    construct_db::backfill_account_addresses(&h.ctx.db_pool)
+        .await
+        .expect("the account gets its address");
+    (
+        user_id,
+        device_ids,
+        format!("ed25519:{}", hex::encode(recovery_key)),
+    )
+}
+
+/// The envelope a client sends: addressed by key, naming the one device its copy is for.
+fn sealed_to_device(address: &str, device: &str) -> core_proto::SealedSenderEnvelope {
+    let mut sealed = build_sealed_envelope_to(address, &random_bytes32());
+    let mut inner = core_proto::SealedInner::decode(sealed.sealed_inner.as_ref()).unwrap();
+    inner.recipient_device = device.to_string();
+    sealed.sealed_inner = inner.encode_to_vec();
+    sealed
+}
+
+/// The stand of 2026-11-06 was red because an invite makes every contact one addressed by key, and
+/// this answer was empty for all of them. A replay reads the same as the delivery it repeats.
+#[tokio::test]
+#[serial]
+async fn s3_a_key_address_naming_its_device_is_answered_with_the_devices() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let (user_id, device_ids, address) = account_addressed_by_key(&h).await;
+    let sealed = sealed_to_device(&address, &device_ids[0]);
+
+    let first = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("delivered");
+    assert_eq!(first.recipient_active_devices, device_ids);
+    let replay = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("a replay succeeds");
+    assert_eq!(replay.recipient_active_devices, device_ids);
+
+    forget_account(&h, user_id, &device_ids).await;
+}
+
+/// A sender that knows only a signed-out device is the one that most needs the answer: its copy
+/// reaches nobody who can open it. The answer names the devices that are active, not the one named.
+#[tokio::test]
+#[serial]
+async fn s4_a_key_address_naming_its_signed_out_device_is_answered_with_the_active_ones() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let (user_id, device_ids, address) = account_addressed_by_key(&h).await;
+    assert!(
+        construct_db::deactivate_device(&h.ctx.db_pool, &device_ids[0])
+            .await
+            .expect("sign the device out")
+    );
+
+    let resp = dispatch_sealed_sender(&h.ctx, &sealed_to_device(&address, &device_ids[0]))
+        .await
+        .expect("delivered");
+    assert_eq!(resp.recipient_active_devices, vec![device_ids[1].clone()]);
+
+    forget_account(&h, user_id, &device_ids).await;
+}
+
+/// The door stays shut for a device of someone else: an address with an account answers as an
+/// address with none does (K2), for the same envelope, so the pair says nothing.
+#[tokio::test]
+#[serial]
+async fn s5_a_key_address_naming_another_accounts_device_reads_like_an_unknown_key() {
+    let Some(h) = build_harness(StealthTokenPolicy::Warn).await else {
+        return;
+    };
+    let (user_id, device_ids, address) = account_addressed_by_key(&h).await;
+    let (stranger_id, stranger_devices, _) = account_addressed_by_key(&h).await;
+    let unknown = format!("ed25519:{}", hex::encode(random_bytes32()));
+    let mut conn = h.ctx.redis_conn.clone();
+    let before = stream_len(&mut conn, &user_id).await;
+
+    let known = dispatch_sealed_sender(&h.ctx, &sealed_to_device(&address, &stranger_devices[0]))
+        .await
+        .expect("delivered");
+    assert!(
+        stream_len(&mut conn, &user_id).await > before,
+        "the address must have reached this account, or the empty answer proves nothing"
+    );
+    let absent = dispatch_sealed_sender(&h.ctx, &sealed_to_device(&unknown, &stranger_devices[0]))
+        .await
+        .expect("an unknown key address is not an error the sender sees");
+
+    assert!(known.recipient_active_devices.is_empty());
+    assert!(absent.recipient_active_devices.is_empty());
+    assert_eq!(known.success, absent.success);
+    assert_eq!(known.error, absent.error);
+    assert_eq!(known.attempt_id, absent.attempt_id);
+    assert_eq!(known.message_number, absent.message_number);
+    assert_eq!(known.intake_verdict, absent.intake_verdict);
+
+    forget_account(&h, user_id, &device_ids).await;
+    forget_account(&h, stranger_id, &stranger_devices).await;
+}
+
 /// The key door hides which addresses have accounts: an address with devices answers exactly as an
-/// address with no account does (K2), with no devices named.
+/// address with no account does (K2), with no devices named, to a sender who names no device.
 #[tokio::test]
 #[serial]
 async fn s2_a_key_address_is_answered_with_no_devices() {
