@@ -385,20 +385,21 @@ pub async fn deactivate_device_unless_primary(
             AppError::internal("Cannot complete request (device deactivation failed)")
         })?;
 
-    if !deactivated {
-        return Ok(DeviceDeactivation::AlreadyInactive);
-    }
-
+    // Before the early return: when the marker failed on the first attempt the row is already
+    // inactive, and a retry that skipped it would leave messaging accepting the device.
     let mut queue = app_context.queue.lock().await;
-    let access_ttl_secs =
-        (app_context.config.access_token_ttl_hours * construct_config::SECONDS_PER_HOUR).max(1);
     queue
-        .mark_device_revoked(device_id, access_ttl_secs)
+        .mark_device_revoked(device_id, access_token_ttl_secs(app_context))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, op, "device deactivate: failed to mark device revoked");
             AppError::internal("Cannot complete request (device revoke marker failed)")
         })?;
+
+    if !deactivated {
+        return Ok(DeviceDeactivation::AlreadyInactive);
+    }
+
     // Session set is user-scoped; still clear residual keys for this user.
     if let Err(e) = queue.revoke_all_sessions(&user_id.to_string()).await {
         tracing::error!(error = %e, op, "device deactivate: failed to revoke user sessions");
@@ -409,6 +410,39 @@ pub async fn deactivate_device_unless_primary(
 
     tracing::info!(device_id = %device_id, op, "device unregistered");
     Ok(DeviceDeactivation::Deactivated)
+}
+
+/// How long a device's revoked marker must live: until every access token it could hold has
+/// expired. Refresh refuses an inactive device, so none is minted after.
+fn access_token_ttl_secs(app_context: &AppContext) -> i64 {
+    (app_context.config.access_token_ttl_hours * construct_config::SECONDS_PER_HOUR).max(1)
+}
+
+/// Mark every device of the account revoked, for messaging, which reads the marker and not the
+/// row. For the paths that take devices out of service in bulk: recovery and account deletion.
+/// Until 2026-11-06 neither did, so a recovered account's old devices went on reading the mailbox.
+pub async fn mark_account_devices_revoked(
+    app_context: &AppContext,
+    user_id: &Uuid,
+) -> Result<(), AppError> {
+    let devices = construct_db::all_device_ids_of_user(&app_context.db_pool, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to list devices to mark revoked");
+            AppError::internal("Cannot complete request (device list failed)")
+        })?;
+    let ttl = access_token_ttl_secs(app_context);
+    let mut queue = app_context.queue.lock().await;
+    for device_id in &devices {
+        queue
+            .mark_device_revoked(device_id, ttl)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to mark device revoked");
+                AppError::internal("Cannot complete request (device revoke marker failed)")
+            })?;
+    }
+    Ok(())
 }
 
 /// Deactivate the requesting device on single-device logout, unless it is the

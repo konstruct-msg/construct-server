@@ -917,6 +917,26 @@ pub async fn set_primary_device(pool: &DbPool, user_id: &Uuid, device_id: &str) 
     Ok(())
 }
 
+/// Whether the device may still act: `None` when it has no row. The authority on a token's device
+/// (`decisions/a-token-is-worth-what-its-device-is-worth.md`), read on every authenticated RPC.
+pub async fn device_is_active(pool: &DbPool, device_id: &str) -> Result<Option<bool>> {
+    sqlx::query_scalar("SELECT is_active FROM devices WHERE device_id = $1")
+        .bind(device_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to read device state")
+}
+
+/// Every device of the account, active or not. For marking them revoked: a retry after a failure
+/// must reach the devices the first attempt already deactivated.
+pub async fn all_device_ids_of_user(pool: &DbPool, user_id: &Uuid) -> Result<Vec<String>> {
+    sqlx::query_scalar("SELECT device_id FROM devices WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list account devices")
+}
+
 /// Deactivate a device (soft-delete). Returns true if a row was updated.
 ///
 /// **Irreversible: nothing in this workspace sets `is_active` back to TRUE.** Call it through

@@ -311,18 +311,27 @@ async fn main() -> Result<()> {
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind).await?;
     let ka = config.grpc_keepalive_interval_secs;
     let ka_to = config.grpc_keepalive_timeout_secs;
+    // No blocklist: this service is given no Redis. The device row is the part that counts.
+    let revocation = construct_server_shared::revocation::RevocationLayer::new(
+        grpc_auth.clone(),
+        construct_server_shared::revocation::RevocationCheck::new(context.db_pool.clone(), None),
+    );
     tokio::spawn(async move {
         let service = VeilGrpcService {
             context: grpc_context,
             auth: grpc_auth,
         };
-        if let Err(e) = construct_server_shared::grpc_server(ka, ka_to)
-            .add_service(
-                VeilServiceServer::new(service)
-                    .max_decoding_message_size(construct_server_shared::decode_limits::VEIL),
-            )
-            .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
-            .await
+        if let Err(e) =
+            construct_server_shared::revocation::guarded_grpc_server(ka, ka_to, revocation)
+                .add_service(
+                    VeilServiceServer::new(service)
+                        .max_decoding_message_size(construct_server_shared::decode_limits::VEIL),
+                )
+                .serve_with_incoming_shutdown(
+                    grpc_incoming,
+                    construct_server_shared::shutdown_signal(),
+                )
+                .await
         {
             tracing::error!(error = %e, "Veil gRPC server failed");
         }

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use construct_auth::AuthManager;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::metrics;
+use construct_server_shared::revocation::RevocationCheck;
 use construct_server_shared::shared::proto::services::v1 as services_proto;
 use construct_server_shared::shared::proto::signaling::v1::{
     CallHangup, GetTurnCredentialsRequest, GetTurnCredentialsResponse, HangupReason,
@@ -34,14 +35,14 @@ async fn send_out(
 
 /// Simple per-stream token bucket rate limiter (no external crates).
 /// Refills at `rate_per_sec` tokens per second. Each `check()` consumes 1 token.
-struct TokenBucket {
+pub(crate) struct TokenBucket {
     tokens: f64,
     rate_per_sec: f64,
     last_refill: std::time::Instant,
 }
 
 impl TokenBucket {
-    fn new(rate_per_sec: u32) -> Self {
+    pub(crate) fn new(rate_per_sec: u32) -> Self {
         Self {
             tokens: rate_per_sec as f64,
             rate_per_sec: rate_per_sec as f64,
@@ -76,6 +77,8 @@ pub(crate) struct SignalingServiceImpl {
     /// `None` when PASETO_PUBLIC_KEY is not available (falls back to trusting
     /// the gateway-injected x-device-id header directly).
     pub(crate) auth: Option<Arc<AuthManager>>,
+    /// What `Signal` asks on every frame: the layer sees a stream only when it opens.
+    pub(crate) revocation: RevocationCheck,
 }
 
 /// Authenticated user_id from Bearer token (optional x-user-id must match).
@@ -110,6 +113,156 @@ fn verified_caller_device_id<T>(
     construct_server_shared::auth_utils::extract_device_id(auth, req.metadata())
 }
 
+/// The id of the verified access token, which a stream goes on being asked about.
+fn caller_token_id<T>(req: &Request<T>, auth: Option<&AuthManager>) -> Result<String, Status> {
+    let auth = auth.ok_or_else(|| {
+        Status::failed_precondition(
+            "AuthManager not configured — set PASETO public keys on signaling-service",
+        )
+    })?;
+    construct_server_shared::auth_utils::extract_authed_caller(auth, req.metadata())
+        .map(|caller| caller.jti)
+}
+
+/// What a `Signal` stream was opened with. The revocation layer checks the token once, at opening,
+/// and a stream lives on past that: each frame asks again, so a removed device stops hearing calls
+/// and an idle stream goes at its next ping. Nothing is delivered between frames, so no timer.
+#[derive(Clone)]
+pub(crate) struct StreamToken {
+    pub(crate) check: RevocationCheck,
+    pub(crate) jti: String,
+    pub(crate) device_id: String,
+}
+
+impl StreamToken {
+    async fn still_good(&self) -> Result<(), Status> {
+        self.check
+            .standing(&self.jti, Some(&self.device_id))
+            .await
+            .into_result()
+    }
+}
+
+/// Frames from the client, until it goes or its token stops being good.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_inbound<S>(
+    mut inbound: S,
+    registry: Arc<CallRegistry>,
+    rate_limiter: RateLimiter,
+    user_id: String,
+    device_id_for_inbound: String,
+    out_tx: tokio::sync::mpsc::Sender<Result<SignalResponse, Status>>,
+    mut signal_limiter: TokenBucket,
+    token: StreamToken,
+) where
+    S: tokio_stream::Stream<Item = Result<SignalRequest, Status>> + Unpin,
+{
+    while let Some(msg_result) = inbound.next().await {
+        if let Err(status) = token.still_good().await {
+            let _ = out_tx.send(Err(status)).await;
+            break;
+        }
+        match msg_result {
+            Ok(msg) => match msg.request {
+                Some(signal_request::Request::RoutedSignal(routed)) => {
+                    // Enforce per-stream signal rate limit before forwarding.
+                    if !signal_limiter.check() {
+                        send_out(
+                            &out_tx,
+                            SignalResponse {
+                                response: Some(signal_response::Response::Error(SignalError {
+                                    code: SignalErrorCode::RateLimited as i32,
+                                    message: "Signal rate limit exceeded (max 10/sec)".into(),
+                                })),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    registry
+                        .touch_online(&user_id, &device_id_for_inbound)
+                        .await;
+                    registry.note_keepalive(&user_id).await;
+                    if let Err(e) = handle_outbound_signal(
+                        &registry,
+                        &rate_limiter,
+                        &user_id,
+                        &device_id_for_inbound,
+                        routed,
+                    )
+                    .await
+                    {
+                        error!(user_id, error = %e, "failed to handle signal");
+                    }
+                }
+                Some(signal_request::Request::Ping(ping)) => {
+                    registry
+                        .touch_online(&user_id, &device_id_for_inbound)
+                        .await;
+                    registry.note_keepalive(&user_id).await;
+                    send_out(
+                        &out_tx,
+                        SignalResponse {
+                            response: Some(signal_response::Response::Pong(SignalPong {
+                                timestamp: ping.timestamp,
+                                server_timestamp: unix_millis(),
+                            })),
+                        },
+                    )
+                    .await;
+                }
+                None => {}
+            },
+            Err(e) => {
+                error!(user_id, error = %e, "inbound stream error");
+                break;
+            }
+        }
+    }
+    info!(user_id, "inbound stream closed");
+}
+
+/// Signals for this device, until it goes or its token stops being good.
+pub(crate) async fn forward_signals(
+    mut rx: tokio::sync::broadcast::Receiver<ForwardedSignal>,
+    out_tx: tokio::sync::mpsc::Sender<Result<SignalResponse, Status>>,
+    token: StreamToken,
+) {
+    while let Ok(signal) = rx.recv().await {
+        if let Err(status) = token.still_good().await {
+            let _ = out_tx.send(Err(status)).await;
+            break;
+        }
+        let response = match signal {
+            ForwardedSignal::Signal(s) => SignalResponse {
+                response: Some(signal_response::Response::Signal(s)),
+            },
+            ForwardedSignal::IncomingCall(call) => SignalResponse {
+                response: Some(signal_response::Response::IncomingCall(
+                    IncomingCallNotification {
+                        call_id: call.call_id,
+                        caller_id: call.caller_id,
+                        caller_name: call.caller_name,
+                        caller_avatar: call.caller_avatar,
+                        call_type: call.call_type,
+                        offered_at: call.offered_at,
+                    },
+                )),
+            },
+            ForwardedSignal::Error(err) => SignalResponse {
+                response: Some(signal_response::Response::Error(SignalError {
+                    code: err.code,
+                    message: err.message,
+                })),
+            },
+        };
+        if out_tx.send(Ok(response)).await.is_err() {
+            break;
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl SignalingService for SignalingServiceImpl {
     type SignalStream =
@@ -121,13 +274,14 @@ impl SignalingService for SignalingServiceImpl {
     ) -> Result<Response<Self::SignalStream>, Status> {
         let user_id = caller_user_id(&request, self.auth.as_deref())?;
         let device_id = verified_caller_device_id(&request, self.auth.as_deref())?;
-        let mut inbound = request.into_inner();
+        let jti = caller_token_id(&request, self.auth.as_deref())?;
+        let inbound = request.into_inner();
         let registry = Arc::clone(&self.registry);
         let rate_limiter = self.rate_limiter.clone();
 
         let tx = registry.register_user(&user_id, &device_id).await;
         registry.touch_online(&user_id, &device_id).await;
-        let mut rx = tx.subscribe();
+        let rx = tx.subscribe();
 
         info!(user_id, device_id, "signal stream opened");
 
@@ -136,115 +290,28 @@ impl SignalingService for SignalingServiceImpl {
         // Per-stream rate limiter: max 10 RoutedSignal messages per second.
         // Prevents DoS amplification where one attacker floods signals that get
         // forwarded to N devices of the callee.
-        let mut signal_limiter = TokenBucket::new(10);
+        let signal_limiter = TokenBucket::new(10);
+
+        let token = StreamToken {
+            check: self.revocation.clone(),
+            jti,
+            device_id: device_id.clone(),
+        };
 
         tokio::spawn(async move {
             let user_id = user_id.clone();
 
-            let inbound_task = {
-                let registry = Arc::clone(&registry);
-                let user_id = user_id.clone();
-                let device_id_for_inbound = device_id.clone();
-                let out_tx = out_tx.clone();
-                tokio::spawn(async move {
-                    while let Some(msg_result) = inbound.next().await {
-                        match msg_result {
-                            Ok(msg) => match msg.request {
-                                Some(signal_request::Request::RoutedSignal(routed)) => {
-                                    // Enforce per-stream signal rate limit before forwarding.
-                                    if !signal_limiter.check() {
-                                        send_out(&out_tx, SignalResponse {
-                                                response: Some(
-                                                    signal_response::Response::Error(SignalError {
-                                                        code: SignalErrorCode::RateLimited as i32,
-                                                        message:
-                                                            "Signal rate limit exceeded (max 10/sec)"
-                                                                .into(),
-                                                    }),
-                                                ),
-                                            }).await;
-                                        continue;
-                                    }
-
-                                    registry
-                                        .touch_online(&user_id, &device_id_for_inbound)
-                                        .await;
-                                    registry.note_keepalive(&user_id).await;
-                                    if let Err(e) = handle_outbound_signal(
-                                        &registry,
-                                        &rate_limiter,
-                                        &user_id,
-                                        &device_id_for_inbound,
-                                        routed,
-                                    )
-                                    .await
-                                    {
-                                        error!(user_id, error = %e, "failed to handle signal");
-                                    }
-                                }
-                                Some(signal_request::Request::Ping(ping)) => {
-                                    registry
-                                        .touch_online(&user_id, &device_id_for_inbound)
-                                        .await;
-                                    registry.note_keepalive(&user_id).await;
-                                    send_out(
-                                        &out_tx,
-                                        SignalResponse {
-                                            response: Some(signal_response::Response::Pong(
-                                                SignalPong {
-                                                    timestamp: ping.timestamp,
-                                                    server_timestamp: unix_millis(),
-                                                },
-                                            )),
-                                        },
-                                    )
-                                    .await;
-                                }
-                                None => {}
-                            },
-                            Err(e) => {
-                                error!(user_id, error = %e, "inbound stream error");
-                                break;
-                            }
-                        }
-                    }
-                    info!(user_id, "inbound stream closed");
-                })
-            };
-
-            let outbound_task = {
-                let out_tx = out_tx.clone();
-                tokio::spawn(async move {
-                    while let Ok(signal) = rx.recv().await {
-                        let response = match signal {
-                            ForwardedSignal::Signal(s) => SignalResponse {
-                                response: Some(signal_response::Response::Signal(s)),
-                            },
-                            ForwardedSignal::IncomingCall(call) => SignalResponse {
-                                response: Some(signal_response::Response::IncomingCall(
-                                    IncomingCallNotification {
-                                        call_id: call.call_id,
-                                        caller_id: call.caller_id,
-                                        caller_name: call.caller_name,
-                                        caller_avatar: call.caller_avatar,
-                                        call_type: call.call_type,
-                                        offered_at: call.offered_at,
-                                    },
-                                )),
-                            },
-                            ForwardedSignal::Error(err) => SignalResponse {
-                                response: Some(signal_response::Response::Error(SignalError {
-                                    code: err.code,
-                                    message: err.message,
-                                })),
-                            },
-                        };
-                        if out_tx.send(Ok(response)).await.is_err() {
-                            break;
-                        }
-                    }
-                })
-            };
+            let inbound_task = tokio::spawn(serve_inbound(
+                inbound,
+                Arc::clone(&registry),
+                rate_limiter,
+                user_id.clone(),
+                device_id.clone(),
+                out_tx.clone(),
+                signal_limiter,
+                token.clone(),
+            ));
+            let outbound_task = tokio::spawn(forward_signals(rx, out_tx.clone(), token));
 
             let _ = tokio::join!(inbound_task, outbound_task);
 
@@ -705,6 +772,184 @@ pub(crate) fn make_instance_id() -> String {
 
 pub(crate) fn make_default_peer_salt(turn_secret: &str) -> String {
     turn_secret.to_string()
+}
+
+#[cfg(test)]
+mod stream_token_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    /// A device row, and what a stream opened with its token asks.
+    struct Stand {
+        db: Arc<sqlx::PgPool>,
+        user: Uuid,
+        device: String,
+    }
+
+    impl Stand {
+        async fn new() -> Self {
+            let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+            let db = Arc::new(sqlx::PgPool::connect(&url).await.expect("Postgres"));
+            let user: Uuid = sqlx::query_scalar("INSERT INTO users DEFAULT VALUES RETURNING id")
+                .fetch_one(db.as_ref())
+                .await
+                .unwrap();
+            let device = Uuid::new_v4().simple().to_string();
+            let random = || [*Uuid::new_v4().as_bytes(), *Uuid::new_v4().as_bytes()].concat();
+            construct_db::create_device(
+                db.as_ref(),
+                construct_db::CreateDeviceData {
+                    device_id: device.clone(),
+                    server_hostname: "test.local".into(),
+                    verifying_key: random(),
+                    identity_public: random(),
+                    signed_prekey_public: random(),
+                    signed_prekey_signature: [random(), random()].concat(),
+                    crypto_suites: "[\"Curve25519+Ed25519\"]".into(),
+                    supports_pq_ratchet: false,
+                },
+                Some(user),
+            )
+            .await
+            .unwrap();
+            Self { db, user, device }
+        }
+
+        fn token(&self) -> StreamToken {
+            StreamToken {
+                check: RevocationCheck::new(self.db.clone(), None),
+                jti: Uuid::new_v4().to_string(),
+                device_id: self.device.clone(),
+            }
+        }
+
+        async fn revoke(&self) {
+            sqlx::query("UPDATE devices SET is_active = FALSE WHERE device_id = $1")
+                .bind(&self.device)
+                .execute(self.db.as_ref())
+                .await
+                .unwrap();
+        }
+
+        async fn cleanup(self) {
+            let _ = sqlx::query("DELETE FROM devices WHERE device_id = $1")
+                .bind(&self.device)
+                .execute(self.db.as_ref())
+                .await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(self.db.as_ref())
+                .await;
+        }
+    }
+
+    fn ring() -> ForwardedSignal {
+        ForwardedSignal::Error(crate::forwarded::SignalErrorInfo {
+            code: 1,
+            message: "a frame".into(),
+        })
+    }
+
+    async fn next(
+        rx: &mut tokio::sync::mpsc::Receiver<Result<SignalResponse, Status>>,
+    ) -> Option<Result<SignalResponse, Status>> {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("an answer within 2 s")
+    }
+
+    /// Mutation: drop the check in `forward_signals` — the removed device goes on hearing calls.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn a_removed_device_stops_hearing_calls_at_the_next_frame() {
+        let stand = Stand::new().await;
+        let (signals, rx) = tokio::sync::broadcast::channel(8);
+        let (out_tx, mut out) = tokio::sync::mpsc::channel(8);
+        let task = tokio::spawn(forward_signals(rx, out_tx, stand.token()));
+
+        signals.send(ring()).unwrap();
+        assert!(
+            next(&mut out).await.unwrap().is_ok(),
+            "delivered while live"
+        );
+
+        stand.revoke().await;
+        signals.send(ring()).unwrap();
+        let refused = next(&mut out).await.unwrap().unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+        task.await.unwrap();
+        assert!(next(&mut out).await.is_none(), "and the stream is over");
+        stand.cleanup().await;
+    }
+
+    /// A store that cannot answer closes the stream as retryable, not as a dead token.
+    /// Mutation: skip the check when `standing` is not `Revoked`.
+    #[tokio::test]
+    async fn a_stream_whose_token_cannot_be_checked_closes_as_unavailable() {
+        let (signals, rx) = tokio::sync::broadcast::channel(8);
+        let (out_tx, mut out) = tokio::sync::mpsc::channel(8);
+        let token = StreamToken {
+            check: RevocationCheck::new(None, None),
+            jti: "jti".into(),
+            device_id: "device".into(),
+        };
+        let task = tokio::spawn(forward_signals(rx, out_tx, token));
+        signals.send(ring()).unwrap();
+        let refused = next(&mut out).await.unwrap().unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unavailable);
+        task.await.unwrap();
+    }
+
+    /// Mutation: drop the check in `serve_inbound` — an idle stream outlives its device.
+    #[tokio::test]
+    #[ignore = "requires Redis and PostgreSQL"]
+    async fn a_removed_devices_ping_closes_its_stream() {
+        let stand = Stand::new().await;
+        let url = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let registry = Arc::new(
+            CallRegistry::new(&url, "stream-token-test".into())
+                .await
+                .expect("registry needs Redis"),
+        );
+        let conn = construct_redis::manager_for(redis::Client::open(url).unwrap())
+            .await
+            .expect("Redis");
+        let limiter = RateLimiter::new(conn, "salt".into(), Default::default());
+
+        let (up, up_rx) = tokio::sync::mpsc::channel(8);
+        let (out_tx, mut out) = tokio::sync::mpsc::channel(8);
+        let task = tokio::spawn(serve_inbound(
+            ReceiverStream::new(up_rx),
+            registry,
+            limiter,
+            stand.user.to_string(),
+            stand.device.clone(),
+            out_tx,
+            TokenBucket::new(10),
+            stand.token(),
+        ));
+        let ping = || {
+            Ok(SignalRequest {
+                request: Some(signal_request::Request::Ping(
+                    construct_server_shared::shared::proto::signaling::v1::SignalPing {
+                        timestamp: 1,
+                    },
+                )),
+            })
+        };
+
+        up.send(ping()).await.unwrap();
+        assert!(next(&mut out).await.unwrap().is_ok(), "answered while live");
+
+        stand.revoke().await;
+        up.send(ping()).await.unwrap();
+        let refused = next(&mut out).await.unwrap().unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+        task.await.unwrap();
+        stand.cleanup().await;
+    }
 }
 
 #[cfg(test)]

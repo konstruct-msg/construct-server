@@ -563,12 +563,21 @@ async fn main() -> Result<()> {
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
 
     tokio::spawn(async move {
+        // No blocklist: this service is given no Redis. The device row is the part that counts.
+        let revocation = construct_server_shared::revocation::RevocationLayer::new(
+            grpc_context.auth.clone(),
+            construct_server_shared::revocation::RevocationCheck::new(
+                grpc_context.db_pool.clone(),
+                None,
+            ),
+        );
         let service = MediaGrpcService {
             context: grpc_context,
         };
-        if let Err(e) = construct_server_shared::grpc_server(
+        if let Err(e) = construct_server_shared::revocation::guarded_grpc_server(
             main_config.grpc_keepalive_interval_secs,
             main_config.grpc_keepalive_timeout_secs,
+            revocation,
         )
         .add_service(
             // 2 MB max per message — bounds memory even if a client lies about size

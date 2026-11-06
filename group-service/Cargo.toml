@@ -46,3 +46,8 @@ ed25519-compact = { version = "2.0", features = ["pem", "random"] }
 [[bin]]
 name = "group-service"
 path = "src/main.rs"
+
+[dev-dependencies]
+http-body-util = "0.1"
+prost = "0.14.3"
+tower = { workspace = true }

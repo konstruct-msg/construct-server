@@ -1,13 +1,19 @@
 //! Exercise the real RPCs/core with PostgreSQL and Redis, never a copied dispatcher.
 //! Each fixture owns random accounts and Redis keys; no global environment edits or FLUSHDB.
 use super::*;
+use construct_server_shared::revocation::{RevocationCheck, RevocationLayer};
 use construct_server_shared::shared::proto::services::v1::{
     device_link_service_server::DeviceLinkService, device_service_server::DeviceService,
+    user_service_server::UserServiceServer,
 };
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
 use prost::Message;
 use tonic::Code;
+use tower::Layer;
 use uuid::Uuid;
+
+#[path = "../../shared/test_support/grpc.rs"]
+mod grpc_support;
 
 struct Fixture {
     service: IdentityGrpcService,
@@ -1225,4 +1231,447 @@ async fn link_result_is_visible_only_to_the_issuing_account() {
     assert!(foreign.device_id.is_empty());
     assert!(foreign.link_key_proof.is_empty());
     f.cleanup().await;
+}
+
+// ── 264: what a token is worth after its device is gone ──────────────────────
+
+/// A real recovery: the phrase's hybrid key set on the account, a claim for a new device.
+async fn recover(f: &Fixture, user: Uuid) -> Result<proto::RecoverAccountResponse, Status> {
+    use construct_crypto::pqc::hybrid::{hybrid_sign, hybrid_signature_keypair_from_seeds};
+    use construct_crypto::server_trust::recovery as claim_bytes;
+    let (private, public) = hybrid_signature_keypair_from_seeds(&rand::random(), &rand::random());
+    let now = chrono::Utc::now().timestamp();
+    let setup = claim_bytes::setup_signable(&user.to_string(), now, &public).unwrap();
+    recovery::set_recovery_key(
+        f.service.context.db_pool.as_ref(),
+        user,
+        &public,
+        &hybrid_sign(&private, &setup).unwrap(),
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let device_id = Uuid::new_v4().simple().to_string();
+    let (_, keys) = device_keys();
+    let claim = claim_bytes::claim_signable(
+        &public,
+        now,
+        &device_id,
+        &keys.verifying_key,
+        &keys.identity_public,
+    )
+    .unwrap();
+    f.service
+        .recover_account(Request::new(proto::RecoverAccountRequest {
+            identifier: user.to_string(),
+            recovery_public_key: public,
+            recovery_signature: hybrid_sign(&private, &claim).unwrap(),
+            timestamp: now,
+            new_device: Some(proto::NewDeviceForRecovery {
+                device_id,
+                public_keys: Some(keys),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .map(Response::into_inner)
+}
+
+/// The layer as `main` builds it, on the same stores.
+async fn guard(f: &Fixture) -> RevocationLayer {
+    let client = redis::Client::open(f.service.context.config.redis_url.as_str()).unwrap();
+    RevocationLayer::new(
+        f.service.context.auth_manager.clone(),
+        RevocationCheck::new(
+            f.service.context.db_pool.clone(),
+            Some(construct_redis::manager_for(client).await.unwrap()),
+        ),
+    )
+    .with_open_methods(RPCS_THAT_DO_NOT_READ_THE_BEARER)
+}
+
+const USER: &str = "/shared.proto.services.v1.UserService";
+const DEVICE: &str = "/shared.proto.services.v1.DeviceService";
+const AUTH: &str = "/shared.proto.services.v1.AuthService";
+
+/// An account with a primary device, and a second device already revoked by it. Returns the
+/// tokens the devices held before that, and the primary's id.
+async fn account_with_a_revoked_device(f: &mut Fixture) -> (Uuid, String, String, String, String) {
+    let user = f.user().await;
+    let (primary, _, _) = f.device(user).await;
+    let (stolen, _, _) = f.device(user).await;
+    construct_db::set_primary_device(f.service.context.db_pool.as_ref(), &user, &primary)
+        .await
+        .unwrap();
+    let mint = |device: &str| {
+        f.service
+            .context
+            .auth_manager
+            .create_token_for_device(&user, Some(device))
+            .unwrap()
+            .0
+    };
+    let primary_token = mint(&primary);
+    let stolen_token = mint(&stolen);
+    f.service
+        .revoke_device(f.request(
+            user,
+            Some(&primary),
+            proto::RevokeDeviceRequest {
+                device_id: stolen.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+    f.keys.push(format!("revoked_device:{stolen}"));
+    (user, primary, primary_token, stolen, stolen_token)
+}
+
+/// The defect 264 opened on: this deleted the account (reproduced on main 2026-11-06).
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn a_revoked_devices_token_can_no_longer_act_on_the_account() {
+    let mut f = Fixture::new().await;
+    let (user, _, primary_token, stolen, stolen_token) =
+        account_with_a_revoked_device(&mut f).await;
+    let guard = guard(&f).await;
+    let users = guard.layer(UserServiceServer::new(f.service.clone()));
+    let devices = guard.layer(proto::device_service_server::DeviceServiceServer::new(
+        f.service.clone(),
+    ));
+
+    let delete = proto::DeleteAccountRequest {
+        confirmation: "DELETE".into(),
+        reason: None,
+    };
+    let (code, headers) = grpc_support::call(
+        users.clone(),
+        &format!("{USER}/DeleteAccount"),
+        Some(&stolen_token),
+        &delete,
+    )
+    .await;
+    assert_eq!(code, Code::Unauthenticated);
+    assert!(
+        headers.get("construct-device-refusal").is_none(),
+        "only identity's refresh and authenticate may tell a client to erase itself"
+    );
+    assert!(
+        construct_db::get_user_by_id(f.service.context.db_pool.as_ref(), &user)
+            .await
+            .unwrap()
+            .is_some(),
+        "the account is still there"
+    );
+
+    let export = proto::ExportUserDataRequest::default();
+    let path = format!("{USER}/ExportUserData");
+    assert_eq!(
+        grpc_support::call(users.clone(), &path, Some(&stolen_token), &export)
+            .await
+            .0,
+        Code::Unauthenticated,
+    );
+    assert_eq!(
+        grpc_support::call(
+            devices,
+            &format!("{DEVICE}/RevokeDevice"),
+            Some(&stolen_token),
+            &proto::RevokeDeviceRequest { device_id: stolen },
+        )
+        .await
+        .0,
+        Code::Unauthenticated,
+        "a revoked device must not revoke its siblings either"
+    );
+    assert_eq!(
+        grpc_support::call(users, &path, Some(&primary_token), &export)
+            .await
+            .0,
+        Code::Ok,
+        "the device that stayed goes on working"
+    );
+    f.cleanup().await;
+}
+
+/// The sign-out-wipes-the-device signal: a dead token must still reach the handler that gives it.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn a_removed_device_still_learns_it_was_removed() {
+    let mut f = Fixture::new().await;
+    let (user, _, _, stolen, stolen_token) = account_with_a_revoked_device(&mut f).await;
+    let refresh = f
+        .service
+        .context
+        .auth_manager
+        .create_refresh_token_for_device(&user, Some(&stolen))
+        .unwrap()
+        .0;
+    let auth = guard(&f)
+        .await
+        .layer(proto::auth_service_server::AuthServiceServer::new(
+            f.service.clone(),
+        ));
+    let (code, headers) = grpc_support::call(
+        auth,
+        &format!("{AUTH}/RefreshToken"),
+        Some(&stolen_token),
+        &proto::RefreshTokenRequest {
+            refresh_token: refresh,
+            device_id: stolen,
+        },
+    )
+    .await;
+    assert_eq!(code, Code::Unauthenticated);
+    assert_eq!(
+        headers
+            .get("construct-device-refusal")
+            .and_then(|v| v.to_str().ok()),
+        Some("1"),
+        "the client erases itself on this number, and nothing else"
+    );
+    f.cleanup().await;
+}
+
+/// `Logout` takes its token in the body, past the layer.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn a_revoked_device_cannot_sign_the_account_out() {
+    let mut f = Fixture::new().await;
+    let (user, _, _, _, stolen_token) = account_with_a_revoked_device(&mut f).await;
+    let (_, jti, _) = f
+        .service
+        .context
+        .auth_manager
+        .create_refresh_token_for_device(&user, None)
+        .unwrap();
+    {
+        let mut queue = f.service.context.queue.lock().await;
+        queue
+            .store_refresh_token(&jti, &user.to_string(), 60)
+            .await
+            .unwrap();
+    }
+    f.keys.push(format!("refresh_token:{jti}"));
+
+    let answer = f
+        .service
+        .logout(Request::new(proto::LogoutRequest {
+            access_token: stolen_token.clone(),
+            all_devices: true,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(answer.success, "it asks to be signed out, and it is");
+    let survives = redis::cmd("EXISTS")
+        .arg(format!("refresh_token:{jti}"))
+        .query_async::<bool>(
+            &mut construct_redis::manager_for(
+                redis::Client::open(f.service.context.config.redis_url.as_str()).unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(survives, "the account's other sessions were left alone");
+
+    let verified = f
+        .service
+        .verify_token(Request::new(proto::VerifyTokenRequest {
+            access_token: stolen_token,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!verified.valid, "VerifyToken tells the same story");
+    f.cleanup().await;
+}
+
+/// A retry reaches the marker even though the row was deactivated by the failed first attempt.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn revoking_an_inactive_device_again_restores_a_lost_marker() {
+    let mut f = Fixture::new().await;
+    let (user, primary, _, stolen, _) = account_with_a_revoked_device(&mut f).await;
+    let mut queue = f.service.context.queue.lock().await;
+    queue
+        .delete(&format!("revoked_device:{stolen}"))
+        .await
+        .unwrap();
+    assert!(!queue.is_device_revoked(&stolen).await.unwrap());
+    drop(queue);
+
+    f.service
+        .revoke_device(f.request(
+            user,
+            Some(&primary),
+            proto::RevokeDeviceRequest {
+                device_id: stolen.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+    let marked = f
+        .service
+        .context
+        .queue
+        .lock()
+        .await
+        .is_device_revoked(&stolen)
+        .await
+        .unwrap();
+    assert!(marked);
+    f.cleanup().await;
+}
+
+/// The stolen-phone case: after recovery the old device is out everywhere, the new one is in.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn recovery_takes_every_old_device_out_of_messaging_and_the_rest() {
+    let mut f = Fixture::new().await;
+    let user = f.user().await;
+    let (old, _, _) = f.device(user).await;
+    f.keys.push(format!("revoked_device:{old}"));
+    let old_token = f
+        .service
+        .context
+        .auth_manager
+        .create_token_for_device(&user, Some(&old))
+        .unwrap()
+        .0;
+
+    let recovered = recover(&f, user).await.expect("recovery succeeds");
+    assert_eq!(recovered.devices_revoked, 1);
+
+    let marked = f
+        .service
+        .context
+        .queue
+        .lock()
+        .await
+        .is_device_revoked(&old)
+        .await
+        .unwrap();
+    assert!(
+        marked,
+        "messaging reads this marker: without it the old device's token still reads the mailbox"
+    );
+
+    let users = guard(&f)
+        .await
+        .layer(UserServiceServer::new(f.service.clone()));
+    let export = proto::ExportUserDataRequest::default();
+    let path = format!("{USER}/ExportUserData");
+    assert_eq!(
+        grpc_support::call(users.clone(), &path, Some(&old_token), &export)
+            .await
+            .0,
+        Code::Unauthenticated
+    );
+    let new_token = recovered.tokens.expect("tokens").access_token;
+    assert_eq!(
+        grpc_support::call(users, &path, Some(&new_token), &export)
+            .await
+            .0,
+        Code::Ok
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn deleting_an_account_marks_its_devices_revoked() {
+    let mut f = Fixture::new().await;
+    let user = f.user().await;
+    let (device, _, _) = f.device(user).await;
+    f.keys.push(format!("revoked_device:{device}"));
+    f.service
+        .delete_account(f.request(
+            user,
+            Some(&device),
+            proto::DeleteAccountRequest {
+                confirmation: "DELETE".into(),
+                reason: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let marked = f
+        .service
+        .context
+        .queue
+        .lock()
+        .await
+        .is_device_revoked(&device)
+        .await
+        .unwrap();
+    assert!(marked);
+    f.cleanup().await;
+}
+
+/// The list is the handlers that read no bearer, exactly. One too many leaves an RPC open to a dead
+/// token; one too few closes the door a removed device learns through.
+#[test]
+fn the_rpcs_open_to_a_dead_token_are_the_ones_that_never_read_it() {
+    let source = include_str!("main.rs");
+    let reads_the_bearer = |body: &str| {
+        [
+            "request_token(",
+            "extract_user_id_from_metadata(",
+            "verify_access_token(",
+            ".metadata()",
+        ]
+        .iter()
+        .any(|call| body.contains(call))
+    };
+    let mut open = std::collections::BTreeSet::new();
+    let mut in_rpc_impl = false;
+    let mut current: Option<(String, String)> = None;
+    let mut flush = |current: &mut Option<(String, String)>| {
+        if let Some((name, body)) = current.take()
+            && !reads_the_bearer(&body)
+        {
+            let camel: String = name
+                .split('_')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .unwrap()
+                        .to_uppercase()
+                        .chain(chars)
+                        .collect::<String>()
+                })
+                .collect();
+            open.insert(camel);
+        }
+    };
+    for line in source.lines() {
+        if line.starts_with("impl ") && line.ends_with("for IdentityGrpcService {") {
+            in_rpc_impl = true;
+        } else if line == "}" {
+            flush(&mut current);
+            in_rpc_impl = false;
+        } else if in_rpc_impl {
+            if let Some(rest) = line.strip_prefix("    async fn ") {
+                flush(&mut current);
+                let name = rest.split('(').next().unwrap().to_string();
+                current = Some((name, String::new()));
+            } else if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+            }
+        }
+    }
+    assert!(open.len() > 5, "the walk found no handlers: {open:?}");
+    open.insert("GetServerTrust".to_string()); // its service lives in server_trust_rpc.rs
+    let listed: std::collections::BTreeSet<String> = RPCS_THAT_DO_NOT_READ_THE_BEARER
+        .iter()
+        .map(|m| m.to_string())
+        .collect();
+    assert_eq!(open, listed);
 }

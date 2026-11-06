@@ -75,6 +75,7 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
 
 - PASETO v4.public only; a token without the `v4.public.` prefix is rejected. Issuer from `AUTH_TOKEN_ISSUER` (fallback `JWT_ISSUER`). Framing is `nonce(32) || message || sig(64)` — client slicing offsets are not a bug. TTL `ACCESS_TOKEN_TTL_HOURS` (24 h).
 - Logout needs `access_token` in the body (empty → `INVALID_ARGUMENT`) and writes `invalidated_token:{jti}`; `RevokeAll` walks the `user_tokens:{user}` index, not all keys.
+- A signature does not say the device is alive. Every service but messaging builds through `revocation::guarded_grpc_server`: a verified token whose `devices` row is gone or inactive, or whose `invalidated_token:{jti}` is set where the service has Redis, gets `UNAUTHENTICATED` before any handler (a store outage: `UNAVAILABLE`). Never `construct-device-refusal` from there: the wipe signal stays in identity's refresh and authenticate. Identity's `RPCS_THAT_DO_NOT_READ_THE_BEARER` must equal the handlers that read none. Messaging stays on the `revoked_device:` marker so that Postgres cannot stop delivery; every path taking a device out of service writes it. Long streams ask again per frame. `decisions/a-token-is-worth-what-its-device-is-worth.md`.
 - Identity `GetSenderCertificate`, `ApproveJoinRequest`, `IssueTokens` use the common
   token/header consistency check. Certificates bind an active device of the token's account;
   invite signers must be active devices of the signed account. Link/join tokens use Redis

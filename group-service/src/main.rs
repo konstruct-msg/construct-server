@@ -103,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
     })?);
     info!("PASETO verification enabled for group-service");
 
+    let revocation = construct_server_shared::revocation::RevocationLayer::new(
+        auth.clone(),
+        construct_server_shared::revocation::RevocationCheck::new(db.clone(), Some(redis.clone())),
+    );
+
     let svc = GroupServiceImpl {
         db,
         hub: service::GroupHub::new(),
@@ -113,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The shared builder, like every other service: until 2026-10-05 this was a bare
     // `Server::builder()` with no stream or header limits and no keepalive.
-    construct_server_shared::grpc_server(
+    construct_server_shared::revocation::guarded_grpc_server(
         std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -122,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5),
+        revocation,
     )
     .add_service(
         MlsServiceServer::new(svc.clone())

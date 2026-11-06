@@ -34,6 +34,8 @@ hex = { workspace = true }
 
 tonic = "0.14.2"
 prost = "0.14.3"
+redis = { workspace = true }
+construct-redis = { path = "../crates/construct-redis" }
 tokio-stream = "0.1"
 rand = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
@@ -42,3 +44,6 @@ curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
 ed25519-compact = { version = "2.0", features = ["pem"] }
 
 construct-veil = { git = "https://github.com/konstruct-msg/construct-veil.git", branch = "main" }
+
+[dev-dependencies]
+http-body-util = "0.1"

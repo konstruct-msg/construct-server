@@ -212,10 +212,8 @@ fn extract_authed_device_id<T>(
 /// The IP key was introduced because the scheme before it read a caller-supplied device id, which
 /// is unverifiable and rotatable — a client could mint a fresh budget per request. That reasoning
 /// still holds, and this does not undo it: the claim comes out of a verified token and nothing
-/// here reads the `x-device-id` header. `auth_utils::extract_device_id` falls back to that header
-/// for legacy tokens without a device claim, which is why this uses `extract_authed_caller` and
-/// takes the claim alone — a legacy token cannot promote itself to a private budget by asserting
-/// a header, it stays on the IP bucket with everyone else.
+/// here reads the `x-device-id` header. A token without a device claim cannot promote itself to a
+/// private budget by asserting a header: it stays on the IP bucket with everyone else.
 ///
 /// Why per device at all: the limit is 10/min per (bucket, target), and an IP bucket is shared by
 /// every device behind one NAT asking about the same peer. That is the definition of a
@@ -232,8 +230,8 @@ fn bundle_rate_key<T>(
     client_ip: &str,
     target_user_id: &str,
 ) -> String {
-    // `extract_authed_caller`, never `auth_utils::extract_device_id` — see the doc above. The
-    // claim, and nothing else, decides the bucket.
+    // `extract_authed_caller`, not `auth_utils::extract_device_id`: a token without a device is
+    // an error there and a bucket here. The claim, and nothing else, decides the bucket.
     let claimed_device =
         construct_server_shared::auth_utils::extract_authed_caller(auth, req.metadata())
             .ok()
@@ -1548,7 +1546,14 @@ async fn main() -> Result<()> {
     info!("gRPC server listening on {}", grpc_bind_address);
 
     let grpc_incoming = construct_server_shared::mptcp_incoming(&grpc_bind_address).await?;
-    let grpc_server = construct_server_shared::grpc_server(
+    let revocation = construct_server_shared::revocation::RevocationLayer::new(
+        context.auth.clone(),
+        construct_server_shared::revocation::RevocationCheck::new(
+            Arc::new(context.db.clone()),
+            Some(context.redis.clone()),
+        ),
+    );
+    let grpc_server = construct_server_shared::revocation::guarded_grpc_server(
         std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1557,6 +1562,7 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5),
+        revocation,
     )
     .add_service(
         KeyServiceServer::new(grpc_service)
@@ -1728,12 +1734,11 @@ mod bundle_rate_bucket_tests {
         );
     }
 
-    /// **The security half, checked at the source.** `auth_utils::extract_device_id` falls back to
-    /// the `x-device-id` header when a token carries no device claim, and that header is
-    /// caller-supplied and rotatable — a client could mint a fresh budget per request, which is
-    /// the precise weakness the IP key replaced. `bundle_rate_key` must therefore never reach for
-    /// it. A plausible tidy-up ("we already have a helper for this") reintroduces the hole in one
-    /// line and changes no behaviour any other test can see.
+    /// **The security half, checked at the source.** The `x-device-id` header is caller-supplied
+    /// and rotatable — a client could mint a fresh budget per request, which is the precise
+    /// weakness the IP key replaced. `bundle_rate_key` must therefore never reach for it. A
+    /// plausible tidy-up ("we already have a helper for this") reintroduces the hole in one line
+    /// and changes no behaviour any other test can see.
     #[test]
     fn the_bucket_never_reads_a_caller_supplied_device_id() {
         let src = include_str!("main.rs");
