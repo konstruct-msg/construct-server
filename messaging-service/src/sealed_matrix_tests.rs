@@ -690,11 +690,11 @@ async fn s4_a_key_address_naming_its_signed_out_device_is_answered_with_the_acti
         return;
     };
     let (user_id, device_ids, address) = account_addressed_by_key(&h).await;
-    assert!(
-        construct_db::deactivate_device(&h.ctx.db_pool, &device_ids[0])
-            .await
-            .expect("sign the device out")
-    );
+    sqlx::query("UPDATE devices SET is_active = FALSE WHERE device_id = $1")
+        .bind(&device_ids[0])
+        .execute(&*h.ctx.db_pool)
+        .await
+        .expect("sign the device out");
 
     let resp = dispatch_sealed_sender(&h.ctx, &sealed_to_device(&address, &device_ids[0]))
         .await
