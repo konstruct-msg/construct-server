@@ -7,6 +7,12 @@
 use anyhow::Result;
 use construct_redis::RedisClient;
 
+/// Redis key of the blocklist entry for one access token. Written by logout, read by every service
+/// that has Redis (`construct_server_shared::revocation`, messaging's `extract_authed_identity`).
+pub fn invalidated_token_key(jti: &str) -> String {
+    format!("invalidated_token:{jti}")
+}
+
 pub(crate) struct TokenManager<'a> {
     client: &'a mut RedisClient,
 }
@@ -128,7 +134,7 @@ impl<'a> TokenManager<'a> {
         jti: &str,
         ttl_seconds: i64,
     ) -> Result<()> {
-        let key = format!("invalidated_token:{}", jti);
+        let key = invalidated_token_key(jti);
         let _: () = self.client.set_ex(&key, "1", ttl_seconds as u64).await?;
         Ok(())
     }
@@ -139,7 +145,7 @@ impl<'a> TokenManager<'a> {
     /// * `Ok(true)` - Token is invalidated (should be rejected)
     /// * `Ok(false)` - Token is valid (not invalidated)
     pub(crate) async fn is_token_invalidated(&mut self, jti: &str) -> Result<bool> {
-        let key = format!("invalidated_token:{}", jti);
+        let key = invalidated_token_key(jti);
         let exists: bool = self.client.exists(&key).await?;
         Ok(exists)
     }

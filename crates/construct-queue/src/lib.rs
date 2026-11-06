@@ -17,6 +17,7 @@ pub use gap::MailboxGap;
 pub use intake_generation::intake_generation_key;
 pub use pow::PowChallengeRecord;
 pub use push_outstanding::{PUSH_OUTSTANDING_TTL_SECONDS, push_outstanding_key};
+pub use tokens::invalidated_token_key;
 
 /// How long a message may sit in a mailbox: the hourly age sweep
 /// (`trim_streams_by_age`) deletes anything older. Delivery deletes nothing —

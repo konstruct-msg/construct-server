@@ -204,6 +204,49 @@ async fn main() -> anyhow::Result<()> {
         axum::serve(listener, app).await.unwrap();
     });
 
+    let blocklist = construct_redis::manager_for(redis::Client::open(redis_url.as_str())?).await?;
+    let db_pool = match env::var("DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            match PgPoolOptions::new()
+                .max_connections(
+                    env::var("DB_MAX_CONNECTIONS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(20),
+                )
+                .min_connections(0)
+                .connect(&url)
+                .await
+            {
+                Ok(pool) => {
+                    info!("DB pool enabled for signaling-service (user_blocks checks)");
+                    Some(Arc::new(pool))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to connect DB - calls_allowed checks limited to Redis-only"
+                    );
+                    None
+                }
+            }
+        }
+        _ => {
+            tracing::error!(
+                "DATABASE_URL not set or empty — signaling-service cannot check mutual \
+                 contacts. ALL calls will be denied with permissionDenied. \
+                 Ensure DATABASE_URL is present in app.env and not overridden to empty."
+            );
+            None
+        }
+    };
+    let revocation_check =
+        construct_server_shared::revocation::RevocationCheck::new(db_pool.clone(), Some(blocklist));
+    let revocation = construct_server_shared::revocation::RevocationLayer::new(
+        auth.clone(),
+        revocation_check.clone(),
+    );
+
     let service = SignalingServiceImpl {
         registry: Arc::clone(&registry),
         rate_limiter: RateLimiter::new(
@@ -216,46 +259,13 @@ async fn main() -> anyhow::Result<()> {
         notification_client,
         contact_hmac_secret: Arc::new(contact_hmac_secret),
         auth,
-        db_pool: match env::var("DATABASE_URL") {
-            Ok(url) if !url.trim().is_empty() => {
-                match PgPoolOptions::new()
-                    .max_connections(
-                        env::var("DB_MAX_CONNECTIONS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(20),
-                    )
-                    .min_connections(0)
-                    .connect(&url)
-                    .await
-                {
-                    Ok(pool) => {
-                        info!("DB pool enabled for signaling-service (user_blocks checks)");
-                        Some(Arc::new(pool))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to connect DB - calls_allowed checks limited to Redis-only"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => {
-                tracing::error!(
-                    "DATABASE_URL not set or empty — signaling-service cannot check mutual \
-                     contacts. ALL calls will be denied with permissionDenied. \
-                     Ensure DATABASE_URL is present in app.env and not overridden to empty."
-                );
-                None
-            }
-        },
+        db_pool,
+        revocation: revocation_check,
     };
 
     // The shared builder, like every other service: until 2026-10-05 this was a bare
     // `Server::builder()` with no stream or header limits and no keepalive.
-    construct_server_shared::grpc_server(
+    construct_server_shared::revocation::guarded_grpc_server(
         std::env::var("GRPC_KEEPALIVE_INTERVAL_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -264,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5),
+        revocation,
     )
     .add_service(
         SignalingServiceServer::new(service)

@@ -52,9 +52,9 @@ pub fn extract_bearer_token(metadata: &MetadataMap) -> Result<&str, Status> {
 
 /// Verify the access token and enforce optional header consistency.
 ///
-/// Returns verified [`Claims`]. Does **not** check the Redis revocation
-/// blocklist — callers that need revocation (messaging) must do so separately
-/// using `claims.jti`.
+/// Returns verified [`Claims`]. Whether the token is still worth anything is not answered here:
+/// [`crate::revocation::RevocationLayer`] asks before a handler runs, and messaging asks in
+/// `extract_authed_identity`.
 pub fn verify_access_token(
     auth_manager: &AuthManager,
     metadata: &MetadataMap,
@@ -130,25 +130,17 @@ pub fn extract_user_id(
     extract_authed_caller(auth_manager.as_ref(), metadata).map(|c| c.user_id)
 }
 
-/// Extract authenticated device_id.
+/// Extract authenticated device_id: `claims.device_id`, never a header.
 ///
-/// Preference order after token verify:
-/// 1. `claims.device_id` when present
-/// 2. `x-device-id` header only for legacy tokens that lack a device claim
-///    (still requires a valid Bearer user token)
+/// A token that names no device has none. The `x-device-id` fallback for such tokens went on
+/// 2026-11-06: 30 days of production reads showed none in use, and it let a caller name any
+/// device (`decisions/a-token-is-worth-what-its-device-is-worth.md`).
 pub fn extract_device_id(
     auth_manager: &AuthManager,
     metadata: &MetadataMap,
 ) -> Result<String, Status> {
-    let caller = extract_authed_caller(auth_manager, metadata)?;
-    if let Some(did) = caller.device_id {
-        return Ok(did);
-    }
-    metadata
-        .get("x-device-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+    extract_authed_caller(auth_manager, metadata)?
+        .device_id
         .ok_or_else(|| Status::unauthenticated("Missing device identity"))
 }
 
@@ -169,7 +161,7 @@ pub fn device_refusal_status(refusal: construct_error::DeviceRefusal) -> Status 
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use construct_config::{
         ApnsConfig, ApnsEnvironment, Config, DbConfig, DeepLinksConfig, FederationConfig,
@@ -185,7 +177,7 @@ mod tests {
         )
     }
 
-    fn make_test_auth() -> AuthManager {
+    pub(crate) fn make_test_auth() -> AuthManager {
         let (priv_pem, pub_pem) = make_ed25519_keypair();
         let config = Config {
             database_url: String::new(),
@@ -387,6 +379,19 @@ mod tests {
         ]);
         let err = extract_authed_caller(&auth, &meta).expect_err("device spoof");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Mutation: bring back the header fallback — a device-less token names any device it likes.
+    #[test]
+    fn a_token_without_a_device_cannot_name_one_in_a_header() {
+        let auth = make_test_auth();
+        let (token, _, _) = auth.create_token(&Uuid::new_v4()).unwrap();
+        let meta = meta_with(&[
+            ("authorization", format!("Bearer {token}")),
+            ("x-device-id", "someone-elses-device".to_string()),
+        ]);
+        let err = extract_device_id(&auth, &meta).expect_err("the header decides nothing");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]

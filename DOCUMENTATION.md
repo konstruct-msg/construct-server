@@ -386,8 +386,12 @@ Verification is `ed25519-dalek` 2.2 `Verifier::verify` — not `verify_strict`, 
 - Access tokens: TTL 24 hours (env `ACCESS_TOKEN_TTL_HOURS`, reduced to limit token exposure window)
 - Refresh tokens: TTL 90 days
 - Claims: `{ sub: user_id, device_id, iss: "construct-server" }`
-- Revocation blocklist: `invalidated_token:{jti}` in Redis (checked on verify and in
-  messaging's Bearer path, fail-closed)
+- Revocation: a verified token is checked against its `devices` row and, where the service has
+  Redis, `invalidated_token:{jti}`, before any handler (`shared/src/construct_server/revocation.rs`,
+  fail-closed with `UNAVAILABLE`; media and veil have no Redis and read the row only). Messaging
+  checks in `extract_authed_identity` against `invalidated_token:{jti}` and `revoked_device:{id}`,
+  so that a Postgres outage cannot stop delivery. A `Signal` stream asks again per frame.
+- `x-device-id` never names a device: a token without a `device_id` claim has none.
 
 ### Account Recovery
 

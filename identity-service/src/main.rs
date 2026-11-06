@@ -265,6 +265,28 @@ fn request_token(metadata: &tonic::metadata::MetadataMap) -> Result<String, Stat
         .ok_or_else(|| Status::unauthenticated("authorization must be Bearer token"))
 }
 
+/// The identity RPCs whose handlers never read the bearer: the revocation layer leaves them alone,
+/// because they must answer whatever token a client happens to attach. `RefreshToken` and
+/// `AuthenticateDevice` are how a removed device learns it was removed, `RecoverAccount` is how an
+/// account comes back. `contract_tests` checks this list against the handlers.
+const RPCS_THAT_DO_NOT_READ_THE_BEARER: &[&str] = &[
+    "GetPowChallenge",
+    "RegisterDevice",
+    "AuthenticateDevice",
+    "RefreshToken",
+    "VerifyToken",
+    "Logout",
+    "RecoverAccount",
+    "GetRecoveryBundle",
+    "VerifyDevice",
+    "ConfirmDeviceLink",
+    "SubmitJoinRequest",
+    "CheckJoinRequestStatus",
+    "UpdateProfilePicture",
+    "CheckUsernameAvailability",
+    "GetServerTrust",
+];
+
 /// `(server_kid, server_signature_hybrid)` for a certificate, or two empty fields when there is
 /// no delegated key or it cannot sign now (logged — the Ed25519 signature still goes out, and a
 /// client that has moved to the hybrid one refuses this certificate, which is what should happen
@@ -422,6 +444,26 @@ fn acting_user(
 // AuthService implementation
 // ============================================================================
 
+impl IdentityGrpcService {
+    /// For the tokens that arrive in a request body, past the revocation layer. `Err` when the
+    /// database could not say; a token naming no device has no row to ask about.
+    async fn token_device_is_active(
+        &self,
+        claims: &construct_server_shared::auth::Claims,
+    ) -> Result<bool, ()> {
+        let Some(device_id) = claims.device_id.as_deref() else {
+            return Ok(true);
+        };
+        match construct_db::device_is_active(self.context.db_pool.as_ref(), device_id).await {
+            Ok(active) => Ok(active == Some(true)),
+            Err(e) => {
+                tracing::error!(error = %e, "Device check failed — closing");
+                Err(())
+            }
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl AuthService for IdentityGrpcService {
     async fn get_pow_challenge(
@@ -562,7 +604,8 @@ impl AuthService for IdentityGrpcService {
                 }
             }
         };
-        if invalidated {
+        let device_gone = !self.token_device_is_active(&claims).await.unwrap_or(false);
+        if invalidated || device_gone {
             return Ok(Response::new(proto::VerifyTokenResponse {
                 valid: false,
                 user_id: None,
@@ -594,6 +637,17 @@ impl AuthService for IdentityGrpcService {
             .map_err(|_| Status::unauthenticated("invalid access token"))?;
         let user_id = uuid::Uuid::parse_str(&claims.sub)
             .map_err(|_| Status::internal("invalid user id in token"))?;
+
+        // This token arrives in the body, past the revocation layer. A removed device has nothing
+        // left to sign out of, and must not get to sign the account's other devices out with
+        // `all_devices`. Success, because the sign-out it asks for has already happened.
+        let active = self
+            .token_device_is_active(&claims)
+            .await
+            .map_err(|_| Status::unavailable("Cannot verify token"))?;
+        if !active {
+            return Ok(Response::new(proto::LogoutResponse { success: true }));
+        }
 
         let app_context = Arc::new(self.context.to_app_context());
         construct_server_shared::auth_service::core::logout_user(
@@ -753,6 +807,13 @@ impl AuthService for IdentityGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let app_context = Arc::new(self.context.to_app_context());
+        // Recovery exists for the stolen phone: its token must stop reading the mailbox now.
+        construct_server_shared::auth_service::core::mark_account_devices_revoked(
+            &app_context,
+            &user_id,
+        )
+        .await
+        .map_err(app_error_to_status)?;
         construct_server_shared::auth_service::core::logout_user(
             app_context.clone(),
             user_id,
@@ -2372,6 +2433,16 @@ impl UserService for IdentityGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("user not found"))?;
 
+        // While the rows still exist to be listed. Logged, not returned, like its neighbour: the
+        // deletion matters more than the marker, and a token of a deleted account finds nothing.
+        if let Err(e) = construct_server_shared::auth_service::core::mark_account_devices_revoked(
+            &self.context.to_app_context(),
+            &user_id,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to mark devices revoked during account deletion");
+        }
         {
             let mut queue = self.context.queue.lock().await;
             if let Err(e) = queue.revoke_all_user_tokens(&user_id.to_string()).await {
@@ -3544,6 +3615,19 @@ async fn main() -> Result<()> {
 
     let grpc_ctx = identity_ctx.clone();
     let grpc_veil = veil_bridge_cert.clone();
+    let revocation = construct_server_shared::revocation::RevocationLayer::new(
+        grpc_ctx.auth_manager.clone(),
+        construct_server_shared::revocation::RevocationCheck::new(
+            grpc_ctx.db_pool.clone(),
+            Some(
+                construct_redis::manager_for(redis::Client::open(
+                    grpc_ctx.config.redis_url.as_str(),
+                )?)
+                .await?,
+            ),
+        ),
+    )
+    .with_open_methods(RPCS_THAT_DO_NOT_READ_THE_BEARER);
     tokio::spawn(async move {
         let svc = IdentityGrpcService {
             context: grpc_ctx,
@@ -3555,36 +3639,26 @@ async fn main() -> Result<()> {
             cert_signing_key,
             cert_hybrid_signer,
         };
-        if let Err(e) =
-            construct_server_shared::grpc_server(grpc_keepalive_secs, grpc_keepalive_timeout_secs)
-                .add_service(
-                    AuthServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
-                )
-                .add_service(
-                    DeviceServiceServer::new(svc.clone())
-                        .max_decoding_message_size(IDENTITY_DECODE),
-                )
-                .add_service(
-                    DeviceLinkServiceServer::new(svc.clone())
-                        .max_decoding_message_size(IDENTITY_DECODE),
-                )
-                .add_service(
-                    UserServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
-                )
-                .add_service(
-                    InviteServiceServer::new(svc).max_decoding_message_size(IDENTITY_DECODE),
-                )
-                // Unauthenticated, like AuthService: a client asks before it has a session.
-                .add_service(ServerTrustServiceServer::new(
-                    server_trust_rpc::ServerTrustGrpc::new(
-                        construct_crypto::server_trust::trust_dir(),
-                    ),
-                ))
-                .serve_with_incoming_shutdown(
-                    grpc_incoming,
-                    construct_server_shared::shutdown_signal(),
-                )
-                .await
+        if let Err(e) = construct_server_shared::revocation::guarded_grpc_server(
+            grpc_keepalive_secs,
+            grpc_keepalive_timeout_secs,
+            revocation,
+        )
+        .add_service(AuthServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE))
+        .add_service(
+            DeviceServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
+        )
+        .add_service(
+            DeviceLinkServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE),
+        )
+        .add_service(UserServiceServer::new(svc.clone()).max_decoding_message_size(IDENTITY_DECODE))
+        .add_service(InviteServiceServer::new(svc).max_decoding_message_size(IDENTITY_DECODE))
+        // Unauthenticated, like AuthService: a client asks before it has a session.
+        .add_service(ServerTrustServiceServer::new(
+            server_trust_rpc::ServerTrustGrpc::new(construct_crypto::server_trust::trust_dir()),
+        ))
+        .serve_with_incoming_shutdown(grpc_incoming, construct_server_shared::shutdown_signal())
+        .await
         {
             tracing::error!(error = %e, "Identity gRPC server failed");
         }

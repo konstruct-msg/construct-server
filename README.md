@@ -80,7 +80,8 @@ Delivery invariants:
 
 - Access tokens are PASETO v4.public only (since 0.20.0). Legacy RS256 JWT was
   removed; a token that is not v4.public is rejected.
-- Logout and revoke use Redis blocklist keys: `invalidated_token:{jti}`.
+- A token is worth what its device is worth: every service refuses a verified token whose device
+  was removed, before any handler. Logout also blocklists the token: `invalidated_token:{jti}`.
 - Messaging requires a bearer token. Optional `x-user-id` and `x-device-id`
   headers must match token claims.
 - Sealed sender redemption is controlled by `MSG_STEALTH_TOKEN_POLICY`:

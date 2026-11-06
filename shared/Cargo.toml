@@ -27,6 +27,8 @@ construct-context        = { path = "../crates/construct-context" }
 tracing = {workspace = true}
 uuid = {workspace = true}
 axum = {workspace = true}
+redis = {workspace = true}
+tower = {workspace = true}
 
 # HTTP and gRPC
 tonic = "0.14.4"
@@ -39,6 +41,9 @@ default = []
 
 [dev-dependencies]
 ed25519-compact = { version = "2.0", features = ["pem", "random"] }
+construct-redis = { path = "../crates/construct-redis" }
+sqlx = {workspace = true}
+tokio = {workspace = true}
 
 [build-dependencies]
 tonic-prost-build = "0.14.4"
