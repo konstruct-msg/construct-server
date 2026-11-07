@@ -534,9 +534,14 @@ impl MessagingService for MessagingGrpcService {
             // path does not surface here as `Err`. `charge_window` degrades to per-instance
             // limits instead (sends continue, counted as `sentinel_degraded*` fail-opens), so
             // only errors before that point (trust lookup, block lookup) reach this arm.
-            let (allowed, reason, retry_after) = match sentinel
-                .check_send_permission(sender_device_id, target, Some(&sender_id.to_string()))
-                .await
+            let (allowed, reason, retry_after) = match core::send_permission(
+                sentinel,
+                sender_device_id,
+                target,
+                &sender_id.to_string(),
+                &recipient.user_id,
+            )
+            .await
             {
                 Ok(perm) => (perm.allowed, perm.denial_reason, perm.retry_after_seconds),
                 Err(e) => {

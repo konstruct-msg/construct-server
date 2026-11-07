@@ -3,4 +3,6 @@
 // (`construct_server_shared::sentinel_service::SentinelCore`) keep working
 // unchanged. The gRPC transport lives in messaging-service.
 
-pub use construct_sentinel_service::{ProtectionStats, SendPermission, SentinelCore, TrustLevel};
+pub use construct_sentinel_service::{
+    OWN_COPY_LIMIT_HOUR, ProtectionStats, SendPermission, SentinelCore, TrustLevel,
+};

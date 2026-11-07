@@ -235,6 +235,9 @@ fn secs_until_next_utc_day(now: u64) -> u64 {
 
 /// The hourly limit, then the daily fanout. `Some((limit, retry))` names the limit that
 /// refused the send; a send the hourly limit refuses is not counted toward fanout.
+///
+/// A copy to the sender's own devices counts toward neither: it reaches nobody else, and
+/// Sentinel keeps its ceiling (`check_own_copy_permission`).
 pub async fn check_send_limits(
     redis: &mut ConnectionManager,
     trust: TrustLevel,
@@ -242,6 +245,9 @@ pub async fn check_send_limits(
     sender_id: &str,
     recipient_id: &str,
 ) -> Option<(&'static str, RetryAfter)> {
+    if crate::core::is_own_copy(sender_id, recipient_id) {
+        return None;
+    }
     if let Err(retry) = check_hourly_rate(redis, sender_id, trust.hourly_limit(config)).await {
         return Some(("hourly", retry));
     }
