@@ -38,6 +38,13 @@ const BLOCKS_CACHE_TTL: i64 = 300; // 5 minutes
 const REPORT_RATE_LIMIT: i64 = 10; // max reports per reporter per day
 const REPORTS_WINDOW_TTL: u64 = 24 * 3600; // 24 hours
 const MSG_WINDOW_TTL: i64 = 3600; // hourly message window
+/// Copies per hour one account may send to its own devices (todo/277). They are not messages to
+/// anyone: a person with two other devices would spend the message limit on them twice per message,
+/// and `New`, ten an hour, is what a device has for 48 hours after it is linked. They still need a
+/// ceiling, because the server cannot read them, and without one they are free storage and a free
+/// channel for a modified client. 2000 envelopes of 64 KiB is 128 MiB an hour, the burst Signal
+/// allows per destination (`INBOUND_MESSAGE_BYTES`); Signal has no message limit on these at all.
+pub const OWN_COPY_LIMIT_HOUR: i32 = 2000;
 
 fn msg_key(device_id: &str) -> String {
     format!("sentinel:rate:msg:{}", device_id)
@@ -92,6 +99,11 @@ impl TrustLevel {
             Self::Flagged => 5,
             Self::Banned => 0,
         }
+    }
+
+    /// Whether copies to the device's own account are counted apart from its messages.
+    pub fn has_own_copy_window(&self) -> bool {
+        !matches!(self, Self::Flagged | Self::Banned)
     }
 
     pub fn recipient_limit_day(&self) -> i32 {
@@ -368,6 +380,18 @@ impl SentinelCore {
         .await
     }
 
+    /// The copies of an account, across its devices.
+    /// Key: `sentinel:rate:own_copy:user:{user_id}`
+    pub async fn consume_own_copy_quota(&self, user_id: &str) -> QuotaOutcome {
+        self.charge_window(
+            &format!("sentinel:rate:own_copy:user:{}", user_id),
+            OWN_COPY_LIMIT_HOUR,
+            MSG_WINDOW_TTL,
+            "sentinel_own_copy_quota",
+        )
+        .await
+    }
+
     /// Charge one send to a rate-limit window, **degrading instead of denying** when
     /// Redis cannot answer.
     ///
@@ -517,6 +541,35 @@ impl SentinelCore {
             }
         }
 
+        Ok(SendPermission {
+            allowed: true,
+            denial_reason: String::new(),
+            retry_after_seconds: 0,
+        })
+    }
+
+    /// The answer for a copy to one of the caller's own devices: its own window, not the message
+    /// limit. A banned or flagged device gets no such window, or this would be the way around what
+    /// was decided about it.
+    pub async fn check_own_copy_permission(
+        &self,
+        caller_device_id: &str,
+        caller_user_id: &str,
+    ) -> Result<SendPermission> {
+        let trust = self.trust_level(caller_device_id).await?;
+        if !trust.has_own_copy_window() {
+            return self
+                .check_send_permission(caller_device_id, caller_device_id, Some(caller_user_id))
+                .await;
+        }
+        if !self.consume_own_copy_quota(caller_user_id).await.allowed {
+            self.record_violation().await;
+            return Ok(SendPermission {
+                allowed: false,
+                denial_reason: "Hourly limit on copies to own devices reached".into(),
+                retry_after_seconds: 3600,
+            });
+        }
         Ok(SendPermission {
             allowed: true,
             denial_reason: String::new(),

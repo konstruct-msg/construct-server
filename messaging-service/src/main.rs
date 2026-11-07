@@ -16,6 +16,8 @@ mod token_redeem;
 mod trust;
 
 #[cfg(test)]
+mod own_copy_limit_tests;
+#[cfg(test)]
 mod sealed_matrix_tests;
 
 use anyhow::{Context, Result};

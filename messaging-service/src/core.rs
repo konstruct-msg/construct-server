@@ -52,6 +52,36 @@ async fn fetch_recipient_device_ids(
     fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
 }
 
+/// Whether a send is addressed to the sender's own account: a copy to a sibling device. Ids
+/// compare as UUIDs, because a client's spelling of its own id is not the point.
+pub(crate) fn is_own_copy(sender_id: &str, recipient_id: &str) -> bool {
+    match (
+        uuid::Uuid::parse_str(sender_id),
+        uuid::Uuid::parse_str(recipient_id),
+    ) {
+        (Ok(sender), Ok(recipient)) => sender == recipient,
+        _ => false,
+    }
+}
+
+/// The Sentinel answer for one send, the same on both transports.
+pub(crate) async fn send_permission(
+    sentinel: &construct_server_shared::sentinel_service::SentinelCore,
+    sender_device: &str,
+    target_device: &str,
+    sender_id: &str,
+    recipient_id: &str,
+) -> anyhow::Result<construct_server_shared::sentinel_service::SendPermission> {
+    if is_own_copy(sender_id, recipient_id) {
+        return sentinel
+            .check_own_copy_permission(sender_device, sender_id)
+            .await;
+    }
+    sentinel
+        .check_send_permission(sender_device, target_device, Some(sender_id))
+        .await
+}
+
 /// What `SendMessageResponse.recipient_active_devices` says for a sealed send.
 ///
 /// **A recipient addressed by key is told about only when the envelope names one of its devices.**

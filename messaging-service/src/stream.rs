@@ -197,9 +197,14 @@ pub(crate) async fn handle_stream_request(
                     // Fails open: on Redis/internal error we allow the send
                     // through (mirrors the previous gRPC-client fail-open
                     // behaviour when sentinel-service was unreachable).
-                    let (allowed, reason, retry_after) = match sentinel
-                        .check_send_permission(sender_device_id, target, Some(&uid.to_string()))
-                        .await
+                    let (allowed, reason, retry_after) = match crate::core::send_permission(
+                        sentinel,
+                        sender_device_id,
+                        target,
+                        &uid.to_string(),
+                        &recipient_id,
+                    )
+                    .await
                     {
                         Ok(perm) => (perm.allowed, perm.denial_reason, perm.retry_after_seconds),
                         Err(e) => {

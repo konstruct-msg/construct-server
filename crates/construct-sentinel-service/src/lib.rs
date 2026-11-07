@@ -15,7 +15,9 @@
 
 pub mod core;
 
-pub use core::{ProtectionStats, QuotaOutcome, SendPermission, SentinelCore, TrustLevel};
+pub use core::{
+    OWN_COPY_LIMIT_HOUR, ProtectionStats, QuotaOutcome, SendPermission, SentinelCore, TrustLevel,
+};
 // Moved to construct-rate-limit (2026-09-13) so the sealed-sender door can reach it
 // without depending on this service crate. Re-exported so callers here are unchanged.
 pub use construct_rate_limit::{BreakerState, DegradedLimiter};
