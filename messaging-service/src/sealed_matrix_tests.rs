@@ -516,6 +516,96 @@ async fn k2_an_unknown_key_address_is_accepted_and_not_disclosed() {
     );
 }
 
+// ── K3: under enforce, a key address pays the same whether an account has it ──
+
+/// `address` with the Privacy Pass token `nonce` pays with, sealed for this server.
+fn to_key_with_token(
+    h: &TestHarness,
+    address: &str,
+    nonce: Option<&[u8; 32]>,
+) -> core_proto::SealedSenderEnvelope {
+    let mut sealed = build_sealed_envelope_to(address, &random_bytes32());
+    if let Some(nonce) = nonce {
+        let token = issue_client_token(&h.token_issuer_key, nonce);
+        let mut inner = core_proto::SealedInner::decode(sealed.sealed_inner.as_ref()).unwrap();
+        inner.token_nonce = nonce.to_vec();
+        inner.token_bytes = seal_token_for_server(&token, &h.token_enc_secret);
+        sealed.sealed_inner = inner.encode_to_vec();
+    }
+    sealed
+}
+
+/// What a sender learns from one send: refused with which label, or accepted with which verdict.
+async fn answer(h: &TestHarness, sealed: &core_proto::SealedSenderEnvelope) -> String {
+    match dispatch_sealed_sender(&h.ctx, sealed).await {
+        Ok(resp) => format!(
+            "accepted success={} verdict={} devices={}",
+            resp.success,
+            resp.intake_verdict,
+            resp.recipient_active_devices.len()
+        ),
+        Err(e) => match e.downcast_ref::<TokenRejected>() {
+            Some(rejected) => format!("rejected {}", rejected.label),
+            None => format!("error {e}"),
+        },
+    }
+}
+
+/// Without a token, an address with an account here was refused and one without was accepted —
+/// a free answer to "does this key have an account" (todo/266). Both now pay alike: refused
+/// without a token, accepted with one, the same verdict either way.
+#[tokio::test]
+#[serial]
+async fn k3_under_enforce_a_key_address_pays_alike_with_or_without_an_account() {
+    let Some(h) = build_harness(StealthTokenPolicy::Enforce).await else {
+        return;
+    };
+    let (user_id, device_ids, known) = account_addressed_by_key(&h).await;
+    let unknown = format!("ed25519:{}", hex::encode(random_bytes32()));
+
+    let without = (
+        answer(&h, &to_key_with_token(&h, &known, None)).await,
+        answer(&h, &to_key_with_token(&h, &unknown, None)).await,
+    );
+    let (n1, n2) = (random_bytes32(), random_bytes32());
+    let with = (
+        answer(&h, &to_key_with_token(&h, &known, Some(&n1))).await,
+        answer(&h, &to_key_with_token(&h, &unknown, Some(&n2))).await,
+    );
+    let spent = (
+        answer(&h, &to_key_with_token(&h, &known, Some(&n1))).await,
+        answer(&h, &to_key_with_token(&h, &unknown, Some(&n2))).await,
+    );
+
+    let mut conn = h.ctx.redis_conn.clone();
+    let spent_keys: Vec<String> = [n1, n2]
+        .iter()
+        .map(|n| format!("spent:{}", hex::encode(Sha256::digest(n))))
+        .collect();
+    let _: () = redis::cmd("DEL")
+        .arg(spent_keys)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(());
+    forget_account(&h, user_id, &device_ids).await;
+
+    assert_eq!(without.0, "rejected missing_token");
+    assert_eq!(
+        without.1, without.0,
+        "no token: the same answer with or without an account"
+    );
+    assert!(with.0.starts_with("accepted success=true"), "{}", with.0);
+    assert_eq!(
+        with.1, with.0,
+        "a token: the same answer with or without an account"
+    );
+    assert_eq!(spent.0, "rejected double_spent");
+    assert_eq!(
+        spent.1, spent.0,
+        "a spent token: the same answer either way"
+    );
+}
+
 // ── I1: warn + no token still delivers ───────────────────────────────────────
 
 #[tokio::test]
