@@ -252,7 +252,13 @@ pub(crate) async fn dispatch_sealed_sender(
     // Resolve it to the internal UUID, then keep all delivery and recipient-bound credential
     // logic UUID-based.
     let addressed_by_key = recipient_address.starts_with("ed25519:");
-    let recipient_id = if addressed_by_key {
+    // A key no account here has is charged and answered as one an account has (todo/266): the
+    // intake check and the token gate below run against the address itself, a keyspace nobody
+    // publishes to and nobody is delivered to, and only then is the envelope dropped. Until
+    // 2026-11-08 it left before the gate, so under `enforce` a send without a token was refused
+    // for a key with an account and accepted for one without — whether a key has an account,
+    // answered for free.
+    let (recipient_id, no_account_for_key) = if addressed_by_key {
         let parsed = construct_server_shared::UserId::parse(&recipient_address)
             .map_err(|e| anyhow::anyhow!("Invalid sealed recipient address: {e}"))?;
         let Some(route_id) = parsed.route_id() else {
@@ -263,47 +269,17 @@ pub(crate) async fn dispatch_sealed_sender(
                 construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
                     .with_label_values(&["resolved"])
                     .inc();
-                recipient.id.to_string()
+                (recipient.id.to_string(), false)
             }
             None => {
-                // Answered exactly as a send to an unknown UUID is — accepted — so that an
-                // unauthenticated sender cannot use this path to learn which keys have accounts
-                // here. It is dropped instead of delivered: there is no mailbox to write to.
                 construct_metrics::MSG_SEALED_KEY_ADDRESS_TOTAL
                     .with_label_values(&["unresolved"])
                     .inc();
-                // The verdict must not become the oracle the `success` above refuses to be: an
-                // existing account answers NONE / NOT_ACCEPTED / UNCHECKED, so this one runs the
-                // same check against a keyspace nobody publishes to (the address itself, hashed
-                // like any account) and answers what an account with no tags would.
-                let intake_verdict = if policy == StealthTokenPolicy::Off {
-                    proto::IntakeVerdict::Unspecified
-                } else {
-                    let mut conn = context.redis_conn.clone();
-                    crate::intake::check_intake_credential(
-                        &mut conn,
-                        context.token_enc_static_secret.as_ref(),
-                        &sealed_inner.intake_tag_sealed,
-                        &recipient_address,
-                        now_unix,
-                    )
-                    .await
-                    .verdict()
-                };
-                return Ok(proto::SendMessageResponse {
-                    message_id,
-                    message_number: 0,
-                    server_timestamp: chrono::Utc::now().timestamp_millis(),
-                    success: true,
-                    error: None,
-                    attempt_id: None,
-                    intake_verdict: intake_verdict as i32,
-                    recipient_active_devices: Vec::new(),
-                });
+                (recipient_address, true)
             }
         }
     } else {
-        recipient_address
+        (recipient_address, false)
     };
 
     // ── Privacy Pass token redemption (stealth-sealed-sender-v2 Phase 1) ───
@@ -421,6 +397,21 @@ pub(crate) async fn dispatch_sealed_sender(
                 }
             }
         } // if intake.owes_token()
+    }
+
+    if no_account_for_key {
+        // Paid for, and answered as an account with no device named would be: accepted, the
+        // verdict the check above gave, no devices. Dropped: there is no mailbox to write to.
+        return Ok(proto::SendMessageResponse {
+            message_id,
+            message_number: 0,
+            server_timestamp: chrono::Utc::now().timestamp_millis(),
+            success: true,
+            error: None,
+            attempt_id: None,
+            intake_verdict: intake_verdict as i32,
+            recipient_active_devices: Vec::new(),
+        });
     }
 
     // The one device this envelope was encrypted for, when the sender named it.
