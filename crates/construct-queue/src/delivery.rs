@@ -7,7 +7,9 @@
 use anyhow::{Context, Result};
 use construct_config::{Config, SECONDS_PER_DAY};
 use construct_redis::{RedisClient, StreamReadOptions};
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
+
+type MailboxEntries = Vec<(String, Option<construct_message::types::MessageEnvelope>)>;
 
 /// What one fan-out actually wrote, and whether the recipient was live when it ran.
 ///
@@ -68,26 +70,7 @@ impl<'a> DeliveryManager<'a> {
             .read_stream_messages(&stream_key, since_id, count)
             .await?;
 
-        // Parse messages. Unparseable entries return None so callers advance stream_id
-        // past them without delivering garbage to the client.
-        let mut result = Vec::new();
-        for (stream_id, fields) in messages {
-            match self.parse_stream_message(fields, user_id) {
-                Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
-                Ok(None) => result.push((stream_id, None)), // wrong recipient, still advance
-                Err(e) => {
-                    tracing::warn!(
-                        stream_id = %stream_id,
-                        user_id = %user_id,
-                        error = %e,
-                        "Skipping unparseable Redis stream entry (re-send message or DEL stream if written with broken to_vec)"
-                    );
-                    result.push((stream_id, None)); // advance past corrupt entry
-                }
-            }
-        }
-
-        Ok(result)
+        Ok(Self::parse_stream_entries(messages, user_id, None))
     }
 
     /// Read messages from a Redis Stream using XREAD
@@ -97,25 +80,7 @@ impl<'a> DeliveryManager<'a> {
         since_id: Option<&str>,
         count: usize,
     ) -> Result<Vec<(String, HashMap<String, Vec<u8>>)>> {
-        // Validate Redis Stream ID format: {timestamp}-{sequence} (e.g., "1707584371151-0")
-        // Bare integer timestamps (e.g., "1772726016") are normalized to "{ts}-0".
-        // If format is completely invalid (e.g., UUID), reset to "0".
-        let normalized;
-        let start_id = if let Some(id) = since_id {
-            if let Some(norm) = Self::normalize_stream_id(id) {
-                normalized = norm;
-                normalized.as_str()
-            } else {
-                tracing::warn!(
-                    stream_key = %stream_key,
-                    invalid_id = %id,
-                    "Invalid Redis Stream ID format - expected '{{timestamp}}-{{sequence}}', resetting to '0'"
-                );
-                "0"
-            }
-        } else {
-            "0"
-        };
+        let start_id = Self::stream_start_id(stream_key, since_id);
 
         // Use construct-redis xread_binary for binary data (MessagePack)
         let options = StreamReadOptions {
@@ -125,14 +90,13 @@ impl<'a> DeliveryManager<'a> {
 
         let entries = match self
             .client
-            .xread_binary(&[(stream_key, start_id)], options)
+            .xread_binary(&[(stream_key, start_id.as_ref())], options)
             .await
         {
             Ok(entries) => entries,
             Err(e) => {
                 // Check if it's a "stream doesn't exist" error
-                let err_str = e.to_string();
-                if err_str.contains("no such key") || err_str.contains("WRONGTYPE") {
+                if Self::empty_stream_error(&e) {
                     // Stream doesn't exist or is empty
                     return Ok(vec![]);
                 } else {
@@ -174,32 +138,125 @@ impl<'a> DeliveryManager<'a> {
         }
 
         // Check format: {timestamp}-{sequence}
-        let parts: Vec<&str> = id.split('-').collect();
-        if parts.len() != 2 {
+        let Some((timestamp, sequence)) = id.split_once('-') else {
             return false;
-        }
-
-        // Both parts must be valid numbers
-        parts[0].parse::<u64>().is_ok() && parts[1].parse::<u64>().is_ok()
+        };
+        timestamp.parse::<u64>().is_ok() && sequence.parse::<u64>().is_ok()
     }
 
-    /// Normalize a Redis Stream ID. Bare u64 timestamps (e.g., "1772726016") are
-    /// treated as "{timestamp}-0" per Redis convention.
-    fn normalize_stream_id(id: &str) -> Option<String> {
+    /// Keep the existing cursor normalization, borrowing already-valid offsets.
+    fn stream_start_id<'s>(stream_key: &str, since_id: Option<&'s str>) -> Cow<'s, str> {
+        let Some(id) = since_id else {
+            return Cow::Borrowed("0");
+        };
         if Self::is_valid_stream_id(id) {
-            return Some(id.to_string());
+            return Cow::Borrowed(id);
         }
-        // Accept bare integer timestamps: "1772726016" → "1772726016-0"
         if id.parse::<u64>().is_ok() {
-            return Some(format!("{}-0", id));
+            return Cow::Owned(format!("{id}-0"));
         }
-        None
+        tracing::warn!(
+            stream_key = %stream_key, invalid_id = %id,
+            "Invalid Redis Stream ID format - expected '{{timestamp}}-{{sequence}}', resetting to '0'"
+        );
+        Cow::Borrowed("0")
+    }
+
+    fn empty_stream_error(error: &redis::RedisError) -> bool {
+        let text = error.to_string();
+        text.contains("no such key") || text.contains("WRONGTYPE")
+    }
+
+    /// Preserve source identity and independent offsets in one nonblocking XREAD. A wrong-type
+    /// source used to be empty without hiding the healthy source, so retry separately on that
+    /// exceptional path; a multi-stream XREAD cannot report per-source errors.
+    pub(crate) async fn read_mailbox_streams(
+        &mut self,
+        user_id: &str,
+        device_id: &str,
+        since_id: Option<&str>,
+        user_since_id: Option<&str>,
+        count: usize,
+    ) -> Result<(MailboxEntries, MailboxEntries)> {
+        let user_key = format!("{}:offline:{user_id}", self.delivery_queue_prefix);
+        let device_key = format!("{user_key}:{device_id}");
+        let device_start = Self::stream_start_id(&device_key, since_id);
+        let user_start = Self::stream_start_id(&user_key, user_since_id);
+        let reply = self
+            .client
+            .xread_binary_grouped(
+                &[
+                    (&device_key, device_start.as_ref()),
+                    (&user_key, user_start.as_ref()),
+                ],
+                StreamReadOptions {
+                    block: None,
+                    count: Some(count as u64),
+                },
+            )
+            .await;
+        let streams = match reply {
+            Ok(streams) => streams,
+            Err(e) if Self::empty_stream_error(&e) => {
+                let device = self
+                    .read_device_messages_from_stream(
+                        user_id,
+                        device_id,
+                        Some(device_start.as_ref()),
+                        count,
+                    )
+                    .await?;
+                let user = self
+                    .read_user_messages_from_stream(user_id, Some(user_start.as_ref()), count)
+                    .await?;
+                return Ok((device, user));
+            }
+            Err(e) => anyhow::bail!("Failed to read stream: {e}"),
+        };
+        let (mut device, mut user) = (Vec::new(), Vec::new());
+        for stream in streams {
+            let (target, device_id) = if stream.key == device_key {
+                (&mut device, Some(device_id))
+            } else if stream.key == user_key {
+                (&mut user, None)
+            } else {
+                anyhow::bail!("Unexpected source in mailbox XREAD reply");
+            };
+            *target = Self::parse_stream_entries(
+                stream.entries.into_iter().map(|e| (e.id, e.fields)),
+                user_id,
+                device_id,
+            );
+        }
+        Ok((device, user))
+    }
+
+    fn parse_stream_entries(
+        entries: impl IntoIterator<Item = (String, HashMap<String, Vec<u8>>)>,
+        user_id: &str,
+        device_id: Option<&str>,
+    ) -> MailboxEntries {
+        entries.into_iter().map(|(id, fields)| {
+            let envelope = match Self::parse_stream_message(fields, user_id) {
+                Ok(envelope) => envelope,
+                Err(e) => {
+                    if let Some(device_id) = device_id {
+                        tracing::debug!(stream_id = %id, user_id, device_id, error = %e,
+                            "Skipping unparseable entry in device stream");
+                    } else {
+                        tracing::warn!(stream_id = %id, user_id, error = %e,
+                            "Skipping unparseable Redis stream entry (re-send message or DEL stream if written with broken to_vec)");
+                    }
+                    None
+                }
+            };
+            (id, envelope)
+        }).collect()
     }
 
     /// Parse stream message fields into MessageEnvelope
     /// Filters by recipient_id to ensure user only gets their messages
     fn parse_stream_message(
-        &self,
         fields: HashMap<String, Vec<u8>>,
         user_id: &str,
     ) -> Result<Option<construct_message::types::MessageEnvelope>> {
@@ -207,8 +264,7 @@ impl<'a> DeliveryManager<'a> {
         let message_id_bytes = fields
             .get("message_id")
             .ok_or_else(|| anyhow::anyhow!("Missing message_id in stream message"))?;
-        let _message_id =
-            String::from_utf8(message_id_bytes.clone()).context("Invalid UTF-8 in message_id")?;
+        std::str::from_utf8(message_id_bytes).context("Invalid UTF-8 in message_id")?;
 
         let payload = fields
             .get("payload")
@@ -458,25 +514,11 @@ impl<'a> DeliveryManager<'a> {
             .read_stream_messages(&stream_key, since_id, count)
             .await?;
 
-        let mut result = Vec::new();
-        for (stream_id, fields) in messages {
-            match self.parse_stream_message(fields, user_id) {
-                Ok(Some(envelope)) => result.push((stream_id, Some(envelope))),
-                Ok(None) => result.push((stream_id, None)),
-                Err(e) => {
-                    tracing::debug!(
-                        stream_id = %stream_id,
-                        user_id = %user_id,
-                        device_id = %device_id,
-                        error = %e,
-                        "Skipping unparseable entry in device stream"
-                    );
-                    result.push((stream_id, None));
-                }
-            }
-        }
-
-        Ok(result)
+        Ok(Self::parse_stream_entries(
+            messages,
+            user_id,
+            Some(device_id),
+        ))
     }
 
     // ── Message deduplication ────────────────────────────────────────────────
@@ -749,5 +791,77 @@ impl<'a> DeliveryManager<'a> {
             "Purged queued messages from blocked sender"
         );
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use construct_message::MessageEnvelope;
+
+    #[test]
+    fn borrowed_message_id_validation_keeps_the_parser_contract() {
+        let mut envelope = MessageEnvelope::new_key_sync("alice".into(), "bob".into());
+        envelope.message_id = "envelope-id".into();
+        envelope.encrypted_payload = vec![0, 255, 128];
+        let payload = rmp_serde::encode::to_vec_named(&envelope).unwrap();
+        let fields = |id: &[u8]| {
+            HashMap::from([
+                ("message_id".into(), id.to_vec()),
+                ("payload".into(), payload.clone()),
+            ])
+        };
+        // This field was validated, not used as the E2E/envelope identity. Empty UTF-8 stays valid.
+        for id in [b"different-transport-id".as_slice(), b""] {
+            let parsed = DeliveryManager::parse_stream_message(fields(id), "bob")
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed.message_id, "envelope-id");
+            assert_eq!(parsed.encrypted_payload, [0, 255, 128]);
+        }
+        assert!(DeliveryManager::parse_stream_message(fields(&[255]), "bob").is_err());
+        assert!(DeliveryManager::parse_stream_message(HashMap::new(), "bob").is_err());
+        assert!(
+            DeliveryManager::parse_stream_message(
+                HashMap::from([("message_id".into(), b"id".to_vec()),]),
+                "bob"
+            )
+            .is_err()
+        );
+        assert!(
+            DeliveryManager::parse_stream_message(
+                HashMap::from([
+                    ("message_id".into(), b"id".to_vec()),
+                    ("payload".into(), vec![255]),
+                ]),
+                "bob"
+            )
+            .is_err()
+        );
+        assert!(
+            DeliveryManager::parse_stream_message(fields(b"id"), "someone-else")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn normalized_read_offsets_keep_special_and_invalid_id_behavior() {
+        for id in ["0", "$", "*", "100-0", "100-42"] {
+            let normalized = DeliveryManager::stream_start_id("mailbox", Some(id));
+            assert_eq!(normalized, id);
+            assert!(matches!(normalized, Cow::Borrowed(_)));
+        }
+        assert_eq!(
+            DeliveryManager::stream_start_id("mailbox", Some("100")),
+            "100-0"
+        );
+        for invalid in ["", "not-an-id", "1-2-3", "-1", "1-", "18446744073709551616"] {
+            assert_eq!(
+                DeliveryManager::stream_start_id("mailbox", Some(invalid)),
+                "0"
+            );
+        }
+        assert_eq!(DeliveryManager::stream_start_id("mailbox", None), "0");
     }
 }
