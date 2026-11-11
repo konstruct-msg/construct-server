@@ -232,9 +232,11 @@ async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
     build_harness_on(policy, &redis_url(), &redis_url()).await
 }
 
-/// `queue_redis` carries the mailbox and the auth blocklist (`MessageQueue`); `abuse_redis` the
-/// standalone connection the sealed path keeps its anti-abuse state on — delivery tags, intake
-/// tags, spent tokens. Two addresses so a test can take one down and keep the other.
+/// `queue_redis` carries the mailbox (`MessageQueue`); `abuse_redis` the standalone connection
+/// everything that does not need the queue mutex runs on — the sealed path's anti-abuse state
+/// (delivery tags, intake tags, spent tokens) and, since the auth blocklist moved off the mutex, the
+/// token blocklist too. Two addresses so a test can take one down and keep the other. In production
+/// both are clones of the same `ConnectionManager` (`main.rs`: `message_queue.clone_redis_connection()`).
 async fn build_harness_on(
     policy: StealthTokenPolicy,
     queue_redis: &str,
@@ -1394,7 +1396,9 @@ async fn del(conn: &mut redis::aio::ConnectionManager, keys: &[String]) {
 async fn a1_auth_fails_closed_when_the_blocklist_cannot_be_read() {
     use crate::grpc::extract_authed_identity;
     let proxy = CuttableRedis::start().await;
-    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+    // The fault goes on the connection the blocklist is read through, not the mailbox's: the two
+    // reads are one `MGET` on `redis_conn` since the auth path left the queue mutex.
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
     let bearer = |token: &str| {
@@ -2531,18 +2535,22 @@ async fn u1_send_message_refuses_past_the_hourly_limit() {
 /// With the store holding the limits down, `SendMessage` still delivers, and says so on the
 /// fail-open counter. Before this test the counter could not move: `redis_conn()` is always `Ok`
 /// and the limit scripts swallowed their errors, so the outage alert never saw these skips.
-/// Mutations: drop both counts in `trust.rs`, or refuse on a script error.
+///
+/// The fault is aimed at the limit commands (`rate:msg:`), not at the connection: the blocklist
+/// read that authenticates the send shares that connection, and refusing an unauthenticated send
+/// is the right answer — what this test holds is that the *limits* failing never refuses a send
+/// that was allowed. Mutations: drop both counts in `trust.rs`, or refuse on a script error.
 #[tokio::test]
 #[serial]
 async fn f1_send_message_delivers_and_counts_when_the_limit_store_is_down() {
-    let proxy = CuttableRedis::start().await;
+    let proxy = FaultyRedis::start().await;
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
     let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
     let before = abuse_fail_open("rate_trust");
 
-    proxy.cut();
+    proxy.fail_commands_naming("rate:msg:");
     let resp = unary_send(
         &h,
         sender,
@@ -2561,10 +2569,13 @@ async fn f1_send_message_delivers_and_counts_when_the_limit_store_is_down() {
 
 /// A Sentinel that cannot read its store lets the send through: an abuse-control outage is not a
 /// delivery outage. Mutation: refuse in the `Err` arm of `send_message` — the send is refused.
+///
+/// Aimed at Sentinel's block cache (`sentinel:blocks:`) for the same reason `f1` aims at the limit
+/// keys: the connection it runs on is also the one the send authenticated on.
 #[tokio::test]
 #[serial]
 async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
-    let proxy = CuttableRedis::start().await;
+    let proxy = FaultyRedis::start().await;
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
@@ -2572,7 +2583,7 @@ async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
     let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
     let before = abuse_fail_open("sentinel");
 
-    proxy.cut();
+    proxy.fail_commands_naming("sentinel:blocks:");
     let resp = unary_send(
         &h,
         sender,
@@ -2597,7 +2608,9 @@ async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
 async fn a2_auth_fails_closed_when_only_the_device_revocation_cannot_be_read() {
     use crate::grpc::extract_authed_identity;
     let proxy = FaultyRedis::start().await;
-    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+    // Same wiring as `a1`: `FaultyRedis` refuses any command naming the armed fragment, so the
+    // device marker's read fails while the mailbox and the token's own key stay readable.
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
     let bearer = |token: &str| {
@@ -2628,6 +2641,42 @@ async fn a2_auth_fails_closed_when_only_the_device_revocation_cannot_be_read() {
         extract_authed_identity(&bearer(&plain), &h.ctx).await,
         Some((user, None))
     );
+}
+
+/// The cheapest check every authenticated call makes does not queue behind the mailbox. An open
+/// `MessageStream` already keeps its own queue clone for the same reason, and a send holds the mutex
+/// across a whole per-device fan-out — so reading the blocklist under it made authentication wait
+/// for somebody else's delivery.
+///
+/// Mutation: read the two markers through `context.queue.lock()` — this call then times out behind
+/// the guard held below instead of answering.
+#[tokio::test]
+#[serial]
+async fn a3_auth_does_not_wait_on_the_mailbox_mutex() {
+    use crate::grpc::extract_authed_identity;
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let user = uuid::Uuid::new_v4();
+    let device = random_device();
+    let (token, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&user, Some(&device))
+        .expect("device token");
+    let mut md = tonic::metadata::MetadataMap::new();
+    md.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    let held = h.ctx.queue.lock().await;
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        extract_authed_identity(&md, &h.ctx),
+    )
+    .await
+    .expect("the blocklist read must not wait for the mailbox mutex");
+    drop(held);
+
+    assert_eq!(answer, Some((user, Some(device))));
 }
 
 /// The dedup reads fail while the mailbox works: the message is written and both fail-opens are

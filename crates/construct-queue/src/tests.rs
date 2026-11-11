@@ -845,3 +845,101 @@ async fn push_outstanding_marks_once_until_cleared() {
     assert!(ttl > 0 && ttl <= PUSH_OUTSTANDING_TTL_SECONDS as i64);
     queue.clear_push_outstanding(&device).await.unwrap();
 }
+
+// ============================================================================
+// Access-token blocklist: one read, the same answer the two reads gave
+// ============================================================================
+
+/// The two markers read as a single `MGET` must answer exactly what the two `EXISTS` in sequence
+/// answered, in every combination. The behaviour this replaced is the contract; the saved round
+/// trip is only worth having if it changes nothing.
+///
+/// Mutation: read only the token slot, or drop the device slot — a row below flips. Mutation:
+/// swap the two fields — the `(false, true)` row flips.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn blocklist_standing_answers_what_the_two_separate_reads_answered() {
+    async fn put(conn: &mut redis::aio::ConnectionManager, key: &str) {
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("1")
+            .query_async(conn)
+            .await
+            .unwrap();
+    }
+
+    async fn clear(conn: &mut redis::aio::ConnectionManager, keys: &[String]) {
+        let _: () = redis::cmd("DEL").arg(keys).query_async(conn).await.unwrap();
+    }
+
+    /// What the removed pair of `EXISTS` calls answered, asked the same way it was asked.
+    async fn two_separate_reads(
+        conn: &mut redis::aio::ConnectionManager,
+        token_key: &str,
+        device_key: &str,
+        names_a_device: bool,
+    ) -> (bool, bool) {
+        let token: bool = redis::cmd("EXISTS")
+            .arg(token_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        let revoked: bool = if names_a_device {
+            redis::cmd("EXISTS")
+                .arg(device_key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap()
+        } else {
+            false
+        };
+        (token, revoked)
+    }
+
+    let config = get_test_config();
+    let queue = MessageQueue::new(&config).await.expect("queue");
+    let mut conn = queue.clone_redis_connection();
+    let suffix = std::process::id();
+    let jti = format!("test_blocklist_jti_{suffix}");
+    let device = format!("test_blocklist_device_{suffix}");
+    // Per-test keys on a shared Redis: no FLUSHDB.
+    let token_key = invalidated_token_key(&jti);
+    let device_key = revoked_device_key(&device);
+    let keys = [token_key.clone(), device_key.clone()];
+
+    for (token_set, device_set) in [(false, false), (true, false), (false, true), (true, true)] {
+        clear(&mut conn, &keys).await;
+        if token_set {
+            put(&mut conn, &token_key).await;
+        }
+        if device_set {
+            put(&mut conn, &device_key).await;
+        }
+        let expected = two_separate_reads(&mut conn, &token_key, &device_key, true).await;
+        let standing = blocklist_standing(&mut conn, &jti, Some(&device))
+            .await
+            .expect("one read of two keys");
+        assert_eq!(
+            (standing.token_invalidated, standing.device_revoked),
+            expected,
+            "token set: {token_set}, device set: {device_set}"
+        );
+        assert_eq!(standing.is_revoked(), expected.0 || expected.1);
+    }
+
+    // A token that names no device asks about one key. The device marker is set below and must
+    // not reach an answer about a token that never mentioned a device.
+    clear(&mut conn, &keys).await;
+    put(&mut conn, &device_key).await;
+    for device_arg in [None, Some("")] {
+        let standing = blocklist_standing(&mut conn, &jti, device_arg)
+            .await
+            .expect("one read of one key");
+        assert!(
+            !standing.is_revoked(),
+            "a device that was not named cannot refuse a token ({device_arg:?})"
+        );
+    }
+
+    clear(&mut conn, &keys).await;
+}

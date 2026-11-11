@@ -13,6 +13,70 @@ pub fn invalidated_token_key(jti: &str) -> String {
     format!("invalidated_token:{jti}")
 }
 
+/// Redis key of the per-device revocation marker. Written by every path that takes a device out of
+/// service, read by messaging before it delivers (`extract_authed_identity`, `poll_messages`).
+pub fn revoked_device_key(device_id: &str) -> String {
+    format!("revoked_device:{device_id}")
+}
+
+/// Where the two markers that can kill one access token stand.
+///
+/// They are two keys because they answer two different questions — this token was logged out
+/// (`invalidated_token:{jti}`) versus every token of this device is dead (`revoked_device:{device}`)
+/// — and both are asked on every authenticated call. Reading them one after the other cost two
+/// round trips on the cheapest operation the service has, so they are read together and split
+/// apart here, where the caller can still say which one refused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BlocklistStanding {
+    /// `invalidated_token:{jti}` is set: this access token was logged out.
+    pub token_invalidated: bool,
+    /// `revoked_device:{device}` is set: every token of this device is dead.
+    pub device_revoked: bool,
+}
+
+impl BlocklistStanding {
+    /// Whether anything in the answer should stop the caller.
+    pub fn is_revoked(&self) -> bool {
+        self.token_invalidated || self.device_revoked
+    }
+}
+
+/// Map one `MGET` reply onto [`BlocklistStanding`].
+///
+/// `MGET` answers one element per key, `nil` for a key that does not exist — which is exactly what
+/// `EXISTS` said about it, so a present-but-empty value still counts as set. Slot 0 is the token
+/// blocklist; slot 1 is the device marker and is only read when a device was asked about at all.
+fn standing_from_reply(names_a_device: bool, reply: &[Option<String>]) -> BlocklistStanding {
+    BlocklistStanding {
+        token_invalidated: reply.first().is_some_and(Option::is_some),
+        device_revoked: names_a_device && reply.get(1).is_some_and(Option::is_some),
+    }
+}
+
+/// Read both blocklist markers for one credential in a single round trip.
+///
+/// An empty `device_id` is no device (the same rule `normalize_device_id` applies on the delivery
+/// path): a token that names none is asked about its own blocklist entry only, so a device marker
+/// that cannot be read does not affect it. Any failure is an `Err` and the caller must close —
+/// an unreadable blocklist is not a clean one.
+pub async fn blocklist_standing(
+    conn: &mut redis::aio::ConnectionManager,
+    jti: &str,
+    device_id: Option<&str>,
+) -> Result<BlocklistStanding> {
+    let token_key = invalidated_token_key(jti);
+    let device_key = device_id.filter(|d| !d.is_empty()).map(revoked_device_key);
+
+    let mut cmd = redis::cmd("MGET");
+    cmd.arg(token_key.as_str());
+    if let Some(key) = device_key.as_deref() {
+        cmd.arg(key);
+    }
+    let reply: Vec<Option<String>> = cmd.query_async(conn).await?;
+
+    Ok(standing_from_reply(device_key.is_some(), &reply))
+}
+
 pub(crate) struct TokenManager<'a> {
     client: &'a mut RedisClient,
 }
@@ -160,7 +224,7 @@ impl<'a> TokenManager<'a> {
         device_id: &str,
         ttl_seconds: i64,
     ) -> Result<()> {
-        let key = format!("revoked_device:{}", device_id);
+        let key = revoked_device_key(device_id);
         let ttl = ttl_seconds.max(1) as u64;
         let _: () = self.client.set_ex(&key, "1", ttl).await?;
         tracing::info!(device_id = %device_id, ttl_seconds = ttl, "Marked device revoked");
@@ -169,7 +233,7 @@ impl<'a> TokenManager<'a> {
 
     /// Returns true if the device was revoked via [`mark_device_revoked`].
     pub(crate) async fn is_device_revoked(&mut self, device_id: &str) -> Result<bool> {
-        let key = format!("revoked_device:{}", device_id);
+        let key = revoked_device_key(device_id);
         let exists: bool = self.client.exists(&key).await?;
         Ok(exists)
     }
@@ -350,5 +414,62 @@ mod link_result_tests {
             Some(("u".to_string(), "d".to_string(), vec![]))
         );
         assert_eq!(decode_link_result(&enc[..2]), None);
+    }
+}
+
+#[cfg(test)]
+mod blocklist_standing_tests {
+    use super::*;
+
+    /// The key spellings are a contract with every writer and every other reader: identity writes
+    /// `invalidated_token:{jti}` on logout, and the services that check without messaging
+    /// (`construct_server_shared::revocation`) read it by the same name.
+    #[test]
+    fn the_key_spellings_are_unchanged() {
+        assert_eq!(invalidated_token_key("jti-1"), "invalidated_token:jti-1");
+        assert_eq!(revoked_device_key("dev-1"), "revoked_device:dev-1");
+    }
+
+    /// `nil` is absent and anything else is present — the same answer `EXISTS` gave, including for
+    /// a key that exists holding nothing.
+    #[test]
+    fn a_nil_slot_is_absent_and_a_present_slot_is_set() {
+        assert_eq!(
+            standing_from_reply(true, &[None, None]),
+            BlocklistStanding::default()
+        );
+        assert_eq!(
+            standing_from_reply(true, &[Some("1".into()), None]),
+            BlocklistStanding {
+                token_invalidated: true,
+                device_revoked: false
+            }
+        );
+        assert_eq!(
+            standing_from_reply(true, &[None, Some("1".into())]),
+            BlocklistStanding {
+                token_invalidated: false,
+                device_revoked: true
+            }
+        );
+        assert_eq!(
+            standing_from_reply(true, &[Some("1".into()), Some(String::new())]),
+            BlocklistStanding {
+                token_invalidated: true,
+                device_revoked: true
+            },
+            "an empty value is a key that exists, which is what EXISTS counted"
+        );
+    }
+
+    /// A token that names no device sends one key, so its reply has one slot and nothing may read
+    /// past it as a revoked device.
+    #[test]
+    fn a_device_less_read_cannot_report_a_revoked_device() {
+        assert!(!standing_from_reply(false, &[None]).device_revoked);
+        assert!(
+            !standing_from_reply(true, &[None]).device_revoked,
+            "a short reply is not a revoked device either"
+        );
     }
 }
