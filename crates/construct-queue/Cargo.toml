@@ -26,3 +26,6 @@ chrono    = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
+# `mailbox_wakeup_arrives_after_the_mailboxes_hold_the_message` subscribes to `inbox:wakeup`
+# and reads it as a stream.
+tokio-stream = "0.1"

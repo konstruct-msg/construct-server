@@ -7,8 +7,22 @@
 use anyhow::{Context, Result};
 use construct_config::{Config, SECONDS_PER_DAY};
 use construct_redis::{RedisClient, StreamReadOptions};
-use redis::AsyncCommands;
 use std::collections::HashMap;
+
+/// What one fan-out actually wrote, and whether the recipient was live when it ran.
+///
+/// Counts are of writes that **landed**, not of writes attempted: the caller's "nowhere to land"
+/// decision (no user stream, no device stream) turns on at least one mailbox holding the message,
+/// and a count of attempts would call a refused write a delivery.
+pub struct MailboxWrites {
+    /// The legacy user-stream write, when it was made at all.
+    pub user_stream: Option<bool>,
+    /// Device-stream writes that landed.
+    pub device_streams: usize,
+    /// Whether a `MessageStream` held this user when the fan-out ran. Read in the same pipeline, so
+    /// it is observed after the writes rather than racing them.
+    pub recipient_online: bool,
+}
 
 pub(crate) struct DeliveryManager<'a> {
     client: &'a mut RedisClient,
@@ -33,16 +47,6 @@ impl<'a> DeliveryManager<'a> {
     /// per-sender quota — Redis cannot trim "this sender's entries".
     fn mailbox_maxlen(&self) -> i64 {
         self.config.messaging.queue_maxlen_standard.max(1)
-    }
-
-    /// Wake MessageStream subscribers after at least one XADD has landed.
-    pub(crate) async fn publish_inbox_wakeup(&mut self, user_id: &str) {
-        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
-        let _: std::result::Result<i64, _> = self
-            .client
-            .connection_mut()
-            .publish(&wakeup_channel, "1")
-            .await;
     }
 
     /// Read messages from Redis Stream for a user
@@ -279,108 +283,159 @@ impl<'a> DeliveryManager<'a> {
         Ok(result)
     }
 
-    /// Write a message to the legacy user mailbox stream.
+    /// Write one envelope to every mailbox the recipient has, in one round trip.
     ///
-    /// Production path when `MSG_MAILBOX_USER_WRITE` is on. Caller
-    /// (`write_message_to_device_streams`) publishes `inbox:wakeup` after this
-    /// XADD (and any device writes) have landed.
+    /// ── Why one round trip ──────────────────────────────────────────────────────────
+    /// The mailbox fan-out is the last thing a send does before it answers, and it used to be
+    /// 1 + d commands, each awaited: one per device, one for the legacy user stream, then a `GET`
+    /// for presence and a `PUBLISH` for the wakeup. On a three-device account that is five round
+    /// trips on the send path; every one of them is pushed into a pipeline here, so the client
+    /// makes one.
     ///
-    /// Stream format: {delivery_queue_prefix}:offline:{user_id}
-    /// Fields: message_id (string), payload (MessagePack serialized envelope)
-    pub(crate) async fn write_message_to_user_stream(
+    /// The payload is encoded **once**. It is the same bytes in every mailbox, and encoding it per
+    /// stream was the same envelope serialized 1 + d times for one message.
+    ///
+    /// ── What must not change ────────────────────────────────────────────────────────
+    /// - **Order.** Redis executes a pipeline in the order it was sent, so every `XADD` still
+    ///   lands before the `inbox:wakeup` publish. That ordering is the whole point of the wakeup:
+    ///   publishing first let a live `MessageStream` poll an empty mailbox (2026-09-18).
+    /// - **One device's failure is that device's loss.** `ignore_errors` turns each command's
+    ///   error into a value instead of failing the batch, so a stream key of the wrong type costs
+    ///   its own copy and nothing else — the other mailboxes still get theirs, and the caller gets
+    ///   the count of writes that landed to make its "nowhere to land" decision on.
+    /// - **Presence is read after the writes, as before**, from the same pipeline: the flag a live
+    ///   stream sets is what the push decision turns on, and it is no longer a separate trip.
+    ///
+    /// The count of landed writes, not of attempted ones: see [`MailboxWrites`].
+    pub(crate) async fn write_message_to_mailboxes(
         &mut self,
         user_id: &str,
+        device_ids: &[String],
+        write_user: bool,
         envelope: &construct_message::types::MessageEnvelope,
-    ) -> Result<String> {
-        let stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
-
-        // Serialize envelope to MessagePack (must match the XREAD path: to_vec_named).
-        // rmp_serde::to_vec uses a legacy serializer that from_slice cannot read back
-        // ("wrong msgpack marker Str8") — messages would be written but never delivered.
+    ) -> Result<MailboxWrites> {
+        // Serialize once: must match the XREAD path (`to_vec_named`). `rmp_serde::to_vec` uses a
+        // legacy serializer that `from_slice` cannot read back ("wrong msgpack marker Str8") —
+        // messages would be written but never delivered.
         let payload = rmp_serde::encode::to_vec_named(envelope)
             .context("Failed to serialize MessageEnvelope to MessagePack")?;
 
-        // Recipient-stream retention — one cap for every writer. Sender trust
-        // must never feed MAXLEN: Redis trims the whole inbox, not "this
-        // sender's entries". New-account volume is hourly_limit_*, not a
-        // smaller MAXLEN on someone else's mailbox.
+        // Recipient-stream retention — one cap for every writer. Sender trust must never feed
+        // MAXLEN: Redis trims the whole inbox, not "this sender's entries". New-account volume is
+        // hourly_limit_*, not a smaller MAXLEN on someone else's mailbox.
         let max_len = self.mailbox_maxlen();
+        let user_stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
+        let presence_key = format!(
+            "{}{}:server_instance_id",
+            self.config.redis_key_prefixes.user, user_id
+        );
+        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
 
-        let stream_id: String = redis::cmd("XADD")
-            .arg(&stream_key)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(max_len)
-            .arg("*")
-            .arg("message_id")
-            .arg(&envelope.message_id)
-            .arg("payload")
-            .arg(&payload)
+        let mut pipe = redis::pipe();
+        // Each reply is read below; a failing command must not hide the others.
+        pipe.ignore_errors();
+
+        let xadd = |pipe: &mut redis::Pipeline, stream_key: &str| {
+            pipe.cmd("XADD")
+                .arg(stream_key)
+                .arg("MAXLEN")
+                .arg("~")
+                .arg(max_len)
+                .arg("*")
+                .arg("message_id")
+                .arg(&envelope.message_id)
+                .arg("payload")
+                .arg(&payload);
+        };
+
+        // Slot i of the reply is `mailboxes[i]`: the legacy user stream first when it is written,
+        // then one per device, in the order the caller addressed them. Kept so a refused write can
+        // name the mailbox it was refused for, which is what the per-device warning used to say.
+        let mut mailboxes: Vec<String> =
+            Vec::with_capacity(usize::from(write_user) + device_ids.len());
+        if write_user {
+            mailboxes.push(user_stream_key.clone());
+        }
+        for device_id in device_ids {
+            mailboxes.push(format!(
+                "{}:offline:{}:{}",
+                self.delivery_queue_prefix, user_id, device_id
+            ));
+        }
+        for stream_key in &mailboxes {
+            xadd(&mut pipe, stream_key);
+        }
+        let user_slot = write_user.then_some(0usize);
+        let first_device_slot = usize::from(write_user);
+        let presence_slot = mailboxes.len();
+        pipe.cmd("GET").arg(&presence_key);
+        pipe.cmd("PUBLISH").arg(&wakeup_channel).arg("1");
+
+        let replies: Vec<redis::Value> = pipe
             .query_async(self.client.connection_mut())
             .await
-            .context("Failed to write message to Redis stream")?;
+            .context("Failed to write the message to its mailboxes")?;
 
-        // INFO, not DEBUG, and not "(test mode)" — this is the production write path for every
-        // offline message. The stream id it returns is the only thing that ties a dispatched
-        // message to a position a later read can be checked against.
-        //
-        // On 2026-08-18 two messages were dispatched to an offline recipient, "Message
-        // dispatched" was logged, and a poll from a cursor below them found nothing eleven
-        // seconds later. Deciding whether they had ever been written took hours of reading code,
-        // because the one line that knew was filtered out in production.
-        tracing::info!(
-            stream_key = %stream_key,
-            message_id = %envelope.message_id,
-            stream_id = %stream_id,
-            "Wrote message to offline stream"
-        );
+        // A reply that is an error, or is missing, is a write that did not land.
+        let landed = |slot: usize| match replies.get(slot) {
+            Some(redis::Value::ServerError(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    user_id = %user_id,
+                    stream_key = %mailboxes.get(slot).map(String::as_str).unwrap_or(""),
+                    "Failed to write to a mailbox stream — the other copies are unaffected"
+                );
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
 
-        Ok(stream_id)
-    }
+        let user_stream = user_slot.map(landed);
+        let device_streams = (first_device_slot..presence_slot)
+            .filter(|slot| landed(*slot))
+            .count();
 
-    /// Write a message to a per-device Redis stream (multi-device fan-out).
-    ///
-    /// Stream format: {delivery_queue_prefix}:offline:{user_id}:{device_id}
-    /// Clients that send `x-device-id` read from this stream instead of the
-    /// user-level stream, enabling true per-device message isolation.
-    pub(crate) async fn write_message_to_device_stream(
-        &mut self,
-        user_id: &str,
-        device_id: &str,
-        envelope: &construct_message::types::MessageEnvelope,
-    ) -> Result<()> {
-        let stream_key = format!(
-            "{}:offline:{}:{}",
-            self.delivery_queue_prefix, user_id, device_id
-        );
+        // Presence: any answer that is not nil and not an error means a stream holds this user.
+        // A failed read is offline, as it was before — fail-open, the wake push is still sent.
+        let recipient_online = match replies.get(presence_slot) {
+            Some(redis::Value::Nil) | None => false,
+            Some(redis::Value::ServerError(e)) => {
+                tracing::debug!(
+                    error = %e,
+                    user_id = %user_id,
+                    "Failed to check recipient online status — will send wake push"
+                );
+                false
+            }
+            Some(_) => true,
+        };
 
-        let payload = rmp_serde::encode::to_vec_named(envelope)
-            .context("Failed to serialize MessageEnvelope to MessagePack")?;
-
-        let max_len = self.mailbox_maxlen();
-        let stream_id: String = redis::cmd("XADD")
-            .arg(&stream_key)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(max_len)
-            .arg("*")
-            .arg("message_id")
-            .arg(&envelope.message_id)
-            .arg("payload")
-            .arg(&payload)
-            .query_async(self.client.connection_mut())
-            .await
-            .context("Failed to write message to per-device stream")?;
-
+        // The stream id of the user-stream write is the only thing that ties a dispatched message
+        // to a position a later read can be checked against (2026-08-18: two messages were
+        // "dispatched", no entry could be found eleven seconds later, and deciding whether they had
+        // ever been written took hours because this line had been filtered out in production).
+        if let Some(redis::Value::BulkString(id)) = user_slot.and_then(|slot| replies.get(slot)) {
+            tracing::info!(
+                stream_key = %user_stream_key,
+                message_id = %envelope.message_id,
+                stream_id = %String::from_utf8_lossy(id),
+                "Wrote message to offline stream"
+            );
+        }
         tracing::debug!(
-            stream_key = %stream_key,
+            user_id = %user_id,
             message_id = %envelope.message_id,
-            stream_id = %stream_id,
-            device_id = %device_id,
-            "Wrote message to per-device stream"
+            device_streams,
+            devices = device_ids.len(),
+            "Wrote message to per-device streams"
         );
 
-        Ok(())
+        Ok(MailboxWrites {
+            user_stream,
+            device_streams,
+            recipient_online,
+        })
     }
 
     /// Read messages from a per-device Redis stream.

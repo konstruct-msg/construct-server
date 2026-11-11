@@ -13,6 +13,7 @@ mod sessions;
 mod tokens;
 
 pub use dedup::MessageDedupKey;
+pub use delivery::MailboxWrites;
 pub use gap::MailboxGap;
 pub use intake_generation::intake_generation_key;
 pub use pow::PowChallengeRecord;
@@ -430,53 +431,29 @@ impl MessageQueue {
         user_id: &str,
         device_ids: &[String],
         envelope: &construct_message::types::MessageEnvelope,
-    ) -> Result<()> {
+    ) -> Result<delivery::MailboxWrites> {
         let write_user = self.config.messaging.mailbox_user_write;
 
-        // The "nowhere to land" check is at the bottom, after the writes, and there is
-        // deliberately only one: an empty `device_ids` already produces zero successful
-        // device writes, so an early guard on it would be a second spelling of the same
-        // condition — and a mutation test proved it, surviving the removal of one guard
-        // because the other still fired.
-        if write_user {
-            // Legacy user stream (cutover: MSG_MAILBOX_USER_WRITE=0 skips this).
-            delivery::DeliveryManager::new(
-                &mut self.client,
-                &self.config,
-                self.delivery_queue_prefix.clone(),
-            )
-            .write_message_to_user_stream(user_id, envelope)
-            .await?;
+        let writes = delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .write_message_to_mailboxes(user_id, device_ids, write_user, envelope)
+        .await?;
+
+        // A failed legacy write fails the send, as it always has: while
+        // `MSG_MAILBOX_USER_WRITE` is on the user stream is the copy the dual-read still leans
+        // on, and the caller must not be told the message was accepted. `mark_message_dispatched`
+        // runs only after this returns `Ok`, so a retry is not a no-op.
+        if writes.user_stream == Some(false) {
+            anyhow::bail!("Failed to write the message to the user stream of recipient {user_id}");
         }
 
-        // Per-device streams (always).
-        let mut device_writes_ok = 0usize;
-        for device_id in device_ids {
-            match delivery::DeliveryManager::new(
-                &mut self.client,
-                &self.config,
-                self.delivery_queue_prefix.clone(),
-            )
-            .write_message_to_device_stream(user_id, device_id, envelope)
-            .await
-            {
-                Ok(()) => device_writes_ok += 1,
-                Err(e) => {
-                    // One failing device must not stop the others — but see the check below:
-                    // "every device failed" is only tolerable while the user stream holds a copy.
-                    tracing::warn!(
-                        user_id = %user_id,
-                        device_id = %device_id,
-                        error = %e,
-                        "Failed to write to per-device stream (non-fatal)"
-                    );
-                }
-            }
-        }
-
-        // Nowhere to land. Covers both shapes at once: no devices known (a failed lookup
-        // and a user with none are indistinguishable here) and every device write failed.
-        if !write_user && device_writes_ok == 0 {
+        // The "nowhere to land" check, in one place. Covers both shapes at once: no devices known
+        // (a failed lookup and a user with none are indistinguishable here) and every device write
+        // refused by Redis.
+        if !write_user && writes.device_streams == 0 {
             anyhow::bail!(
                 "No mailbox to write: user-stream writes are disabled (MSG_MAILBOX_USER_WRITE=0) \
                  and none of the {} device stream writes for recipient {user_id} landed",
@@ -484,18 +461,7 @@ impl MessageQueue {
             );
         }
 
-        // Wake only after at least one XADD has landed. Publishing first (the old
-        // MSG_MAILBOX_USER_WRITE=0 branch) let a live MessageStream poll an empty
-        // device stream and miss the message until the fallback tick.
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .publish_inbox_wakeup(user_id)
-        .await;
-
-        Ok(())
+        Ok(writes)
     }
 
     /// Whether legacy user-stream XADD is enabled (`MSG_MAILBOX_USER_WRITE`).
