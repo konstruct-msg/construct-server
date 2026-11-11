@@ -8,7 +8,6 @@
 
 use construct_auth::AuthManager;
 use construct_config::Config;
-use construct_context::AppContext;
 use construct_db::DbPool;
 use construct_federation::ServerSigner;
 use construct_queue::MessageQueue;
@@ -45,29 +44,6 @@ pub struct MessagingServiceContext {
     /// `federation.signing_key_seed` — same derivation identity-service uses to
     /// publish the public half at `/.well-known/construct-server`.
     pub token_enc_static_secret: Option<x25519_dalek::StaticSecret>,
-}
-
-impl MessagingServiceContext {
-    /// Convert to AppContext for use with existing handlers
-    /// This is a temporary adapter until handlers are refactored to use traits
-    pub fn to_app_context(&self) -> AppContext {
-        let builder = AppContext::builder()
-            .with_db_pool(self.db_pool.clone())
-            .with_queue(self.queue.clone())
-            .with_auth_manager(self.auth_manager.clone())
-            .with_config(self.config.clone())
-            .with_server_instance_id(self.server_instance_id.clone());
-
-        let builder = if let Some(signer) = &self.server_signer {
-            builder.with_server_signer(signer.clone())
-        } else {
-            builder
-        };
-
-        builder
-            .build()
-            .expect("Failed to build AppContext for messaging service")
-    }
 }
 
 impl MessagingServiceContext {

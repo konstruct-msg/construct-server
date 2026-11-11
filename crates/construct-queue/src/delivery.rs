@@ -481,15 +481,6 @@ impl<'a> DeliveryManager<'a> {
 
     // ── Message deduplication ────────────────────────────────────────────────
 
-    /// Returns true if the scoped delivery was already dispatched (duplicate).
-    pub(crate) async fn is_message_duplicate(
-        &mut self,
-        key: &crate::MessageDedupKey,
-    ) -> Result<bool> {
-        let exists: bool = self.client.exists(key.as_str()).await?;
-        Ok(exists)
-    }
-
     /// Mark the scoped delivery as dispatched to prevent duplicate delivery.
     /// TTL 24h — covers any realistic client retry window.
     pub(crate) async fn mark_message_dispatched(

@@ -235,7 +235,7 @@ async fn build_harness(policy: StealthTokenPolicy) -> Option<TestHarness> {
 /// `queue_redis` carries the mailbox (`MessageQueue`); `abuse_redis` the standalone connection
 /// everything that does not need the queue mutex runs on — the sealed path's anti-abuse state
 /// (delivery tags, intake tags, spent tokens) and, since the auth blocklist moved off the mutex, the
-/// token blocklist too. Two addresses so a test can take one down and keep the other. In production
+/// token blocklist and dedup reads too. Two addresses so a test can take one down and keep the other. In production
 /// both are clones of the same `ConnectionManager` (`main.rs`: `message_queue.clone_redis_connection()`).
 async fn build_harness_on(
     policy: StealthTokenPolicy,
@@ -992,7 +992,7 @@ async fn i7_named_sender_leaves_no_sender_mapping() {
         String::new(),
     );
 
-    let app_context = Arc::new(h.ctx.to_app_context());
+    let app_context = h.ctx.clone();
     crate::core::dispatch_envelope(
         &app_context,
         envelope,
@@ -1470,7 +1470,7 @@ async fn d1_a_message_is_marked_dispatched_only_once_its_stream_entry_exists() {
         b"ciphertext".to_vec(),
         String::new(),
     );
-    let app_context = Arc::new(h.ctx.to_app_context());
+    let app_context = h.ctx.clone();
     let mut conn = h.ctx.redis_conn.clone();
     let stream_key = format!("delivery:offline:{recipient}");
     let dedup_key = construct_queue::MessageDedupKey::new(
@@ -1892,7 +1892,7 @@ async fn d2_dispatch_dedup_is_scoped_to_sender_recipient_and_device() {
     let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
         return;
     };
-    let app = Arc::new(h.ctx.to_app_context());
+    let app = h.ctx.clone();
     let (alice, bob, recipient, other) = (
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
@@ -2047,6 +2047,137 @@ async fn d3_send_message_fast_path_uses_the_same_scoped_dedup_as_dispatch() {
         cleanup.push(format!("fanout:{sender}:{day}:probe"));
     }
     del(&mut conn, &cleanup).await;
+}
+
+/// A retry already committed to a mailbox must return before rate counters or mailbox writes,
+/// even while another send holds the queue. Mutation: put the ingress dedup read under the mutex.
+#[tokio::test]
+#[serial]
+async fn d5_unary_duplicate_does_not_wait_on_the_mailbox_mutex() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+    let envelope = direct_envelope(&sender, &recipient, vec![7; 8], None);
+    let first = unary_send(&h, sender, &device, envelope.clone())
+        .await
+        .expect("first send");
+    assert!(first.success);
+
+    let held = h.ctx.queue.lock().await;
+    let started = std::time::Instant::now();
+    let retry = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        unary_send(&h, sender, &device, envelope),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    drop(held);
+
+    let mut conn = h.ctx.redis_conn.clone();
+    let copies = stream_len(&mut conn, &recipient).await;
+    let hourly: u64 = redis::cmd("GET")
+        .arg(format!("rate:msg:{{{sender}}}:hour"))
+        .query_async(&mut conn)
+        .await
+        .expect("hourly count");
+    let dedup = construct_queue::MessageDedupKey::new(
+        &sender.to_string(),
+        &recipient.to_string(),
+        None,
+        &first.message_id,
+    );
+    del(
+        &mut conn,
+        &[
+            format!("delivery:offline:{recipient}"),
+            dedup.as_str().to_string(),
+        ],
+    )
+    .await;
+    cleanup_sender(&mut conn, &sender).await;
+
+    let retry = retry
+        .expect("a cached unary retry must not wait for the mailbox mutex")
+        .expect("idempotent success");
+    assert!(retry.success);
+    assert_eq!(retry.message_id, first.message_id);
+    assert_eq!(retry.message_number, 0);
+    assert_eq!(retry.error, None);
+    assert_eq!(retry.intake_verdict, IntakeVerdict::Unspecified as i32);
+    assert!(retry.recipient_active_devices.is_empty());
+    assert_eq!(copies, 1, "a retry must not add another mailbox entry");
+    assert_eq!(
+        hourly, 1,
+        "a retry must not charge the hourly counter again"
+    );
+    eprintln!("cached unary retry with mailbox mutex held: {elapsed:?}");
+}
+
+/// Dispatch retains its own dedup recheck, but reading it must not queue behind a mailbox write.
+/// Mutation: put the dispatch dedup read under the mutex held below.
+#[tokio::test]
+#[serial]
+async fn d6_dispatch_duplicate_does_not_wait_on_the_mailbox_mutex() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let envelope = construct_message::MessageEnvelope::new_direct_message(
+        uuid::Uuid::new_v4().to_string(),
+        sender.to_string(),
+        recipient.to_string(),
+        vec![0; 32],
+        0,
+        b"ciphertext".to_vec(),
+        String::new(),
+    );
+    let dedup = construct_queue::MessageDedupKey::new(
+        &sender.to_string(),
+        &recipient.to_string(),
+        None,
+        &envelope.message_id,
+    );
+    let app = h.ctx.clone();
+    crate::core::dispatch_envelope(
+        &app,
+        envelope.clone(),
+        None,
+        crate::core::DeviceTargets::Known(Vec::new()),
+    )
+    .await
+    .expect("first dispatch");
+
+    let held = h.ctx.queue.lock().await;
+    let started = std::time::Instant::now();
+    let retry = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::core::dispatch_envelope(
+            &app,
+            envelope,
+            None,
+            crate::core::DeviceTargets::Known(Vec::new()),
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    drop(held);
+
+    let mut conn = h.ctx.redis_conn.clone();
+    let copies = stream_len(&mut conn, &recipient).await;
+    del(
+        &mut conn,
+        &[
+            format!("delivery:offline:{recipient}"),
+            dedup.as_str().to_string(),
+        ],
+    )
+    .await;
+    retry
+        .expect("a committed dispatch retry must not wait for the mailbox mutex")
+        .expect("idempotent success");
+    assert_eq!(copies, 1, "a dispatch retry must not write another entry");
+    eprintln!("cached dispatch retry with mailbox mutex held: {elapsed:?}");
 }
 
 /// Catch-up checks revocation again between pages. Holding the response channel to one item
@@ -2665,7 +2796,7 @@ async fn d4_a_device_list_the_caller_read_is_not_asked_for_again() {
     envelope.recipient_device = Some(device.clone());
 
     crate::core::dispatch_envelope(
-        &Arc::new(ctx.to_app_context()),
+        &ctx,
         envelope,
         None,
         crate::core::DeviceTargets::Known(vec![device.clone()]),
@@ -2790,7 +2921,7 @@ async fn a3_auth_does_not_wait_on_the_mailbox_mutex() {
 #[serial]
 async fn f3_an_unreadable_dedup_key_does_not_stop_delivery() {
     let proxy = FaultyRedis::start().await;
-    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &proxy.url, &redis_url()).await else {
+    let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
     let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());

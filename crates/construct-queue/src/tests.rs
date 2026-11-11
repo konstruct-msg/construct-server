@@ -846,6 +846,70 @@ async fn push_outstanding_marks_once_until_cleared() {
     queue.clear_push_outstanding(&device).await.unwrap();
 }
 
+/// A lock-free dedup read remains EXISTS, not GET: any stored value marks a retry, and reads
+/// neither create a marker for a new message nor refresh one. Mutation: return false, or use GET.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn dedup_read_without_the_queue_preserves_exists_semantics() {
+    let mut queue = MessageQueue::new(&get_test_config()).await.expect("queue");
+    let mut conn = queue.clone_redis_connection();
+    let key = MessageDedupKey::new(
+        &format!("test_dedup_reader_{}", std::process::id()),
+        "recipient",
+        None,
+        "message",
+    );
+    let _: () = redis::cmd("DEL")
+        .arg(key.as_str())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(!is_message_duplicate(&mut conn, &key).await.unwrap());
+    assert!(!queue.is_message_duplicate(&key).await.unwrap());
+
+    for (command, args) in [
+        ("SET", vec![""]),
+        ("SET", vec!["1"]),
+        ("HSET", vec!["field", "value"]),
+        ("LPUSH", vec!["value"]),
+    ] {
+        let _: () = redis::cmd("DEL")
+            .arg(key.as_str())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: redis::Value = redis::cmd(command)
+            .arg(key.as_str())
+            .arg(args)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: bool = redis::cmd("EXPIRE")
+            .arg(key.as_str())
+            .arg(60)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            is_message_duplicate(&mut conn, &key).await.unwrap(),
+            "{command}"
+        );
+        assert!(queue.is_message_duplicate(&key).await.unwrap(), "{command}");
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(key.as_str())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(ttl > 0 && ttl <= 60, "a read must not change retention");
+    }
+    let _: () = redis::cmd("DEL")
+        .arg(key.as_str())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(!is_message_duplicate(&mut conn, &key).await.unwrap());
+}
+
 // ============================================================================
 // Access-token blocklist: one read, the same answer the two reads gave
 // ============================================================================

@@ -456,8 +456,8 @@ impl MessagingService for MessagingGrpcService {
         // counters.  Client retries after a disconnect share the same message_id,
         // so without this check every retry inflates the hourly rate counter.
         {
-            let mut queue = self.context.queue.lock().await;
-            match queue.is_message_duplicate(&dedup_key).await {
+            let mut conn = self.context.redis_conn.clone();
+            match construct_queue::is_message_duplicate(&mut conn, &dedup_key).await {
                 Ok(true) => {
                     tracing::debug!(
                         message_id = %message_id,
@@ -665,9 +665,8 @@ impl MessagingService for MessagingGrpcService {
         // Do not set max_queue_len from sender trust. Redis MAXLEN trims the
         // recipient's whole inbox; new-account volume is hourly_limit_*.
 
-        let app_context = Arc::new(self.context.to_app_context());
         core::dispatch_envelope(
-            &app_context,
+            &self.context,
             msg_envelope,
             self.context.notification_context.clone(),
             // Nothing has read this account's devices: the unsealed path answers no device list.
