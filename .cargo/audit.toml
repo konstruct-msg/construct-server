@@ -1,40 +1,49 @@
 # Security audit configuration
 # See: https://rustsec.org/
 
+# Every entry below is either "not compiled into anything we ship" or "no fix exists yet". Both
+# claims are checkable in one command each and are re-checked when the entries are touched:
+#   cargo tree -i <crate>   — prints nothing when the crate is only a Cargo.lock entry
+#   cargo update -p <crate> --precise <version from Solution>
+# An entry that is no longer needed fails nothing, so the list rots quietly; three did on
+# 2026-11-11 (rand, paste — both already fixed or gone — and the whole openssl stack, cleared by
+# a patch bump). Re-run `cargo audit` with `ignore = []` before assuming an entry is still true.
+
 [advisories]
 # Vulnerabilities to ignore (with justification)
 ignore = [
-    # RUSTSEC-2023-0071: rsa 0.9.9 - Marvin Attack timing sidechannel
-    # Status: No fix available
-    # Risk: LOW - pulled in by sqlx-mysql, we use PostgreSQL only
-    # Action: Monitor for updates monthly
+    # RUSTSEC-2023-0071: rsa 0.9.10 - Marvin Attack: key recovery through timing sidechannels
+    # Status: no fix in the 0.9.x line; rsa 0.10 is what fixes it, and sqlx-mysql 0.8 requires 0.9.
+    # Risk: NONE IN THIS BUILD - rsa is a Cargo.lock entry only. Cargo locks sqlx's optional
+    #       drivers whichever features are on, and the mysql driver is off: `cargo tree -i rsa`
+    #       prints nothing, so neither sqlx-mysql nor rsa is ever compiled.
+    # Action: drop this entry when sqlx 0.9 (which takes rsa 0.10) is adopted. That upgrade does
+    #         NOT clear RUSTSEC-2026-0459 below — sqlx-sqlite 0.9 accepts libsqlite3-sys < 0.38,
+    #         and the fix is >= 0.39.
     "RUSTSEC-2023-0071",
 
-    # RUSTSEC-2024-0436: paste - proc-macro denial of service
-    # Status: No fix available (crate unmaintained)
-    # Risk: LOW - build-time only, doesn't affect runtime security
-    # Impact: Potential infinite loop during compilation
-    # Mitigation: We use specific version pinned by dependencies
-    # Action: Monitor for maintained alternative or upstream fix
-    "RUSTSEC-2024-0436",
-
-    # RUSTSEC-2025-0134: rustls-pemfile unmaintained
-    # Status: Replacement is rustls-pki-types with pem feature
-    # Risk: NONE - no vulnerability, crate still functional
-    # Blocker: rustls-pki-types 1.14 (pinned by rustls 0.23) lacks pem feature
-    # Action: Remove when upgrading rustls stack to version that includes pem support
+    # RUSTSEC-2025-0134: rustls-pemfile 2.2.0 - unmaintained
+    # Status: replacement is rustls-pki-types with the pem feature.
+    # Risk: NONE - no vulnerability, the crate still works.
+    # Blocker: rustls-pki-types 1.14 (pinned by rustls 0.23) has no pem feature.
+    # Action: remove when the rustls stack reaches a version with that feature.
     "RUSTSEC-2025-0134",
 
-    # RUSTSEC-2026-0097: rand 0.8.x / 0.10.x unsound with custom global logger
-    # Status: No patched rand 0.8.x available; fix requires sqlx 0.9+ (not yet released)
-    # Risk: NEGLIGIBLE — unsoundness only triggers when a custom global logger itself
-    #       calls rand::rng() during initialisation, a pattern we do not use.
-    #       rand is pulled in transitively by sqlx-postgres and apns-h2.
-    # Action: Remove when sqlx upgrades to a rand version with the fix
-    "RUSTSEC-2026-0097",
-    # RUSTSEC-2026-0185: quinn-proto Remote memory exhaustion in quinn-proto from unbounded out-of-order stream reassembly
-    # Status: No patched reqwest 0.13.4 available;
-    "RUSTSEC-2026-0185",
+    # RUSTSEC-2026-0459: libsqlite3-sys 0.30.1 - bundled SQLite CVE-2026-119375 (uninitialised
+    # page-cache memory when a database is opened beside a crafted `-wal` of another page size)
+    # Status: fixed in libsqlite3-sys 0.39; no released sqlx accepts it (0.8.6 pins ^0.30,
+    #         0.9.0 allows < 0.38), so no dependency bump clears this.
+    # Risk: NONE IN THIS BUILD, and two independent reasons:
+    #   1. It is never compiled. sqlx-sqlite is a lockfile entry of sqlx-macros-core's optional
+    #      driver support; the sqlite feature is off and `cargo tree -i libsqlite3-sys` prints
+    #      nothing.
+    #   2. Even with the driver on, no SQLite source would be compiled: sqlx-sqlite asks for
+    #      libsqlite3-sys with `pkg-config`, `vcpkg` and `unlock_notify` — not `bundled` — and the
+    #      advisory's vector is the bundled copy ("a build that links a system SQLite ... is not
+    #      affected by the copy in this crate").
+    # Action: remove when an sqlx release accepts libsqlite3-sys >= 0.39; check with
+    #         `cargo update -p libsqlite3-sys --precise 0.39.1`.
+    "RUSTSEC-2026-0459",
 ]
 
 # Don't fail on unmaintained crates (just warn)
