@@ -472,6 +472,7 @@ async fn receive_message(
         &app_context,
         envelope,
         context.notification_context.clone(),
+        crate::core::DeviceTargets::LookUp,
     )
     .await
     {

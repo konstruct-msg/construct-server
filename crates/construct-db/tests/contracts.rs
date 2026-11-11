@@ -296,6 +296,58 @@ async fn blocklist_is_directional_idempotent_and_scoped_on_unblock() {
     db.cleanup().await;
 }
 
+/// The routing set of a send is `get_active_device_ids`, and it must be the same set the full-row
+/// read produced — that read is what the send path used before, so a difference here is a message
+/// delivered to a different set of mailboxes.
+///
+/// Mutation: drop `AND is_active = TRUE` — the deactivated device reappears. Mutation: drop the
+/// `user_id` filter — the other account's device appears.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn active_device_ids_are_the_set_the_full_rows_named() {
+    let db = Database::new(&MIGRATIONS).await;
+    let (u, v) = (user(&db.pool).await, user(&db.pool).await);
+    let (a, b, gone, other) = (
+        device(&db.pool, u).await,
+        device(&db.pool, u).await,
+        device(&db.pool, u).await,
+        device(&db.pool, v).await,
+    );
+    deactivate_device(&db.pool, &gone).await.unwrap();
+
+    let mut full: Vec<String> = get_devices_by_user_id(&db.pool, &u)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| d.device_id)
+        .collect();
+    full.sort();
+    let mut ids = get_active_device_ids(&db.pool, &u).await.unwrap();
+    ids.sort();
+    assert_eq!(ids, full, "the ids are the rows' ids, in the same set");
+    assert_eq!(ids, {
+        let mut expected = vec![a.clone(), b.clone()];
+        expected.sort();
+        expected
+    });
+    assert!(!ids.contains(&gone), "a signed-out device keeps no mailbox");
+    assert!(
+        !ids.contains(&other),
+        "another account's device is not this set"
+    );
+
+    // An account with no devices answers an empty list, not an error: the send path reads a
+    // failed lookup and an empty account the same way.
+    let nobody = user(&db.pool).await;
+    assert!(
+        get_active_device_ids(&db.pool, &nobody)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    db.cleanup().await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn route_lookup_returns_the_exact_account_and_directory_fields() {

@@ -670,6 +670,8 @@ impl MessagingService for MessagingGrpcService {
             &app_context,
             msg_envelope,
             self.context.notification_context.clone(),
+            // Nothing has read this account's devices: the unsealed path answers no device list.
+            core::DeviceTargets::LookUp,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;

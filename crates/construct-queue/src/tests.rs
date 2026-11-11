@@ -448,7 +448,7 @@ async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
     let mut queue = mailbox_queue(true).await;
     clear_mailbox(&mut queue, user, &[device]).await;
 
-    // Device list empty — the shape of a failed `fetch_recipient_device_ids`, or of a
+    // Device list empty — the shape of a failed `fetch_recipient_device_ids_for_user`, or of a
     // device that registered after this message was sent.
     let missed =
         construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());

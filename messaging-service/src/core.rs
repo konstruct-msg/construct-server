@@ -36,8 +36,8 @@ pub(crate) async fn fetch_recipient_device_ids_for_user(
     let Ok(uid) = Uuid::parse_str(recipient_id) else {
         return vec![];
     };
-    match construct_db::get_devices_by_user_id(db_pool, &uid).await {
-        Ok(devices) => devices.into_iter().map(|d| d.device_id).collect(),
+    match construct_db::get_active_device_ids(db_pool, &uid).await {
+        Ok(devices) => devices,
         Err(e) => {
             tracing::warn!(error = %e, recipient = %recipient_id, "Failed to fetch recipient devices for fan-out");
             vec![]
@@ -45,11 +45,38 @@ pub(crate) async fn fetch_recipient_device_ids_for_user(
     }
 }
 
-async fn fetch_recipient_device_ids(
-    app_context: &Arc<AppContext>,
-    recipient_id: &str,
-) -> Vec<String> {
-    fetch_recipient_device_ids_for_user(&app_context.db_pool, recipient_id).await
+/// Which device mailboxes a send is addressed by, and whether the caller already had to read them.
+///
+/// A sealed send reads the recipient's active devices anyway: to answer its sender
+/// (`SendMessageResponse.recipient_active_devices`) and to decide whether a key-addressed envelope
+/// names one of them. Dispatch needs exactly that list to route. Asking a second time was a second
+/// identical query inside one request — the same account, the same `is_active` filter, a few
+/// milliseconds apart — so the caller that holds the answer hands it over instead.
+///
+/// A sender could name a device that this list does not have (revoked or re-registered between the
+/// bundle fetch and the send). That case is unchanged and still lands on
+/// [`select_target_devices`]'s `unknown_device` fallback: what is handed over is a fresher reading
+/// of the same account, not a cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeviceTargets {
+    /// Nobody has read them: dispatch asks.
+    LookUp,
+    /// The devices the caller just read for its own answer, in this same request.
+    Known(Vec<String>),
+}
+
+impl DeviceTargets {
+    /// The routing set: what the caller knew, or one read of the account's active devices.
+    pub(crate) async fn resolve(
+        self,
+        db_pool: &construct_db::DbPool,
+        recipient_id: &str,
+    ) -> Vec<String> {
+        match self {
+            Self::Known(devices) => devices,
+            Self::LookUp => fetch_recipient_device_ids_for_user(db_pool, recipient_id).await,
+        }
+    }
 }
 
 /// Whether a send is addressed to the sender's own account: a copy to a sibling device. Ids
@@ -203,10 +230,14 @@ pub(crate) fn select_target_devices(
 ///
 /// Used by the gRPC path where the envelope is constructed without going
 /// through `EncryptedMessage` deserialization.
+///
+/// `targets` says whether the caller already read the recipient's active devices for its own
+/// answer; see [`DeviceTargets`].
 pub async fn dispatch_envelope(
     app_context: &Arc<AppContext>,
     envelope: MessageEnvelope,
     notification_context: Option<Arc<NotificationServiceContext>>,
+    targets: DeviceTargets,
 ) -> Result<(), AppError> {
     let t_start = std::time::Instant::now();
     let salt = &app_context.config.logging.hash_salt;
@@ -274,7 +305,7 @@ pub async fn dispatch_envelope(
         }
     }
 
-    let active_devices = fetch_recipient_device_ids(app_context, recipient_id).await;
+    let active_devices = targets.resolve(&app_context.db_pool, recipient_id).await;
     let (device_ids, routing) =
         select_target_devices(&active_devices, envelope.recipient_device.as_deref());
     MSG_DELIVERY_ROUTING_TOTAL
@@ -506,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_named_device_never_shrinks_an_empty_active_set_into_a_delivery() {
-        // `fetch_recipient_device_ids` returns an empty vec both for a DB error and
+        // `fetch_recipient_device_ids_for_user` returns an empty vec both for a DB error and
         // for a user with no devices, and the two are indistinguishable here. Neither
         // may become "deliver to the device the sender named" on the sender's word:
         // that would let a lookup failure invent a mailbox. Empty stays empty, and

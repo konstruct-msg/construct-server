@@ -703,6 +703,33 @@ pub async fn get_devices_by_user_id(pool: &DbPool, user_id: &Uuid) -> Result<Vec
     Ok(devices)
 }
 
+/// The routing set of one account: the ids of its active devices, and nothing else.
+///
+/// A send addresses mailboxes; it never reads a device's identity key, prekey, signature or
+/// sealed metadata. [`get_devices_by_user_id`] returns all of that, decoded into `Vec<u8>` fields,
+/// on the path of every message — kilobytes per device for one column's worth of information. This
+/// is the same `WHERE` and the same order without the payload, for the callers that only ask
+/// "which mailboxes".
+///
+/// An account with no active devices answers an empty list, exactly as the full-row read does.
+pub async fn get_active_device_ids(pool: &DbPool, user_id: &Uuid) -> Result<Vec<String>> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT device_id FROM devices WHERE user_id = $1 AND is_active = TRUE \
+         ORDER BY registered_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            error = %e,
+            user_id = %user_id,
+            "Database error while fetching user device ids"
+        );
+        anyhow::anyhow!("Failed to fetch device ids for user {}: {}", user_id, e)
+    })
+}
+
 /// Create user + first device in a single transaction (atomic)
 ///
 /// This ensures that:
