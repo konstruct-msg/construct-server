@@ -42,6 +42,20 @@ impl MessageDedupKey {
     }
 }
 
+/// Whether this scoped delivery has a committed marker, without taking the mailbox mutex.
+///
+/// This is only a retry fast path: callers still mark the delivery after successful mailbox
+/// writes. A Redis error is returned so each ingress can retain its existing fail-open policy.
+pub async fn is_message_duplicate(
+    conn: &mut redis::aio::ConnectionManager,
+    key: &MessageDedupKey,
+) -> anyhow::Result<bool> {
+    Ok(redis::cmd("EXISTS")
+        .arg(key.as_str())
+        .query_async(conn)
+        .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -498,9 +498,8 @@ pub(crate) async fn dispatch_sealed_sender(
         sealed.sealed_inner.to_vec(),
     );
 
-    let app_context = Arc::new(context.to_app_context());
     if let Err(e) = core::dispatch_envelope(
-        &app_context,
+        context,
         msg_envelope,
         context.notification_context.clone(),
         dispatch_targets,

@@ -12,7 +12,7 @@ mod rate_limiting;
 mod sessions;
 mod tokens;
 
-pub use dedup::MessageDedupKey;
+pub use dedup::{MessageDedupKey, is_message_duplicate};
 pub use delivery::MailboxWrites;
 pub use gap::MailboxGap;
 pub use intake_generation::intake_generation_key;
@@ -588,13 +588,7 @@ impl MessageQueue {
 
     /// Returns true if this scoped delivery was already dispatched (duplicate retry).
     pub async fn is_message_duplicate(&mut self, key: &MessageDedupKey) -> Result<bool> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .is_message_duplicate(key)
-        .await
+        is_message_duplicate(self.client.connection_mut(), key).await
     }
 
     /// Mark a scoped delivery as dispatched (idempotency key, TTL 24h).

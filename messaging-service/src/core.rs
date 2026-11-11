@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use construct_context::AppContext;
+use crate::context::MessagingServiceContext;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
 use construct_metrics::{
@@ -234,7 +234,7 @@ pub(crate) fn select_target_devices(
 /// `targets` says whether the caller already read the recipient's active devices for its own
 /// answer; see [`DeviceTargets`].
 pub async fn dispatch_envelope(
-    app_context: &Arc<AppContext>,
+    app_context: &MessagingServiceContext,
     envelope: MessageEnvelope,
     notification_context: Option<Arc<NotificationServiceContext>>,
     targets: DeviceTargets,
@@ -263,13 +263,8 @@ pub async fn dispatch_envelope(
     // happens *after* the mailbox XADD — marking first turned a write failure
     // into an idempotent success (ACK without a stream entry).
     if is_user_message {
-        let t_lock = std::time::Instant::now();
-        let mut queue = app_context.queue.lock().await;
-        tracing::debug!(
-            wait_ms = t_lock.elapsed().as_millis(),
-            "queue lock acquired (dedup)"
-        );
-        match queue.is_message_duplicate(&dedup_key).await {
+        let mut conn = app_context.redis_conn.clone();
+        match construct_queue::is_message_duplicate(&mut conn, &dedup_key).await {
             Ok(true) => {
                 tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
                 return Ok(());
@@ -280,7 +275,6 @@ pub async fn dispatch_envelope(
                 record_abuse_fail_open("dispatch_dedup");
             }
         }
-        drop(queue);
     }
 
     // Block check is Postgres — do not hold the Redis queue Mutex across it.

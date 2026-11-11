@@ -298,9 +298,8 @@ pub(crate) async fn handle_stream_request(
                     ),
                 });
 
-                let app_context = Arc::new(context.to_app_context());
                 match core::dispatch_envelope(
-                    &app_context,
+                    context,
                     msg_envelope,
                     context.notification_context.clone(),
                     core::DeviceTargets::LookUp,

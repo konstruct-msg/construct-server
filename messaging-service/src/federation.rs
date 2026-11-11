@@ -467,9 +467,8 @@ async fn receive_message(
         recipient_device: None,
     };
 
-    let app_context = Arc::new(context.to_app_context());
     match crate::core::dispatch_envelope(
-        &app_context,
+        &context,
         envelope,
         context.notification_context.clone(),
         crate::core::DeviceTargets::LookUp,
