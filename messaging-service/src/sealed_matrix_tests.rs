@@ -993,9 +993,14 @@ async fn i7_named_sender_leaves_no_sender_mapping() {
     );
 
     let app_context = Arc::new(h.ctx.to_app_context());
-    crate::core::dispatch_envelope(&app_context, envelope, None)
-        .await
-        .expect("dispatch");
+    crate::core::dispatch_envelope(
+        &app_context,
+        envelope,
+        None,
+        crate::core::DeviceTargets::LookUp,
+    )
+    .await
+    .expect("dispatch");
 
     let mut conn = h.ctx.redis_conn.clone();
     assert!(
@@ -1490,22 +1495,37 @@ async fn d1_a_message_is_marked_dispatched_only_once_its_stream_entry_exists() {
         .query_async(&mut conn)
         .await
         .unwrap();
-    crate::core::dispatch_envelope(&app_context, envelope.clone(), None)
-        .await
-        .expect_err("a mailbox write that failed is an error, not a delivery");
+    crate::core::dispatch_envelope(
+        &app_context,
+        envelope.clone(),
+        None,
+        crate::core::DeviceTargets::LookUp,
+    )
+    .await
+    .expect_err("a mailbox write that failed is an error, not a delivery");
     assert!(
         !dedup_exists(&mut conn).await,
         "nothing was written, so a retry must not be swallowed as a duplicate"
     );
 
     del(&mut conn, std::slice::from_ref(&stream_key)).await;
-    crate::core::dispatch_envelope(&app_context, envelope.clone(), None)
-        .await
-        .expect("the retry delivers");
+    crate::core::dispatch_envelope(
+        &app_context,
+        envelope.clone(),
+        None,
+        crate::core::DeviceTargets::LookUp,
+    )
+    .await
+    .expect("the retry delivers");
     assert!(dedup_exists(&mut conn).await);
-    crate::core::dispatch_envelope(&app_context, envelope, None)
-        .await
-        .expect("a second retry is an idempotent success");
+    crate::core::dispatch_envelope(
+        &app_context,
+        envelope,
+        None,
+        crate::core::DeviceTargets::LookUp,
+    )
+    .await
+    .expect("a second retry is an idempotent success");
     assert_eq!(
         stream_len(&mut conn, &recipient).await,
         1,
@@ -1919,9 +1939,14 @@ async fn d2_dispatch_dedup_is_scoped_to_sender_recipient_and_device() {
                 .to_string(),
         );
         for _ in 0..2 {
-            crate::core::dispatch_envelope(&app, env.clone(), None)
-                .await
-                .expect("dispatch");
+            crate::core::dispatch_envelope(
+                &app,
+                env.clone(),
+                None,
+                crate::core::DeviceTargets::LookUp,
+            )
+            .await
+            .expect("dispatch");
             assert_eq!(
                 stream_len(&mut conn, &to).await,
                 expected_len,
@@ -2598,6 +2623,85 @@ async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
     let mut mailbox = h.ctx.queue.lock().await.clone_redis_connection();
     assert_eq!(stream_len(&mut mailbox, &recipient).await, 1);
     del(&mut mailbox, &[format!("delivery:offline:{recipient}")]).await;
+}
+
+/// Dispatch routes to the devices the caller hands over instead of asking the account again. The
+/// `Known` arm belongs to the sealed path, which reads that list anyway to answer its sender.
+///
+/// Proven the hard way rather than by call counting: the pool below cannot answer anything, so a
+/// second lookup would come back empty and the message would land in no device stream at all.
+///
+/// Mutation: make `DeviceTargets::resolve` always look up — the device stream stays empty.
+#[tokio::test]
+#[serial]
+async fn d4_a_device_list_the_caller_read_is_not_asked_for_again() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let (sender, recipient, device) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), random_device());
+
+    // A pool that points nowhere: every query against it fails, and a failed device lookup is an
+    // empty list — the shape that would silently route this message to no mailbox.
+    let dead_pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy("postgres://nobody:nobody@127.0.0.1:1/none")
+        .expect("lazy pool");
+    let mut ctx = Arc::try_unwrap(h.ctx)
+        .ok()
+        .expect("sole owner of the context");
+    ctx.db_pool = Arc::new(dead_pool);
+    let ctx = Arc::new(ctx);
+
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let mut envelope = construct_message::MessageEnvelope::new_direct_message(
+        message_id.clone(),
+        sender.to_string(),
+        recipient.to_string(),
+        vec![0; 32],
+        0,
+        vec![7; 16],
+        String::new(),
+    );
+    envelope.recipient_device = Some(device.clone());
+
+    crate::core::dispatch_envelope(
+        &Arc::new(ctx.to_app_context()),
+        envelope,
+        None,
+        crate::core::DeviceTargets::Known(vec![device.clone()]),
+    )
+    .await
+    .expect("dispatched to the devices the caller already had");
+
+    let mut conn = ctx.queue.lock().await.clone_redis_connection();
+    let device_stream = format!("delivery:offline:{recipient}:{device}");
+    let landed: i64 = redis::cmd("XLEN")
+        .arg(&device_stream)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or(0);
+    assert_eq!(
+        landed, 1,
+        "the named device's mailbox got the copy without a second lookup"
+    );
+    del(
+        &mut conn,
+        &[
+            device_stream,
+            format!("delivery:offline:{recipient}"),
+            // The dispatch marks the scoped dedup key after the write; leaving it would make a
+            // later run of this test (same recipient? no — a fresh uuid) harmless but untidy.
+            construct_queue::MessageDedupKey::new(
+                &sender.to_string(),
+                &recipient.to_string(),
+                Some(&device),
+                &message_id,
+            )
+            .as_str()
+            .to_string(),
+        ],
+    )
+    .await;
 }
 
 /// The device-revoked read fails while the blocklist read works: a device token is refused, a

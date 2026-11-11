@@ -303,6 +303,7 @@ pub(crate) async fn handle_stream_request(
                     &app_context,
                     msg_envelope,
                     context.notification_context.clone(),
+                    core::DeviceTargets::LookUp,
                 )
                 .await
                 {

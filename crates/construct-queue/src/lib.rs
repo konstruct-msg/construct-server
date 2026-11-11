@@ -420,7 +420,7 @@ impl MessageQueue {
     ///
     /// **Errors when the message reached no stream at all.** After the step-4 cutover
     /// (`MSG_MAILBOX_USER_WRITE=0`) the device streams are the only mailbox, and
-    /// `device_ids` is empty whenever the device lookup failed — `fetch_recipient_device_ids`
+    /// `device_ids` is empty whenever the device lookup failed — `fetch_recipient_device_ids_for_user`
     /// returns `vec![]` on a DB error and on an unparseable user id alike. Returning `Ok`
     /// there would let `dispatch_envelope` report a delivered message that was never
     /// written: the same silent loss the cursor trim was removed to prevent, re-entered

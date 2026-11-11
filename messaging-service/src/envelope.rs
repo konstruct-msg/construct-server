@@ -433,6 +433,9 @@ pub(crate) async fn dispatch_sealed_sender(
             &active_devices,
         )
         .await;
+    // Dispatch routes to this same list, so it is handed over instead of the account being asked
+    // again for it a few lines later (see `DeviceTargets`). Taken before the answer consumes it.
+    let dispatch_targets = core::DeviceTargets::Known(active_devices.clone());
     let recipient_active_devices = core::reported_active_devices(
         addressed_by_key,
         names_a_device_of_recipient,
@@ -500,6 +503,7 @@ pub(crate) async fn dispatch_sealed_sender(
         &app_context,
         msg_envelope,
         context.notification_context.clone(),
+        dispatch_targets,
     )
     .await
     {
