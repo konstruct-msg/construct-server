@@ -1153,6 +1153,37 @@ fn require_legacy_sealed_sender_auth(authed_user_id: Option<uuid::Uuid>) -> Resu
     }
 }
 
+/// What the blocklist says about a credential that verified.
+///
+/// Separate from [`extract_authed_identity`] so the decision can be tested without Redis: the
+/// reads answer two booleans or fail, and what that means for the caller is this table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BlocklistRefusal {
+    /// `invalidated_token:{jti}` is set — the token was logged out.
+    TokenInvalidated,
+    /// `revoked_device:{device}` is set — every token of that device is dead.
+    DeviceRevoked,
+    /// The markers could not be read. Refused, with the reason carried out so it can be logged:
+    /// an unreadable blocklist is not a clean one.
+    Unavailable(String),
+}
+
+/// Refuse unless both markers were read and neither is set.
+///
+/// The token's own blocklist entry is reported first when both are set, which is the order the two
+/// separate reads used to be made in — a logged-out token on a revoked device is named as logged
+/// out, and no refusal turns into an acceptance because of which key was written.
+pub(crate) fn blocklist_refusal(
+    standing: Result<construct_queue::BlocklistStanding, String>,
+) -> Option<BlocklistRefusal> {
+    match standing {
+        Err(e) => Some(BlocklistRefusal::Unavailable(e)),
+        Ok(s) if s.token_invalidated => Some(BlocklistRefusal::TokenInvalidated),
+        Ok(s) if s.device_revoked => Some(BlocklistRefusal::DeviceRevoked),
+        Ok(_) => None,
+    }
+}
+
 /// Extract the authenticated user UUID from gRPC request metadata.
 ///
 /// Requires a cryptographically verified Bearer access token (PASETO).
@@ -1173,40 +1204,37 @@ pub(crate) async fn extract_authed_identity(
             .ok()?;
     let user_id = uuid::Uuid::parse_str(&claims.sub).ok()?;
 
-    // Fail-closed: reject if Redis is unavailable, JTI is blocklisted, or the
-    // device was revoked (covers all outstanding tokens for that device_id).
-    let mut queue = context.queue.lock().await;
+    // Fail-closed: reject if Redis is unavailable, the JTI is blocklisted, or the device was
+    // revoked (covers all outstanding tokens for that device_id).
+    //
+    // Both markers in one `MGET`, and on the lock-free connection rather than `context.queue`:
+    // this is the only Redis work every authenticated call does, so a queue mutex held here would
+    // make the cheapest check the most contended one — an authenticated send would wait behind
+    // another send's mailbox fan-out before it was even allowed to look at the blocklist.
+    let mut conn = context.redis_conn.clone();
+    let standing =
+        construct_queue::blocklist_standing(&mut conn, &claims.jti, claims.device_id.as_deref())
+            .await
+            .map_err(|e| e.to_string());
 
-    match queue.is_token_invalidated(&claims.jti).await {
-        Ok(true) => {
+    match blocklist_refusal(standing) {
+        None => Some((user_id, claims.device_id.clone())),
+        Some(BlocklistRefusal::TokenInvalidated) => {
             tracing::warn!(jti = %claims.jti, "Rejected revoked access token in gRPC auth");
-            return None;
+            None
         }
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "Blocklist check failed — rejecting token");
-            return None;
+        Some(BlocklistRefusal::DeviceRevoked) => {
+            tracing::warn!(
+                device_id = %claims.device_id.as_deref().unwrap_or(""),
+                "Rejected access token for revoked device"
+            );
+            None
         }
-    }
-
-    if let Some(device_id) = claims.device_id.as_deref() {
-        match queue.is_device_revoked(device_id).await {
-            Ok(true) => {
-                tracing::warn!(
-                    device_id = %device_id,
-                    "Rejected access token for revoked device"
-                );
-                return None;
-            }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "Device-revoked check failed — rejecting token");
-                return None;
-            }
+        Some(BlocklistRefusal::Unavailable(error)) => {
+            tracing::warn!(error = %error, "Blocklist check failed — rejecting token");
+            None
         }
     }
-
-    Some((user_id, claims.device_id.clone()))
 }
 
 async fn extract_authed_user_id(
@@ -1388,6 +1416,56 @@ mod sealed_dispatch_error_tests {
         let status = map_sealed_dispatch_error(anyhow::anyhow!("redis down"));
         assert_eq!(status.code(), tonic::Code::Internal);
         assert_eq!(status.message(), "redis down");
+    }
+
+    /// The blocklist is the one check every authenticated call pays for, so the table that turns
+    /// its two reads into a decision is here rather than behind a live Redis. Each row is a
+    /// mutation: flipping any arm accepts a credential the old two-`EXISTS` pair refused.
+    #[test]
+    fn a_revoked_credential_is_refused_and_a_clear_one_is_not() {
+        use super::{BlocklistRefusal, blocklist_refusal};
+        use construct_queue::BlocklistStanding;
+
+        let clear = |token_invalidated, device_revoked| BlocklistStanding {
+            token_invalidated,
+            device_revoked,
+        };
+
+        assert_eq!(
+            blocklist_refusal(Ok(clear(false, false))),
+            None,
+            "nothing set"
+        );
+        assert_eq!(
+            blocklist_refusal(Ok(clear(true, false))),
+            Some(BlocklistRefusal::TokenInvalidated)
+        );
+        assert_eq!(
+            blocklist_refusal(Ok(clear(false, true))),
+            Some(BlocklistRefusal::DeviceRevoked)
+        );
+        assert_eq!(
+            blocklist_refusal(Ok(clear(true, true))),
+            Some(BlocklistRefusal::TokenInvalidated),
+            "both set: named as logged out, the order the two separate reads made it"
+        );
+    }
+
+    /// A Redis error is a refusal, not a pass. This is the arm that a mutation to `Ok(_) => None`
+    /// would silently turn into "any token is valid while Redis is down".
+    #[test]
+    fn an_unreadable_blocklist_refuses_the_credential() {
+        use super::{BlocklistRefusal, blocklist_refusal};
+
+        match blocklist_refusal(Err("connection refused".to_string())) {
+            Some(BlocklistRefusal::Unavailable(reason)) => {
+                assert_eq!(
+                    reason, "connection refused",
+                    "the reason is carried for the log"
+                )
+            }
+            other => panic!("an unreadable blocklist must refuse, got {other:?}"),
+        }
     }
 
     #[test]
