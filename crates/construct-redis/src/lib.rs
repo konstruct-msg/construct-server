@@ -43,7 +43,7 @@ pub use connect::{connect as connect_manager, connection_config, manager_for};
 mod streams;
 
 pub use client::RedisClient;
-pub use streams::{StreamEntry, StreamEntryBinary, StreamReadOptions};
+pub use streams::{StreamEntry, StreamEntryBinary, StreamReadBinary, StreamReadOptions};
 
 // Re-export commonly used types
 pub use redis::RedisError;

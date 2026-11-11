@@ -392,6 +392,379 @@ async fn mailbox_offline_backlog_survives_a_read_from_a_lower_cursor() {
     clear_mailbox(&mut queue, user, &[device]).await;
 }
 
+fn mailbox_page_snapshot(page: &MailboxPage) -> Vec<u8> {
+    rmp_serde::encode::to_vec_named(&(
+        &page.entries,
+        &page.user_only_ids,
+        page.sibling_skipped,
+        &page.user_examined_through,
+        page.has_more,
+        page.resume_after(Some("0")),
+    ))
+    .unwrap()
+}
+
+/// Reference the old two-read transport while sharing the production parser and pure merge.
+/// Explicit merge/UTF-8 assertions below and the pure merge tests remain independent oracles.
+async fn sequential_mailbox_page(
+    queue: &mut MessageQueue,
+    user: &str,
+    device: &str,
+    since: Option<&str>,
+    user_since: Option<&str>,
+    count: usize,
+) -> MailboxPage {
+    let mut delivery = delivery::DeliveryManager::new(
+        &mut queue.client,
+        &queue.config,
+        queue.delivery_queue_prefix.clone(),
+    );
+    let device_entries = delivery
+        .read_device_messages_from_stream(user, device, since, count.saturating_mul(2))
+        .await
+        .unwrap();
+    let user_entries = delivery
+        .read_user_messages_from_stream(user, user_since, count.saturating_mul(2))
+        .await
+        .unwrap();
+    merge_mailbox_pages(
+        device_entries,
+        user_entries,
+        count,
+        count.saturating_mul(2),
+        device,
+    )
+}
+
+/// One actual XREAD must carry both independent offsets (or just the legacy offset for a
+/// device-less reader). A scripted RESP server rejects the old single-source request shape.
+#[tokio::test]
+#[ignore = "scripted Redis exchange; run with mailbox integration tests"]
+async fn mailbox_read_uses_one_xread_with_independent_source_offsets() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    async fn command(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> Vec<Vec<u8>> {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let count: usize = line.strip_prefix('*').unwrap().trim().parse().unwrap();
+        let mut args = Vec::with_capacity(count);
+        for _ in 0..count {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let len: usize = line.strip_prefix('$').unwrap().trim().parse().unwrap();
+            let mut arg = vec![0; len + 2];
+            reader.read_exact(&mut arg).await.unwrap();
+            assert_eq!(&arg[len..], b"\r\n");
+            arg.truncate(len);
+            args.push(arg);
+        }
+        args
+    }
+    for (device, fail) in [Some("reader"), None, Some("")]
+        .into_iter()
+        .flat_map(|device| [(device, false), (device, true)])
+    {
+        let expected: &[&str] = if device == Some("reader") {
+            &[
+                "XREAD",
+                "COUNT",
+                "4",
+                "STREAMS",
+                "delivery:offline:user:reader",
+                "delivery:offline:user",
+                "150-0",
+                "300-0",
+            ]
+        } else {
+            &[
+                "XREAD",
+                "COUNT",
+                "2",
+                "STREAMS",
+                "delivery:offline:user",
+                "150-0",
+            ]
+        };
+        let expected: Vec<Vec<u8>> = expected.iter().map(|s| s.as_bytes().to_vec()).collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("redis://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            loop {
+                let args = command(&mut read).await;
+                match args[0].as_slice() {
+                    b"CLIENT" => write.write_all(b"+OK\r\n").await.unwrap(),
+                    b"PING" => write.write_all(b"+PONG\r\n").await.unwrap(),
+                    b"XREAD" => {
+                        if args != expected {
+                            write
+                                .write_all(b"-ERR expected one correctly addressed XREAD\r\n")
+                                .await
+                                .unwrap();
+                            panic!("XREAD arguments {args:?} != {expected:?}");
+                        }
+                        let reply: &[u8] = if fail {
+                            b"-ERR injected mailbox read failure\r\n"
+                        } else {
+                            b"$-1\r\n"
+                        };
+                        write.write_all(reply).await.unwrap();
+                        return;
+                    }
+                    other => panic!("unexpected command {other:?}"),
+                }
+            }
+        });
+        let mut config = get_test_config();
+        config.redis_url = url;
+        let mut queue = MessageQueue::new(&config).await.unwrap();
+        let result = queue
+            .read_mailbox_messages("user", device, Some("150"), Some("300-0"), 2)
+            .await;
+        if fail {
+            let error = result.err().expect("a failed read is not an empty mailbox");
+            assert!(error.to_string().contains("injected mailbox read failure"));
+        } else {
+            let page = result.unwrap();
+            assert!(page.entries.is_empty());
+            assert!(!page.has_more);
+        }
+        server.await.unwrap();
+    }
+}
+
+/// Static mailboxes must give byte-for-byte identical pages, including both cursor positions,
+/// corrupt-entry placeholders, sibling counts, coverage and has_more. Reads never alter XRANGE.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_read_matches_separate_reads_with_independent_cursors() {
+    use construct_message::MessageEnvelope;
+    let user = format!("test_mailbox_read_equivalence_{}", std::process::id());
+    let device = "reader";
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, &user, &[device]).await;
+    let user_key = format!("{}:offline:{user}", queue.delivery_queue_prefix);
+    let device_key = format!("{user_key}:{device}");
+    let env = |id: &str| {
+        let mut e = MessageEnvelope::new_key_sync("alice".into(), user.clone());
+        e.message_id = id.to_string();
+        e.encrypted_payload = vec![0, 255, 128];
+        e
+    };
+    let mut sibling = env("sibling");
+    sibling.recipient_device = Some("sibling-device".into());
+    let mut wrong_recipient = env("wrong-recipient");
+    wrong_recipient.recipient_id = "someone-else".into();
+    for (key, rows) in [
+        (
+            &user_key,
+            vec![
+                ("100-0", env("shared")),
+                ("200-0", env("user-only")),
+                ("300-0", sibling),
+                ("400-0", env("bad-utf8")),
+                ("500-0", wrong_recipient),
+            ],
+        ),
+        (
+            &device_key,
+            vec![
+                ("150-0", env("shared")),
+                ("250-0", env("device-only")),
+                ("450-0", env("bad-payload")),
+            ],
+        ),
+    ] {
+        for (id, envelope) in rows {
+            let message_id = if envelope.message_id == "bad-utf8" {
+                vec![255u8]
+            } else {
+                envelope.message_id.as_bytes().to_vec()
+            };
+            let payload = if envelope.message_id == "bad-payload" {
+                vec![255u8]
+            } else {
+                rmp_serde::encode::to_vec_named(&envelope).unwrap()
+            };
+            let _: String = redis::cmd("XADD")
+                .arg(key)
+                .arg(id)
+                .arg("message_id")
+                .arg(message_id)
+                .arg("payload")
+                .arg(payload)
+                .query_async(queue.client.connection_mut())
+                .await
+                .unwrap();
+        }
+    }
+    let before: redis::Value = redis::cmd("XRANGE")
+        .arg(&user_key)
+        .arg("-")
+        .arg("+")
+        .query_async(queue.client.connection_mut())
+        .await
+        .unwrap();
+    for user_write in [true, false] {
+        queue.config.messaging.mailbox_user_write = user_write;
+        for count in [0, 1, 2, 3, 20] {
+            for (since, user_since) in [
+                (None, None),
+                (Some("0"), Some("0")),
+                (Some("150-0"), Some("0")),
+                (Some("0"), Some("300-0")),
+                (Some("250"), Some("200")),
+                (Some("not-an-id"), Some("invalid")),
+                (Some("999-0"), Some("0")),
+                (Some("0"), Some("999-0")),
+                (Some("$"), Some("0")),
+                (Some("0"), Some("$")),
+            ] {
+                let expected =
+                    sequential_mailbox_page(&mut queue, &user, device, since, user_since, count)
+                        .await;
+                let actual = queue
+                    .read_mailbox_messages(&user, Some(device), since, user_since, count)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    mailbox_page_snapshot(&actual),
+                    mailbox_page_snapshot(&expected),
+                    "count={count}, since={since:?}, user_since={user_since:?}, flag={user_write}"
+                );
+            }
+        }
+    }
+    let page = queue
+        .read_mailbox_messages(&user, Some(device), None, None, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["150-0", "200-0", "250-0", "400-0", "450-0", "500-0"]
+    );
+    assert!(
+        page.entries[3..].iter().all(|(_, e)| e.is_none()),
+        "corrupt/wrong-recipient entries still advance"
+    );
+    assert_eq!(page.user_only_ids, ["user-only"]);
+    assert_eq!(page.sibling_skipped, 1);
+    assert_eq!(page.user_examined_through.as_deref(), Some("500-0"));
+    assert!(!page.has_more);
+    assert!(
+        queue
+            .read_mailbox_messages(&user, Some(device), Some("*"), None, 20)
+            .await
+            .is_err(),
+        "a Redis cursor error must not become an empty mailbox"
+    );
+    for device in [None, Some("")] {
+        let legacy = queue
+            .read_mailbox_messages(&user, device, Some("200-0"), Some("999-0"), 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy
+                .entries
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["300-0", "400-0", "500-0"]
+        );
+        assert!(legacy.user_only_ids.is_empty());
+        assert_eq!(legacy.user_examined_through, None);
+    }
+    let after: redis::Value = redis::cmd("XRANGE")
+        .arg(&user_key)
+        .arg("-")
+        .arg("+")
+        .query_async(queue.client.connection_mut())
+        .await
+        .unwrap();
+    assert_eq!(after, before, "reads are not retention");
+    assert_eq!(stream_len(&mut queue, &device_key).await, 3);
+    clear_mailbox(&mut queue, &user, &[device]).await;
+}
+
+/// A missing or wrong-type source is empty, not a reason to lose the healthy source. Empty
+/// stream groups may be omitted/reordered by Redis, so source identity must not be positional.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_read_keeps_the_healthy_source_when_its_peer_is_missing_or_wrongtype() {
+    let user = format!("test_mailbox_read_fault_{}", std::process::id());
+    let device = "reader";
+    let mut queue = mailbox_queue(true).await;
+    let user_key = format!("{}:offline:{user}", queue.delivery_queue_prefix);
+    let device_key = format!("{user_key}:{device}");
+    for (bad_device, wrongtype) in [(true, false), (false, false), (true, true), (false, true)] {
+        clear_mailbox(&mut queue, &user, &[device]).await;
+        let (bad, good) = if bad_device {
+            (&device_key, &user_key)
+        } else {
+            (&user_key, &device_key)
+        };
+        if wrongtype {
+            let _: () = redis::cmd("SET")
+                .arg(bad)
+                .arg("not a stream")
+                .query_async(queue.client.connection_mut())
+                .await
+                .unwrap();
+        }
+        let envelope =
+            construct_message::MessageEnvelope::new_key_sync("alice".into(), user.clone());
+        let payload = rmp_serde::encode::to_vec_named(&envelope).unwrap();
+        let _: String = redis::cmd("XADD")
+            .arg(good)
+            .arg("100-0")
+            .arg("message_id")
+            .arg(&envelope.message_id)
+            .arg("payload")
+            .arg(payload)
+            .query_async(queue.client.connection_mut())
+            .await
+            .unwrap();
+        let expected = sequential_mailbox_page(&mut queue, &user, device, None, None, 20).await;
+        let actual = queue
+            .read_mailbox_messages(&user, Some(device), None, None, 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            mailbox_page_snapshot(&actual),
+            mailbox_page_snapshot(&expected)
+        );
+        assert_eq!(actual.entries.len(), 1);
+        assert_eq!(
+            actual.entries[0].1.as_ref().unwrap().message_id,
+            envelope.message_id
+        );
+        assert_eq!(actual.user_only(), usize::from(bad_device));
+        assert_eq!(stream_len(&mut queue, good).await, 1);
+    }
+    clear_mailbox(&mut queue, &user, &[device]).await;
+    let _: () = redis::pipe()
+        .cmd("SET")
+        .arg(&user_key)
+        .arg("wrong type")
+        .cmd("SET")
+        .arg(&device_key)
+        .arg("wrong type")
+        .query_async(queue.client.connection_mut())
+        .await
+        .unwrap();
+    let empty = queue
+        .read_mailbox_messages(&user, Some(device), None, None, 20)
+        .await
+        .unwrap();
+    assert!(empty.entries.is_empty());
+    assert!(!empty.has_more);
+    clear_mailbox(&mut queue, &user, &[device]).await;
+}
+
 /// Every device gets its own copy, and neither read empties the other's box — the
 /// shared-mailbox loss that the per-device streams exist to remove.
 #[tokio::test]

@@ -2195,6 +2195,192 @@ async fn o1_with_the_anti_abuse_store_down_a_sealed_message_is_still_delivered()
     del(&mut mailbox, &[format!("delivery:offline:{recipient}")]).await;
 }
 
+/// The actual pending RPC keeps its wire result after read batching/merge changes: bytes stay
+/// opaque, device wins duplicates, siblings/receipts/corrupt entries do not leak, and even empty
+/// pages advance the Redis cursor. A device-less token still reads only the legacy stream.
+#[tokio::test]
+#[serial]
+async fn p5_pending_rpc_preserves_payloads_cursors_and_legacy_reads() {
+    use construct_server_shared::shared::proto::services::v1::{
+        GetPendingMessagesRequest, PendingMessage, messaging_service_server::MessagingService,
+    };
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let device = random_device();
+    let account = recipient.to_string();
+    let user_key = format!("delivery:offline:{account}");
+    let device_key = format!("{user_key}:{device}");
+    let payload = vec![0, 255, 128, 1];
+    let make = |id: &str| {
+        let mut e = construct_message::MessageEnvelope::new_direct_message(
+            id.into(),
+            "alice".into(),
+            account.clone(),
+            vec![0; 32],
+            0,
+            payload.clone(),
+            String::new(),
+        );
+        e.timestamp = 7;
+        e
+    };
+    let mut sibling = make("sibling");
+    sibling.recipient_device = Some("other-device".into());
+    let own = make("own");
+    let user_only = make("user-only");
+    let device_only = make("device-only");
+    let mut receipt = make("receipt");
+    receipt.message_type = construct_message::MessageType::Receipt;
+    let mut sealed = make("sealed");
+    sealed.is_sealed_sender = true;
+    sealed.sealed_inner = Some(vec![255, 0, 128]);
+    let mut conn = h.ctx.redis_conn.clone();
+    for (key, rows) in [
+        (
+            &user_key,
+            vec![
+                ("50-0", sibling),
+                ("110-0", own.clone()),
+                ("200-0", user_only),
+                ("400-0", make("corrupt")),
+                ("500-0", receipt),
+                ("600-0", sealed.clone()),
+            ],
+        ),
+        (
+            &device_key,
+            vec![("100-0", own), ("300-0", device_only), ("610-0", sealed)],
+        ),
+    ] {
+        for (id, e) in rows {
+            let bytes = if e.message_id == "corrupt" {
+                vec![255]
+            } else {
+                rmp_serde::encode::to_vec_named(&e).unwrap()
+            };
+            let _: String = redis::cmd("XADD")
+                .arg(key)
+                .arg(id)
+                .arg("message_id")
+                .arg(&e.message_id)
+                .arg("payload")
+                .arg(bytes)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+    }
+    let (token, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&recipient, Some(&device))
+        .unwrap();
+    let (legacy_token, _, _) = h.ctx.auth_manager.create_token(&recipient).unwrap();
+    let request = |token: &str, cursor: Option<String>, limit: i32| {
+        let mut req = tonic::Request::new(GetPendingMessagesRequest {
+            since_cursor: cursor,
+            limit: Some(limit),
+        });
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req
+    };
+    let service = crate::grpc::MessagingGrpcService {
+        context: h.ctx.clone(),
+    };
+    let expected = |id: &str| PendingMessage {
+        message_id: id.into(),
+        sender_id: if id == "sealed" {
+            String::new()
+        } else {
+            "alice".into()
+        },
+        encrypted_payload: if id == "sealed" {
+            Vec::new()
+        } else {
+            payload.clone()
+        },
+        timestamp: 7,
+        content_type: core_proto::ContentType::E2eeSignal as i32,
+        sealed_inner_data: if id == "sealed" {
+            vec![255, 0, 128]
+        } else {
+            Vec::new()
+        },
+    };
+    let messages: Vec<_> = ["own", "user-only", "device-only", "sealed"]
+        .into_iter()
+        .map(expected)
+        .collect();
+    let full = service
+        .get_pending_messages(request(&token, None, 100))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(full.messages, messages);
+    assert_eq!(full.next_cursor, "610-0");
+    assert!(!full.has_more);
+    assert!(full.gap.is_none());
+
+    let mut cursor = "0-0".to_string();
+    let mut received = Vec::new();
+    let mut complete = false;
+    let mut empty_pages = 0;
+    for _ in 0..20 {
+        let page = service
+            .get_pending_messages(request(&token, Some(cursor.clone()), 1))
+            .await
+            .unwrap()
+            .into_inner();
+        if page.messages.is_empty() {
+            empty_pages += 1;
+        }
+        assert!(page.gap.is_none());
+        assert_ne!(
+            page.next_cursor, cursor,
+            "paging must advance even past corrupt/receipt-only pages"
+        );
+        received.extend(page.messages);
+        cursor = page.next_cursor;
+        if !page.has_more {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete);
+    assert!(
+        empty_pages > 0,
+        "exercise cursor advancement without a client-visible message"
+    );
+    assert_eq!(received, messages);
+    assert_eq!(cursor, "610-0");
+
+    let legacy = service
+        .get_pending_messages(request(&legacy_token, None, 100))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        legacy.messages,
+        ["sibling", "own", "user-only", "sealed"]
+            .into_iter()
+            .map(expected)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(legacy.next_cursor, "600-0");
+    assert!(!legacy.has_more);
+    assert_eq!(stream_len(&mut conn, &recipient).await, 6);
+    let device_len: i64 = redis::cmd("XLEN")
+        .arg(&device_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(device_len, 3);
+    del(&mut conn, &[user_key, device_key]).await;
+}
+
 /// A stream examines a sibling device's user-stream entries once, not on every poll: they are
 /// counted as skipped on the first poll and the user position moves past them. On 2026-09-21 a
 /// two-device stand re-read the same eight on every 5-second tick. Mutation: drop the

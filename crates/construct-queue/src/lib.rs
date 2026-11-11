@@ -469,26 +469,6 @@ impl MessageQueue {
         self.config.messaging.mailbox_user_write
     }
 
-    /// Read messages from a per-device Redis stream.
-    ///
-    /// Used by multi-device-aware clients that pass `x-device-id` in stream metadata.
-    /// Falls back gracefully: if the device stream is empty or doesn't exist, returns [].
-    async fn read_device_messages_from_stream(
-        &mut self,
-        user_id: &str,
-        device_id: &str,
-        since_id: Option<&str>,
-        count: usize,
-    ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .read_device_messages_from_stream(user_id, device_id, since_id, count)
-        .await
-    }
-
     /// Read the recipient mailbox for delivery.
     ///
     /// - No `device_id`: legacy user stream only.
@@ -534,12 +514,13 @@ impl MessageQueue {
 
         // Oversample each source so the merge can still fill `count` after dedupe.
         let per_source = count.saturating_mul(2);
-        let device_msgs = self
-            .read_device_messages_from_stream(user_id, device_id, since_id, per_source)
-            .await?;
-        let user_msgs = self
-            .read_user_messages_from_stream(user_id, user_since_id, per_source)
-            .await?;
+        let (device_msgs, user_msgs) = delivery::DeliveryManager::new(
+            &mut self.client,
+            &self.config,
+            self.delivery_queue_prefix.clone(),
+        )
+        .read_mailbox_streams(user_id, device_id, since_id, user_since_id, per_source)
+        .await?;
 
         Ok(merge_mailbox_pages(
             device_msgs,
@@ -760,18 +741,15 @@ fn merge_mailbox_pages(
     source_limit: usize,
     reader_device: &str,
 ) -> MailboxPage {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
-    let device_ids: HashSet<MessageDedupKey> = device_msgs
-        .iter()
-        .filter_map(|(_, e)| e.as_ref().map(MessageDedupKey::for_envelope))
-        .collect();
-
+    // Device entries overwrite user entries in this same scope, so their provenance is also
+    // the coverage answer. Hash each admitted envelope once; no second set or Redis key strings.
     let mut by_message_id: HashMap<
-        MessageDedupKey,
-        (String, construct_message::types::MessageEnvelope),
+        [u8; 32],
+        (String, construct_message::types::MessageEnvelope, bool),
     > = HashMap::new();
-    let mut orphans: Vec<(String, Option<construct_message::types::MessageEnvelope>)> = Vec::new();
+    let mut orphans = Vec::new();
     let mut sibling_skipped = 0usize;
     // The last user entry examined, wherever it goes below — kept, overwritten by the
     // device copy, skipped, or an orphan. XREAD returns in id order, so it is the page's last.
@@ -799,42 +777,49 @@ fn merge_mailbox_pages(
                     sibling_skipped += 1;
                     continue;
                 }
-                by_message_id.insert(MessageDedupKey::for_envelope(&env), (stream_id, env));
+                by_message_id.insert(
+                    MessageDedupKey::scope_for_envelope(&env),
+                    (stream_id, env, false),
+                );
             }
-            None => orphans.push((stream_id, None)),
+            None => orphans.push((stream_id, None, false)),
         }
     }
     for (stream_id, envelope) in device_msgs {
         match envelope {
             Some(env) => {
-                by_message_id.insert(MessageDedupKey::for_envelope(&env), (stream_id, env));
+                by_message_id.insert(
+                    MessageDedupKey::scope_for_envelope(&env),
+                    (stream_id, env, true),
+                );
             }
-            None => orphans.push((stream_id, None)),
+            None => orphans.push((stream_id, None, true)),
         }
     }
 
-    let mut merged: Vec<(String, Option<construct_message::types::MessageEnvelope>)> =
-        by_message_id
-            .into_values()
-            .map(|(stream_id, env)| (stream_id, Some(env)))
-            .chain(orphans)
-            .collect();
+    let mut merged: Vec<_> = by_message_id
+        .into_values()
+        .map(|(stream_id, env, on_device)| (stream_id, Some(env), on_device))
+        .chain(orphans)
+        .collect();
 
     merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
-    merged.retain(|(id, _)| !past_horizon(id));
+    merged.retain(|(id, _, _)| !past_horizon(id));
     let cut_by_count = merged.len() > count;
     merged.truncate(count);
 
     // Collected after truncation: only entries actually handed to the client are evidence.
     let user_only_ids: Vec<String> = merged
         .iter()
-        .filter_map(|(_, e)| e.as_ref())
-        .filter(|e| !device_ids.contains(&MessageDedupKey::for_envelope(e)))
-        .map(|e| e.message_id.clone())
+        .filter(|(_, _, on_device)| !on_device)
+        .filter_map(|(_, e, _)| e.as_ref().map(|e| e.message_id.clone()))
         .collect();
 
     MailboxPage {
-        entries: merged,
+        entries: merged
+            .into_iter()
+            .map(|(id, envelope, _)| (id, envelope))
+            .collect(),
         user_only_ids,
         sibling_skipped,
         // Examined only up to the horizon: user entries after it were left for the next page.
@@ -1247,6 +1232,48 @@ mod mailbox_merge_tests {
         assert_eq!(ids(&page), vec!["m1", "m2"]);
         assert!(!page.has_more);
         assert_eq!(page.resume_after(Some("0")).as_deref(), Some("400-0"));
+    }
+
+    /// CPU-only benchmark of the production merge, with cloning outside the timed region.
+    /// Run with --release --ignored --nocapture; latency is reported, never asserted.
+    #[test]
+    #[ignore = "manual merge CPU benchmark"]
+    fn mailbox_merge_cpu_benchmark() {
+        let device: Vec<_> = (0..50)
+            .map(|i| {
+                let mut e = env(&format!("message-{i}"));
+                e.encrypted_payload = vec![255; 1024];
+                (format!("{}-0", 1000 + 2 * i), Some(e))
+            })
+            .collect();
+        let user: Vec<_> = (0..50)
+            .map(|i| {
+                let mut e = if i < 40 {
+                    device[i].1.as_ref().unwrap().clone()
+                } else if i < 45 {
+                    env_for(&format!("sibling-{i}"), "other")
+                } else {
+                    env(&format!("user-only-{i}"))
+                };
+                e.encrypted_payload = vec![255; 1024];
+                (format!("{}-0", 1001 + 2 * i), Some(e))
+            })
+            .collect();
+        let mut elapsed = std::time::Duration::ZERO;
+        for _ in 0..1000 {
+            let (d, u) = (device.clone(), user.clone());
+            let started = std::time::Instant::now();
+            let page = std::hint::black_box(merge_mailbox_pages(d, u, 50, 100, "dev"));
+            elapsed += started.elapsed();
+            assert_eq!(page.entries.len(), 50);
+            assert_eq!(page.user_only(), 2);
+            assert_eq!(page.sibling_skipped, 5);
+            assert!(page.has_more);
+        }
+        eprintln!(
+            "mailbox merge: {:.2} us/page (1000 pages, 50+50 inputs, 1 KiB payload)",
+            elapsed.as_secs_f64() * 1e6 / 1000.0
+        );
     }
 
     /// A page that delivered nothing and examined nothing leaves the cursor where it was.
