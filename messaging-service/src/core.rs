@@ -321,7 +321,9 @@ pub async fn dispatch_envelope(
     let t_lock = std::time::Instant::now();
     let mut queue = app_context.queue.lock().await;
     let write_user = queue.mailbox_user_write_enabled();
-    queue
+    // One round trip for every mailbox of this recipient, plus the presence read that used to be
+    // a command of its own (see `write_message_to_mailboxes`).
+    let writes = queue
         .write_message_to_device_streams(recipient_id, &device_ids, &envelope)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to deliver message: {e}")))?;
@@ -347,21 +349,10 @@ pub async fn dispatch_envelope(
             .inc_by(device_ids.len() as u64);
     }
 
-    // Presence check under the same lock as the stream write so we observe the
-    // online flag set by an active MessageStream on this (or another) instance.
-    // Redis error → treat as offline (fail-open: still send APNs wake).
-    let recipient_online = match queue.get_user_server_instance(recipient_id).await {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(e) => {
-            tracing::debug!(
-                error = %e,
-                recipient_hash = %log_safe_id(recipient_id, salt),
-                "Failed to check recipient online status — will send wake push"
-            );
-            false
-        }
-    };
+    // Presence is read inside the fan-out pipeline, after the writes, so it still observes the
+    // online flag an active MessageStream set on this (or another) instance. A failed read is
+    // offline: fail-open, the wake push is still sent.
+    let recipient_online = writes.recipient_online;
     drop(queue);
     tracing::debug!(
         redis_ms = t_lock.elapsed().as_millis(),

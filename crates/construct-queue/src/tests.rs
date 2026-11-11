@@ -943,3 +943,108 @@ async fn blocklist_standing_answers_what_the_two_separate_reads_answered() {
 
     clear(&mut conn, &keys).await;
 }
+
+// ============================================================================
+// One fan-out, one round trip
+// ============================================================================
+
+/// A device stream that refuses the write costs that device its copy and nothing else. The other
+/// mailboxes still get theirs, and the count the caller decides "nowhere to land" on is of writes
+/// that landed — a count of attempts would call a refused write a delivery.
+///
+/// Mutation: fail the whole fan-out on the first refused `XADD` — the sibling's stream stays empty
+/// and the send comes back an error.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_a_refused_device_stream_costs_only_that_copy() {
+    let user = "test_mailbox_one_bad_device_user";
+    let (good, bad) = ("test_mbx_onebad_ok", "test_mbx_onebad_bad");
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[good, bad]).await;
+
+    // A string where the device stream belongs: `XADD` answers WRONGTYPE for that key alone.
+    let bad_key = format!("{}:offline:{}:{}", queue.delivery_queue_prefix, user, bad);
+    let mut conn = queue.clone_redis_connection();
+    let _: () = redis::cmd("SET")
+        .arg(&bad_key)
+        .arg("not-a-stream")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    let writes = queue
+        .write_message_to_device_streams(user, &[good.to_string(), bad.to_string()], &env)
+        .await
+        .expect("a refused copy is not the message's failure");
+
+    assert_eq!(writes.device_streams, 1, "only the healthy device's write");
+    assert_eq!(
+        writes.user_stream,
+        Some(true),
+        "the legacy copy still landed"
+    );
+    assert!(!writes.recipient_online, "nobody is streaming this user");
+
+    let good_key = format!("{}:offline:{}:{}", queue.delivery_queue_prefix, user, good);
+    assert_eq!(stream_len(&mut queue, &good_key).await, 1);
+
+    let _: () = redis::cmd("DEL")
+        .arg(&bad_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    clear_mailbox(&mut queue, user, &[good, bad]).await;
+}
+
+/// A fan-out still wakes the account's `inbox:wakeup` channel, and the entry is there when the
+/// wakeup is read. Nothing else asserts the publish: the stream tests poll, so dropping the
+/// `PUBLISH` would leave every connected client waiting for the fallback tick instead of
+/// delivering at once — silently, and only visible as latency.
+///
+/// The wakeup runs after the writes because Redis executes a pipeline in the order it was sent;
+/// that is the mechanism, not a race this test could observe from outside.
+///
+/// Mutation: drop the `PUBLISH` from the fan-out — this times out waiting for a wakeup that never
+/// comes.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_a_fan_out_wakes_the_account_channel_after_writing() {
+    use tokio_stream::StreamExt;
+
+    let user = "test_mailbox_wakeup_order_user";
+    let device = "test_mbx_wakeup_dev";
+    let mut queue = mailbox_queue(true).await;
+    clear_mailbox(&mut queue, user, &[device]).await;
+
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let client = redis::Client::open(url.as_str()).expect("redis client");
+    let mut pubsub = client.get_async_pubsub().await.expect("pubsub");
+    let channel = format!("inbox:wakeup:{user}");
+    pubsub.subscribe(&channel).await.expect("subscribe");
+
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    queue
+        .write_message_to_device_streams(user, &[device.to_string()], &env)
+        .await
+        .expect("dispatch");
+
+    let mut messages = pubsub.into_on_message();
+    let wakeup = tokio::time::timeout(std::time::Duration::from_secs(5), messages.next())
+        .await
+        .expect("the fan-out must publish a wakeup")
+        .expect("one message");
+    assert_eq!(wakeup.get_channel_name(), channel);
+
+    let device_key = format!(
+        "{}:offline:{}:{}",
+        queue.delivery_queue_prefix, user, device
+    );
+    assert_eq!(
+        stream_len(&mut queue, &device_key).await,
+        1,
+        "the wakeup must not arrive before the entry"
+    );
+
+    clear_mailbox(&mut queue, user, &[device]).await;
+}
