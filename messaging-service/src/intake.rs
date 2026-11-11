@@ -290,22 +290,24 @@ pub(crate) async fn check_intake_credential(
 
     let mut any_published = false;
     for epoch in acceptable_epochs(intake_epoch(now_unix)) {
-        let members: redis::RedisResult<Vec<Vec<u8>>> = redis::cmd("SMEMBERS")
+        // Batch only this epoch: a current match must not read (or fail on) the previous one.
+        // Both carriers must be readable before a match counts, so any command/decode error
+        // fails the pair. No `ignore_errors`: a match must never hide an unreadable peer key.
+        let tags = redis::pipe()
+            .cmd("SMEMBERS")
             .arg(tag_key(recipient_user_id, epoch))
-            .query_async(conn)
-            .await;
-        let legacy: redis::RedisResult<Option<Vec<u8>>> = redis::cmd("GET")
+            .cmd("GET")
             .arg(legacy_tag_key(recipient_user_id, epoch))
-            .query_async(conn)
+            .query_async::<(Vec<Vec<u8>>, Option<Vec<u8>>)>(conn)
             .await;
-        match (members, legacy) {
-            (Ok(members), Ok(legacy)) => {
+        match tags {
+            Ok((members, legacy)) => {
                 any_published |= !members.is_empty() || legacy.is_some();
                 if any_tag_matches(&presented, members.iter().chain(legacy.iter())) {
                     return IntakeCheck::Vouched;
                 }
             }
-            (Err(e), _) | (_, Err(e)) => {
+            Err(e) => {
                 tracing::warn!(error = %e, "intake tag lookup unavailable — falling back to the token path");
                 return IntakeCheck::Unavailable;
             }

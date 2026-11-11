@@ -1582,6 +1582,503 @@ async fn t1_a_delivery_tag_is_kept_5_min_and_24_h_and_released_when_the_write_fa
     del(&mut conn, &[stream_key, exact, seen]).await;
 }
 
+/// Pin the sequential lookup's decisions before batching it: both carriers must be readable,
+/// current epoch wins before previous, and a previous match cannot rescue a current read error.
+/// Wrong-length/binary stored values and irrelevant epochs must keep their existing outcomes.
+#[tokio::test]
+#[serial]
+async fn n2_intake_epoch_reads_preserve_matching_and_error_priority() {
+    use crate::intake::{
+        INTAKE_EPOCH_SECONDS, INTAKE_TAG_LEN, IntakeCheck, UnrecognisedReason,
+        check_intake_credential, legacy_tag_key, tag_key,
+    };
+    #[derive(Clone, Copy)]
+    enum Stored {
+        Missing,
+        Match,
+        Other,
+        WrongLength,
+        WrongType,
+    }
+    use IntakeCheck::{Unavailable, Unrecognised, Vouched};
+    use Stored::*;
+    use UnrecognisedReason::{NoMatch, NothingPublished};
+
+    let Some(mut conn) = try_redis().await else {
+        return;
+    };
+    let account = uuid::Uuid::new_v4().to_string();
+    let epoch = 20_707;
+    let now = epoch * INTAKE_EPOCH_SECONDS;
+    let secret = X25519StaticSecret::from(random_bytes32());
+    let mut tag = vec![0; INTAKE_TAG_LEN];
+    tag[INTAKE_TAG_LEN - 1] = 255;
+    let sealed = seal_token_for_server(&tag, &secret);
+    let keys = [
+        tag_key(&account, epoch),
+        legacy_tag_key(&account, epoch),
+        tag_key(&account, epoch - 1),
+        legacy_tag_key(&account, epoch - 1),
+    ];
+    let cases = [
+        (
+            "empty",
+            [Missing, Missing, Missing, Missing],
+            Unrecognised(NothingPublished),
+        ),
+        ("current set", [Match, Missing, Missing, Missing], Vouched),
+        (
+            "current legacy",
+            [Missing, Match, Missing, Missing],
+            Vouched,
+        ),
+        ("previous set", [Missing, Missing, Match, Missing], Vouched),
+        (
+            "previous legacy",
+            [Missing, Missing, Missing, Match],
+            Vouched,
+        ),
+        (
+            "current mismatch",
+            [Other, Missing, Missing, Missing],
+            Unrecognised(NoMatch),
+        ),
+        (
+            "previous mismatch",
+            [Missing, Missing, Missing, Other],
+            Unrecognised(NoMatch),
+        ),
+        (
+            "previous rescues mismatch",
+            [Other, Other, Match, Missing],
+            Vouched,
+        ),
+        (
+            "short set member",
+            [WrongLength, Missing, Missing, Missing],
+            Unrecognised(NoMatch),
+        ),
+        (
+            "short legacy",
+            [Missing, WrongLength, Missing, Missing],
+            Unrecognised(NoMatch),
+        ),
+        (
+            "legacy error despite set match",
+            [Match, WrongType, Missing, Missing],
+            Unavailable,
+        ),
+        (
+            "set error despite legacy match",
+            [WrongType, Match, Missing, Missing],
+            Unavailable,
+        ),
+        (
+            "previous cannot rescue current error",
+            [WrongType, Missing, Match, Match],
+            Unavailable,
+        ),
+        (
+            "previous legacy error despite set match",
+            [Missing, Missing, Match, WrongType],
+            Unavailable,
+        ),
+        (
+            "previous set error despite legacy match",
+            [Missing, Missing, WrongType, Match],
+            Unavailable,
+        ),
+        (
+            "current wins before previous error",
+            [Match, Missing, WrongType, WrongType],
+            Vouched,
+        ),
+        (
+            "current legacy wins before previous error",
+            [Missing, Match, WrongType, WrongType],
+            Vouched,
+        ),
+    ];
+    // Matching tags outside the accepted epochs (or on another account) never count.
+    let irrelevant = [
+        tag_key(&account, epoch - 2),
+        legacy_tag_key(&account, epoch + 1),
+        tag_key(&uuid::Uuid::new_v4().to_string(), epoch),
+    ];
+    for (index, key) in irrelevant.iter().enumerate() {
+        let _: () = redis::cmd(if index == 1 { "SET" } else { "SADD" })
+            .arg(key)
+            .arg(&tag)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+    for (label, states, expected) in cases {
+        del(&mut conn, &keys).await;
+        for (index, state) in states.into_iter().enumerate() {
+            if matches!(state, Missing) {
+                continue;
+            }
+            let value = match state {
+                Match | WrongType => tag.clone(),
+                Other => vec![7; INTAKE_TAG_LEN],
+                WrongLength => vec![7; INTAKE_TAG_LEN - 1],
+                Missing => unreachable!(),
+            };
+            let use_set = (index % 2 == 0) ^ matches!(state, WrongType);
+            let _: redis::Value = redis::cmd(if use_set { "SADD" } else { "SET" })
+                .arg(&keys[index])
+                .arg(value)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+        let actual =
+            check_intake_credential(&mut conn, Some(&secret), &sealed, &account, now).await;
+        assert_eq!(actual, expected, "{label}");
+        assert_eq!(actual.verdict(), expected.verdict(), "{label}");
+        assert_eq!(actual.owes_token(), expected.owes_token(), "{label}");
+    }
+    del(&mut conn, &keys).await;
+    del(&mut conn, &irrelevant).await;
+
+    // Epoch zero has no predecessor, and still accepts the current legacy carrier.
+    let zero_key = legacy_tag_key(&account, 0);
+    let _: () = redis::cmd("SET")
+        .arg(&zero_key)
+        .arg(&tag)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        check_intake_credential(&mut conn, Some(&secret), &sealed, &account, 0).await,
+        Vouched
+    );
+    del(&mut conn, &[zero_key]).await;
+}
+
+/// Exercise the actual sealed-send consumer: grace/legacy matches spare the wallet, while a
+/// mismatch or either unreadable carrier keeps its distinct verdict and redeems the token.
+#[tokio::test]
+#[serial]
+async fn n3_intake_epoch_reads_keep_send_verdicts_and_token_spend() {
+    use crate::intake::{INTAKE_TAG_LEN, intake_epoch, legacy_tag_key, tag_key};
+    #[derive(Clone, Copy)]
+    enum Scenario {
+        PreviousMatch,
+        NoMatch,
+        LegacyError,
+        SetError,
+    }
+    use Scenario::*;
+    for policy in [StealthTokenPolicy::Warn, StealthTokenPolicy::Enforce] {
+        let Some(h) = build_harness(policy).await else {
+            return;
+        };
+        let recipient = uuid::Uuid::new_v4();
+        let account = recipient.to_string();
+        let epoch = intake_epoch(chrono::Utc::now().timestamp() as u64);
+        let keys = [
+            tag_key(&account, epoch),
+            legacy_tag_key(&account, epoch),
+            tag_key(&account, epoch - 1),
+            legacy_tag_key(&account, epoch - 1),
+        ];
+        let tag = vec![9; INTAKE_TAG_LEN];
+        let mut conn = h.ctx.redis_conn.clone();
+        for (index, (scenario, verdict)) in [
+            (PreviousMatch, IntakeVerdict::Accepted),
+            (NoMatch, IntakeVerdict::NotAccepted),
+            (LegacyError, IntakeVerdict::Unchecked),
+            (SetError, IntakeVerdict::Unchecked),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            del(&mut conn, &keys).await;
+            let mut setup = redis::pipe();
+            match scenario {
+                PreviousMatch => {
+                    setup.cmd("SET").arg(&keys[3]).arg(&tag);
+                }
+                NoMatch => {
+                    setup
+                        .cmd("SET")
+                        .arg(&keys[3])
+                        .arg(vec![8u8; INTAKE_TAG_LEN]);
+                }
+                LegacyError => {
+                    setup
+                        .cmd("SADD")
+                        .arg(&keys[0])
+                        .arg(&tag)
+                        .cmd("SADD")
+                        .arg(&keys[1])
+                        .arg(&tag);
+                }
+                SetError => {
+                    setup
+                        .cmd("SET")
+                        .arg(&keys[0])
+                        .arg(&tag)
+                        .cmd("SET")
+                        .arg(&keys[1])
+                        .arg(&tag);
+                }
+            }
+            setup.query_async::<()>(&mut conn).await.unwrap();
+            let nonce = random_bytes32();
+            let token = issue_client_token(&h.token_issuer_key, &nonce);
+            let delivery_tag = random_bytes32();
+            let mut sealed = build_sealed_envelope(
+                &recipient,
+                &delivery_tag,
+                Some(&nonce),
+                Some(&seal_token_for_server(&token, &h.token_enc_secret)),
+            );
+            let mut inner = core_proto::SealedInner::decode(sealed.sealed_inner.as_ref()).unwrap();
+            inner.intake_tag_sealed = seal_token_for_server(&tag, &h.token_enc_secret);
+            sealed.sealed_inner = inner.encode_to_vec();
+
+            let response = dispatch_sealed_sender(&h.ctx, &sealed)
+                .await
+                .expect("sealed send");
+            assert!(response.success);
+            assert_eq!(response.intake_verdict, verdict as i32);
+            assert!(response.error.is_none());
+            assert_eq!(stream_len(&mut conn, &recipient).await, (index + 1) as i64);
+            let spent = format!("spent:{}", hex::encode(Sha256::digest(nonce)));
+            let redeemed: bool = redis::cmd("EXISTS")
+                .arg(&spent)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                redeemed,
+                verdict != IntakeVerdict::Accepted,
+                "only a confirmed match spares the token"
+            );
+            crate::spent_tag::unmark_delivery_tag(&mut conn, &delivery_tag)
+                .await
+                .unwrap();
+            del(&mut conn, &[spent]).await;
+        }
+        del(&mut conn, &keys).await;
+        del(&mut conn, &[format!("delivery:offline:{recipient}")]).await;
+    }
+}
+
+/// A transport outage is Unchecked, not NotAccepted or free sending. Invalid/absent credentials
+/// still finish their local checks without Redis; the valid credential follows token fallback.
+#[tokio::test]
+#[serial]
+async fn n4_intake_outage_keeps_local_checks_and_delivers_unchecked() {
+    use crate::intake::{
+        INTAKE_TAG_LEN, IntakeCheck, UnrecognisedReason, check_intake_credential, intake_epoch,
+        tag_key,
+    };
+    let proxy = CuttableRedis::start().await;
+    let Some(h) = build_harness_on(StealthTokenPolicy::Enforce, &redis_url(), &proxy.url).await
+    else {
+        return;
+    };
+    let recipient = uuid::Uuid::new_v4();
+    let account = recipient.to_string();
+    let now = chrono::Utc::now().timestamp() as u64;
+    let key = tag_key(&account, intake_epoch(now));
+    let tag = vec![9; INTAKE_TAG_LEN];
+    let mut mailbox = h.ctx.queue.lock().await.clone_redis_connection();
+    let _: i64 = redis::cmd("SADD")
+        .arg(&key)
+        .arg(&tag)
+        .query_async(&mut mailbox)
+        .await
+        .unwrap();
+    let credential = seal_token_for_server(&tag, &h.token_enc_secret);
+    let mut conn = h.ctx.redis_conn.clone();
+    assert_eq!(
+        check_intake_credential(
+            &mut conn,
+            Some(&h.token_enc_secret),
+            &credential,
+            &account,
+            now
+        )
+        .await,
+        IntakeCheck::Vouched,
+        "known good before the outage"
+    );
+    proxy.cut();
+
+    let short = seal_token_for_server(&[9; INTAKE_TAG_LEN - 1], &h.token_enc_secret);
+    for (presented, secret, expected) in [
+        (&[][..], Some(&h.token_enc_secret), IntakeCheck::Absent),
+        (
+            &credential[..],
+            None,
+            IntakeCheck::Unrecognised(UnrecognisedReason::NoServerKey),
+        ),
+        (
+            &[7u8; 64][..],
+            Some(&h.token_enc_secret),
+            IntakeCheck::Unrecognised(UnrecognisedReason::UnsealFailed),
+        ),
+        (
+            &short[..],
+            Some(&h.token_enc_secret),
+            IntakeCheck::Unrecognised(UnrecognisedReason::WrongLength),
+        ),
+    ] {
+        assert_eq!(
+            check_intake_credential(&mut conn, secret, presented, &account, now).await,
+            expected
+        );
+    }
+
+    let nonce = random_bytes32();
+    let token = issue_client_token(&h.token_issuer_key, &nonce);
+    let mut sealed = build_sealed_envelope(
+        &recipient,
+        &random_bytes32(),
+        Some(&nonce),
+        Some(&seal_token_for_server(&token, &h.token_enc_secret)),
+    );
+    let mut inner = core_proto::SealedInner::decode(sealed.sealed_inner.as_ref()).unwrap();
+    inner.intake_tag_sealed = credential;
+    sealed.sealed_inner = inner.encode_to_vec();
+    let response = dispatch_sealed_sender(&h.ctx, &sealed)
+        .await
+        .expect("an outage must not stop delivery");
+    assert!(response.success);
+    assert_eq!(response.intake_verdict, IntakeVerdict::Unchecked as i32);
+    assert_eq!(stream_len(&mut mailbox, &recipient).await, 1);
+    del(
+        &mut mailbox,
+        &[key, format!("delivery:offline:{recipient}")],
+    )
+    .await;
+}
+
+/// Withhold both replies until BOTH commands for an epoch arrive. Sequential awaits cannot
+/// pass this test; a pipeline can. Parse RESP frames, not TCP packets, to avoid packet-boundary
+/// assumptions. Also assert that a current match never asks Redis about the previous epoch.
+#[tokio::test]
+async fn n5_intake_sends_both_epoch_reads_before_awaiting_either() {
+    use crate::intake::{
+        INTAKE_EPOCH_SECONDS, INTAKE_TAG_LEN, IntakeCheck, UnrecognisedReason,
+        check_intake_credential, legacy_tag_key, tag_key,
+    };
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    async fn command(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> Vec<Vec<u8>> {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let count: usize = line
+            .strip_prefix('*')
+            .expect("RESP array")
+            .trim()
+            .parse()
+            .unwrap();
+        let mut args = Vec::with_capacity(count);
+        for _ in 0..count {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let len: usize = line
+                .strip_prefix('$')
+                .expect("bulk arg")
+                .trim()
+                .parse()
+                .unwrap();
+            let mut arg = vec![0; len + 2];
+            reader.read_exact(&mut arg).await.unwrap();
+            assert_eq!(&arg[len..], b"\r\n");
+            arg.truncate(len);
+            args.push(arg);
+        }
+        args
+    }
+    let account = uuid::Uuid::new_v4().to_string();
+    let epoch = 20_707;
+    let secret = X25519StaticSecret::from(random_bytes32());
+    let credential = seal_token_for_server(&[9; INTAKE_TAG_LEN], &secret);
+    for match_at in [Some(0), Some(1), None] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("redis://{}", listener.local_addr().unwrap());
+        let account_for_server = account.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            let mut pair_count = 0;
+            loop {
+                let args = command(&mut read).await;
+                match args[0].as_slice() {
+                    b"CLIENT" => {
+                        write.write_all(b"+OK\r\n").await.unwrap();
+                    }
+                    b"PING" => {
+                        write.write_all(b"+PONG\r\n").await.unwrap();
+                    }
+                    b"SMEMBERS" => {
+                        let e = epoch - pair_count;
+                        assert_eq!(
+                            args,
+                            vec![
+                                b"SMEMBERS".to_vec(),
+                                tag_key(&account_for_server, e).into_bytes()
+                            ]
+                        );
+                        // Do not return SMEMBERS yet: the GET must already have been sent.
+                        assert_eq!(
+                            command(&mut read).await,
+                            vec![
+                                b"GET".to_vec(),
+                                legacy_tag_key(&account_for_server, e).into_bytes()
+                            ]
+                        );
+                        write.write_all(b"*0\r\n").await.unwrap();
+                        let matched = match_at == Some(pair_count);
+                        if matched {
+                            write.write_all(b"$16\r\n").await.unwrap();
+                            write.write_all(&[9; INTAKE_TAG_LEN]).await.unwrap();
+                            write.write_all(b"\r\n").await.unwrap();
+                        } else {
+                            write.write_all(b"$-1\r\n").await.unwrap();
+                        }
+                        pair_count += 1;
+                        if matched || pair_count == 2 {
+                            return pair_count;
+                        }
+                    }
+                    other => panic!("unexpected command {other:?}"),
+                }
+            }
+        });
+        let mut conn = construct_redis::manager_for(redis::Client::open(url).unwrap())
+            .await
+            .unwrap();
+        let actual = check_intake_credential(
+            &mut conn,
+            Some(&secret),
+            &credential,
+            &account,
+            epoch * INTAKE_EPOCH_SECONDS,
+        )
+        .await;
+        assert_eq!(
+            actual,
+            if match_at.is_some() {
+                IntakeCheck::Vouched
+            } else {
+                IntakeCheck::Unrecognised(UnrecognisedReason::NothingPublished)
+            }
+        );
+        assert_eq!(
+            server.await.unwrap(),
+            if match_at == Some(0) { 1 } else { 2 }
+        );
+    }
+}
+
 /// Under `enforce` the intake tag is what spares a token. A tag the recipient published delivers
 /// with none; a tag it did not publish, and a tag that could not be looked up, owe one — the
 /// lookup failing open to the token path, never to delivery. Mutation: treat `Unavailable` as
