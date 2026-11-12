@@ -12,8 +12,8 @@ use crate::core;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
 use crate::sealed_ip::{SealedIpDecision, check_sealed_ip_limit, extract_client_ip};
 use crate::stream::{
-    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request,
-    is_valid_redis_stream_cursor, poll_messages, spawn_inbox_wakeup,
+    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request, is_valid_mailbox_cursor,
+    poll_messages, spawn_inbox_wakeup,
 };
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, messaging_service_server::MessagingService,
@@ -218,7 +218,12 @@ impl MessagingService for MessagingGrpcService {
                                     &client_ip,
                                 ).await {
                                     tracing::warn!(error = %e, "Error handling stream request");
-                                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                                    let status = if e.is::<construct_queue::InvalidMailboxCursor>() {
+                                        Status::invalid_argument(e.to_string())
+                                    } else {
+                                        Status::internal(e.to_string())
+                                    };
+                                    let _ = tx.send(Err(status)).await;
                                     break 'stream "handler_error";
                                 }
                             }
@@ -878,7 +883,8 @@ impl MessagingService for MessagingGrpcService {
         let user_id = user_uuid.to_string();
 
         let req = request.into_inner();
-        let limit = req.limit.unwrap_or(50).min(100) as usize;
+        let limit = usize::try_from(req.limit.unwrap_or(50).min(100))
+            .map_err(|_| Status::invalid_argument("limit must not be negative"))?;
         let since = req.since_cursor.as_deref();
 
         // Hold the lock only for XREAD — release immediately after so other handlers
@@ -888,14 +894,17 @@ impl MessagingService for MessagingGrpcService {
         // merges device + user streams (minimal-server-delivery step 3).
         if let Some(cursor) = since
             && !cursor.is_empty()
-            && !is_valid_redis_stream_cursor(cursor)
+            && !is_valid_mailbox_cursor(cursor)
         {
+            if cursor.starts_with("mc") {
+                return Err(Status::invalid_argument("invalid mailbox cursor"));
+            }
             tracing::warn!(
                 cursor = %cursor,
-                "Ignoring invalid since_cursor on GetPendingMessages (expected Redis stream ID)"
+                "Ignoring invalid legacy since_cursor on GetPendingMessages (expected mailbox cursor)"
             );
         }
-        let since = since.filter(|c| !c.is_empty() && is_valid_redis_stream_cursor(c));
+        let since = since.filter(|c| !c.is_empty() && is_valid_mailbox_cursor(c));
 
         let mode = if device_id.as_deref().filter(|d| !d.is_empty()).is_some() {
             "device_merge"
@@ -923,9 +932,7 @@ impl MessagingService for MessagingGrpcService {
         // Taken from the page, not from what survives the receipt filter below: a full page of
         // receipts used to report has_more=false and stall offline catch-up, and a page stopped
         // at a sibling-filled user read is short and still not the end.
-        let next_cursor = page
-            .resume_after(since)
-            .unwrap_or_else(|| "0-0".to_string());
+        let next_cursor = page.resume_cursor().encode();
         let has_more = page.has_more;
         let stream_messages = page.entries;
         construct_metrics::MSG_MAILBOX_READ_TOTAL

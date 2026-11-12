@@ -307,18 +307,28 @@ SendMessage RPC ──────────► grpc.rs::send_message
 
 **Offline delivery (retention-bounded, cursor = read offset).** If Bob is offline, messages
 accumulate in Redis `delivery:offline:{user_id}` (and per-device fan-out keys). On reconnect
-his client subscribes with `since_cursor` — the Redis stream ID of the last message it
-*durably persisted*. The server:
+his client subscribes with `since_cursor` — the opaque checkpoint of its *durably completed
+frame prefix*. The server:
 
-1. reads **forward** from that cursor (`read_mailbox_messages` — side-effect-free dual-read);
-   the user stream is read from `StreamCatchupState::user_stream_id` when that is ahead —
-   a server-side position that moves past entries the reader examined and skipped (a
-   sibling device's), never told to the client;
+1. reads **forward** from independent device/user positions in that cursor
+   (`read_mailbox_messages` — side-effect-free dual-read). Redis IDs are unique only within
+   one stream: a shared maximum loses an equal-ID peer at a strict page boundary. Each frame
+   carries its own checkpoint, including ignorable source prefixes, not the final page cursor;
    continues immediately while `MailboxPage::has_more`, even when a page contains only
    sibling entries; checks device revocation before each page and stops on a closed channel;
 2. does **not** delete from the client cursor. Client-asserted `XTRIM` caused silent loss
    (paging/cancel races; multi-device shared mailbox). See construct-docs
    `decisions/minimal-server-delivery.md` (Accepted).
+
+New cursors are stateless, fixed-width `mc1:<device-ms20>-<device-seq20>:<user-ms20>-<user-seq20>`
+(87 ASCII bytes); clients only persist/echo them. Legacy numeric checkpoints still seed both
+positions. `$` snapshots the source tails once. `limit` remains a strict maximum (zero returns
+none, negative is `INVALID_ARGUMENT`). Gap notices compare each source with its own offset and
+keep numeric source-local diagnostic intervals for existing client date readers.
+**Rollout/rollback must keep the full cursor fix** (decoder, source-prefix tracking and per-frame
+encoder) on every messaging backend. Do not mix old scalar-cursor emitters with new ones; replace
+all old backends/streams before enabling the new deployment. Accepting new tokens alone is not
+sufficient if a backend still returns shared scalar checkpoints. See construct-docs `decisions/mailbox-cursor-names-each-source.md` and construct-protos PR #35.
 
 Capacity backstops: `MAXLEN ~` on XADD (`MSG_QUEUE_MAXLEN_STANDARD`, default 10_000) and hourly age sweep
 (7 days, `MAILBOX_MAX_AGE_DAYS` — the window the clients keep keys for). A short session re-delivers; the client

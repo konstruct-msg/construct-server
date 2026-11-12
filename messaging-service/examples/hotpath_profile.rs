@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Result, ensure};
 use construct_config::{Config, SecretNeeds};
 use construct_message::MessageEnvelope;
-use construct_queue::{MessageDedupKey, MessageQueue};
+use construct_queue::{MailboxCursor, MessageDedupKey, MessageQueue};
 use construct_utils::{hash_client_ip, log_safe_id};
 
 // Instrument only this standalone executable. Counts requested Rust heap bytes, not allocator
@@ -151,6 +151,21 @@ fn profile_hashes(check: bool) {
     }
 }
 
+fn profile_cursor(check: bool) {
+    let cursor: MailboxCursor = "1763000000000-9".parse().expect("fixture cursor");
+    let sample = Sample::start();
+    for _ in 0..100_000 {
+        black_box(black_box(cursor).encode());
+    }
+    let allocations = sample.finish("mailbox cursor", 100_000);
+    if check {
+        assert_eq!(
+            allocations, 100_000,
+            "cursor encoding must allocate only the output String"
+        );
+    }
+}
+
 async fn profile_mailboxes(queue: &MessageQueue, namespace: &str) -> Result<()> {
     const WORKERS: usize = 4;
     const SENDS: usize = 128;
@@ -285,13 +300,16 @@ async fn main() -> Result<()> {
     );
     let check = !tail.is_empty();
     ensure!(
-        ["all", "clone", "hash", "mailbox"].contains(&mode.as_str()),
-        "mode: all|clone|hash|mailbox"
+        ["all", "clone", "hash", "cursor", "mailbox"].contains(&mode.as_str()),
+        "mode: all|clone|hash|cursor|mailbox"
     );
     if mode == "all" || mode == "hash" {
         profile_hashes(check);
     }
-    if mode == "hash" {
+    if mode == "all" || mode == "cursor" {
+        profile_cursor(check);
+    }
+    if mode == "hash" || mode == "cursor" {
         return Ok(());
     }
     let mut config = Config::from_env_for(SecretNeeds::MESSAGING)?;

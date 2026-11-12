@@ -198,7 +198,7 @@ impl<'a> DeliveryManager<'a> {
     }
 
     /// Keep the existing cursor normalization, borrowing already-valid offsets.
-    fn stream_start_id<'s>(stream_key: &str, since_id: Option<&'s str>) -> Cow<'s, str> {
+    pub(crate) fn stream_start_id<'s>(stream_key: &str, since_id: Option<&'s str>) -> Cow<'s, str> {
         let Some(id) = since_id else {
             return Cow::Borrowed("0");
         };

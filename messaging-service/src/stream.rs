@@ -24,15 +24,9 @@ pub(crate) const SUBSCRIBE_CATCHUP_GRACE: std::time::Duration =
 /// [`SUBSCRIBE_CATCHUP_GRACE`]), never at stream open.
 #[derive(Debug, Default)]
 pub(crate) struct StreamCatchupState {
-    /// Last Redis stream id used as exclusive XREAD start (resume position).
+    /// Opaque exclusive resume position of both sources. A reconnect receives exactly the
+    /// per-frame checkpoint, not a shared watermark or a server-only user position.
     pub last_stream_id: Option<String>,
-    /// Where the legacy **user** stream is read from, when it is ahead of
-    /// `last_stream_id`. Server-side only — the client is never told it, so a reconnect
-    /// starts both streams from the client's one cursor and re-examines skipped entries above it.
-    /// Moves on what a read *examined*, not on what it delivered: the user stream holds
-    /// a sibling device's entries, which this reader skips and would otherwise re-read
-    /// on every poll (`MailboxPage::user_examined_through`).
-    pub user_stream_id: Option<String>,
     /// Subscribe on this connection carried a valid `since_cursor` (S2 canary).
     pub subscribe_with_cursor_seen: bool,
     /// First offline catch-up completed (Subscribe handler or grace timer).
@@ -395,13 +389,16 @@ pub(crate) async fn handle_stream_request(
             if let Some(cursor) = sub.since_cursor.as_deref()
                 && !cursor.is_empty()
             {
-                // Clients must pass a Redis stream ID (e.g. "1782556480695-0"), NOT a
-                // message UUID.  An invalid cursor used as XREAD start ID is reset to "0"
-                // (re-deliver everything) while a valid-but-stale cursor can skip messages.
-                if !is_valid_redis_stream_cursor(cursor) {
+                // Opaque checkpoints and legacy numeric IDs are bookmarks, not message UUIDs.
+                // An invalid legacy bookmark retains the historical replay-from-zero fallback;
+                // malformed/unsupported modern tokens fail explicitly instead of hiding a reset.
+                if cursor.starts_with("mc") && !is_valid_mailbox_cursor(cursor) {
+                    return Err(construct_queue::InvalidMailboxCursor.into());
+                }
+                if !is_valid_mailbox_cursor(cursor) {
                     tracing::warn!(
                         cursor = %cursor,
-                        "Ignoring invalid since_cursor on Subscribe (expected Redis stream ID, not message UUID)"
+                        "Ignoring invalid legacy since_cursor on Subscribe (expected mailbox cursor, not message UUID)"
                     );
                 } else {
                     catchup.subscribe_with_cursor_seen = true;
@@ -497,21 +494,11 @@ pub(crate) async fn handle_stream_request(
     Ok(())
 }
 
-/// Returns true when `cursor` is a valid Redis stream resume position.
-/// Shared by MessageStream Subscribe and GetPendingMessages (read offset only).
-pub(crate) fn is_valid_redis_stream_cursor(cursor: &str) -> bool {
-    if cursor == "0" || cursor == "$" {
-        return true;
-    }
-    if let Some((ts, seq)) = cursor.split_once('-') {
-        return ts.parse::<u64>().is_ok() && seq.parse::<u64>().is_ok();
-    }
-    cursor.parse::<u64>().is_ok()
+/// Shared validation of opaque and legacy mailbox cursors (read offsets only).
+pub(crate) fn is_valid_mailbox_cursor(cursor: &str) -> bool {
+    cursor == "$" || cursor.parse::<construct_queue::MailboxCursor>().is_ok()
 }
 
-/// Apply a client `since_cursor` as the resume position: only advance, never rewind.
-/// Returns whether the cursor was applied (advanced or equal — position is at least
-/// the client bookmark).
 /// Whether an empty poll is worth a line in the log.
 ///
 /// `poll_messages` reported only what it found, so a poll that returned nothing left no trace at
@@ -532,35 +519,36 @@ fn empty_poll_is_a_finding(msg_count: usize, is_resume_catchup: bool) -> bool {
     msg_count == 0 && is_resume_catchup
 }
 
+/// Join a client bookmark componentwise: advance either source without rewinding the other.
+/// Returns whether it changed. `$` is accepted only before a position has been established.
 fn apply_since_cursor(cursor: &str, last_stream_id: &mut Option<String>) -> bool {
-    let advance = match last_stream_id {
-        None => true,
-        Some(current) => compare_stream_ids(cursor, current) == std::cmp::Ordering::Greater,
+    use construct_queue::MailboxCursor;
+    let next = match (last_stream_id.as_deref(), cursor.parse::<MailboxCursor>()) {
+        (None, _) if is_valid_mailbox_cursor(cursor) => cursor.to_string(),
+        (Some("$"), Ok(_)) => cursor.to_string(),
+        (Some(current), Ok(requested)) => {
+            let Ok(previous) = current.parse::<MailboxCursor>() else {
+                return false;
+            };
+            let joined = previous.join(requested);
+            if joined == previous {
+                return false;
+            }
+            if !current.starts_with("mc") && !cursor.starts_with("mc") {
+                cursor.to_string() // Retain the legacy representation until the first read.
+            } else {
+                joined.encode()
+            }
+        }
+        _ => return false,
     };
-    if advance {
-        tracing::info!(cursor = %cursor, "Resuming stream from client since_cursor");
-        *last_stream_id = Some(cursor.to_string());
-    }
-    advance
+    tracing::info!(cursor = %next, "Resuming stream from client since_cursor");
+    *last_stream_id = Some(next);
+    true
 }
 
-/// Compare two Redis stream IDs lexicographically by (timestamp, sequence).
-/// Returns `Ordering::Greater` if `a` is strictly newer than `b`.
-/// IDs with unexpected formats are treated as "not greater" (safe fallback).
-/// Where the user stream is read from: whichever of the examined-through position and
-/// the delivery cursor is ahead. A resume cursor from the client may have jumped
-/// `last_stream_id` past the examined-through position, and a delivery always has.
-fn user_read_position<'a>(
-    user_stream_id: Option<&'a str>,
-    last_stream_id: Option<&'a str>,
-) -> Option<&'a str> {
-    match (user_stream_id, last_stream_id) {
-        (Some(u), Some(d)) if compare_stream_ids(u, d) == std::cmp::Ordering::Greater => Some(u),
-        (Some(u), None) => Some(u),
-        (_, d) => d,
-    }
-}
-
+/// Legacy scalar ordering used by the Subscribe race regression fixtures below.
+#[cfg(test)]
 fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(id: &str) -> Option<(u64, u64)> {
         if let Some((ts, seq)) = id.split_once('-') {
@@ -719,11 +707,7 @@ pub(crate) async fn poll_messages(
     is_resume_catchup: bool,
 ) -> anyhow::Result<()> {
     let user_id_str = user_id.to_string();
-    let StreamCatchupState {
-        last_stream_id,
-        user_stream_id,
-        ..
-    } = catchup;
+    let StreamCatchupState { last_stream_id, .. } = catchup;
 
     if last_stream_id.is_none() && is_resume_catchup {
         tracing::warn!(
@@ -774,28 +758,26 @@ pub(crate) async fn poll_messages(
         }
 
         pages += 1;
-        let device_before = last_stream_id.clone();
-        let user_before = user_stream_id.clone();
+        let cursor_before = last_stream_id.clone();
 
         let t_xread = std::time::Instant::now();
-        let user_since = user_read_position(user_stream_id.as_deref(), last_stream_id.as_deref());
         let page = queue
             .read_mailbox_messages(
                 &user_id_str,
                 device_id,
                 last_stream_id.as_deref(),
-                user_since,
+                last_stream_id.as_deref(),
                 STREAM_MAILBOX_PAGE,
             )
             .await?;
         // Read before `entries` is moved out: a method on the page borrows the whole struct.
         let user_only_count = page.user_only();
         let has_more = page.has_more;
-        let user_examined_through = page.user_examined_through.clone();
-        let messages = page.entries;
+        let page_cursor = page.resume_cursor().encode();
+        let msg_count = page.entries.len();
         // Delivering to the device consumes the push that announced it; the next envelope may push
         // again. Only on a non-empty read — an idle poll runs every few seconds per open stream.
-        if !messages.is_empty()
+        if msg_count > 0
             && let Some(device) = device_id.filter(|d| !d.is_empty())
         {
             let _ = queue.clear_push_outstanding(device).await;
@@ -826,7 +808,6 @@ pub(crate) async fn poll_messages(
         }
         let xread_ms = t_xread.elapsed().as_millis();
 
-        let msg_count = messages.len();
         seen += msg_count;
         if msg_count > 0 {
             tracing::info!(
@@ -843,7 +824,8 @@ pub(crate) async fn poll_messages(
             tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
         }
 
-        for (stream_id, envelope) in messages {
+        for (cursor, envelope) in page.into_cursor_entries() {
+            let stream_id = cursor.encode();
             // Convert MessageEnvelope to the appropriate stream response
             let Some(envelope) = envelope else {
                 *last_stream_id = Some(stream_id); // advance past corrupt/wrong-recipient entry
@@ -875,8 +857,8 @@ pub(crate) async fn poll_messages(
                 }
             };
 
-            // Attach the Redis stream position so the client can resume on the next
-            // reconnect by passing stream_cursor as SubscribeRequest.since_cursor.
+            // Attach this entry's complete checkpoint, never the final page cursor.
+            // Disconnect after any frame must leave every unreturned peer readable.
             response.stream_cursor = Some(stream_id.clone());
 
             let delivered_message_id = match &response.response {
@@ -902,17 +884,15 @@ pub(crate) async fn poll_messages(
             *last_stream_id = Some(stream_id);
         }
 
-        // Only once every entry above is delivered: an early return above leaves both
-        // positions where the next poll must start from.
-        if user_examined_through.is_some() {
-            *user_stream_id = user_examined_through;
-        }
+        // Commit trailing ignorable prefixes only after all frames were queued successfully.
+        // An early return retains the last successfully sent frame's complete checkpoint.
+        *last_stream_id = Some(page_cursor);
 
         if !has_more {
             break;
         }
         // A page that reports more and moves neither cursor would spin.
-        if last_stream_id == &device_before && user_stream_id == &user_before {
+        if last_stream_id == &cursor_before {
             tracing::warn!(
                 user_id = %user_id_str,
                 "poll_messages: has_more but the cursors did not move — stopping"
@@ -1099,34 +1079,32 @@ mod tests {
 
     #[test]
     fn redis_stream_cursor_accepts_stream_ids_rejects_uuids() {
-        assert!(is_valid_redis_stream_cursor("1786052214011-0"));
-        assert!(is_valid_redis_stream_cursor("0"));
-        assert!(is_valid_redis_stream_cursor("1772726016")); // bare ms timestamp
-        assert!(!is_valid_redis_stream_cursor(
+        assert!(is_valid_mailbox_cursor("1786052214011-0"));
+        assert!(is_valid_mailbox_cursor("0"));
+        assert!(is_valid_mailbox_cursor("1772726016")); // bare ms timestamp
+        assert!(is_valid_mailbox_cursor("$"));
+        assert!(is_valid_mailbox_cursor(
+            &construct_queue::MailboxCursor::default().to_string()
+        ));
+        assert!(!is_valid_mailbox_cursor(
             "d22fc8d6-21eb-42dd-9739-baf26fbe67bf"
         ));
-        assert!(!is_valid_redis_stream_cursor("not-a-cursor"));
+        assert!(!is_valid_mailbox_cursor("not-a-cursor"));
+        assert!(!is_valid_mailbox_cursor("mc1:0-0:0-0"));
     }
 
-    /// The user stream is read from the examined-through position only while it is ahead
-    /// of the delivery cursor; a delivery or a client resume that passes it takes over.
     #[test]
-    fn user_stream_reads_from_whichever_position_is_ahead() {
-        assert_eq!(user_read_position(None, None), None);
-        assert_eq!(user_read_position(Some("500-0"), None), Some("500-0"));
-        assert_eq!(user_read_position(None, Some("300-0")), Some("300-0"));
-        assert_eq!(
-            user_read_position(Some("500-0"), Some("300-0")),
-            Some("500-0")
-        );
-        assert_eq!(
-            user_read_position(Some("500-0"), Some("700-0")),
-            Some("700-0")
-        );
-        assert_eq!(
-            user_read_position(Some("500-0"), Some("500-0")),
-            Some("500-0")
-        );
+    fn subscribe_joins_source_positions_without_borrowing_a_siblings_watermark() {
+        let d = "mc1:00000000000000000500-00000000000000000000:00000000000000000100-00000000000000000000";
+        let u = "mc1:00000000000000000200-00000000000000000000:00000000000000000300-00000000000000000000";
+        let both = "mc1:00000000000000000500-00000000000000000000:00000000000000000300-00000000000000000000";
+        let mut last = Some(d.to_string());
+        assert!(apply_since_cursor(u, &mut last));
+        assert_eq!(last.as_deref(), Some(both));
+        assert!(!apply_since_cursor(d, &mut last));
+        assert!(!apply_since_cursor("$", &mut last));
+        assert!(!apply_since_cursor("mc1:bad", &mut last));
+        assert_eq!(last.as_deref(), Some(both));
     }
 
     #[test]
