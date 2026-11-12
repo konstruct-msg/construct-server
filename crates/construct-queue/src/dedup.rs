@@ -14,6 +14,23 @@ impl MessageDedupKey {
         recipient_device: Option<&str>,
         message_id: &str,
     ) -> Self {
+        Self(format!(
+            "msg:dedup:v2:{}",
+            hex::encode(Self::scope_hash(
+                sender_id,
+                recipient_id,
+                recipient_device,
+                message_id,
+            ))
+        ))
+    }
+
+    fn scope_hash(
+        sender_id: &str,
+        recipient_id: &str,
+        recipient_device: Option<&str>,
+        message_id: &str,
+    ) -> [u8; 32] {
         let mut hash = Sha256::new();
         for field in [
             sender_id,
@@ -24,7 +41,7 @@ impl MessageDedupKey {
             hash.update((field.len() as u64).to_be_bytes());
             hash.update(field.as_bytes());
         }
-        Self(format!("msg:dedup:v2:{}", hex::encode(hash.finalize())))
+        hash.finalize().into()
     }
 
     /// Redis key, without plaintext account or device identifiers.
@@ -32,8 +49,9 @@ impl MessageDedupKey {
         &self.0
     }
 
-    pub(crate) fn for_envelope(envelope: &construct_message::MessageEnvelope) -> Self {
-        Self::new(
+    /// Same scope as the Redis key, without allocating its hex/string carrier for a local merge.
+    pub(crate) fn scope_for_envelope(envelope: &construct_message::MessageEnvelope) -> [u8; 32] {
+        Self::scope_hash(
             &envelope.sender_id,
             &envelope.recipient_id,
             envelope.recipient_device.as_deref(),
@@ -59,6 +77,22 @@ pub async fn is_message_duplicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_merge_scope_keeps_the_existing_redis_key_bytes() {
+        let mut envelope =
+            construct_message::MessageEnvelope::new_key_sync("alice".into(), "bob".into());
+        envelope.message_id = "message".into();
+        envelope.recipient_device = Some("device".into());
+        let scope = MessageDedupKey::scope_for_envelope(&envelope);
+        let expected =
+            "msg:dedup:v2:974bd5b58e642c745b90e4cefcc5f6ded73447dcc4f043548dce9e4a072ad2aa";
+        assert_eq!(format!("msg:dedup:v2:{}", hex::encode(scope)), expected);
+        assert_eq!(
+            MessageDedupKey::new("alice", "bob", Some("device"), "message").as_str(),
+            expected
+        );
+    }
 
     #[test]
     fn routing_fields_and_the_message_id_each_separate_deliveries() {

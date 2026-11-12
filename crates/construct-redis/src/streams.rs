@@ -19,12 +19,50 @@ pub struct StreamEntryBinary {
     pub fields: HashMap<String, Vec<u8>>,
 }
 
+/// One source in a binary XREAD reply. Redis omits sources with no entries, so callers
+/// merging multiple streams must use `key`, never the position in the reply.
+#[derive(Debug, Clone)]
+pub struct StreamReadBinary {
+    pub key: String,
+    pub entries: Vec<StreamEntryBinary>,
+}
+
+fn binary_stream_reply(reply: StreamReadReply) -> Vec<StreamReadBinary> {
+    reply
+        .keys
+        .into_iter()
+        .map(|stream| StreamReadBinary {
+            key: stream.key,
+            entries: stream
+                .ids
+                .into_iter()
+                .map(|entry| StreamEntryBinary {
+                    id: entry.id,
+                    fields: entry
+                        .map
+                        .into_iter()
+                        .filter_map(|(key, value)| {
+                            let bytes = match value {
+                                Value::BulkString(bytes) => bytes,
+                                Value::SimpleString(s) => s.into_bytes(),
+                                Value::Int(i) => i.to_string().into_bytes(),
+                                _ => return None,
+                            };
+                            Some((key, bytes))
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Options for XREAD command
 #[derive(Debug, Clone, Default)]
 pub struct StreamReadOptions {
     /// Block for N milliseconds (None = no blocking)
     pub block: Option<u64>,
-    /// Maximum number of entries to return
+    /// Maximum number of entries to return per stream
     pub count: Option<u64>,
 }
 
@@ -116,6 +154,23 @@ impl RedisClient {
         streams: &[(&str, &str)],
         options: StreamReadOptions,
     ) -> Result<Vec<StreamEntryBinary>> {
+        Ok(self
+            .xread_binary_grouped(streams, options)
+            .await?
+            .into_iter()
+            .flat_map(|stream| stream.entries)
+            .collect())
+    }
+
+    /// XREAD with binary fields, retaining the source key and per-source entry order.
+    ///
+    /// Uses one command with independent offsets and a per-stream COUNT. An empty source
+    /// is omitted by Redis; any command error fails the entire read (including WRONGTYPE).
+    pub async fn xread_binary_grouped(
+        &mut self,
+        streams: &[(&str, &str)],
+        options: StreamReadOptions,
+    ) -> Result<Vec<StreamReadBinary>> {
         let mut cmd = redis::cmd("XREAD");
 
         // Add options
@@ -142,31 +197,8 @@ impl RedisClient {
         // Execute
         let reply: StreamReadReply = cmd.query_async(self.connection_mut()).await?;
 
-        // Convert to binary format
-        let mut entries = Vec::new();
-        for stream_key in reply.keys {
-            for stream_id in stream_key.ids {
-                let mut fields = HashMap::new();
-
-                // Parse field map - keep as bytes
-                for (key, value) in stream_id.map.iter() {
-                    let value_bytes = match value {
-                        Value::BulkString(bytes) => bytes.clone(),
-                        Value::SimpleString(s) => s.as_bytes().to_vec(),
-                        Value::Int(i) => i.to_string().into_bytes(),
-                        _ => continue, // Skip unsupported types
-                    };
-                    fields.insert(key.clone(), value_bytes);
-                }
-
-                entries.push(StreamEntryBinary {
-                    id: stream_id.id,
-                    fields,
-                });
-            }
-        }
-
-        Ok(entries)
+        // Consume the decoded reply: binary payloads already own their buffers.
+        Ok(binary_stream_reply(reply))
     }
 
     /// XRANGE - Read a range of entries from a stream (binary values).
@@ -229,6 +261,106 @@ impl RedisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_binary_reply_retains_sources_and_moves_payload_buffers() {
+        use redis::streams::{StreamId, StreamKey};
+        let bytes = vec![0, 255, 128, 7];
+        let ptr = bytes.as_ptr();
+        let reply = StreamReadReply {
+            keys: vec![
+                StreamKey {
+                    key: "second-source".into(),
+                    ids: vec![StreamId {
+                        id: "100-0".into(),
+                        map: HashMap::from([
+                            ("payload".into(), Value::BulkString(bytes)),
+                            ("simple".into(), Value::SimpleString("hello".into())),
+                            ("integer".into(), Value::Int(42)),
+                            ("unsupported".into(), Value::Nil),
+                        ]),
+                        ..Default::default()
+                    }],
+                },
+                StreamKey {
+                    key: "first-source".into(),
+                    ids: Vec::new(),
+                },
+            ],
+        };
+        let grouped = binary_stream_reply(reply);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].key, "second-source");
+        assert_eq!(grouped[1].key, "first-source");
+        assert!(grouped[1].entries.is_empty());
+        let fields = &grouped[0].entries[0].fields;
+        assert_eq!(fields["payload"], [0, 255, 128, 7]);
+        assert_eq!(
+            fields["payload"].as_ptr(),
+            ptr,
+            "decoded payload must move, not clone"
+        );
+        assert_eq!(fields["simple"], b"hello");
+        assert_eq!(fields["integer"], b"42");
+        assert!(!fields.contains_key("unsupported"));
+        assert!(binary_stream_reply(StreamReadReply { keys: Vec::new() }).is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn grouped_binary_read_keeps_independent_offsets_and_per_source_count() -> Result<()> {
+        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let keys: Vec<_> = (0..3)
+            .map(|i| format!("test_binary_grouped_{}:{i}", std::process::id()))
+            .collect();
+        client.del(&keys).await?;
+        for key in &keys[..2] {
+            for id in ["100-0", "200-0", "300-0"] {
+                let _: String = client
+                    .connection_mut()
+                    .xadd(key, id, &[("payload", &[0u8, 255, 128][..])])
+                    .await?;
+            }
+        }
+        let requested = [
+            (&keys[2][..], "0"),
+            (&keys[1][..], "200-0"),
+            (&keys[0][..], "100-0"),
+        ];
+        let grouped = client
+            .xread_binary_grouped(
+                &requested,
+                StreamReadOptions {
+                    block: None,
+                    count: Some(1),
+                },
+            )
+            .await?;
+        assert_eq!(grouped.len(), 2, "missing source is omitted");
+        assert_eq!(grouped[0].key, keys[1]);
+        assert_eq!(grouped[0].entries[0].id, "300-0");
+        assert_eq!(grouped[1].key, keys[0]);
+        assert_eq!(grouped[1].entries[0].id, "200-0");
+        for group in &grouped {
+            assert_eq!(group.entries.len(), 1, "COUNT applies to each source");
+            assert_eq!(group.entries[0].fields["payload"], [0, 255, 128]);
+        }
+        let flattened = client
+            .xread_binary(
+                &requested,
+                StreamReadOptions {
+                    block: None,
+                    count: Some(1),
+                },
+            )
+            .await?;
+        assert_eq!(
+            flattened.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["300-0", "200-0"]
+        );
+        client.del(&keys).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore] // Requires Redis
