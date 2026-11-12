@@ -54,8 +54,7 @@ async fn test_delivery_track_user_online() {
     let user_id = "test_delivery_user_001";
     let server_id = "test_server_001";
 
-    let mut manager =
-        delivery::DeliveryManager::new(&mut client, &config, "test:delivery:".to_string());
+    let mut manager = delivery::DeliveryManager::new(&mut client, &config, "test:delivery:");
 
     // Track user online
     manager
@@ -331,6 +330,119 @@ async fn stream_len(queue: &mut MessageQueue, key: &str) -> i64 {
         .expect("XLEN failed")
 }
 
+/// Cloning a queue must keep its boot-time config and shared Redis namespace, even after the
+/// caller changes/drops its source Config or drops the original queue. Exercise the consumer,
+/// not just the pointer representation: custom prefix, cutover flag, presence TTL and payload.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
+    let mut config = get_test_config();
+    let prefix = format!("test:p6:clone:{}", std::process::id());
+    config.delivery_queue_prefix = prefix.clone();
+    config.redis_key_prefixes.user = format!("{prefix}:presence:");
+    config.messaging.mailbox_user_write = false;
+    config.session_ttl_days = 2;
+    let presence_key = format!(
+        "{}account:server_instance_id",
+        config.redis_key_prefixes.user
+    );
+    let mut original = MessageQueue::new(&config).await.unwrap();
+    let mut cloned = original.clone();
+    assert!(
+        Arc::ptr_eq(&original.config, &cloned.config),
+        "queue clones must not deep-copy Config"
+    );
+    assert!(
+        Arc::ptr_eq(
+            &original.delivery_queue_prefix,
+            &cloned.delivery_queue_prefix
+        ),
+        "queue clones must share the immutable prefix"
+    );
+    config.delivery_queue_prefix = "unused".into();
+    config.redis_key_prefixes.user = "unused".into();
+    config.messaging.mailbox_user_write = true;
+    drop(config);
+
+    original.delete_mailbox("account").await.unwrap();
+    original
+        .track_user_online("account", "instance")
+        .await
+        .unwrap();
+    assert_eq!(
+        cloned
+            .get_user_server_instance("account")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("instance")
+    );
+    let mut conn = cloned.clone_redis_connection();
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(&presence_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!((172_790..=172_800).contains(&ttl));
+    let message = construct_message::MessageEnvelope::new_direct_message(
+        "message".into(),
+        "alice".into(),
+        "account".into(),
+        vec![0; 32],
+        0,
+        vec![0, 255, 128],
+        String::new(),
+    );
+    let writes = cloned
+        .write_message_to_device_streams("account", &["device".into()], &message)
+        .await
+        .unwrap();
+    assert_eq!(
+        writes.user_stream, None,
+        "the source config mutation must not enable legacy writes"
+    );
+    assert_eq!(writes.device_streams, 1);
+    assert!(writes.recipient_online);
+    let page = original
+        .read_mailbox_messages("account", Some("device"), None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(
+        page.entries[0].1.as_ref().unwrap().encrypted_payload,
+        [0, 255, 128]
+    );
+    assert_eq!(page.user_only(), 0);
+    drop(original);
+    assert!(!cloned.mailbox_user_write_enabled());
+    let remaining = cloned
+        .read_mailbox_messages("account", Some("device"), None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining.entries.len(),
+        1,
+        "a reader outlives the original handle"
+    );
+    cloned.untrack_user_online("account").await.unwrap();
+    assert_eq!(
+        cloned.get_user_server_instance("account").await.unwrap(),
+        None
+    );
+    assert_eq!(cloned.delete_mailbox("account").await.unwrap(), 1);
+    let keys = [
+        presence_key,
+        format!("{prefix}:offline:account"),
+        format!("{prefix}:offline:account:device"),
+    ];
+    let left: usize = redis::cmd("EXISTS")
+        .arg(&keys)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
 /// The incident, replayed. Recipient offline, two messages dispatched, client resumes
 /// from a cursor below both.
 ///
@@ -417,7 +529,7 @@ async fn sequential_mailbox_page(
     let mut delivery = delivery::DeliveryManager::new(
         &mut queue.client,
         &queue.config,
-        queue.delivery_queue_prefix.clone(),
+        &queue.delivery_queue_prefix,
     );
     let device_entries = delivery
         .read_device_messages_from_stream(user, device, since, count.saturating_mul(2))
@@ -607,7 +719,9 @@ async fn mailbox_read_matches_separate_reads_with_independent_cursors() {
         .await
         .unwrap();
     for user_write in [true, false] {
-        queue.config.messaging.mailbox_user_write = user_write;
+        Arc::make_mut(&mut queue.config)
+            .messaging
+            .mailbox_user_write = user_write;
         for count in [0, 1, 2, 3, 20] {
             for (since, user_since) in [
                 (None, None),

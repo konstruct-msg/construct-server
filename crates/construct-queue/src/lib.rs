@@ -45,6 +45,7 @@ mod tests;
 use anyhow::Result;
 use construct_config::Config;
 use construct_redis::RedisClient;
+use std::sync::Arc;
 
 /// Shared Redis state for the services. Messages are opaque MessagePack envelopes
 /// in per-device/legacy-user streams; lifecycle and E2E meaning remain in the core.
@@ -56,9 +57,9 @@ use construct_redis::RedisClient;
 #[derive(Clone)]
 pub struct MessageQueue {
     client: RedisClient,
-    delivery_queue_prefix: String,
-    /// Reference to config for Redis key prefixes (needed for key generation)
-    config: Config,
+    delivery_queue_prefix: Arc<str>,
+    /// Immutable boot-time snapshot, shared by per-stream queue handles rather than deep-cloned.
+    config: Arc<Config>,
 }
 
 impl MessageQueue {
@@ -81,8 +82,8 @@ impl MessageQueue {
         tracing::info!("Mailbox retention: {} days", MAILBOX_MAX_AGE_DAYS);
         Ok(Self {
             client,
-            delivery_queue_prefix: config.delivery_queue_prefix.clone(),
-            config: config.clone(),
+            delivery_queue_prefix: Arc::from(config.delivery_queue_prefix.as_str()),
+            config: Arc::new(config.clone()),
         })
     }
 
@@ -363,13 +364,9 @@ impl MessageQueue {
         since_id: Option<&str>,
         count: usize,
     ) -> Result<Vec<(String, Option<construct_message::types::MessageEnvelope>)>> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .read_user_messages_from_stream(user_id, since_id, count)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .read_user_messages_from_stream(user_id, since_id, count)
+            .await
     }
 
     // `trim_offline_stream` was removed with minimal-server-delivery step 2 — see the
@@ -381,33 +378,21 @@ impl MessageQueue {
         user_id: &str,
         server_instance_id: &str,
     ) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .track_user_online(user_id, server_instance_id)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .track_user_online(user_id, server_instance_id)
+            .await
     }
 
     pub async fn untrack_user_online(&mut self, user_id: &str) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .untrack_user_online(user_id)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .untrack_user_online(user_id)
+            .await
     }
 
     pub async fn get_user_server_instance(&mut self, user_id: &str) -> Result<Option<String>> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .get_user_server_instance(user_id)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .get_user_server_instance(user_id)
+            .await
     }
 
     /// Fan-out a message to per-device Redis streams (multi-device support).
@@ -437,7 +422,7 @@ impl MessageQueue {
         let writes = delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
-            self.delivery_queue_prefix.clone(),
+            &self.delivery_queue_prefix,
         )
         .write_message_to_mailboxes(user_id, device_ids, write_user, envelope)
         .await?;
@@ -517,7 +502,7 @@ impl MessageQueue {
         let (device_msgs, user_msgs) = delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
-            self.delivery_queue_prefix.clone(),
+            &self.delivery_queue_prefix,
         )
         .read_mailbox_streams(user_id, device_id, since_id, user_since_id, per_source)
         .await?;
@@ -574,13 +559,9 @@ impl MessageQueue {
 
     /// Mark a scoped delivery as dispatched (idempotency key, TTL 24h).
     pub async fn mark_message_dispatched(&mut self, key: &MessageDedupKey) -> Result<()> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .mark_message_dispatched(key)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .mark_message_dispatched(key)
+            .await
     }
 
     /// Clone the internal Redis ConnectionManager for rate-limiting / caching operations.
@@ -597,13 +578,9 @@ impl MessageQueue {
     /// Delegates to `DeliveryManager::trim_streams_by_age`. Intended to be called from
     /// a periodic background task (every hour) to enforce `MAILBOX_MAX_AGE_DAYS`.
     pub async fn trim_streams_by_age(&mut self, max_age_seconds: u64) -> Result<u64> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .trim_streams_by_age(max_age_seconds)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .trim_streams_by_age(max_age_seconds)
+            .await
     }
 
     /// Delete every mailbox of `user_id` — the user stream and each per-device
@@ -612,13 +589,9 @@ impl MessageQueue {
     /// Without this a deleted account's queued messages stayed until the age sweep,
     /// up to `MAILBOX_MAX_AGE_DAYS`, though the account and its keys were gone.
     pub async fn delete_mailbox(&mut self, user_id: &str) -> Result<u64> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .delete_mailbox(user_id)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .delete_mailbox(user_id)
+            .await
     }
 
     /// Forget the account's intake-key generation, for account deletion. The one place it
@@ -639,13 +612,9 @@ impl MessageQueue {
         recipient_id: &str,
         sender_id: &str,
     ) -> Result<u64> {
-        delivery::DeliveryManager::new(
-            &mut self.client,
-            &self.config,
-            self.delivery_queue_prefix.clone(),
-        )
-        .purge_messages_from_sender(recipient_id, sender_id)
-        .await
+        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
+            .purge_messages_from_sender(recipient_id, sender_id)
+            .await
     }
 }
 

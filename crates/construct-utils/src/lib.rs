@@ -70,11 +70,19 @@ pub fn log_safe_id(id: &str, salt: &str) -> String {
     hasher.update(id.as_bytes());
     let hash = hasher.finalize();
 
-    // Take first 4 bytes and format each as hex
-    hash[..4]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>()
+    lower_hex(&hash[..4])
+}
+
+// One output allocation; do not build a temporary String for every byte. Width, lowercase
+// alphabet and leading zeroes are part of the existing log/rate-key representation.
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 15)] as char);
+    }
+    output
 }
 
 /// Derives a stable, salted tag from a client IP so the **raw address is never
@@ -97,7 +105,7 @@ pub fn hash_client_ip(ip: &str, salt: &str) -> String {
     hasher.update(salt.as_bytes());
     hasher.update(ip.as_bytes());
     let hash = hasher.finalize();
-    hash[..8].iter().map(|b| format!("{:02x}", b)).collect()
+    lower_hex(&hash[..8])
 }
 
 /// Validates username format and length requirements.
@@ -357,6 +365,35 @@ mod tests {
     #[test]
     fn test_password_too_short() {
         assert!(validate_password_strength("Short1").is_err());
+    }
+
+    #[test]
+    fn lower_hex_preserves_every_byte_and_leading_zero() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let legacy: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(lower_hex(&bytes), legacy);
+        assert_eq!(lower_hex(&[]), "");
+        assert_eq!(lower_hex(&[0, 1, 15, 16, 128, 255]), "00010f1080ff");
+    }
+
+    #[test]
+    fn logging_hash_bytes_keep_their_existing_wire_and_key_meaning() {
+        for (id, salt, expected) in [
+            ("", "", "e3b0c442"),
+            ("alice", "salt", "3baa379b"),
+            ("用户", "salt", "2eca841b"),
+            ("alice", "🔐", "dad47f26"),
+        ] {
+            assert_eq!(log_safe_id(id, salt), expected);
+        }
+        for (ip, salt, expected) in [
+            ("", "", "44ca7d91c47de98c"),
+            ("192.0.2.3", "salt", "23181e8ad240495d"),
+            ("2001:db8::1", "salt", "5a57b10d70b884c2"),
+            ("unknown", "salt", "unknown"),
+        ] {
+            assert_eq!(hash_client_ip(ip, salt), expected);
+        }
     }
 
     #[test]

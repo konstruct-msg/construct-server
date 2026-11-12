@@ -26,17 +26,70 @@ pub struct MailboxWrites {
     pub recipient_online: bool,
 }
 
+struct MailboxWriteKeys<'a> {
+    user: &'a str,
+    presence: &'a str,
+    wakeup: &'a str,
+}
+
+/// The same RESP commands, with capacity derived from their actual bytes. Each XADD must own
+/// its wire arguments, but temporary key buffers need not be retained per destination.
+fn mailbox_write_pipeline(
+    keys: MailboxWriteKeys<'_>,
+    device_ids: &[String],
+    write_user: bool,
+    max_len: i64,
+    message_id: &str,
+    payload: &[u8],
+) -> redis::Pipeline {
+    let mut pipe = redis::Pipeline::with_capacity(usize::from(write_user) + device_ids.len() + 2);
+    pipe.ignore_errors();
+    let xadd = |pipe: &mut redis::Pipeline, key: &str| {
+        // Ten arguments: 29 fixed bytes plus at most 20 bytes for an i64 MAXLEN.
+        let mut cmd =
+            redis::Cmd::with_capacity(10, key.len() + message_id.len() + payload.len() + 49);
+        cmd.arg("XADD")
+            .arg(key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(max_len)
+            .arg("*")
+            .arg("message_id")
+            .arg(message_id)
+            .arg("payload")
+            .arg(payload);
+        pipe.add_command(cmd);
+    };
+    if write_user {
+        xadd(&mut pipe, keys.user);
+    }
+    if let Some(max_device_len) = device_ids.iter().map(String::len).max() {
+        let mut device_key = String::with_capacity(keys.user.len() + 1 + max_device_len);
+        device_key.push_str(keys.user);
+        device_key.push(':');
+        let base_len = device_key.len();
+        for device in device_ids {
+            device_key.truncate(base_len);
+            device_key.push_str(device);
+            xadd(&mut pipe, &device_key);
+        }
+    }
+    pipe.cmd("GET").arg(keys.presence);
+    pipe.cmd("PUBLISH").arg(keys.wakeup).arg("1");
+    pipe
+}
+
 pub(crate) struct DeliveryManager<'a> {
     client: &'a mut RedisClient,
     config: &'a Config,
-    delivery_queue_prefix: String,
+    delivery_queue_prefix: &'a str,
 }
 
 impl<'a> DeliveryManager<'a> {
     pub(crate) fn new(
         client: &'a mut RedisClient,
         config: &'a Config,
-        delivery_queue_prefix: String,
+        delivery_queue_prefix: &'a str,
     ) -> Self {
         Self {
             client,
@@ -387,45 +440,24 @@ impl<'a> DeliveryManager<'a> {
         );
         let wakeup_channel = format!("inbox:wakeup:{}", user_id);
 
-        let mut pipe = redis::pipe();
-        // Each reply is read below; a failing command must not hide the others.
-        pipe.ignore_errors();
-
-        let xadd = |pipe: &mut redis::Pipeline, stream_key: &str| {
-            pipe.cmd("XADD")
-                .arg(stream_key)
-                .arg("MAXLEN")
-                .arg("~")
-                .arg(max_len)
-                .arg("*")
-                .arg("message_id")
-                .arg(&envelope.message_id)
-                .arg("payload")
-                .arg(&payload);
-        };
-
-        // Slot i of the reply is `mailboxes[i]`: the legacy user stream first when it is written,
-        // then one per device, in the order the caller addressed them. Kept so a refused write can
-        // name the mailbox it was refused for, which is what the per-device warning used to say.
-        let mut mailboxes: Vec<String> =
-            Vec::with_capacity(usize::from(write_user) + device_ids.len());
-        if write_user {
-            mailboxes.push(user_stream_key.clone());
-        }
-        for device_id in device_ids {
-            mailboxes.push(format!(
-                "{}:offline:{}:{}",
-                self.delivery_queue_prefix, user_id, device_id
-            ));
-        }
-        for stream_key in &mailboxes {
-            xadd(&mut pipe, stream_key);
-        }
+        let pipe = mailbox_write_pipeline(
+            MailboxWriteKeys {
+                user: &user_stream_key,
+                presence: &presence_key,
+                wakeup: &wakeup_channel,
+            },
+            device_ids,
+            write_user,
+            max_len,
+            &envelope.message_id,
+            &payload,
+        );
+        // Cmd owns its argument bytes; the serialized source is no longer needed across await.
+        drop(payload);
+        // User first when enabled, then devices in caller order, then presence and wakeup.
         let user_slot = write_user.then_some(0usize);
         let first_device_slot = usize::from(write_user);
-        let presence_slot = mailboxes.len();
-        pipe.cmd("GET").arg(&presence_key);
-        pipe.cmd("PUBLISH").arg(&wakeup_channel).arg("1");
+        let presence_slot = first_device_slot + device_ids.len();
 
         let replies: Vec<redis::Value> = pipe
             .query_async(self.client.connection_mut())
@@ -435,10 +467,21 @@ impl<'a> DeliveryManager<'a> {
         // A reply that is an error, or is missing, is a write that did not land.
         let landed = |slot: usize| match replies.get(slot) {
             Some(redis::Value::ServerError(e)) => {
+                // Reconstruct a mailbox name only on failure, not into a retained Vec per send.
+                let stream_key = if user_slot == Some(slot) {
+                    Cow::Borrowed(user_stream_key.as_str())
+                } else if let Some(device) = slot
+                    .checked_sub(first_device_slot)
+                    .and_then(|i| device_ids.get(i))
+                {
+                    Cow::Owned(format!("{user_stream_key}:{device}"))
+                } else {
+                    Cow::Borrowed("")
+                };
                 tracing::warn!(
                     error = %e,
                     user_id = %user_id,
-                    stream_key = %mailboxes.get(slot).map(String::as_str).unwrap_or(""),
+                    stream_key = %stream_key,
                     "Failed to write to a mailbox stream — the other copies are unaffected"
                 );
                 false
@@ -795,9 +838,75 @@ impl<'a> DeliveryManager<'a> {
 }
 
 #[cfg(test)]
-mod read_tests {
+mod tests {
     use super::*;
     use construct_message::MessageEnvelope;
+
+    #[test]
+    fn reserved_mailbox_pipeline_keeps_the_legacy_resp_bytes() {
+        for devices in [
+            Vec::<String>::new(),
+            vec!["one".into()],
+            vec![
+                "first".into(),
+                "".into(),
+                "a-much-longer-device-id".into(),
+                "设备".into(),
+            ],
+        ] {
+            for write_user in [true, false] {
+                for maxlen in [1, 10_000, i64::MAX] {
+                    for payload in [Vec::new(), vec![0, 255, 128], vec![255; 65_536]] {
+                        let keys = MailboxWriteKeys {
+                            user: "custom:queue:offline:account",
+                            presence: "custom:presence:account",
+                            wakeup: "inbox:wakeup:account",
+                        };
+                        let id = "méssage:\0id";
+                        let mut legacy = redis::pipe();
+                        legacy.ignore_errors();
+                        let mut names = Vec::new();
+                        if write_user {
+                            names.push(keys.user.to_string());
+                        }
+                        names.extend(
+                            devices
+                                .iter()
+                                .map(|device| format!("{}:{device}", keys.user)),
+                        );
+                        for name in names {
+                            legacy
+                                .cmd("XADD")
+                                .arg(name)
+                                .arg("MAXLEN")
+                                .arg("~")
+                                .arg(maxlen)
+                                .arg("*")
+                                .arg("message_id")
+                                .arg(id)
+                                .arg("payload")
+                                .arg(&payload);
+                        }
+                        legacy.cmd("GET").arg(keys.presence);
+                        legacy.cmd("PUBLISH").arg(keys.wakeup).arg("1");
+                        let payload_len = payload.len();
+                        let planned = mailbox_write_pipeline(
+                            keys, &devices, write_user, maxlen, id, &payload,
+                        );
+                        drop(payload); // The pipeline must own the bytes before the source is freed.
+                        assert_eq!(planned.len(), usize::from(write_user) + devices.len() + 2);
+                        assert_eq!(
+                            planned.get_packed_pipeline(),
+                            legacy.get_packed_pipeline(),
+                            "user={write_user}, devices={}, payload={}, maxlen={maxlen}",
+                            devices.len(),
+                            payload_len
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn borrowed_message_id_validation_keeps_the_parser_contract() {
