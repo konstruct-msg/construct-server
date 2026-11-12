@@ -313,7 +313,18 @@ async fn active_device_ids_are_the_set_the_full_rows_named() {
         device(&db.pool, u).await,
         device(&db.pool, v).await,
     );
-    deactivate_device(&db.pool, &gone).await.unwrap();
+    // Fixture state only: this contract tests directory reads, not the guarded removal flow.
+    // Real device removal must stay behind the auth service's primary-device guard.
+    let inactive = sqlx::query("UPDATE devices SET is_active = FALSE WHERE device_id = $1")
+        .bind(&gone)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        inactive.rows_affected(),
+        1,
+        "the inactive fixture must exist"
+    );
 
     let mut full: Vec<String> = get_devices_by_user_id(&db.pool, &u)
         .await
