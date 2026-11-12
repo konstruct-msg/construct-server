@@ -52,6 +52,9 @@ are allocation churn, not retained memory. CPU-only phases approximate CPU cost;
 mailbox timings include Redis/network waits. Use external CPU/RSS/cgroup tools for
 whole-process limits.
 
+CI explicitly executes the pure `cursor --check` mode: compiling the example with
+`cargo test --all-targets` alone does not run its main/allocation assertions.
+
 This is not an end-to-end RPC, throughput forecast or VPS capacity claim: auth,
 SQL, crypto, APNs, dispatch-mutex contention and full subscriber response buffers
 are outside this probe. In particular, a single-thread runtime and a heap guard
