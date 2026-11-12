@@ -171,8 +171,10 @@ message MessageStreamResponse {
   optional string response_id = 10;
 
   // Opaque server-assigned stream position cursor.
-  // Clients SHOULD persist the latest value and pass it as SubscribeRequest.since_cursor
-  // on the next reconnect to avoid re-reading already-delivered messages.
+  // Persist the checkpoint of the durably completed frame prefix, not the last received frame.
+  // Echo it unchanged as SubscribeRequest.since_cursor on reconnect. A checkpoint may carry
+  // independent positions in multiple mailbox sources; clients must not parse or synthesize it.
+  // Delivery is at-least-once; this read offset never authorizes mailbox deletion.
   optional string stream_cursor = 11;
 
   // Was rate_limit_challenge: a PoW no client could answer (SendMessageRequest has no field
@@ -195,11 +197,10 @@ message SubscribeRequest {
   // Subscribe to presence updates for these users?
   bool include_presence = 2;
 
-  // Resume cursor: last Redis stream ID received by the client on a previous
-  // connection.  When present, the server will deliver only messages AFTER this
-  // position, avoiding re-delivery of already-seen messages on reconnect.
-  // Clients should persist the last stream_cursor value from MessageStreamResponse
-  // and send it here when re-opening the stream after a disconnect.
+  // Opaque checkpoint from MessageStreamResponse.stream_cursor for this authenticated mailbox.
+  // Resume only after the corresponding frame prefix is durably completed. Echo the token
+  // unchanged; it need not be a single Redis ID. Legacy numeric checkpoints remain readable.
+  // This is a read offset only, never an ACK or a request to trim the mailbox.
   optional string since_cursor = 3;
 }
 
@@ -567,7 +568,8 @@ message GetPendingMessagesRequest {
   // Omit on first request to get all pending messages
   optional string since_cursor = 1;
 
-  // Maximum number of messages to return (default: 50, max: 100)
+  // Strict maximum number of messages to return (default: 50, capped at 100).
+  // Zero returns no messages without consuming them; negative values are INVALID_ARGUMENT.
   optional int32 limit = 2;
 }
 
@@ -636,9 +638,11 @@ message GetPendingMessagesResponse {
 // Set when the stream's largest deleted id is newer than the cursor. Deletions other than
 // trimming (a blocked sender's messages purged) count too; that over-reports, never hides.
 message MailboxGap {
-  // The cursor the client asked from: the last position it had.
+  // Source-local diagnostic position from the client's requested checkpoint (Redis ms-seq).
+  // Not the full opaque resume token when the mailbox has multiple sources. Clients use this
+  // and resumes_at to show an interval, not to subscribe or advance their saved checkpoint.
   string after_cursor = 1;
-  // The oldest position still held, where delivery resumes; empty when nothing is held.
+  // Oldest position still held in that SAME source (Redis ms-seq); empty when none is held.
   string resumes_at = 2;
 }
 

@@ -2,6 +2,7 @@
 //! Production delivery is stream fan-out followed by inbox wakeup; reads never delete
 //! messages. MAXLEN and the seven-day age sweep own mailbox retention.
 
+mod cursor;
 mod dedup;
 mod delivery;
 mod gap;
@@ -12,6 +13,8 @@ mod rate_limiting;
 mod sessions;
 mod tokens;
 
+use cursor::StreamPosition;
+pub use cursor::{InvalidMailboxCursor, MailboxCursor};
 pub use dedup::{MessageDedupKey, is_message_duplicate};
 pub use delivery::MailboxWrites;
 pub use gap::MailboxGap;
@@ -461,18 +464,10 @@ impl MessageQueue {
     ///   stream, dedupe by `MessageDedupKey` (prefer device copy), order by Redis stream id
     ///   as a time watermark, return at most `count` entries.
     ///
-    /// Stream ids from the two keys are not the same sequence, but both are
-    /// millisecond-based; a client cursor from either works as a shared watermark.
-    /// See construct-docs `decisions/minimal-server-delivery.md` step 3.
-    /// `since_id` is the reader's resume position — the device stream's, and the one the
-    /// client is told. `user_since_id` is where the **user** stream is read from; a caller
-    /// that keeps no separate position passes `since_id` again. The two are separate
-    /// because the user stream holds entries this reader examines and never delivers
-    /// (a sibling's — see `merge_mailbox_pages`), and a cursor that moves only on delivery
-    /// never moves past them: on 2026-09-21 a two-device stand read the same eight
-    /// sibling entries on every 5-second poll for as long as the reader had nothing of
-    /// its own to receive, and counted them each time. `MailboxPage::user_examined_through`
-    /// is what the caller stores to move the user position on its own.
+    /// IDs are unique only within a source. Opaque cursors carry both exclusive offsets;
+    /// legacy numeric callers may still pass separate `since_id` / `user_since_id` offsets.
+    /// A complete opaque `since_id` is authoritative and needs no separate user position.
+    /// `$` is resolved once to explicit source tails before reading. No cursor trims data.
     pub async fn read_mailbox_messages(
         &mut self,
         user_id: &str,
@@ -481,39 +476,139 @@ impl MessageQueue {
         user_since_id: Option<&str>,
         count: usize,
     ) -> Result<MailboxPage> {
-        let Some(device_id) = device_id.filter(|d| !d.is_empty()) else {
-            let entries = self
-                .read_user_messages_from_stream(user_id, since_id, count)
+        let device_id = device_id.filter(|d| !d.is_empty());
+        let (start, device_start, user_start) = self
+            .mailbox_read_offsets(user_id, device_id, since_id, user_since_id)
+            .await?;
+        let Some(device_id) = device_id else {
+            // Redis COUNT 0 means unbounded, not zero. Probe one row for a zero-limit
+            // request but return/consume none; this also keeps the legacy path's maximum strict.
+            let mut entries = self
+                .read_user_messages_from_stream(user_id, Some(&user_start), count.max(1))
                 .await?;
-            // Not a coverage signal: without a device_id there is no device stream to
-            // compare against, so nothing here says anything about cutover readiness.
-            let has_more = entries.len() == count;
+            let has_more = !entries.is_empty() && entries.len() >= count;
+            entries.truncate(count);
+            let mut resume = start;
+            let mut entry_cursors = Vec::with_capacity(entries.len());
+            for (id, _) in &entries {
+                resume.user = resume.user.max(id.parse()?);
+                entry_cursors.push(resume);
+            }
             return Ok(MailboxPage {
                 entries,
                 user_only_ids: Vec::new(),
                 sibling_skipped: 0,
-                user_examined_through: None,
                 has_more,
+                resume,
+                entry_cursors,
             });
         };
 
         // Oversample each source so the merge can still fill `count` after dedupe.
-        let per_source = count.saturating_mul(2);
+        let per_source = count.saturating_mul(2).max(1);
         let (device_msgs, user_msgs) = delivery::DeliveryManager::new(
             &mut self.client,
             &self.config,
             &self.delivery_queue_prefix,
         )
-        .read_mailbox_streams(user_id, device_id, since_id, user_since_id, per_source)
+        .read_mailbox_streams(
+            user_id,
+            device_id,
+            Some(&device_start),
+            Some(&user_start),
+            per_source,
+        )
         .await?;
 
-        Ok(merge_mailbox_pages(
-            device_msgs,
-            user_msgs,
-            count,
-            per_source,
-            device_id,
-        ))
+        merge_mailbox_pages(device_msgs, user_msgs, count, per_source, device_id, start)
+    }
+
+    /// Resolve a complete token (or the two legacy offsets) without repeatedly interpreting `$`
+    /// as a moving tail. Kept separate from XREAD so the resulting page owns its exact start.
+    async fn mailbox_read_offsets<'a>(
+        &mut self,
+        user_id: &str,
+        device_id: Option<&str>,
+        since: Option<&'a str>,
+        user_since: Option<&'a str>,
+    ) -> Result<(
+        MailboxCursor,
+        std::borrow::Cow<'a, str>,
+        std::borrow::Cow<'a, str>,
+    )> {
+        use std::borrow::Cow;
+        if let Some(raw) = since.filter(|s| s.starts_with("mc")) {
+            let cursor: MailboxCursor = raw.parse()?;
+            return Ok((
+                cursor,
+                Cow::Owned(cursor.device.to_string()),
+                Cow::Owned(cursor.user.to_string()),
+            ));
+        }
+        let user_key = format!("{}:offline:{user_id}", self.delivery_queue_prefix);
+        let device_key = device_id.map(|d| format!("{user_key}:{d}"));
+        let mut device = delivery::DeliveryManager::stream_start_id(
+            device_key.as_deref().unwrap_or(&user_key),
+            since,
+        );
+        let mut user = delivery::DeliveryManager::stream_start_id(
+            &user_key,
+            if device_id.is_some() {
+                user_since
+            } else {
+                since
+            },
+        );
+        // There is no device source for a legacy device-less `$` request.
+        if device_id.is_none() && device == "$" {
+            device = Cow::Borrowed("0");
+        }
+        let tails = [
+            (device == "$").then(|| {
+                (
+                    true,
+                    device_key
+                        .as_deref()
+                        .expect("a device tail has a device key"),
+                )
+            }),
+            (user == "$").then_some((false, user_key.as_str())),
+        ];
+        let tail_count = tails.iter().flatten().count();
+        if tail_count > 0 {
+            let mut pipe = redis::Pipeline::with_capacity(tail_count);
+            pipe.ignore_errors();
+            for (_, key) in tails.iter().flatten() {
+                pipe.cmd("XINFO").arg("STREAM").arg(key);
+            }
+            let replies: Vec<redis::Value> = pipe.query_async(self.client.connection_mut()).await?;
+            anyhow::ensure!(replies.len() == tail_count, "incomplete mailbox tail reply");
+            for ((on_device, _), reply) in tails.into_iter().flatten().zip(replies) {
+                let position = match reply {
+                    redis::Value::ServerError(e) => {
+                        let text = e.to_string();
+                        anyhow::ensure!(
+                            text.contains("no such key") || text.contains("WRONGTYPE"),
+                            "failed to resolve mailbox tail: {text}"
+                        );
+                        "0-0".to_string()
+                    }
+                    info => gap::parse_xinfo_stream(&info)
+                        .last_generated
+                        .ok_or_else(|| anyhow::anyhow!("missing mailbox tail position"))?,
+                };
+                if on_device {
+                    device = Cow::Owned(position);
+                } else {
+                    user = Cow::Owned(position);
+                }
+            }
+        }
+        let cursor = MailboxCursor {
+            device: device.parse()?,
+            user: user.parse()?,
+        };
+        Ok((cursor, device, user))
     }
 
     /// Whether the mailbox read from `since` lost entries after it — the device's stream first,
@@ -525,13 +620,19 @@ impl MessageQueue {
         device_id: Option<&str>,
         since: &str,
     ) -> Result<Option<MailboxGap>> {
+        let Ok(cursor) = since.parse::<MailboxCursor>() else {
+            return Ok(None); // `$` and unrecognized legacy bookmarks name no past interval.
+        };
         let prefix = &self.delivery_queue_prefix;
         let mut keys = Vec::new();
         if let Some(device) = device_id.filter(|d| !d.is_empty()) {
-            keys.push(format!("{prefix}:offline:{user_id}:{device}"));
+            keys.push((
+                format!("{prefix}:offline:{user_id}:{device}"),
+                cursor.device,
+            ));
         }
-        keys.push(format!("{prefix}:offline:{user_id}"));
-        for key in keys {
+        keys.push((format!("{prefix}:offline:{user_id}"), cursor.user));
+        for (key, position) in keys {
             let reply: redis::RedisResult<redis::Value> = redis::cmd("XINFO")
                 .arg("STREAM")
                 .arg(&key)
@@ -541,7 +642,7 @@ impl MessageQueue {
                 Ok(info) => {
                     let stream = gap::parse_xinfo_stream(&info);
                     let cap = self.config.messaging.queue_maxlen_standard.max(1) as u64;
-                    if let Some(found) = gap::mailbox_gap(since, &stream, cap) {
+                    if let Some(found) = gap::mailbox_gap(&position.to_string(), &stream, cap) {
                         return Ok(Some(found));
                     }
                 }
@@ -641,13 +742,10 @@ pub struct MailboxPage {
     /// page. They live in that device's stream by construction, so they are neither a
     /// delivery for this reader nor evidence about coverage — see `merge_mailbox_pages`.
     pub sibling_skipped: usize,
-    /// The user-stream id through which this read examined **every** entry — delivered
-    /// it, deduplicated it against the device copy, or skipped it as a sibling's — so the
-    /// caller may read the user stream from here next time without re-examining any of
-    /// them. `None` when the page was cut by `count` (an examined entry above the cut was
-    /// not delivered and must be read again) or when the user stream had nothing to
-    /// examine. Never compared with a device-stream id: it positions the user stream only.
-    pub user_examined_through: Option<String>,
+    /// Complete source positions after this page, including skipped sibling prefixes.
+    resume: MailboxCursor,
+    /// Complete positions after each entry, never the final page position on an early frame.
+    entry_cursors: Vec<MailboxCursor>,
     /// The streams may hold more after this page: it was cut by `count`, or a source read came
     /// back full and the page stops at its last entry. Follows the reads, not `entries.len()`
     /// — a page stopped at a sibling-filled user read can be short, or empty, and still not
@@ -656,17 +754,34 @@ pub struct MailboxPage {
 }
 
 impl MailboxPage {
-    /// Where a reader that keeps **one** cursor for both streams resumes after this page
-    /// (`GetPendingMessages`): past the last delivered entry, or past the examined user
-    /// entries when they reach further — every entry up to there was delivered or is not
-    /// this reader's. `since` when the page moved nothing.
-    pub fn resume_after(&self, since: Option<&str>) -> Option<String> {
-        let delivered = self.entries.last().map(|(id, _)| id.as_str());
-        [delivered, self.user_examined_through.as_deref(), since]
+    /// The next opaque cursor for a completed fetch/page. An empty page retains its start
+    /// (or moves only over ignorable source prefixes); no cross-source maximum is taken.
+    pub fn resume_cursor(&self) -> MailboxCursor {
+        self.resume
+    }
+
+    /// Streaming consumes checkpoints alongside the corresponding envelopes. A failed send
+    /// must not commit a later entry's checkpoint. Raw Redis IDs in `entries` are diagnostic only.
+    ///
+    /// # Panics
+    /// If a caller changed the public entries' length: truncating the zip would silently drop
+    /// ciphertext. Production builders always construct one checkpoint per entry.
+    pub fn into_cursor_entries(
+        self,
+    ) -> impl Iterator<
+        Item = (
+            MailboxCursor,
+            Option<construct_message::types::MessageEnvelope>,
+        ),
+    > {
+        assert_eq!(
+            self.entry_cursors.len(),
+            self.entries.len(),
+            "mailbox entries and checkpoints must stay aligned"
+        );
+        self.entry_cursors
             .into_iter()
-            .flatten()
-            .max_by(|a, b| compare_stream_id_watermarks(a, b))
-            .map(str::to_string)
+            .zip(self.entries.into_iter().map(|(_, env)| env))
     }
 
     /// How many delivered entries the device stream did not have — the cutover gate, as a
@@ -696,135 +811,206 @@ impl MailboxPage {
 /// An unnamed entry (a sender that predates `recipient_device`, or a server-generated
 /// envelope) is for every device and is merged as before.
 ///
-/// **A page ends where the shorter of the two reads ends.** Each source is read up to
-/// `source_limit` entries; one that came back full may hold more after its last entry, and
-/// those are not in the page. Delivering past that point moved the reader's cursor over
-/// them: the user read of a three-device account is mostly siblings' entries and ends well
-/// before the read of the reader's own stream, so a user-only entry behind a backlog was
-/// passed over and never delivered. Entries after the earliest full read's last id wait for
-/// the next page.
+/// Preserve the existing earliest-full-read horizon for bounded chronological page ordering.
+/// Unlike the old shared watermark, resumption uses independent consumed prefixes. IDs can tie
+/// across sources, and a count boundary MUST NOT advance the source of an unreturned peer.
 fn merge_mailbox_pages(
     device_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     user_msgs: Vec<(String, Option<construct_message::types::MessageEnvelope>)>,
     count: usize,
     source_limit: usize,
     reader_device: &str,
-) -> MailboxPage {
-    use std::collections::HashMap;
+    start: MailboxCursor,
+) -> Result<MailboxPage> {
+    use construct_message::types::MessageEnvelope;
+    use std::collections::{HashMap, hash_map::Entry};
 
-    // Device entries overwrite user entries in this same scope, so their provenance is also
-    // the coverage answer. Hash each admitted envelope once; no second set or Redis key strings.
-    let mut by_message_id: HashMap<
-        [u8; 32],
-        (String, construct_message::types::MessageEnvelope, bool),
-    > = HashMap::new();
-    let mut orphans = Vec::new();
-    let mut sibling_skipped = 0usize;
-    // The last user entry examined, wherever it goes below — kept, overwritten by the
-    // device copy, skipped, or an orphan. XREAD returns in id order, so it is the page's last.
-    let user_last_id = user_msgs.last().map(|(id, _)| id.clone());
-    let horizon = [&device_msgs, &user_msgs]
-        .into_iter()
-        .filter(|read| read.len() >= source_limit)
-        .filter_map(|read| read.last().map(|(id, _)| id.clone()))
-        .min_by(|a, b| compare_stream_id_watermarks(a, b));
-    let past_horizon = |id: &str| {
-        horizon
-            .as_deref()
-            .is_some_and(|h| compare_stream_id_watermarks(id, h) == std::cmp::Ordering::Greater)
-    };
-
-    // User first, then device overwrites — device wins on collision.
-    for (stream_id, envelope) in user_msgs.into_iter() {
-        match envelope {
-            Some(env) => {
-                if env
-                    .recipient_device
-                    .as_deref()
-                    .is_some_and(|named| named != reader_device)
-                {
-                    sibling_skipped += 1;
-                    continue;
+    struct Candidate {
+        id: String,
+        position: StreamPosition,
+        envelope: Option<MessageEnvelope>,
+        on_device: bool,
+    }
+    // Rows refer to stable candidate indices, not another hash/digest or a copy of ciphertext.
+    // MAX names a sibling skip. Every other index is assigned once below.
+    struct SourceRow {
+        position: StreamPosition,
+        candidate: usize,
+    }
+    // A sibling-only read must not reserve a page of large envelope slots it never uses.
+    let admitted = device_msgs.len().saturating_add(
+        user_msgs
+            .iter()
+            .filter(|(_, env)| {
+                env.as_ref().is_none_or(|e| {
+                    e.recipient_device
+                        .as_deref()
+                        .is_none_or(|d| d == reader_device)
+                })
+            })
+            .count(),
+    );
+    let mut candidates: Vec<Option<Candidate>> = Vec::with_capacity(admitted);
+    let mut by_scope = HashMap::with_capacity(admitted);
+    let mut user_rows = Vec::with_capacity(user_msgs.len());
+    let mut device_rows = Vec::with_capacity(device_msgs.len());
+    let mut sibling_skipped = 0;
+    let mut horizon: Option<StreamPosition> = None;
+    for source in [&device_msgs, &user_msgs] {
+        if source.len() >= source_limit
+            && let Some((id, _)) = source.last()
+        {
+            let last = id.parse::<StreamPosition>()?;
+            horizon = Some(horizon.map_or(last, |h| h.min(last)));
+        }
+    }
+    // User first, then device overwrites: payload preference and dedup scope are unchanged.
+    for (on_device, source) in [(false, user_msgs), (true, device_msgs)] {
+        let rows = if on_device {
+            &mut device_rows
+        } else {
+            &mut user_rows
+        };
+        for (id, envelope) in source {
+            let position = id.parse::<StreamPosition>()?;
+            if !on_device
+                && envelope.as_ref().is_some_and(|env| {
+                    env.recipient_device
+                        .as_deref()
+                        .is_some_and(|d| d != reader_device)
+                })
+            {
+                sibling_skipped += 1;
+                rows.push(SourceRow {
+                    position,
+                    candidate: usize::MAX,
+                });
+                continue;
+            }
+            let index = if let Some(env) = &envelope {
+                match by_scope.entry(MessageDedupKey::scope_for_envelope(env)) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => {
+                        let index = candidates.len();
+                        candidates.push(None);
+                        e.insert(index);
+                        index
+                    }
                 }
-                by_message_id.insert(
-                    MessageDedupKey::scope_for_envelope(&env),
-                    (stream_id, env, false),
-                );
-            }
-            None => orphans.push((stream_id, None, false)),
+            } else {
+                let index = candidates.len();
+                candidates.push(None); // Corrupt entries have distinct identities.
+                index
+            };
+            candidates[index] = Some(Candidate {
+                id,
+                position,
+                envelope,
+                on_device,
+            });
+            rows.push(SourceRow {
+                position,
+                candidate: index,
+            });
         }
     }
-    for (stream_id, envelope) in device_msgs {
-        match envelope {
-            Some(env) => {
-                by_message_id.insert(
-                    MessageDedupKey::scope_for_envelope(&env),
-                    (stream_id, env, true),
-                );
+    drop(by_scope); // Only the stable row indices are needed from here on.
+    let candidate = |index: usize| {
+        candidates[index]
+            .as_ref()
+            .expect("every row has a candidate")
+    };
+    let mut order: Vec<_> = (0..candidates.len())
+        .filter(|&i| horizon.is_none_or(|h| candidate(i).position <= h))
+        .collect();
+    order.sort_by(|&a, &b| {
+        candidate(a)
+            .position
+            .cmp(&candidate(b).position)
+            .then(a.cmp(&b))
+    });
+    let cut_by_count = order.len() > count;
+    order.truncate(count); // Strict API maximum, even when IDs tie across streams.
+    let mut delivered_at = vec![usize::MAX; candidates.len()];
+    for (rank, &index) in order.iter().enumerate() {
+        delivered_at[index] = rank + 1;
+    }
+    let mut resume = start;
+    let mut entry_cursors = Vec::with_capacity(order.len());
+    let (mut device_through, mut user_through) = (0, 0);
+    // Consume only a contiguous prefix in each source. Nonrepresentative copies may be
+    // skipped now: the representative's actual (source, ID) still blocks its component
+    // until delivered. This includes older retries in the SAME source, not only user twins.
+    // Thus duplicate-filled horizons can progress without losing the unissued representative.
+    for rank in 0..=order.len() {
+        for (on_device, rows, through, position) in [
+            (true, &device_rows, &mut device_through, &mut resume.device),
+            (false, &user_rows, &mut user_through, &mut resume.user),
+        ] {
+            while let Some(row) = rows.get(*through) {
+                let ready = row.candidate == usize::MAX || {
+                    let c = candidate(row.candidate);
+                    c.envelope.is_none()
+                        || on_device != c.on_device
+                        || row.position != c.position
+                        || delivered_at[row.candidate] <= rank
+                };
+                if !ready {
+                    break;
+                }
+                *position = (*position).max(row.position);
+                *through += 1;
             }
-            None => orphans.push((stream_id, None, true)),
+        }
+        if rank > 0 {
+            entry_cursors.push(resume);
         }
     }
-
-    let mut merged: Vec<_> = by_message_id
-        .into_values()
-        .map(|(stream_id, env, on_device)| (stream_id, Some(env), on_device))
-        .chain(orphans)
-        .collect();
-
-    merged.sort_by(|a, b| compare_stream_id_watermarks(&a.0, &b.0));
-    merged.retain(|(id, _, _)| !past_horizon(id));
-    let cut_by_count = merged.len() > count;
-    merged.truncate(count);
-
-    // Collected after truncation: only entries actually handed to the client are evidence.
-    let user_only_ids: Vec<String> = merged
-        .iter()
-        .filter(|(_, _, on_device)| !on_device)
-        .filter_map(|(_, e, _)| e.as_ref().map(|e| e.message_id.clone()))
-        .collect();
-
-    MailboxPage {
-        entries: merged
-            .into_iter()
-            .map(|(id, envelope, _)| (id, envelope))
-            .collect(),
+    let mut entries = Vec::with_capacity(order.len());
+    let mut user_only_ids = Vec::new();
+    for index in order {
+        let c = candidates[index]
+            .take()
+            .expect("each candidate is selected once");
+        if !c.on_device
+            && let Some(env) = &c.envelope
+        {
+            user_only_ids.push(env.message_id.clone());
+        }
+        entries.push((c.id, c.envelope));
+    }
+    Ok(MailboxPage {
+        entries,
         user_only_ids,
         sibling_skipped,
-        // Examined only up to the horizon: user entries after it were left for the next page.
-        user_examined_through: if cut_by_count {
-            None
-        } else {
-            user_last_id.map(|id| {
-                if past_horizon(&id) {
-                    horizon.clone().unwrap_or(id)
-                } else {
-                    id
-                }
-            })
-        },
+        resume,
+        entry_cursors,
         has_more: cut_by_count || horizon.is_some(),
-    }
-}
-
-fn compare_stream_id_watermarks(a: &str, b: &str) -> std::cmp::Ordering {
-    fn parse(id: &str) -> Option<(u64, u64)> {
-        if let Some((ts, seq)) = id.split_once('-') {
-            Some((ts.parse().ok()?, seq.parse().ok()?))
-        } else {
-            id.parse::<u64>().ok().map(|ts| (ts, 0))
-        }
-    }
-    match (parse(a), parse(b)) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        _ => a.cmp(b),
-    }
+    })
 }
 
 #[cfg(test)]
 mod mailbox_merge_tests {
     use super::*;
     use construct_message::types::{MessageEnvelope, MessageType};
+
+    fn merge_mailbox_pages(
+        device: Vec<(String, Option<MessageEnvelope>)>,
+        user: Vec<(String, Option<MessageEnvelope>)>,
+        count: usize,
+        source_limit: usize,
+        reader: &str,
+    ) -> MailboxPage {
+        super::merge_mailbox_pages(
+            device,
+            user,
+            count,
+            source_limit,
+            reader,
+            MailboxCursor::default(),
+        )
+        .unwrap()
+    }
 
     fn env(id: &str) -> MessageEnvelope {
         MessageEnvelope {
@@ -1048,14 +1234,14 @@ mod mailbox_merge_tests {
         let page = merge_mailbox_pages(vec![], user, 10, 100, "a");
         assert!(page.entries.is_empty());
         assert_eq!(page.sibling_skipped, 2);
-        assert_eq!(page.user_examined_through.as_deref(), Some("200-0"));
+        assert_eq!(page.resume_cursor().user, StreamPosition(200, 0));
+        assert_eq!(page.resume_cursor().device, StreamPosition(0, 0));
     }
 
-    /// A page cut by `count` leaves examined entries undelivered above the cut. Claiming
-    /// the user stream examined through its last id would skip them next time; the claim
-    /// is withheld and the delivery cursor alone positions the next read.
+    /// A cut page advances only the consumed user prefix, never the unseen suffix or
+    /// the independent device component.
     #[test]
-    fn a_page_cut_by_count_does_not_claim_the_user_stream_examined() {
+    fn a_page_cut_by_count_claims_only_the_consumed_user_prefix() {
         let user = vec![
             ("100-0".to_string(), Some(env("first"))),
             ("200-0".to_string(), Some(env("second"))),
@@ -1063,12 +1249,14 @@ mod mailbox_merge_tests {
         ];
         let page = merge_mailbox_pages(vec![], user, 1, 100, "a");
         assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.user_examined_through, None);
+        assert_eq!(page.resume_cursor().user, StreamPosition(100, 0));
+        assert_eq!(page.resume_cursor().device, StreamPosition(0, 0));
         assert!(page.has_more, "the cut entries are still to come");
 
         let nothing = merge_mailbox_pages(vec![], vec![], 10, 100, "a");
         assert_eq!(
-            nothing.user_examined_through, None,
+            nothing.resume_cursor(),
+            MailboxCursor::default(),
             "an empty user page examined nothing and moves nothing"
         );
         assert!(!nothing.has_more);
@@ -1086,6 +1274,45 @@ mod mailbox_merge_tests {
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.user_only(), 0);
         assert_eq!(page.sibling_skipped, 1);
+    }
+
+    /// Stream IDs are unique only inside one source. Cutting between distinct messages with
+    /// the same ID loses the unreturned peer on the next exclusive XREAD, regardless of sort order.
+    #[test]
+    fn a_page_boundary_must_not_split_a_shared_stream_id() {
+        for count in [1, 2] {
+            let device = vec![
+                ("100-0".to_string(), Some(env("first"))),
+                ("200-0".to_string(), Some(env("device-only"))),
+            ];
+            let user = vec![("200-0".to_string(), Some(env("user-only")))];
+            let mut cursor = MailboxCursor::default();
+            let mut received = Vec::new();
+            let mut finished = false;
+            for _ in 0..10 {
+                let page = read_fixture(&device, &user, cursor, count, "dev");
+                assert!(page.entries.len() <= count, "limit is a maximum");
+                received.extend(ids(&page).into_iter().map(str::to_string));
+                let next = page.resume_cursor();
+                if !page.has_more {
+                    finished = true;
+                    break;
+                }
+                assert!(
+                    next != cursor && next.join(cursor) == next,
+                    "paging stalled or rewound a source"
+                );
+                cursor = next;
+            }
+            received.sort();
+            received.dedup();
+            assert!(finished);
+            assert_eq!(
+                received,
+                ["device-only", "first", "user-only"],
+                "count={count}: never skip an equal-ID peer"
+            );
+        }
     }
 
     /// Independent sequences in the same Redis millisecond can put a device copy before
@@ -1106,28 +1333,20 @@ mod mailbox_merge_tests {
             ("1000-4".to_string(), Some(env("legacy-only"))),
             ("1000-5".to_string(), Some(env_for("own", "a"))),
         ];
-        let mut cursor = "0".to_string();
+        let mut cursor = MailboxCursor::default();
         let mut received = Vec::new();
         let mut complete = false;
         for _ in 0..10 {
-            let read = |source: &Vec<(String, Option<MessageEnvelope>)>| {
-                source
-                    .iter()
-                    .filter(|(id, _)| compare_stream_id_watermarks(id, &cursor).is_gt())
-                    .take(2)
-                    .cloned()
-                    .collect()
-            };
-            let page = merge_mailbox_pages(read(&device), read(&user), 1, 2, "a");
+            let page = read_fixture(&device, &user, cursor, 1, "a");
             received.extend(ids(&page).into_iter().map(str::to_string));
-            let next = page.resume_after(Some(&cursor)).unwrap();
+            let next = page.resume_cursor();
             if !page.has_more {
                 complete = true;
                 break;
             }
             assert!(
-                compare_stream_id_watermarks(&next, &cursor).is_gt(),
-                "paging stalled"
+                next != cursor && next.join(cursor) == next,
+                "paging stalled or rewound a source"
             );
             cursor = next;
         }
@@ -1135,6 +1354,205 @@ mod mailbox_merge_tests {
         received.sort();
         received.dedup(); // Across pages: at-least-once; the client deduplicates message ids.
         assert_eq!(received, ["legacy-only", "next", "own"]);
+    }
+
+    #[test]
+    fn same_source_retries_do_not_hold_a_prefix_behind_an_unissued_representative() {
+        let source = vec![
+            ("100-0".into(), Some(env("a"))),
+            ("200-0".into(), Some(env("b"))),
+            ("250-0".into(), Some(env("c"))),
+            ("300-0".into(), Some(env("a"))),
+        ];
+        for device_source in [false, true] {
+            let (device, user) = if device_source {
+                (source.clone(), vec![])
+            } else {
+                (vec![], source.clone())
+            };
+            let first = read_fixture(&device, &user, MailboxCursor::default(), 2, "reader");
+            assert_eq!(ids(&first), ["b", "c"]);
+            let cursor = first.resume_cursor();
+            assert_ne!(
+                cursor,
+                MailboxCursor::default(),
+                "the old a is covered by the unissued a at 300"
+            );
+            let second = read_fixture(&device, &user, cursor, 2, "reader");
+            assert_eq!(ids(&second), ["a"], "the representative was not skipped");
+            assert!(!second.has_more);
+        }
+    }
+
+    #[test]
+    fn checkpoint_planning_moves_the_device_ciphertext_buffer_without_copying_it() {
+        let mut chosen = env("same");
+        chosen.encrypted_payload = vec![255; 32 * 1024];
+        let pointer = chosen.encrypted_payload.as_ptr();
+        let mut twin = env("same");
+        twin.encrypted_payload = b"older user copy".to_vec();
+        let page = merge_mailbox_pages(
+            vec![("200-0".into(), Some(chosen))],
+            vec![("100-0".into(), Some(twin))],
+            1,
+            2,
+            "reader",
+        );
+        let output = page.entries[0].1.as_ref().unwrap();
+        assert_eq!(output.encrypted_payload.len(), 32 * 1024);
+        assert_eq!(output.encrypted_payload.as_ptr(), pointer);
+        assert_eq!(page.user_only(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mailbox entries and checkpoints must stay aligned")]
+    fn a_caller_cannot_silently_zip_away_a_mailbox_entry() {
+        let mut page = merge_mailbox_pages(
+            vec![("100-0".into(), Some(env("a")))],
+            vec![],
+            1,
+            2,
+            "reader",
+        );
+        page.entries.clear(); // A programming error, not a malformed ciphertext or client cursor.
+        let _ = page.into_cursor_entries();
+    }
+
+    /// All 15,625 short source layouts: absent/corrupt/a/b/sibling at three IDs in each
+    /// stream, with retries, equal IDs and either horizon. Exercise full pages AND a fresh
+    /// opaque-cursor reconnect after every first frame. This is the production merge.
+    #[test]
+    fn exhaustive_source_prefixes_survive_page_and_frame_boundaries() {
+        use std::collections::BTreeSet;
+        let mut checked = 0;
+        for layout in 0..15_625 {
+            let mut code = layout;
+            let mut source = || {
+                let mut rows = Vec::new();
+                for id in 1..=3 {
+                    let kind = code % 5;
+                    code /= 5;
+                    let env = match kind {
+                        0 => continue,
+                        1 => Some(env("a")),
+                        2 => Some(env("b")),
+                        3 => None,
+                        _ => Some(env_for("sibling", "other")),
+                    };
+                    rows.push((format!("1000-{id}"), env));
+                }
+                rows
+            };
+            let device = source();
+            let user = source();
+            let expected: BTreeSet<_> = device
+                .iter()
+                .filter_map(|(_, e)| e.as_ref())
+                .chain(
+                    user.iter()
+                        .filter_map(|(_, e)| e.as_ref())
+                        .filter(|e| e.recipient_device.as_deref() != Some("other")),
+                )
+                .map(|e| e.message_id.clone())
+                .collect();
+            for count in [1, 2, 3] {
+                for interrupt in [false, true] {
+                    let mut cursor = MailboxCursor::default();
+                    let mut received = BTreeSet::new();
+                    let mut finished = false;
+                    for _ in 0..32 {
+                        let page = read_fixture(&device, &user, cursor, count, "reader");
+                        assert!(page.entries.len() <= count, "strict limit, layout={layout}");
+                        let end = page.resume_cursor();
+                        let has_more = page.has_more;
+                        let mut interrupted = false;
+                        let mut next = end;
+                        for (checkpoint, envelope) in page.into_cursor_entries() {
+                            if let Some(env) = envelope {
+                                received.insert(env.message_id);
+                                if interrupt {
+                                    next = checkpoint
+                                        .to_string()
+                                        .parse()
+                                        .expect("client echoes opaque token");
+                                    interrupted = true;
+                                    break;
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            next.join(cursor),
+                            next,
+                            "no source rewinds, layout={layout}"
+                        );
+                        if !interrupted && !has_more {
+                            finished = true;
+                            break;
+                        }
+                        assert_ne!(
+                            next, cursor,
+                            "stalled layout={layout}, limit={count}, interrupt={interrupt}"
+                        );
+                        assert!(
+                            next.to_string() > cursor.to_string(),
+                            "legacy storage order"
+                        );
+                        cursor = next;
+                    }
+                    assert!(
+                        finished,
+                        "did not drain layout={layout}, limit={count}, interrupt={interrupt}"
+                    );
+                    assert_eq!(
+                        received, expected,
+                        "lost/leaked layout={layout}, limit={count}, interrupt={interrupt}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 93_750);
+    }
+
+    #[test]
+    fn malformed_redis_ids_fail_the_read_instead_of_fabricating_a_checkpoint() {
+        assert!(
+            super::merge_mailbox_pages(
+                vec![("bad-id".into(), Some(env("a")))],
+                vec![],
+                1,
+                2,
+                "reader",
+                MailboxCursor::default()
+            )
+            .is_err()
+        );
+    }
+
+    fn read_fixture(
+        device: &[(String, Option<MessageEnvelope>)],
+        user: &[(String, Option<MessageEnvelope>)],
+        cursor: MailboxCursor,
+        count: usize,
+        reader: &str,
+    ) -> MailboxPage {
+        let read = |source: &[(String, Option<MessageEnvelope>)], offset: StreamPosition| {
+            source
+                .iter()
+                .filter(|(id, _)| id.parse::<StreamPosition>().unwrap() > offset)
+                .take(count * 2)
+                .cloned()
+                .collect()
+        };
+        super::merge_mailbox_pages(
+            read(device, cursor.device),
+            read(user, cursor.user),
+            count,
+            count * 2,
+            reader,
+            cursor,
+        )
+        .unwrap()
     }
 
     fn ids(page: &MailboxPage) -> Vec<&str> {
@@ -1162,15 +1580,13 @@ mod mailbox_merge_tests {
         ];
         let page = merge_mailbox_pages(device, user, 10, 3, "a");
         assert_eq!(ids(&page), vec!["m1"]);
-        assert_eq!(page.user_examined_through.as_deref(), Some("300-0"));
+        assert_eq!(page.resume_cursor().user, StreamPosition(300, 0));
+        assert_eq!(page.resume_cursor().device, StreamPosition(150, 0));
         assert!(page.has_more);
-        assert_eq!(page.resume_after(Some("0")).as_deref(), Some("300-0"));
     }
 
-    /// The other way round: the reader's own stream comes back full at 200 and the user read
-    /// reaches 300. A user-only entry at 300 waits, and the user stream is claimed examined
-    /// only through 200 — claiming 300 would skip it next time. Mutation: report
-    /// `user_last_id` unbounded — the claim reads 300.
+    /// A full device read ends at 200; the user-only entry at 300 waits. The user cursor
+    /// names its own last consumed row, 150, not the device's 200 or unissued user's 300.
     #[test]
     fn a_full_device_read_bounds_what_the_user_read_claims() {
         let device = vec![
@@ -1183,7 +1599,8 @@ mod mailbox_merge_tests {
         ];
         let page = merge_mailbox_pages(device, user, 10, 2, "a");
         assert_eq!(ids(&page), vec!["m1", "m2"]);
-        assert_eq!(page.user_examined_through.as_deref(), Some("200-0"));
+        assert_eq!(page.resume_cursor().user, StreamPosition(150, 0));
+        assert_eq!(page.resume_cursor().device, StreamPosition(200, 0));
         assert!(page.has_more);
     }
 
@@ -1200,7 +1617,8 @@ mod mailbox_merge_tests {
         let page = merge_mailbox_pages(device, user, 10, 3, "a");
         assert_eq!(ids(&page), vec!["m1", "m2"]);
         assert!(!page.has_more);
-        assert_eq!(page.resume_after(Some("0")).as_deref(), Some("400-0"));
+        assert_eq!(page.resume_cursor().device, StreamPosition(400, 0));
+        assert_eq!(page.resume_cursor().user, StreamPosition(300, 0));
     }
 
     /// CPU-only benchmark of the production merge, with cloning outside the timed region.
@@ -1248,8 +1666,9 @@ mod mailbox_merge_tests {
     /// A page that delivered nothing and examined nothing leaves the cursor where it was.
     #[test]
     fn an_empty_page_resumes_where_it_started() {
-        let page = merge_mailbox_pages(vec![], vec![], 10, 100, "a");
-        assert_eq!(page.resume_after(Some("500-0")).as_deref(), Some("500-0"));
-        assert_eq!(page.resume_after(None), None);
+        for start in [MailboxCursor::default(), "500-0".parse().unwrap()] {
+            let page = super::merge_mailbox_pages(vec![], vec![], 10, 100, "a", start).unwrap();
+            assert_eq!(page.resume_cursor(), start);
+        }
     }
 }

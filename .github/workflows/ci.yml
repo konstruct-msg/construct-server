@@ -264,6 +264,13 @@ jobs:
       - name: Run service-backed tests (#[ignore])
         run: cargo test --workspace --all-targets --no-fail-fast -- --ignored --test-threads=1
 
+      # cargo test compiles example mains but does not execute their allocation assertions.
+      # This pure mode needs no Redis/SQL/secrets and must catch wire-buffer reallocations.
+      - name: Check mailbox cursor allocation guard
+        run: cargo run --locked -p messaging-service --example hotpath_profile -- cursor --check
+        env:
+          PROFILE_LOCAL_REDIS: "1"
+
       - name: Cleanup test keys
         if: always()
         run: ./scripts/cleanup_test_keys.sh

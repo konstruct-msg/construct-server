@@ -1,7 +1,7 @@
 # Hot-path allocation probe
 
-`hotpath_profile.rs` calls the production `MessageQueue`, `log_safe_id` and
-`hash_client_ip` helpers. It adds no instrumentation to service binaries.
+`hotpath_profile.rs` calls the production `MessageQueue`, `MailboxCursor::encode`,
+`log_safe_id` and `hash_client_ip` helpers. It adds no instrumentation to service binaries.
 
 Use **only local/disposable Redis**. Keys have a unique `profile:p6:<run>` mailbox
 prefix and scoped dedup inputs. The probe never flushes Redis. It verifies written
@@ -23,9 +23,9 @@ work=$(mktemp -d) # empty working directory prevents loading the repository's .e
 rmdir "$work"
 ```
 
-Modes: `clone`, `hash`, `mailbox`, or `all` (default). Add `--check` after the mode
+Modes: `clone`, `hash`, `cursor`, `mailbox`, or `all` (default). Add `--check` after the mode
 to enforce deterministic allocation guards: only the holder vector allocates in
-`clone`, and only one output String per call in `hash`. These guards are for the
+`clone`, and only one output String per call in `hash` / `cursor`. These guards are for the
 optimized implementation; omit them when measuring an older baseline. Network
 latency is never an assertion. Run each mode in a fresh
 process for OS peak-RSS comparisons (`/usr/bin/time -l` on macOS, `-v` on Linux).
@@ -35,6 +35,10 @@ Keep environment, compiler, Redis and workload identical across revisions.
   Includes the holder vector; configuration is the fixture loaded above, not a
   model of every production secret/certificate configuration.
 - `hash`: 100,000 log-ID and IP-tag encodings, using public fixture inputs.
+- `cursor`: 100,000 encodings of a source checkpoint; one 87-byte output allocation, no
+  ciphertext, network or Redis work. The normal Display `.to_string()` path initially used
+  five allocations/reallocations and requested 248 bytes; the wire encoder reserves once.
+  This compares implementations of the **new** token, not new tokens against old scalar IDs.
 - `mailbox`: one current-thread Tokio runtime, exactly four workers, 128 sends per
   worker, 1 KiB ciphertext and 1/3/32 destination-device copies plus the user copy.
   No task-per-recipient expansion. 32 devices is a transport stress fixture, **not
@@ -47,6 +51,9 @@ metadata, native TLS buffers, kernel/socket and Redis memory; requested-byte tot
 are allocation churn, not retained memory. CPU-only phases approximate CPU cost;
 mailbox timings include Redis/network waits. Use external CPU/RSS/cgroup tools for
 whole-process limits.
+
+CI explicitly executes the pure `cursor --check` mode: compiling the example with
+`cargo test --all-targets` alone does not run its main/allocation assertions.
 
 This is not an end-to-end RPC, throughput forecast or VPS capacity claim: auth,
 SQL, crypto, APNs, dispatch-mutex contention and full subscriber response buffers
@@ -72,7 +79,7 @@ Decimal MB below; allocation counters include reallocations and holder/setup cos
 | Three-copy mailbox send allocations / requested bytes | ~93 / 27,991 | ~60 / 24,333 |
 | 32-copy stress send allocations / requested bytes | ~419 / 160,065 | ~151 / 125,417 |
 
-`--check` passes for clone/hash. Restoring byte-by-byte `format!` encoding still
+`--check` passes for clone/hash (and the subsequent cursor-fix encoder). Restoring byte-by-byte `format!` encoding still
 passes functional golden vectors but fails the allocation guard (400,000 instead
 of 100,000 allocations for log IDs). Queue sharing, prefix lifetime/config snapshot,
 protocol bytes and real delivery have separate regression tests.

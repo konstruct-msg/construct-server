@@ -32,6 +32,8 @@ use crate::context::MessagingServiceContext;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
 use crate::token_redeem::{TokenRedeemResult, redeem_token_checked};
 
+mod cursors;
+
 // ── Env defaults matching ops/docker-compose.dev.yml ─────────────────────────
 
 fn redis_url() -> String {
@@ -2320,7 +2322,10 @@ async fn p5_pending_rpc_preserves_payloads_cursors_and_legacy_reads() {
         .unwrap()
         .into_inner();
     assert_eq!(full.messages, messages);
-    assert_eq!(full.next_cursor, "610-0");
+    assert_eq!(
+        full.next_cursor,
+        "mc1:00000000000000000610-00000000000000000000:00000000000000000600-00000000000000000000"
+    );
     assert!(!full.has_more);
     assert!(full.gap.is_none());
 
@@ -2355,7 +2360,7 @@ async fn p5_pending_rpc_preserves_payloads_cursors_and_legacy_reads() {
         "exercise cursor advancement without a client-visible message"
     );
     assert_eq!(received, messages);
-    assert_eq!(cursor, "610-0");
+    assert_eq!(cursor, full.next_cursor);
 
     let legacy = service
         .get_pending_messages(request(&legacy_token, None, 100))
@@ -2369,7 +2374,10 @@ async fn p5_pending_rpc_preserves_payloads_cursors_and_legacy_reads() {
             .map(expected)
             .collect::<Vec<_>>()
     );
-    assert_eq!(legacy.next_cursor, "600-0");
+    assert_eq!(
+        legacy.next_cursor,
+        "mc1:00000000000000000000-00000000000000000000:00000000000000000600-00000000000000000000"
+    );
     assert!(!legacy.has_more);
     assert_eq!(stream_len(&mut conn, &recipient).await, 6);
     let device_len: i64 = redis::cmd("XLEN")
@@ -2384,7 +2392,7 @@ async fn p5_pending_rpc_preserves_payloads_cursors_and_legacy_reads() {
 /// A stream examines a sibling device's user-stream entries once, not on every poll: they are
 /// counted as skipped on the first poll and the user position moves past them. On 2026-09-21 a
 /// two-device stand re-read the same eight on every 5-second tick. Mutation: drop the
-/// `user_stream_id` update in `poll_messages` — the second poll skips all ten again.
+/// final source-cursor update in `poll_messages` — the second poll skips all ten again.
 #[tokio::test]
 #[serial]
 async fn p1_a_stream_examines_a_siblings_entries_once() {
@@ -2510,14 +2518,13 @@ async fn p2_one_stream_poll_drains_pages_including_an_empty_sibling_page() {
         )
         .await
         .expect("one catch-up poll");
-        let mut previous_cursor = (0_u64, 0_u64);
+        let mut previous_cursor = construct_queue::MailboxCursor::default();
         let mut received: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|response| {
                 let response = response.expect("message, not an error");
                 let cursor = response.stream_cursor.expect("resume cursor");
-                let (ts, seq) = cursor.split_once('-').unwrap();
-                let cursor = (ts.parse::<u64>().unwrap(), seq.parse::<u64>().unwrap());
-                assert!(cursor >= previous_cursor, "delivery cursor regressed: {previous_cursor:?} -> {cursor:?}");
+                let cursor: construct_queue::MailboxCursor = cursor.parse().expect("opaque cursor roundtrip");
+                assert_eq!(cursor.join(previous_cursor), cursor, "a source regressed: {previous_cursor:?} -> {cursor:?}");
                 previous_cursor = cursor;
                 let Some(construct_server_shared::shared::proto::services::v1::message_stream_response::Response::Message(env)) = response.response else {
                     panic!("expected a message");

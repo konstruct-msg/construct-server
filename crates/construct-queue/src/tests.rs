@@ -509,9 +509,12 @@ fn mailbox_page_snapshot(page: &MailboxPage) -> Vec<u8> {
         &page.entries,
         &page.user_only_ids,
         page.sibling_skipped,
-        &page.user_examined_through,
         page.has_more,
-        page.resume_after(Some("0")),
+        page.resume_cursor().to_string(),
+        page.entry_cursors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
     ))
     .unwrap()
 }
@@ -526,26 +529,126 @@ async fn sequential_mailbox_page(
     user_since: Option<&str>,
     count: usize,
 ) -> MailboxPage {
+    let per_source = count.saturating_mul(2).max(1);
+    let (start, device_start, user_start) = queue
+        .mailbox_read_offsets(user, Some(device), since, user_since)
+        .await
+        .unwrap();
     let mut delivery = delivery::DeliveryManager::new(
         &mut queue.client,
         &queue.config,
         &queue.delivery_queue_prefix,
     );
     let device_entries = delivery
-        .read_device_messages_from_stream(user, device, since, count.saturating_mul(2))
+        .read_device_messages_from_stream(user, device, Some(&device_start), per_source)
         .await
         .unwrap();
     let user_entries = delivery
-        .read_user_messages_from_stream(user, user_since, count.saturating_mul(2))
+        .read_user_messages_from_stream(user, Some(&user_start), per_source)
         .await
         .unwrap();
     merge_mailbox_pages(
         device_entries,
         user_entries,
         count,
-        count.saturating_mul(2),
+        per_source,
         device,
+        start,
     )
+    .unwrap()
+}
+
+async fn scripted_redis_command(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> Vec<Vec<u8>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let count: usize = line.strip_prefix('*').unwrap().trim().parse().unwrap();
+    let mut args = Vec::with_capacity(count);
+    for _ in 0..count {
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let len: usize = line.strip_prefix('$').unwrap().trim().parse().unwrap();
+        let mut arg = vec![0; len + 2];
+        reader.read_exact(&mut arg).await.unwrap();
+        assert_eq!(&arg[len..], b"\r\n");
+        arg.truncate(len);
+        args.push(arg);
+    }
+    args
+}
+
+/// Tail resolution must batch both source snapshots and fail on a generic Redis error.
+/// The server also answers XREAD so ignoring LOADING cannot accidentally pass on a later EOF.
+#[tokio::test]
+#[ignore = "scripted Redis exchange; run with mailbox integration tests"]
+async fn mailbox_tail_batches_snapshots_and_never_turns_an_outage_into_a_zero_checkpoint() {
+    use tokio::io::{AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("redis://{}", listener.local_addr().unwrap());
+    let (stop, mut stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+        let (mut tails, mut xreads) = (0, 0);
+        loop {
+            let args = tokio::select! {
+                _ = &mut stopped => break,
+                args = scripted_redis_command(&mut read) => args,
+            };
+            match args[0].as_slice() {
+                b"CLIENT" => write.write_all(b"+OK\r\n").await.unwrap(),
+                b"PING" => write.write_all(b"+PONG\r\n").await.unwrap(),
+                b"XINFO" => {
+                    let key = if tails == 0 {
+                        "delivery:offline:user:reader"
+                    } else {
+                        "delivery:offline:user"
+                    };
+                    assert_eq!(
+                        args,
+                        [
+                            b"XINFO".to_vec(),
+                            b"STREAM".to_vec(),
+                            key.as_bytes().to_vec()
+                        ]
+                    );
+                    tails += 1;
+                    if tails == 2 {
+                        write
+                            .write_all(b"-LOADING injected tail outage\r\n-ERR no such key\r\n")
+                            .await
+                            .unwrap();
+                    } // Withhold the first reply: a sequential implementation cannot proceed.
+                }
+                b"XREAD" => {
+                    xreads += 1;
+                    write.write_all(b"$-1\r\n").await.unwrap();
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
+        (tails, xreads)
+    });
+    let mut config = get_test_config();
+    config.redis_url = url;
+    let mut queue = MessageQueue::new(&config).await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        queue.read_mailbox_messages("user", Some("reader"), Some("$"), Some("$"), 1),
+    )
+    .await;
+    stop.send(()).unwrap();
+    let (tails, xreads) = server.await.unwrap();
+    assert_eq!(tails, 2, "both offsets were requested");
+    assert_eq!(xreads, 0, "an unknown tail is not zero");
+    let error = result
+        .expect("tail requests were not pipelined")
+        .err()
+        .expect("outage must fail");
+    assert!(error.to_string().contains("injected tail outage"));
 }
 
 /// One actual XREAD must carry both independent offsets (or just the legacy offset for a
@@ -553,24 +656,7 @@ async fn sequential_mailbox_page(
 #[tokio::test]
 #[ignore = "scripted Redis exchange; run with mailbox integration tests"]
 async fn mailbox_read_uses_one_xread_with_independent_source_offsets() {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    async fn command(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> Vec<Vec<u8>> {
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let count: usize = line.strip_prefix('*').unwrap().trim().parse().unwrap();
-        let mut args = Vec::with_capacity(count);
-        for _ in 0..count {
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            let len: usize = line.strip_prefix('$').unwrap().trim().parse().unwrap();
-            let mut arg = vec![0; len + 2];
-            reader.read_exact(&mut arg).await.unwrap();
-            assert_eq!(&arg[len..], b"\r\n");
-            arg.truncate(len);
-            args.push(arg);
-        }
-        args
-    }
+    use tokio::io::{AsyncWriteExt, BufReader};
     for (device, fail) in [Some("reader"), None, Some("")]
         .into_iter()
         .flat_map(|device| [(device, false), (device, true)])
@@ -604,7 +690,7 @@ async fn mailbox_read_uses_one_xread_with_independent_source_offsets() {
             let (read, mut write) = stream.into_split();
             let mut read = BufReader::new(read);
             loop {
-                let args = command(&mut read).await;
+                let args = scripted_redis_command(&mut read).await;
                 match args[0].as_slice() {
                     b"CLIENT" => write.write_all(b"+OK\r\n").await.unwrap(),
                     b"PING" => write.write_all(b"+PONG\r\n").await.unwrap(),
@@ -767,7 +853,8 @@ async fn mailbox_read_matches_separate_reads_with_independent_cursors() {
     );
     assert_eq!(page.user_only_ids, ["user-only"]);
     assert_eq!(page.sibling_skipped, 1);
-    assert_eq!(page.user_examined_through.as_deref(), Some("500-0"));
+    assert_eq!(page.resume_cursor().user, StreamPosition(500, 0));
+    assert_eq!(page.resume_cursor().device, StreamPosition(450, 0));
     assert!(!page.has_more);
     assert!(
         queue
@@ -790,7 +877,8 @@ async fn mailbox_read_matches_separate_reads_with_independent_cursors() {
             ["300-0", "400-0", "500-0"]
         );
         assert!(legacy.user_only_ids.is_empty());
-        assert_eq!(legacy.user_examined_through, None);
+        assert_eq!(legacy.resume_cursor().user, StreamPosition(500, 0));
+        assert_eq!(legacy.resume_cursor().device, StreamPosition(200, 0));
     }
     let after: redis::Value = redis::cmd("XRANGE")
         .arg(&user_key)
@@ -1166,9 +1254,8 @@ async fn mailbox_a_user_only_entry_behind_a_sibling_backlog_reaches_a_paged_read
                 .iter()
                 .filter_map(|(_, e)| e.as_ref().map(|e| e.message_id.clone())),
         );
-        cursor = page
-            .resume_after(Some(&cursor))
-            .expect("a cursor to resume from");
+        assert!(page.entries.len() <= 2, "limit remains a maximum");
+        cursor = page.resume_cursor().to_string();
         if !page.has_more {
             break;
         }
