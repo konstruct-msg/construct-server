@@ -196,10 +196,7 @@ fn is_public_v6(v6: Ipv6Addr) -> bool {
         return is_public_v4(v4);
     }
     // Discard prefix 100::/64
-    if s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0 {
-        return false;
-    }
-    true
+    !(s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
 }
 
 #[cfg(test)]
