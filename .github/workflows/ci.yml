@@ -71,6 +71,15 @@ jobs:
       - name: Run split-secrets fixture tests
         run: bash scripts/test-split-secrets.sh
 
+  # Operator safeguards run without Docker, services, secrets or Rust.
+  messaging-test-window:
+    name: Messaging test-window safeguards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test-messaging-test-limit-window.py
+
   # Check formatting
   fmt:
     name: Format Check
