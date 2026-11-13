@@ -117,8 +117,6 @@ pub struct VeilServiceContext {
 pub enum IssueError {
     #[error("unknown relay: {0}")]
     UnknownRelay(String),
-    #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
     #[error("veil_pk must be exactly {VEIL_PK_LEN} bytes, got {0}")]
     InvalidVeilPk(usize),
     #[error("unknown role: {0}")]
@@ -493,10 +491,11 @@ fn encode_capability_v2(
     out
 }
 
-/// Issue (generate + sign + persist) a fresh capability for `user_id` on `relay_address`.
-pub async fn issue_capability(
+/// Issue (generate + sign) a fresh bearer capability on `relay_address`. Nothing is
+/// stored: no reader ever existed, and a row tying the presented access to an account is
+/// what joins a relay's log to that account (decisions/veil-relay-sees-no-stable-device-id.md §2).
+pub fn issue_capability(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
 ) -> Result<IssuedCapability, IssueError> {
     let relay = ctx
@@ -512,31 +511,15 @@ pub async fn issue_capability(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_tickets \
-         (ticket_id, auth_key, user_id, relay_scope, not_before, not_after, suite_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(&minted.ticket_id)
-    .bind(&minted.auth_key)
-    .bind(user_id)
-    .bind(&minted.relay_scope)
-    .bind(minted.not_before)
-    .bind(minted.issued.not_after)
-    .bind(minted.suite_id as i16)
-    .execute(&*ctx.db_pool)
-    .await?;
-
     Ok(minted.issued)
 }
 
 /// Issue (sign + persist) a fresh **key-bound** (B1) capability for `user_id` on
 /// `relay_address`, bound to the holder's `veil_pk`. No bearer secret is generated
 /// or stored — the relay verifies the holder's own signature over the exporter
-/// (`AuthRecordV3`), so this table holds only public accounting data.
-pub async fn issue_capability_v2(
+/// (`AuthRecordV3`). Nothing is persisted either (see [`issue_capability`]).
+pub fn issue_capability_v2(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
     veil_pk: &[u8],
     role: u32,
@@ -565,39 +548,22 @@ pub async fn issue_capability_v2(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_capabilities_v2 \
-         (ticket_id, veil_pk, role, user_id, relay_scope, not_before, not_after, suite_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(&minted.ticket_id[..])
-    .bind(&minted.veil_pk[..])
-    .bind(minted.role as i16)
-    .bind(user_id)
-    .bind(&minted.relay_scope)
-    .bind(minted.not_before)
-    .bind(minted.issued.not_after)
-    .bind(minted.suite_id as i16)
-    .execute(&*ctx.db_pool)
-    .await?;
-
     Ok(minted.issued)
 }
 
 /// Issue one capability, dispatching bearer (B2) vs key-bound (B1) exactly as the
 /// public RPC does: an empty `veil_pk` yields a bearer capability, otherwise a
 /// key-bound one bound to `veil_pk`/`role`.
-async fn issue_one(
+fn issue_one(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
     veil_pk: &[u8],
     role: u32,
 ) -> Result<IssuedCapability, IssueError> {
     if veil_pk.is_empty() {
-        issue_capability(ctx, user_id, relay_address).await
+        issue_capability(ctx, relay_address)
     } else {
-        issue_capability_v2(ctx, user_id, relay_address, veil_pk, role).await
+        issue_capability_v2(ctx, relay_address, veil_pk, role)
     }
 }
 
@@ -658,7 +624,7 @@ pub struct IssuedBundle {
 ///
 /// Empty `relay_address` is resolved via [`resolve_primary_relay`] (single-relay default)
 /// so auto first-issue clients that omit the field still work in the common N=1 deploy.
-pub async fn issue_bundle(
+pub fn issue_bundle(
     ctx: &VeilServiceContext,
     user_id: Uuid,
     relay_address: &str,
@@ -667,7 +633,7 @@ pub async fn issue_bundle(
     k: usize,
 ) -> Result<IssuedBundle, IssueError> {
     let primary_addr = resolve_primary_relay(&ctx.relays, relay_address)?.to_string();
-    let primary = issue_one(ctx, user_id, &primary_addr, veil_pk, role).await?;
+    let primary = issue_one(ctx, &primary_addr, veil_pk, role)?;
 
     let epoch = unix_now() / ALT_ROTATION_SECS;
     let alt_addrs = select_alternate_addresses(&ctx.relays, &primary_addr, user_id, k, epoch);
@@ -676,7 +642,7 @@ pub async fn issue_bundle(
     for addr in alt_addrs {
         // A single misconfigured alternate must not fail the whole issuance — the
         // primary already succeeded. Skip and log; the client still gets a usable set.
-        match issue_one(ctx, user_id, &addr, veil_pk, role).await {
+        match issue_one(ctx, &addr, veil_pk, role) {
             Ok(cap) => alternates.push(cap),
             Err(e) => tracing::warn!(
                 front = %front_label(&ctx.issuer, &addr),
@@ -1628,6 +1594,30 @@ mod tests {
             bootstrap_voucher_enabled: true,
             voucher_quota: VOUCHER_QUOTA,
         }
+    }
+
+    /// Issuance stores nothing: it succeeds against a database that cannot be reached.
+    /// veil_tickets / veil_capabilities_v2 held ticket_id ↔ veil_pk (↔ auth_key) ↔ user_id
+    /// for no reader (migration 078 drops them); a write coming back fails here.
+    #[tokio::test]
+    async fn issuance_touches_no_database() {
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .unwrap();
+        let ctx = voucher_test_ctx(unreachable, &["relay-a:443", "relay-b:443", "relay-c:443"]);
+        let bearer = issue_bundle(&ctx, Uuid::new_v4(), "relay-a:443", &[], 0, 2).expect("bearer");
+        assert_eq!(bearer.alternates.len(), 2, "alternates are issued too");
+        let key_bound = issue_bundle(
+            &ctx,
+            Uuid::new_v4(),
+            "relay-a:443",
+            &[5u8; 32],
+            ROLE_USER as u32,
+            2,
+        )
+        .expect("key-bound");
+        assert_eq!(key_bound.alternates.len(), 2);
     }
 
     #[tokio::test]

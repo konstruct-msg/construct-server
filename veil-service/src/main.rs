@@ -36,7 +36,6 @@ impl VeilService for VeilGrpcService {
             core::IssueError::UnknownRelay(r) => {
                 Status::invalid_argument(format!("unknown relay: {r}"))
             }
-            core::IssueError::Db(e) => Status::internal(format!("db error: {e}")),
             core::IssueError::InvalidVeilPk(n) => {
                 Status::invalid_argument(format!("invalid veil_pk length: {n}"))
             }
@@ -65,7 +64,6 @@ impl VeilService for VeilGrpcService {
             req.role,
             core::DEFAULT_ALTERNATES_K,
         )
-        .await
         .map_err(map_issue_err)?;
 
         let issued = bundle.primary;
