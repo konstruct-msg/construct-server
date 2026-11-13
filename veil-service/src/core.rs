@@ -147,7 +147,6 @@ pub enum VoucherError {
 pub struct IssuedVoucher {
     pub config_uri: String,
     pub exp: i64,
-    pub ticket_id: Vec<u8>,
     pub relay_address: String,
     pub not_after: i64,
 }
@@ -783,8 +782,13 @@ pub fn sign_entrypoint_tuple(
     sign_canonical_fields(issuer, &fields)
 }
 
-/// Mint a short-lived B2 voucher under a single Postgres transaction (quota + tracing).
+/// Mint a short-lived B2 voucher under a single Postgres transaction (quota only).
 /// Signs the config blob only after COMMIT so a failed INSERT never returns a uri.
+///
+/// The voucher itself is not recorded — only that `issuer_user_id` minted one, and when,
+/// for the 24h quota. Its `ticket_id` is what the friend presents to a relay; kept next to
+/// the issuer it would tie the friend's IP to the issuer's account (owner, 2026-11-13:
+/// vouchers burn fast and are not recorded; decisions/veil-relay-sees-no-stable-device-id.md).
 pub async fn issue_bootstrap_voucher(
     ctx: &VeilServiceContext,
     issuer_user_id: Uuid,
@@ -800,8 +804,8 @@ pub async fn issue_bootstrap_voucher(
         .execute(&mut *tx)
         .await?;
 
-    let issued_at_rows: Vec<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT ticket_id, issued_at FROM veil_bootstrap_vouchers \
+    let issued_at_rows: Vec<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "SELECT issued_at FROM veil_bootstrap_vouchers \
          WHERE issuer_user_id = $1 AND issued_at > NOW() - INTERVAL '24 hours' \
          FOR UPDATE",
     )
@@ -809,7 +813,7 @@ pub async fn issue_bootstrap_voucher(
     .fetch_all(&mut *tx)
     .await?;
 
-    let times: Vec<_> = issued_at_rows.iter().map(|(_, t)| *t).collect();
+    let times: Vec<_> = issued_at_rows.iter().map(|(t,)| *t).collect();
     if let Err(retry_after) =
         voucher_quota_retry_after(&times, chrono::Utc::now(), ctx.voucher_quota)
     {
@@ -833,18 +837,10 @@ pub async fn issue_bootstrap_voucher(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_bootstrap_vouchers \
-         (ticket_id, issuer_user_id, pool, relay_address, not_after) \
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(&minted.ticket_id)
-    .bind(issuer_user_id)
-    .bind(VOUCHER_POOL)
-    .bind(&relay_address)
-    .bind(minted.issued.not_after)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("INSERT INTO veil_bootstrap_vouchers (issuer_user_id) VALUES ($1)")
+        .bind(issuer_user_id)
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
@@ -861,16 +857,16 @@ pub async fn issue_bootstrap_voucher(
     Ok(IssuedVoucher {
         config_uri,
         exp: minted.issued.not_after,
-        ticket_id: minted.ticket_id,
         relay_address: minted.issued.relay_address,
         not_after: minted.issued.not_after,
     })
 }
 
-/// Drop tracing rows older than 7 days. Errors are for the caller to log.
+/// Drop quota rows past the 24h quota window — nothing reads them after it. Errors are for
+/// the caller to log.
 pub async fn sweep_bootstrap_vouchers(pool: &DbPool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
-        "DELETE FROM veil_bootstrap_vouchers WHERE issued_at < NOW() - INTERVAL '7 days'",
+        "DELETE FROM veil_bootstrap_vouchers WHERE issued_at < NOW() - INTERVAL '24 hours'",
     )
     .execute(pool)
     .await?;
@@ -1653,11 +1649,30 @@ mod tests {
             .await;
     }
 
+    /// A voucher is not recorded: the quota table holds who minted one and when, nothing a
+    /// relay ever sees (migration 079). A column coming back fails here.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn the_voucher_quota_table_holds_only_issuer_and_time() {
+        let pool = voucher_test_pool().await;
+        let mut columns: Vec<(String,)> = sqlx::query_as(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_name = 'veil_bootstrap_vouchers'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        columns.sort();
+        let columns: Vec<_> = columns.into_iter().map(|(c,)| c).collect();
+        assert_eq!(columns, ["issued_at", "issuer_user_id"]);
+    }
+
     #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn voucher_insert_failure_returns_no_blob() {
         let pool = voucher_test_pool().await;
         const CONSTRAINT: &str = "veil_bootstrap_vouchers_test_insert_fail";
+        const INSERT_FAIL_ISSUER: &str = "00000000-0000-4000-8000-00000000f417";
         let _ = sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
         ))
@@ -1666,14 +1681,15 @@ mod tests {
         sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers \
              ADD CONSTRAINT {CONSTRAINT} \
-             CHECK (relay_address <> 'insert-fail.example:443')"
+             CHECK (issuer_user_id <> '{INSERT_FAIL_ISSUER}')"
         ))
         .execute(&pool)
         .await
         .expect("add test constraint");
 
         let ctx = voucher_test_ctx(pool.clone(), &["insert-fail.example:443"]);
-        let result = issue_bootstrap_voucher(&ctx, Uuid::new_v4()).await;
+        let result =
+            issue_bootstrap_voucher(&ctx, Uuid::parse_str(INSERT_FAIL_ISSUER).unwrap()).await;
 
         let _ = sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
