@@ -94,7 +94,7 @@ jobs:
           components: rustfmt
 
       - name: Which compiler judges this push
-        # rust-toolchain.toml pins 1.98.0, but `dtolnay/rust-toolchain@stable` may export
+        # rust-toolchain.toml pins 1.100.0, but `dtolnay/rust-toolchain@stable` may export
         # RUSTUP_TOOLCHAIN, which overrides the file. Rather than assert one way or the
         # other, print it: a run that disagrees with the pin then says so in its own log
         # instead of surfacing later as "green locally, red in CI" — which is exactly the
@@ -142,7 +142,7 @@ jobs:
           components: clippy
 
       - name: Which compiler judges this push
-        # rust-toolchain.toml pins 1.98.0, but `dtolnay/rust-toolchain@stable` may export
+        # rust-toolchain.toml pins 1.100.0, but `dtolnay/rust-toolchain@stable` may export
         # RUSTUP_TOOLCHAIN, which overrides the file. Rather than assert one way or the
         # other, print it: a run that disagrees with the pin then says so in its own log
         # instead of surfacing later as "green locally, red in CI" — which is exactly the
