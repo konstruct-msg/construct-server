@@ -36,7 +36,6 @@ impl VeilService for VeilGrpcService {
             core::IssueError::UnknownRelay(r) => {
                 Status::invalid_argument(format!("unknown relay: {r}"))
             }
-            core::IssueError::Db(e) => Status::internal(format!("db error: {e}")),
             core::IssueError::InvalidVeilPk(n) => {
                 Status::invalid_argument(format!("invalid veil_pk length: {n}"))
             }
@@ -65,12 +64,13 @@ impl VeilService for VeilGrpcService {
             req.role,
             core::DEFAULT_ALTERNATES_K,
         )
-        .await
         .map_err(map_issue_err)?;
 
         let issued = bundle.primary;
+        // No account and no identifier of the issued access in this line: a relay sees the
+        // renewal arrive through its tunnel, so `user_id` + time here joins its log to an
+        // account (decisions/veil-relay-sees-no-stable-device-id.md §2, todo 311).
         info!(
-            user_id = %user_id,
             front = %core::front_label(&self.context.issuer, &issued.relay_address),
             capability_version = issued.capability_version,
             alternates = bundle.alternates.len(),
@@ -157,10 +157,10 @@ impl VeilService for VeilGrpcService {
             construct_metrics::VEIL_BOOTSTRAP_VOUCHERS_N1_ISSUED_TOTAL.inc();
         }
 
+        // Neither the issuer nor the voucher's ticket_id: another person presents that
+        // ticket_id to a relay, and the pair would tie their IP to the issuer's account.
         info!(
-            issuer_user_id = %user_id,
-            ticket_id = %hex::encode(&issued.ticket_id),
-            relay = %issued.relay_address,
+            front = %core::front_label(&self.context.issuer, &issued.relay_address),
             not_after = issued.not_after,
             "issued bootstrap voucher"
         );
@@ -378,4 +378,69 @@ async fn main() -> Result<()> {
         .context("Failed to start axum server")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod log_guard {
+    /// No log line in veil-service names an account or an identifier of issued access.
+    /// Either one, next to a time, joins a relay's log to an account
+    /// (decisions/veil-relay-sees-no-stable-device-id.md §2). Counts go to metrics.
+    #[test]
+    fn no_log_line_names_an_account_or_issued_access() {
+        const NAMES: [&str; 5] = [
+            "user_id",
+            "issuer_user_id",
+            "ticket_id",
+            "veil_pk",
+            "device_id",
+        ];
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut scanned = 0;
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            for mac in ["info!(", "warn!(", "debug!(", "error!(", "trace!("] {
+                let mut from = 0;
+                while let Some(at) = src[from..].find(mac) {
+                    let open = from + at + mac.len();
+                    let (mut depth, mut end) = (1, open);
+                    for (i, c) in src[open..].char_indices() {
+                        depth += match c {
+                            '(' => 1,
+                            ')' => -1,
+                            _ => 0,
+                        };
+                        if depth == 0 {
+                            end = open + i;
+                            break;
+                        }
+                    }
+                    let args = &src[open..end];
+                    scanned += 1;
+                    for name in NAMES {
+                        let named = args.match_indices(name).any(|(i, _)| {
+                            let before = args[..i].chars().next_back();
+                            let after = args[i + name.len()..].chars().next();
+                            let ident = |c: Option<char>| {
+                                c.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                            };
+                            !ident(before) && !ident(after)
+                        });
+                        if named {
+                            let line = src[..open].lines().count();
+                            found.push(format!("{}:{line} names {name}", path.display()));
+                        }
+                    }
+                    from = end;
+                }
+            }
+        }
+        // The scan sees the service's log lines at all (main.rs alone has more than ten).
+        assert!(scanned > 10, "scanned only {scanned} log macros");
+        assert!(found.is_empty(), "{found:#?}");
+    }
 }

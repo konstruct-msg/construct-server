@@ -117,8 +117,6 @@ pub struct VeilServiceContext {
 pub enum IssueError {
     #[error("unknown relay: {0}")]
     UnknownRelay(String),
-    #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
     #[error("veil_pk must be exactly {VEIL_PK_LEN} bytes, got {0}")]
     InvalidVeilPk(usize),
     #[error("unknown role: {0}")]
@@ -149,7 +147,6 @@ pub enum VoucherError {
 pub struct IssuedVoucher {
     pub config_uri: String,
     pub exp: i64,
-    pub ticket_id: Vec<u8>,
     pub relay_address: String,
     pub not_after: i64,
 }
@@ -493,10 +490,11 @@ fn encode_capability_v2(
     out
 }
 
-/// Issue (generate + sign + persist) a fresh capability for `user_id` on `relay_address`.
-pub async fn issue_capability(
+/// Issue (generate + sign) a fresh bearer capability on `relay_address`. Nothing is
+/// stored: no reader ever existed, and a row tying the presented access to an account is
+/// what joins a relay's log to that account (decisions/veil-relay-sees-no-stable-device-id.md §2).
+pub fn issue_capability(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
 ) -> Result<IssuedCapability, IssueError> {
     let relay = ctx
@@ -512,31 +510,15 @@ pub async fn issue_capability(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_tickets \
-         (ticket_id, auth_key, user_id, relay_scope, not_before, not_after, suite_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(&minted.ticket_id)
-    .bind(&minted.auth_key)
-    .bind(user_id)
-    .bind(&minted.relay_scope)
-    .bind(minted.not_before)
-    .bind(minted.issued.not_after)
-    .bind(minted.suite_id as i16)
-    .execute(&*ctx.db_pool)
-    .await?;
-
     Ok(minted.issued)
 }
 
 /// Issue (sign + persist) a fresh **key-bound** (B1) capability for `user_id` on
 /// `relay_address`, bound to the holder's `veil_pk`. No bearer secret is generated
 /// or stored — the relay verifies the holder's own signature over the exporter
-/// (`AuthRecordV3`), so this table holds only public accounting data.
-pub async fn issue_capability_v2(
+/// (`AuthRecordV3`). Nothing is persisted either (see [`issue_capability`]).
+pub fn issue_capability_v2(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
     veil_pk: &[u8],
     role: u32,
@@ -565,39 +547,22 @@ pub async fn issue_capability_v2(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_capabilities_v2 \
-         (ticket_id, veil_pk, role, user_id, relay_scope, not_before, not_after, suite_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(&minted.ticket_id[..])
-    .bind(&minted.veil_pk[..])
-    .bind(minted.role as i16)
-    .bind(user_id)
-    .bind(&minted.relay_scope)
-    .bind(minted.not_before)
-    .bind(minted.issued.not_after)
-    .bind(minted.suite_id as i16)
-    .execute(&*ctx.db_pool)
-    .await?;
-
     Ok(minted.issued)
 }
 
 /// Issue one capability, dispatching bearer (B2) vs key-bound (B1) exactly as the
 /// public RPC does: an empty `veil_pk` yields a bearer capability, otherwise a
 /// key-bound one bound to `veil_pk`/`role`.
-async fn issue_one(
+fn issue_one(
     ctx: &VeilServiceContext,
-    user_id: Uuid,
     relay_address: &str,
     veil_pk: &[u8],
     role: u32,
 ) -> Result<IssuedCapability, IssueError> {
     if veil_pk.is_empty() {
-        issue_capability(ctx, user_id, relay_address).await
+        issue_capability(ctx, relay_address)
     } else {
-        issue_capability_v2(ctx, user_id, relay_address, veil_pk, role).await
+        issue_capability_v2(ctx, relay_address, veil_pk, role)
     }
 }
 
@@ -658,7 +623,7 @@ pub struct IssuedBundle {
 ///
 /// Empty `relay_address` is resolved via [`resolve_primary_relay`] (single-relay default)
 /// so auto first-issue clients that omit the field still work in the common N=1 deploy.
-pub async fn issue_bundle(
+pub fn issue_bundle(
     ctx: &VeilServiceContext,
     user_id: Uuid,
     relay_address: &str,
@@ -667,7 +632,7 @@ pub async fn issue_bundle(
     k: usize,
 ) -> Result<IssuedBundle, IssueError> {
     let primary_addr = resolve_primary_relay(&ctx.relays, relay_address)?.to_string();
-    let primary = issue_one(ctx, user_id, &primary_addr, veil_pk, role).await?;
+    let primary = issue_one(ctx, &primary_addr, veil_pk, role)?;
 
     let epoch = unix_now() / ALT_ROTATION_SECS;
     let alt_addrs = select_alternate_addresses(&ctx.relays, &primary_addr, user_id, k, epoch);
@@ -676,7 +641,7 @@ pub async fn issue_bundle(
     for addr in alt_addrs {
         // A single misconfigured alternate must not fail the whole issuance — the
         // primary already succeeded. Skip and log; the client still gets a usable set.
-        match issue_one(ctx, user_id, &addr, veil_pk, role).await {
+        match issue_one(ctx, &addr, veil_pk, role) {
             Ok(cap) => alternates.push(cap),
             Err(e) => tracing::warn!(
                 front = %front_label(&ctx.issuer, &addr),
@@ -817,8 +782,13 @@ pub fn sign_entrypoint_tuple(
     sign_canonical_fields(issuer, &fields)
 }
 
-/// Mint a short-lived B2 voucher under a single Postgres transaction (quota + tracing).
+/// Mint a short-lived B2 voucher under a single Postgres transaction (quota only).
 /// Signs the config blob only after COMMIT so a failed INSERT never returns a uri.
+///
+/// The voucher itself is not recorded — only that `issuer_user_id` minted one, and when,
+/// for the 24h quota. Its `ticket_id` is what the friend presents to a relay; kept next to
+/// the issuer it would tie the friend's IP to the issuer's account (owner, 2026-11-13:
+/// vouchers burn fast and are not recorded; decisions/veil-relay-sees-no-stable-device-id.md).
 pub async fn issue_bootstrap_voucher(
     ctx: &VeilServiceContext,
     issuer_user_id: Uuid,
@@ -834,8 +804,8 @@ pub async fn issue_bootstrap_voucher(
         .execute(&mut *tx)
         .await?;
 
-    let issued_at_rows: Vec<(Vec<u8>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT ticket_id, issued_at FROM veil_bootstrap_vouchers \
+    let issued_at_rows: Vec<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "SELECT issued_at FROM veil_bootstrap_vouchers \
          WHERE issuer_user_id = $1 AND issued_at > NOW() - INTERVAL '24 hours' \
          FOR UPDATE",
     )
@@ -843,7 +813,7 @@ pub async fn issue_bootstrap_voucher(
     .fetch_all(&mut *tx)
     .await?;
 
-    let times: Vec<_> = issued_at_rows.iter().map(|(_, t)| *t).collect();
+    let times: Vec<_> = issued_at_rows.iter().map(|(t,)| *t).collect();
     if let Err(retry_after) =
         voucher_quota_retry_after(&times, chrono::Utc::now(), ctx.voucher_quota)
     {
@@ -867,18 +837,10 @@ pub async fn issue_bootstrap_voucher(
         unix_now(),
     );
 
-    sqlx::query(
-        "INSERT INTO veil_bootstrap_vouchers \
-         (ticket_id, issuer_user_id, pool, relay_address, not_after) \
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(&minted.ticket_id)
-    .bind(issuer_user_id)
-    .bind(VOUCHER_POOL)
-    .bind(&relay_address)
-    .bind(minted.issued.not_after)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("INSERT INTO veil_bootstrap_vouchers (issuer_user_id) VALUES ($1)")
+        .bind(issuer_user_id)
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
@@ -895,16 +857,16 @@ pub async fn issue_bootstrap_voucher(
     Ok(IssuedVoucher {
         config_uri,
         exp: minted.issued.not_after,
-        ticket_id: minted.ticket_id,
         relay_address: minted.issued.relay_address,
         not_after: minted.issued.not_after,
     })
 }
 
-/// Drop tracing rows older than 7 days. Errors are for the caller to log.
+/// Drop quota rows past the 24h quota window — nothing reads them after it. Errors are for
+/// the caller to log.
 pub async fn sweep_bootstrap_vouchers(pool: &DbPool) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
-        "DELETE FROM veil_bootstrap_vouchers WHERE issued_at < NOW() - INTERVAL '7 days'",
+        "DELETE FROM veil_bootstrap_vouchers WHERE issued_at < NOW() - INTERVAL '24 hours'",
     )
     .execute(pool)
     .await?;
@@ -1630,6 +1592,30 @@ mod tests {
         }
     }
 
+    /// Issuance stores nothing: it succeeds against a database that cannot be reached.
+    /// veil_tickets / veil_capabilities_v2 held ticket_id ↔ veil_pk (↔ auth_key) ↔ user_id
+    /// for no reader (migration 078 drops them); a write coming back fails here.
+    #[tokio::test]
+    async fn issuance_touches_no_database() {
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .unwrap();
+        let ctx = voucher_test_ctx(unreachable, &["relay-a:443", "relay-b:443", "relay-c:443"]);
+        let bearer = issue_bundle(&ctx, Uuid::new_v4(), "relay-a:443", &[], 0, 2).expect("bearer");
+        assert_eq!(bearer.alternates.len(), 2, "alternates are issued too");
+        let key_bound = issue_bundle(
+            &ctx,
+            Uuid::new_v4(),
+            "relay-a:443",
+            &[5u8; 32],
+            ROLE_USER as u32,
+            2,
+        )
+        .expect("key-bound");
+        assert_eq!(key_bound.alternates.len(), 2);
+    }
+
     #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn voucher_quota_fourth_mint_exhausted() {
@@ -1663,11 +1649,30 @@ mod tests {
             .await;
     }
 
+    /// A voucher is not recorded: the quota table holds who minted one and when, nothing a
+    /// relay ever sees (migration 079). A column coming back fails here.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn the_voucher_quota_table_holds_only_issuer_and_time() {
+        let pool = voucher_test_pool().await;
+        let mut columns: Vec<(String,)> = sqlx::query_as(
+            "SELECT column_name::text FROM information_schema.columns \
+             WHERE table_name = 'veil_bootstrap_vouchers'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        columns.sort();
+        let columns: Vec<_> = columns.into_iter().map(|(c,)| c).collect();
+        assert_eq!(columns, ["issued_at", "issuer_user_id"]);
+    }
+
     #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn voucher_insert_failure_returns_no_blob() {
         let pool = voucher_test_pool().await;
         const CONSTRAINT: &str = "veil_bootstrap_vouchers_test_insert_fail";
+        const INSERT_FAIL_ISSUER: &str = "00000000-0000-4000-8000-00000000f417";
         let _ = sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
         ))
@@ -1676,14 +1681,15 @@ mod tests {
         sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers \
              ADD CONSTRAINT {CONSTRAINT} \
-             CHECK (relay_address <> 'insert-fail.example:443')"
+             CHECK (issuer_user_id <> '{INSERT_FAIL_ISSUER}')"
         ))
         .execute(&pool)
         .await
         .expect("add test constraint");
 
         let ctx = voucher_test_ctx(pool.clone(), &["insert-fail.example:443"]);
-        let result = issue_bootstrap_voucher(&ctx, Uuid::new_v4()).await;
+        let result =
+            issue_bootstrap_voucher(&ctx, Uuid::parse_str(INSERT_FAIL_ISSUER).unwrap()).await;
 
         let _ = sqlx::query(&format!(
             "ALTER TABLE veil_bootstrap_vouchers DROP CONSTRAINT IF EXISTS {CONSTRAINT}"
