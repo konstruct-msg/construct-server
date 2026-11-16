@@ -34,14 +34,19 @@ _ok()   { echo "  ✅ $1"; ((PASS++)) || true; }
 _warn() { echo "  ⚠️  $1"; ((WARN++)) || true; }
 _fail() { echo "  ❌ $1"; ((FAIL++)) || true; }
 
+_now_ms() {
+  python3 -c 'import time; print(time.time_ns() // 1_000_000)'
+}
+
 # _timed: runs a command that must SUCCEED within TIMEOUT_S.
 # Warns (but passes) if elapsed > WARN_MS.
 _timed() {
   local label="$1"; shift
-  local start elapsed exit_code=0
-  start=$(date +%s%3N)
+  local start end elapsed exit_code=0
+  start=$(_now_ms)
   timeout "$TIMEOUT_S" "$@" > /dev/null 2>&1 || exit_code=$?
-  elapsed=$(( $(date +%s%3N) - start ))
+  end=$(_now_ms)
+  elapsed=$((end - start))
   if [ "$exit_code" -eq 124 ]; then
     _fail "$label — hung (timed out after ${TIMEOUT_S}s)"
   elif [ "$exit_code" -ne 0 ]; then
@@ -54,54 +59,56 @@ _timed() {
   fi
 }
 
-# _timed_err: runs a command that must FAIL (e.g. return UNAUTHENTICATED) quickly.
-# Passes if the command returns a non-zero exit within TIMEOUT_S.
-# Fails if it hangs (timeout), succeeds unexpectedly, or hits connection refused.
-_timed_err() {
-  local label="$1"; shift
-  local start elapsed exit_code=0 output
-  start=$(date +%s%3N)
+# A gRPC refusal proves only the expected contract when its exact status is named.
+# "Any non-zero" also passes INTERNAL, INVALID_ARGUMENT and a stale method, which made
+# several old smoke labels stronger than their assertions.
+_timed_grpc_error() {
+  local label="$1" expected="$2"; shift 2
+  local start end elapsed exit_code=0 output actual
+  start=$(_now_ms)
   output=$(timeout "$TIMEOUT_S" "$@" 2>&1) || exit_code=$?
-  elapsed=$(( $(date +%s%3N) - start ))
+  end=$(_now_ms)
+  elapsed=$((end - start))
+  actual=$(printf '%s\n' "$output" | sed -nE 's/^[[:space:]]*Code:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' | head -n1)
   if [ "$exit_code" -eq 124 ]; then
     _fail "$label — hung (timed out after ${TIMEOUT_S}s)"
   elif [ "$exit_code" -eq 0 ]; then
-    _fail "$label — expected rejection but got success"
+    _fail "$label — expected gRPC $expected but got success"
   elif echo "$output" | grep -qi "connection refused\|no such host\|dial tcp\|i/o timeout"; then
     _fail "$label — cannot connect to server (${elapsed}ms)"
+  elif [ "$actual" != "$expected" ]; then
+    _fail "$label — expected gRPC $expected, got ${actual:-no grpc code} (${elapsed}ms)"
   else
-    _ok "$label (${elapsed}ms, rejected as expected)"
+    _ok "$label (${elapsed}ms, gRPC $expected)"
     if [ "$elapsed" -gt "$WARN_MS" ]; then
       _warn "$label — slow rejection: ${elapsed}ms > ${WARN_MS}ms"
     fi
   fi
 }
 
-# _timed_err_unauthenticated: like _timed_err, but additionally verifies the error
-# is UNAUTHENTICATED (not UNIMPLEMENTED). Catches stale-binary regression where a
-# missing RPC returns gRPC status 12 (Unimplemented) instead of status 16.
-_timed_err_unauthenticated() {
-  local label="$1"; shift
-  local start elapsed exit_code=0 output
-  start=$(date +%s%3N)
+# Run a successful command and prove a predicate over the JSON it actually returned.
+_timed_json() {
+  local label="$1" predicate="$2"; shift 2
+  local start end elapsed exit_code=0 output
+  start=$(_now_ms)
   output=$(timeout "$TIMEOUT_S" "$@" 2>&1) || exit_code=$?
-  elapsed=$(( $(date +%s%3N) - start ))
+  end=$(_now_ms)
+  elapsed=$((end - start))
   if [ "$exit_code" -eq 124 ]; then
     _fail "$label — hung (timed out after ${TIMEOUT_S}s)"
-  elif [ "$exit_code" -eq 0 ]; then
-    _fail "$label — expected rejection but got success"
-  elif echo "$output" | grep -qi "connection refused\|no such host\|dial tcp\|i/o timeout"; then
-    _fail "$label — cannot connect to server (${elapsed}ms)"
-  elif echo "$output" | grep -qi "Unimplemented\|unimplemented"; then
-    _fail "$label — got UNIMPLEMENTED (stale binary? method not registered)"
+  elif [ "$exit_code" -ne 0 ]; then
+    _fail "$label — failed (exit $exit_code, ${elapsed}ms)"
+  elif ! printf '%s\n' "$output" | jq -e "$predicate" >/dev/null 2>&1; then
+    _fail "$label — response did not satisfy: $predicate"
   else
-    _ok "$label (${elapsed}ms, rejected as expected)"
+    _ok "$label (${elapsed}ms, response verified)"
     if [ "$elapsed" -gt "$WARN_MS" ]; then
-      _warn "$label — slow rejection: ${elapsed}ms > ${WARN_MS}ms"
+      _warn "$label — slow: ${elapsed}ms > ${WARN_MS}ms threshold"
     fi
   fi
 }
 
+main() {
 echo ""
 echo "=== Construct Smoke Tests ==="
 echo "Auth:        $AUTH_HOST"
@@ -131,9 +138,9 @@ _timed "GetPowChallenge (liveness)" grpcurl \
 
 # VerifyToken with a fake token: VerifyToken always returns gRPC OK — it responds
 # with {valid: false} for bad tokens rather than an error status.
-# Test that it responds quickly (liveness + non-hanging, not rejection).
+# Test both prompt completion and the response body; gRPC OK alone proves neither.
 FAKE_TOKEN="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzbW9rZS10ZXN0IiwiZXhwIjoxfQ.ZmFrZXNpZ25hdHVyZQ"
-_timed "VerifyToken (invalid token → valid:false fast)" grpcurl \
+_timed_json "VerifyToken (invalid token → valid:false fast)" '.valid == false' grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/auth_service.proto \
@@ -147,7 +154,7 @@ echo "--- Messaging Service ---"
 
 # No auth → must return UNAUTHENTICATED quickly (not hang).
 # This is the primary regression test for the getPendingMessages deadlock bug.
-_timed_err "GetPendingMessages (no auth → rejected fast)" grpcurl \
+_timed_grpc_error "GetPendingMessages (no auth → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
@@ -157,7 +164,7 @@ _timed_err "GetPendingMessages (no auth → rejected fast)" grpcurl \
 
 # With a fake Bearer token → auth middleware runs, must reject quickly.
 # Catches hangs in auth middleware that only trigger when Authorization header is present.
-_timed_err "GetPendingMessages (fake token → rejected fast)" grpcurl \
+_timed_grpc_error "GetPendingMessages (fake token → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
@@ -168,7 +175,7 @@ _timed_err "GetPendingMessages (fake token → rejected fast)" grpcurl \
 
 # P0-A regression: client-supplied x-user-id alone must NOT authenticate.
 # Caddy does not inject identity headers — services require Bearer.
-_timed_err "GetPendingMessages (x-user-id spoof only → rejected)" grpcurl \
+_timed_grpc_error "GetPendingMessages (x-user-id spoof only → UNAUTHENTICATED)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
@@ -178,7 +185,7 @@ _timed_err "GetPendingMessages (x-user-id spoof only → rejected)" grpcurl \
   shared.proto.services.v1.MessagingService/GetPendingMessages
 
 # Spoof guard: Bearer present but x-user-id mismatches claims → reject.
-_timed_err "GetPendingMessages (fake token + mismatched x-user-id → rejected)" grpcurl \
+_timed_grpc_error "GetPendingMessages (fake token + mismatched x-user-id → UNAUTHENTICATED)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/messaging_service.proto \
@@ -193,7 +200,7 @@ echo ""
 echo "--- Auth Logout ---"
 
 # Logout requires access_token in request body; empty → INVALID_ARGUMENT (not hang).
-_timed_err "Logout (empty access_token → rejected fast)" grpcurl \
+_timed_grpc_error "Logout (empty access_token → INVALID_ARGUMENT fast)" InvalidArgument grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/auth_service.proto \
@@ -207,7 +214,7 @@ echo "--- Key Service ---"
 
 # GetPreKeyBundle with no auth → must reject quickly (not hang).
 # Key service is on the session-init critical path; a hang here blocks new chats.
-_timed_err "GetPreKeyBundle (no auth → rejected fast)" grpcurl \
+_timed_grpc_error "GetPreKeyBundle (no auth → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/key_service.proto \
@@ -216,7 +223,7 @@ _timed_err "GetPreKeyBundle (no auth → rejected fast)" grpcurl \
   shared.proto.services.v1.KeyService/GetPreKeyBundle
 
 # GetPreKeyBundle with fake token → tests auth middleware under the key service.
-_timed_err "GetPreKeyBundle (fake token → rejected fast)" grpcurl \
+_timed_grpc_error "GetPreKeyBundle (fake token → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/key_service.proto \
@@ -234,7 +241,7 @@ echo "--- Signaling Service ---"
 # CRITICAL REGRESSION TEST: if binary is stale (pre-InitiateCall), this returns
 # UNIMPLEMENTED (gRPC status 12) instead and the test fails, alerting us of a
 # Docker build cache issue before we deploy to production.
-_timed_err_unauthenticated "InitiateCall (no auth → UNAUTHENTICATED, not UNIMPLEMENTED)" grpcurl \
+_timed_grpc_error "InitiateCall (no auth → UNAUTHENTICATED, not UNIMPLEMENTED)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/signaling_service.proto \
@@ -243,7 +250,7 @@ _timed_err_unauthenticated "InitiateCall (no auth → UNAUTHENTICATED, not UNIMP
   shared.proto.signaling.v1.SignalingService/InitiateCall
 
 # GetTurnCredentials without auth → must also reject quickly (liveness).
-_timed_err "GetTurnCredentials (no auth → rejected fast)" grpcurl \
+_timed_grpc_error "GetTurnCredentials (no auth → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/signaling_service.proto \
@@ -252,7 +259,7 @@ _timed_err "GetTurnCredentials (no auth → rejected fast)" grpcurl \
   shared.proto.signaling.v1.SignalingService/GetTurnCredentials
 
 # P0-A: x-user-id alone must not authorize calls.
-_timed_err "InitiateCall (x-user-id spoof only → rejected)" grpcurl \
+_timed_grpc_error "InitiateCall (x-user-id spoof only → UNAUTHENTICATED)" Unauthenticated grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/signaling_service.proto \
@@ -262,31 +269,19 @@ _timed_err "InitiateCall (x-user-id spoof only → rejected)" grpcurl \
   shared.proto.signaling.v1.SignalingService/InitiateCall
 
 
-# ── 6. Identity metrics surface (optional; warn-only if unreachable) ──────────
-echo ""
-echo "--- Metrics (identity HTTP) ---"
-IDENTITY_HTTP="${IDENTITY_HTTP:-localhost:8081}"
-if curl -sf --max-time "$TIMEOUT_S" "http://$IDENTITY_HTTP/metrics" > /tmp/construct-smoke-metrics.txt 2>/dev/null; then
-  _ok "GET identity /metrics"
-  # Counters may be zero until first fail-open; presence of HELP/TYPE is enough.
-  if grep -q "construct_auth_security_fail_open_total\|construct_messages_sent_total\|construct_" /tmp/construct-smoke-metrics.txt; then
-    _ok "metrics text exposes construct_* series"
-  else
-    _warn "metrics reachable but no construct_* series found yet"
-  fi
-else
-  _warn "identity /metrics not reachable at $IDENTITY_HTTP (skip — not all stacks expose it)"
-fi
-
-
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $WARN warnings ==="
 echo ""
-echo "Phase 7 audit checks covered: Bearer-required auth, x-user-id spoof rejection,"
-echo "  logout empty-token reject, signaling auth, optional metrics scrape."
+echo "Checks covered: exact auth refusals, x-user-id spoof rejection,"
+echo "  logout empty-token validation, signaling auth, and VerifyToken body."
 echo ""
 
 if [ "$FAIL" -gt 0 ]; then
-  exit 1
+  return 1
+fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi

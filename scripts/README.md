@@ -20,6 +20,32 @@ Optional args to override default hosts:
 # Defaults: localhost:50051 localhost:50052 localhost:50057 localhost:8080 localhost:50060
 ```
 
+The smoke test names and verifies exact gRPC refusal codes and response predicates; a generic
+non-zero exit is not a passing auth test. Its pure harness contracts need no running service:
+
+```bash
+bash scripts/test-smoke-harness.sh
+bash scripts/test-wait-for-command.sh
+```
+
+CI readiness uses `wait-for-command.sh`; exhausting the bounded attempts is a hard failure rather
+than falling through to the next step.
+
+## Mutation tests
+
+Use the wrapper rather than a shared `CARGO_TARGET_DIR`. It runs `cargo-mutants --in-place`, writes
+results outside the repository, and refuses to report the cargo-mutants result until every tracked
+Rust source matches its pre-run SHA-256:
+
+```bash
+unset CARGO_TARGET_DIR
+scripts/mutate-package.sh construct-auth
+bash scripts/test-mutate-package.sh  # pure wrapper contracts
+```
+
+Package-local mutation results say what that package's selected test command catches. A surviving
+mutation may still be covered by a downstream or ignored test and must be classified before removal.
+
 ## Key Management
 
 ```bash
