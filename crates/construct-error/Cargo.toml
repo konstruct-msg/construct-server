@@ -40,3 +40,7 @@ database = ["dep:sqlx"]
 redis = ["dep:redis"]
 http = ["dep:reqwest"]
 serialization = ["dep:rmp-serde", "dep:uuid"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
