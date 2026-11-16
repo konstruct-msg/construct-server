@@ -52,6 +52,11 @@ fi
 printf '\n[pre-push] наблюдаемость подключена к чему-то настоящему\n'
 python3 scripts/check-observability.py || fail=1
 
+printf '\n[pre-push] контракты test harness\n'
+bash scripts/test-smoke-harness.sh || fail=1
+bash scripts/test-wait-for-command.sh || fail=1
+bash scripts/test-mutate-package.sh || fail=1
+
 # Clippy идёт последним и только если предыдущее прошло: он самый долгий
 # (минуты на холодном target), и ждать его ради ошибки форматирования незачем.
 # Пропускается через SKIP_CLIPPY=1, когда правка заведомо не касается Rust —

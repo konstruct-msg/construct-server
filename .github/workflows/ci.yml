@@ -80,6 +80,18 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 scripts/test-messaging-test-limit-window.py
 
+  # The smoke and mutation wrappers are executable specifications: wrong gRPC status,
+  # unchecked JSON, a shared target, or unrestored source must redden without services.
+  test-harnesses:
+    name: Test harness contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/test-smoke-harness.sh
+      - run: bash scripts/test-wait-for-command.sh
+      - run: GIT_DIR=.git GIT_WORK_TREE="$PWD" bash scripts/test-mutate-package.sh
+
   # Check formatting
   fmt:
     name: Format Check
@@ -333,46 +345,23 @@ jobs:
 
       - name: Wait for services to be healthy
         run: |
-          # Wait for gateway HTTP (simple, no DB dependency)
-          echo "Waiting for gateway /health..."
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:8080/health && { echo "✅ gateway ready"; break; }
-            echo "  attempt $i/30..."; sleep 2
-          done
+          # Gateway HTTP is a simple liveness endpoint.
+          scripts/wait-for-command.sh "gateway /health" 30 2 \
+            curl -sf http://localhost:8080/health
 
-          # Wait for identity-service to be truly ready (GetPowChallenge requires DB).
-          # Uses the actual RPC — grpcurl exits 0 only if the call succeeds.
-          echo "Waiting for identity-service (GetPowChallenge)..."
-          for i in $(seq 1 40); do
+          # GetPowChallenge proves identity has reached its DB-backed RPC path.
+          scripts/wait-for-command.sh "identity-service GetPowChallenge" 40 2 \
             grpcurl -plaintext -connect-timeout 2 \
               -import-path shared/proto \
               -proto services/auth_service.proto \
               -d '{}' localhost:50051 \
-              shared.proto.services.v1.AuthService/GetPowChallenge > /dev/null 2>&1 \
-              && { echo "identity-service ready"; break; }
-            echo "  attempt $i/40..."; sleep 2
-          done
+              shared.proto.services.v1.AuthService/GetPowChallenge
 
-          # Wait for messaging-service port (TCP open = gRPC stack is up).
-          echo "Waiting for messaging-service port..."
-          for i in $(seq 1 30); do
-            nc -z localhost 50052 && { echo "messaging-service ready"; break; }
-            echo "  attempt $i/30..."; sleep 2
-          done
-
-          # Wait for key-service port
-          echo "Waiting for key-service port..."
-          for i in $(seq 1 30); do
-            nc -z localhost 50057 && { echo "key-service ready"; break; }
-            echo "  attempt $i/30..."; sleep 2
-          done
-
-          # Wait for signaling-service port
-          echo "Waiting for signaling-service port..."
-          for i in $(seq 1 30); do
-            nc -z localhost 50060 && { echo "signaling-service ready"; break; }
-            echo "  attempt $i/30..."; sleep 2
-          done
+          # The smoke test below proves handler contracts. These waits only separate
+          # startup failures from assertions and fail after their final attempt.
+          scripts/wait-for-command.sh "messaging-service port" 30 2 nc -z localhost 50052
+          scripts/wait-for-command.sh "key-service port" 30 2 nc -z localhost 50057
+          scripts/wait-for-command.sh "signaling-service port" 30 2 nc -z localhost 50060
 
       - name: Run smoke tests
         run: bash scripts/smoke-test.sh
