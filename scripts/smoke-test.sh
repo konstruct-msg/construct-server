@@ -77,7 +77,7 @@ _timed_grpc_error() {
   elif echo "$output" | grep -qi "connection refused\|no such host\|dial tcp\|i/o timeout"; then
     _fail "$label — cannot connect to server (${elapsed}ms)"
   elif [ "$actual" != "$expected" ]; then
-    _fail "$label — expected gRPC $expected, got ${actual:-no grpc code} (${elapsed}ms)"
+    _fail "$label — expected gRPC $expected, got ${actual:-no grpc code (grpcurl/proto/request failure)} (${elapsed}ms)"
   else
     _ok "$label (${elapsed}ms, gRPC $expected)"
     if [ "$elapsed" -gt "$WARN_MS" ]; then
@@ -140,7 +140,9 @@ _timed "GetPowChallenge (liveness)" grpcurl \
 # with {valid: false} for bad tokens rather than an error status.
 # Test both prompt completion and the response body; gRPC OK alone proves neither.
 FAKE_TOKEN="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzbW9rZS10ZXN0IiwiZXhwIjoxfQ.ZmFrZXNpZ25hdHVyZQ"
-_timed_json "VerifyToken (invalid token → valid:false fast)" '.valid == false' grpcurl \
+_timed_json "VerifyToken (invalid token → valid:false fast)" \
+  'type == "object" and ((.valid // false) == false) and (.userId? == null) and (.deviceId? == null) and (.expiresAt? == null)' \
+  grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/auth_service.proto \
@@ -212,9 +214,9 @@ _timed_grpc_error "Logout (empty access_token → INVALID_ARGUMENT fast)" Invali
 echo ""
 echo "--- Key Service ---"
 
-# GetPreKeyBundle with no auth → must reject quickly (not hang).
-# Key service is on the session-init critical path; a hang here blocks new chats.
-_timed_grpc_error "GetPreKeyBundle (no auth → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
+# Anonymous bundle lookup is intentional for sealed session initiation. An unknown target
+# must be indistinguishable whether the caller sends no credential or an invalid one.
+_timed_grpc_error "GetPreKeyBundle (anonymous unknown target → NOT_FOUND fast)" NotFound grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/key_service.proto \
@@ -222,8 +224,9 @@ _timed_grpc_error "GetPreKeyBundle (no auth → UNAUTHENTICATED fast)" Unauthent
   "$KEY_HOST" \
   shared.proto.services.v1.KeyService/GetPreKeyBundle
 
-# GetPreKeyBundle with fake token → tests auth middleware under the key service.
-_timed_grpc_error "GetPreKeyBundle (fake token → UNAUTHENTICATED fast)" Unauthenticated grpcurl \
+# An invalid Bearer cannot buy a private device rate bucket or identified behavior: it stays
+# on the anonymous IP bucket and sees the same unknown-target answer.
+_timed_grpc_error "GetPreKeyBundle (invalid token remains anonymous → NOT_FOUND)" NotFound grpcurl \
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/key_service.proto \
@@ -245,7 +248,7 @@ _timed_grpc_error "InitiateCall (no auth → UNAUTHENTICATED, not UNIMPLEMENTED)
   -plaintext \
   -import-path "$PROTO_DIR" \
   -proto services/signaling_service.proto \
-  -d '{"call_id":"smoke","callee_user_id":"00000000-0000-0000-0000-000000000000","has_video":false}' \
+  -d '{"call_id":"00000000-0000-0000-0000-000000000001","callee_user_id":"00000000-0000-0000-0000-000000000002","call_type":"CALL_TYPE_AUDIO","caller_name":"Smoke"}' \
   "$SIG_HOST" \
   shared.proto.signaling.v1.SignalingService/InitiateCall
 
@@ -264,7 +267,7 @@ _timed_grpc_error "InitiateCall (x-user-id spoof only → UNAUTHENTICATED)" Unau
   -import-path "$PROTO_DIR" \
   -proto services/signaling_service.proto \
   -H "x-user-id: 00000000-0000-0000-0000-000000000001" \
-  -d '{"call_id":"smoke-spoof","callee_user_id":"00000000-0000-0000-0000-000000000002","has_video":false}' \
+  -d '{"call_id":"00000000-0000-0000-0000-000000000001","callee_user_id":"00000000-0000-0000-0000-000000000002","call_type":"CALL_TYPE_AUDIO","caller_name":"Smoke"}' \
   "$SIG_HOST" \
   shared.proto.signaling.v1.SignalingService/InitiateCall
 
