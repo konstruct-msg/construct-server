@@ -106,8 +106,20 @@ case "$method" in
     exit 1
     ;;
   */InitiateCall)
-    if [[ "$payload" == *has_video* ]]; then
-      printf 'Error invoking method: no known field named has_video\n' >&2
+    if ! printf '%s\n' "$payload" | jq -e '
+      type == "object"
+      and (.call_id | type == "string")
+      and (.callee_user_id | type == "string")
+      and (.call_type == "CALL_TYPE_AUDIO")
+      and ([keys[] | select(
+        . != "call_id"
+        and . != "callee_user_id"
+        and . != "call_type"
+        and . != "caller_name"
+        and . != "caller_avatar"
+      )] | length == 0)
+    ' >/dev/null; then
+      printf 'Error invoking method: request does not match InitiateCall proto\n' >&2
       exit 1
     fi
     printf 'ERROR:\n  Code: Unauthenticated\n  Message: missing bearer\n' >&2
