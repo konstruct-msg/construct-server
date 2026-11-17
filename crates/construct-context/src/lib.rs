@@ -21,8 +21,6 @@ pub struct AppContext {
     /// Optional: only required for services that send push notifications directly.
     /// messaging-service delegates push to notification-service via gRPC and leaves this None.
     pub apns_client: Option<Arc<ApnsClient>>,
-    /// APNs sandbox client for development/TestFlight tokens
-    pub apns_sandbox_client: Option<Arc<ApnsClient>>,
     /// Device token encryption for privacy
     /// Optional: only required for services that register/decrypt device tokens.
     pub token_encryption: Option<Arc<DeviceTokenEncryption>>,
@@ -73,7 +71,6 @@ pub struct AppContextBuilder {
     auth_manager: Option<Arc<AuthManager>>,
     config: Option<Arc<Config>>,
     apns_client: Option<Arc<ApnsClient>>,
-    apns_sandbox_client: Option<Arc<ApnsClient>>,
     token_encryption: Option<Arc<DeviceTokenEncryption>>,
     server_instance_id: Option<String>,
     server_signer_override: Option<Arc<ServerSigner>>,
@@ -87,7 +84,6 @@ impl AppContextBuilder {
             auth_manager: None,
             config: None,
             apns_client: None,
-            apns_sandbox_client: None,
             token_encryption: None,
             server_instance_id: None,
             server_signer_override: None,
@@ -157,7 +153,6 @@ impl AppContextBuilder {
                 .ok_or_else(|| "auth_manager is required".to_string())?,
             config,
             apns_client: self.apns_client,
-            apns_sandbox_client: self.apns_sandbox_client,
             token_encryption: self.token_encryption,
             server_instance_id: self
                 .server_instance_id
@@ -173,3 +168,6 @@ impl Default for AppContextBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod contract_tests;

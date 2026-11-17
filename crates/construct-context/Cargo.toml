@@ -14,3 +14,11 @@ construct-queue         = { path = "../construct-queue" }
 
 tokio  = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# `AppContext` holds a `DbPool`; builder contracts use a never-connected pool rather
+# than a live database.
+sqlx = { workspace = true }
+# `AuthManager::new` refuses to run without a PASETO v4.public key pair. The pair is
+# generated per test rather than committed, matching construct-auth's own fixtures.
+ed25519-compact = { version = "2.0", features = ["pem", "random"] }
