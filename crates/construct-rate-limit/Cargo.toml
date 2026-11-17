@@ -10,3 +10,10 @@ redis = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+# Service-backed contracts need a runtime of their own; the crate itself has none.
+tokio = { workspace = true }
+# Redis connections in tests go through the same timeout-carrying constructor as
+# production, so a hung server fails instead of parking the suite.
+construct-redis = { path = "../construct-redis" }
