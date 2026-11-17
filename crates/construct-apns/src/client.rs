@@ -162,14 +162,7 @@ impl ApnsClient {
         );
         debug!("APNs payload: {}", payload_json);
 
-        let topic = match push_type {
-            PushType::Voip => self
-                .config
-                .voip_topic
-                .as_deref()
-                .unwrap_or(&self.config.topic),
-            _ => &self.config.topic,
-        };
+        let topic = topic_for(&self.config, push_type);
 
         let options = notification_options(topic, push_type, priority, &payload);
 
@@ -301,6 +294,21 @@ impl ApnsClient {
             NotificationPriority::High,
         )
         .await
+    }
+}
+
+/// The topic a push is addressed to.
+///
+/// A VoIP push carries its own topic: sending it under the app's normal topic is rejected by
+/// APNs, which is why `send_voip_incoming_call_push` refuses before reaching here when no VoIP
+/// topic is configured. Everything else goes to the app topic.
+///
+/// Pure, so the choice is pinned by a table test instead of by a live send — the same reason
+/// `condemns_device_token` is pure.
+fn topic_for(config: &ApnsConfig, push_type: PushType) -> &str {
+    match push_type {
+        PushType::Voip => config.voip_topic.as_deref().unwrap_or(&config.topic),
+        _ => &config.topic,
     }
 }
 
@@ -449,5 +457,199 @@ mod tests {
     #[test]
     fn collapse_id_fits_apns_limit() {
         assert!(CollapseId::new(MESSAGE_COLLAPSE_ID).is_ok());
+    }
+
+    // ── Request headers ─────────────────────────────────────────────────────
+
+    fn config(enabled: bool, voip_topic: Option<&str>) -> ApnsConfig {
+        ApnsConfig {
+            enabled,
+            environment: ApnsEnvironment::Development,
+            key_path: String::new(),
+            key_id: String::new(),
+            team_id: String::new(),
+            bundle_id: String::new(),
+            topic: "cc.konstruct.app".to_string(),
+            voip_topic: voip_topic.map(str::to_string),
+            device_token_encryption_key: "0".repeat(64),
+        }
+    }
+
+    fn options(
+        push_type: PushType,
+        priority: NotificationPriority,
+    ) -> NotificationOptions<'static> {
+        notification_options("cc.konstruct.app", push_type, priority, &payload(None))
+    }
+
+    /// `apns-push-type` is required since iOS 13: without it APNs drops the push without
+    /// telling anyone, so the mapping from our three kinds to Apple's is not cosmetic.
+    #[test]
+    fn every_push_type_names_its_apns_header() {
+        assert_eq!(
+            options(PushType::Silent, NotificationPriority::Low).apns_push_type,
+            Some(ApnsPushType::Background)
+        );
+        assert_eq!(
+            options(PushType::Visible, NotificationPriority::High).apns_push_type,
+            Some(ApnsPushType::Alert)
+        );
+        assert_eq!(
+            options(PushType::Voip, NotificationPriority::High).apns_push_type,
+            Some(ApnsPushType::Voip)
+        );
+    }
+
+    #[test]
+    fn every_push_type_carries_the_topic_it_was_given() {
+        for push_type in [PushType::Silent, PushType::Visible, PushType::Voip] {
+            assert_eq!(
+                options(push_type, NotificationPriority::High).apns_topic,
+                Some("cc.konstruct.app"),
+                "{push_type:?} must name a topic or APNs rejects the request"
+            );
+        }
+    }
+
+    /// A call is time-critical: it must go out immediately whatever the caller asked for,
+    /// and it must not be stored for retry — a wake-up delivered minutes later is a call
+    /// the user already missed.
+    #[test]
+    fn a_voip_push_is_high_priority_and_expires_immediately() {
+        let voip = options(PushType::Voip, NotificationPriority::Low);
+        // `Priority` is not `PartialEq`, so the rendered value is the comparison — which is
+        // also exactly the `apns-priority` header APNs receives.
+        assert_eq!(format!("{:?}", voip.apns_priority), "Some(High)");
+        assert_eq!(voip.apns_expiration, Some(0));
+
+        for push_type in [PushType::Silent, PushType::Visible] {
+            assert_eq!(
+                options(push_type, NotificationPriority::High).apns_expiration,
+                None,
+                "{push_type:?} may be stored by APNs"
+            );
+        }
+    }
+
+    /// A VoIP push must travel under the VoIP topic; under the app topic APNs rejects it. The
+    /// fallback to the app topic only covers the case `send_voip_incoming_call_push` already
+    /// refuses (no VoIP topic configured), so it is recorded here, not endorsed.
+    #[test]
+    fn a_voip_push_is_addressed_to_the_voip_topic() {
+        let bridged = config(false, Some("cc.konstruct.app.voip"));
+        assert_eq!(topic_for(&bridged, PushType::Voip), "cc.konstruct.app.voip");
+        for push_type in [PushType::Silent, PushType::Visible] {
+            assert_eq!(
+                topic_for(&bridged, push_type),
+                "cc.konstruct.app",
+                "{push_type:?} must not be sent to the VoIP topic"
+            );
+        }
+        assert_eq!(
+            topic_for(&config(false, None), PushType::Voip),
+            "cc.konstruct.app"
+        );
+    }
+
+    #[test]
+    fn a_message_priority_maps_to_the_apns_one() {
+        assert_eq!(
+            format!(
+                "{:?}",
+                options(PushType::Visible, NotificationPriority::High).apns_priority
+            ),
+            "Some(High)"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                options(PushType::Visible, NotificationPriority::Low).apns_priority
+            ),
+            "Some(Normal)"
+        );
+    }
+
+    // ── Initialization and the disabled path ─────────────────────────────────
+
+    /// Disabled is the documented way to run without APNs credentials, and it must stay a
+    /// no-op: otherwise an empty `APNS_KEY_PATH` decides whether the service starts.
+    #[tokio::test]
+    async fn initialize_is_a_no_op_when_disabled() {
+        ApnsClient::new(config(false, None))
+            .expect("client")
+            .initialize()
+            .await
+            .expect("a disabled client must not need a key file");
+    }
+
+    /// Enabled means the key is expected. Reporting success without it would move the
+    /// failure to the first push, where it is a silently dropped notification.
+    #[tokio::test]
+    async fn initialize_refuses_when_enabled_without_a_readable_key() {
+        let mut cfg = config(true, None);
+        cfg.key_path = "/nonexistent/construct-test/AuthKey.p8".to_string();
+        let err = ApnsClient::new(cfg)
+            .expect("client")
+            .initialize()
+            .await
+            .expect_err("an enabled client without a key must refuse to start");
+        assert!(
+            err.to_string().contains("Failed to open APNs key file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_is_a_no_op_when_disabled_and_an_error_before_initialize() {
+        let payload = payload(None);
+
+        ApnsClient::new(config(false, None))
+            .expect("client")
+            .send_notification(
+                "token",
+                payload.clone(),
+                PushType::Silent,
+                NotificationPriority::Low,
+            )
+            .await
+            .expect("a disabled client must not attempt a send");
+
+        let err = ApnsClient::new(config(true, None))
+            .expect("client")
+            .send_notification(
+                "token",
+                payload,
+                PushType::Silent,
+                NotificationPriority::Low,
+            )
+            .await
+            .expect_err("an initialized-only client must refuse");
+        assert!(
+            err.to_string().contains("APNs client not initialized"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The VoIP topic is what makes an incoming call wake a backgrounded device. Sending
+    /// without it, under the normal topic, is rejected by APNs — so returning `Ok(())`
+    /// reported a delivery that never happened and made the misconfiguration invisible.
+    #[tokio::test]
+    async fn a_voip_push_without_a_topic_is_an_error_not_a_silent_success() {
+        let err = ApnsClient::new(config(false, None))
+            .expect("client")
+            .send_voip_incoming_call_push(
+                "token",
+                "call-1".to_string(),
+                "user-1".to_string(),
+                "Caller".to_string(),
+                "audio".to_string(),
+                1_700_000_000,
+            )
+            .await
+            .expect_err("a VoIP push without a topic must not report success");
+        assert!(
+            err.to_string().contains("APNS_VOIP_TOPIC not configured"),
+            "unexpected error: {err}"
+        );
     }
 }
