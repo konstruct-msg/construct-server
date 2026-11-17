@@ -586,6 +586,8 @@ dependencies = [
  "construct-db",
  "construct-federation",
  "construct-queue",
+ "ed25519-compact",
+ "sqlx",
  "tokio",
  "tracing",
 ]
