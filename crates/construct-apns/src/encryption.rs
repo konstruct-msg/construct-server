@@ -339,4 +339,79 @@ mod tests {
         let result = DeviceTokenEncryption::from_hex("too_short");
         assert!(result.is_err());
     }
+
+    // ── Envelope boundaries and the redacted Debug ───────────────────────────
+
+    /// The version byte is what lets a rotation keep old rows decryptable, so it must be
+    /// the configured primary — not a constant that happens to match the default.
+    #[test]
+    fn current_version_names_the_configured_key() {
+        assert_eq!(
+            DeviceTokenEncryption::new(&[0u8; 32])
+                .expect("encryption")
+                .current_version(),
+            1
+        );
+
+        let mut keys = HashMap::new();
+        keys.insert(
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
+        keys.insert(
+            7,
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string(),
+        );
+        assert_eq!(
+            DeviceTokenEncryption::from_keys(keys, 7)
+                .expect("from_keys")
+                .current_version(),
+            7
+        );
+    }
+
+    /// An empty plaintext is the shortest valid envelope: version + nonce + tag. The size
+    /// floor has to admit exactly that, or a token of length zero could never be stored.
+    #[test]
+    fn an_empty_plaintext_round_trips_at_the_size_floor() {
+        let encryption = DeviceTokenEncryption::new(&[0u8; 32]).expect("encryption");
+        let sealed = encryption.encrypt("").expect("encrypt");
+        assert_eq!(sealed.len(), MIN_ENCRYPTED_SIZE);
+        assert_eq!(encryption.decrypt(&sealed).expect("decrypt"), "");
+    }
+
+    /// One byte short of the floor has to be refused *before* the nonce is split off:
+    /// a lower floor would index and split a slice that cannot hold a nonce and a tag,
+    /// turning malformed input into a panic on the notification path.
+    #[test]
+    fn a_truncated_envelope_is_refused_before_it_is_split() {
+        let encryption = DeviceTokenEncryption::new(&[0u8; 32]).expect("encryption");
+
+        for len in [0usize, MIN_ENCRYPTED_SIZE - 1] {
+            let err = encryption
+                .decrypt(&vec![0u8; len])
+                .expect_err("truncated input must not decrypt");
+            assert!(
+                err.to_string().contains("too short"),
+                "{len} bytes: unexpected error {err}"
+            );
+        }
+    }
+
+    /// This `Debug` exists so a key that reaches a log line does not become the key. It has
+    /// to name the version (the useful part) and hide the cipher and its key bytes.
+    #[test]
+    fn debug_of_a_key_names_the_version_and_hides_the_material() {
+        let key = EncryptionKey {
+            version: 7,
+            cipher: ChaCha20Poly1305::new(&Key::from([9u8; 32])),
+        };
+        let rendered = format!("{key:?}");
+        assert!(rendered.contains("version: 7"), "{rendered}");
+        assert!(rendered.contains("<ChaCha20Poly1305>"), "{rendered}");
+        assert!(
+            !rendered.contains(&"09".repeat(32)),
+            "key material must never be rendered: {rendered}"
+        );
+    }
 }
