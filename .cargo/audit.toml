@@ -44,6 +44,22 @@ ignore = [
     # Action: remove when an sqlx release accepts libsqlite3-sys >= 0.39; check with
     #         `cargo update -p libsqlite3-sys --precise 0.39.1`.
     "RUSTSEC-2026-0459",
+
+    # RUSTSEC-2026-0543: chrono 0.4.44 — unmaintained (the advisory has `patched = []`, so it
+    # covers every version).
+    # Status: `cargo update -p chrono` CANNOT clear this — 0.4.45 exists and is still inside
+    #         the advisory's range. Only replacing the crate does.
+    # Risk: NONE TODAY, but this entry is NOT like the three above. `unmaintained` is not a
+    #       vulnerability: the code still works and the version stays pinned in Cargo.lock.
+    #       The difference is that chrono IS compiled into everything we ship —
+    #       `cargo tree -i chrono` reaches construct-auth, and from there all eight services.
+    #       So what is accepted here is not "a lockfile entry" but "no future fixes for a
+    #       crate in the request path": a bug found tomorrow gets no upstream patch.
+    # Action: replace chrono with its recommended alternative (`jiff` or `time`, per the
+    #         advisory). That is a migration through construct-auth and every service that
+    #         formats time, not a version bump; until it lands, re-check this entry on every
+    #         dependency change rather than assuming it still holds.
+    "RUSTSEC-2026-0543",
 ]
 
 # Don't fail on unmaintained crates (just warn)
