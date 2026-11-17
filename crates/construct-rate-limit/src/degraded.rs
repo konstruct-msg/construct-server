@@ -451,4 +451,19 @@ mod tests {
         assert!(l.charge("dev", 1, 3600, 3599).allowed);
         assert!(l.charge("dev", 1, 3600, 3601).allowed);
     }
+
+    /// The window is `now - now % window`, so every second inside one window maps to the
+    /// same start. Charging the same key at different seconds must therefore keep
+    /// spending the same budget; otherwise a caller resets its ceiling by waiting a
+    /// moment, which is not a window at all.
+    #[test]
+    fn charges_at_different_seconds_inside_one_window_share_the_budget() {
+        let l = DegradedLimiter::new();
+        assert!(l.charge("dev", 2, 3600, 100).allowed);
+        assert!(l.charge("dev", 2, 3600, 200).allowed);
+        assert!(
+            !l.charge("dev", 2, 3600, 300).allowed,
+            "100s, 200s and 300s are the same hourly window"
+        );
+    }
 }

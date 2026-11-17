@@ -24,12 +24,21 @@ pub async fn is_user_in_warmup(pool: &PgPool, user_id: Uuid) -> Result<bool> {
 }
 
 /// Get user account age in hours
+///
+/// The SQL function returns `NUMERIC` (`EXTRACT(EPOCH ...) / 3600`), which sqlx will not
+/// decode into `f64`: without the cast this query failed on every call with "Rust type
+/// Option<f64> (as SQL type FLOAT8) is not compatible with SQL type NUMERIC".
+/// `messaging-service`'s `get_trust_level` turns that error into `unwrap_or(0.0)`, which
+/// is `TrustLevel::New` — so the whole trust ladder silently collapsed to its strictest
+/// rung for every account, established ones included. The cast makes the declared Rust
+/// type true; sub-millisecond precision on an hour count is not worth a schema change.
 pub async fn get_user_account_age_hours(pool: &PgPool, user_id: Uuid) -> Result<f64> {
-    let age = sqlx::query_scalar::<_, Option<f64>>("SELECT get_user_account_age_hours($1)")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await
-        .context("Failed to get account age")?;
+    let age =
+        sqlx::query_scalar::<_, Option<f64>>("SELECT (get_user_account_age_hours($1))::float8")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .context("Failed to get account age")?;
 
     Ok(age.unwrap_or(0.0))
 }
@@ -252,5 +261,15 @@ mod tests {
         assert_eq!(client_rate_bucket(""), "unknown");
         assert_eq!(client_rate_bucket("   "), "unknown");
         assert_eq!(client_rate_bucket("not-an-address"), "not-an-address");
+    }
+
+    #[test]
+    fn a_colon_suffix_is_only_a_port_when_the_host_is_a_host() {
+        // `2001:db8::1:zzz` is not an address, so it is not an address with a port
+        // either: the port branch requires the part before the last colon to parse
+        // *and* to contain no colon. Relaxing that guard rewrites unknown input into
+        // a real `/64` bucket, which spends a real client's budget on traffic that
+        // never had an address.
+        assert_eq!(client_rate_bucket("2001:db8::1:zzz"), "2001:db8::1:zzz");
     }
 }
