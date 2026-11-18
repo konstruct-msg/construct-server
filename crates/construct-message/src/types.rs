@@ -843,8 +843,10 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&restored.encrypted_payload)
             .expect("receipt payload must be JSON");
         assert_eq!(payload["status"], "delivered");
-        let ids = payload["message_ids"].as_array().unwrap();
-        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            payload["message_ids"],
+            serde_json::json!(["msg-1", "msg-2"])
+        );
     }
 
     #[test]
@@ -913,16 +915,13 @@ mod tests {
 
     /// The two tests above read JSON. The delivery queue does not use JSON.
     ///
-    /// `construct-queue` serialises every envelope with `rmp_serde::to_vec_named` and
-    /// `parse_stream_message` reads it back with `rmp_serde::from_slice`, so the only
-    /// compatibility that matters for messages already sitting in Redis is MessagePack.
-    /// A dual reader proven against JSON says nothing about it: the two formats drive
-    /// `deserialize_any` differently, and an entry that fails here is not an error the
-    /// user sees — `read_offline_messages` logs a warning, returns `None`, and advances
-    /// the cursor past it, which deletes the message.
+    /// `construct-queue` writes named MessagePack; `parse_stream_message` reads it
+    /// with `rmp_serde::from_slice`. JSON fixtures do not prove that old Redis
+    /// entries can be delivered. A decode failure can skip an entry without
+    /// deleting it from the stream.
     ///
-    /// `LegacyEnvelope` mirrors the shape written before `fe25e6e`: binary fields as
-    /// base64 `String`, `sealed_inner_b64` under its old name.
+    /// The legacy fixture uses string payload fields and the old `sealedInnerB64`
+    /// key. It includes the duplicate payload written before `b0cd0d6`.
     #[test]
     fn legacy_messagepack_entry_still_reads() {
         use base64::Engine;
@@ -944,8 +943,8 @@ mod tests {
             sealed_inner_b64: Option<String>,
         }
 
-        let sealed = b"opaque-sealed-inner".to_vec();
-        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&sealed);
+        let sealed = b"\x00\xffopaque-sealed-inner";
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(sealed);
 
         let legacy = LegacyEnvelope {
             message_id: "legacy-mp".to_string(),
@@ -965,8 +964,11 @@ mod tests {
         let env: MessageEnvelope = rmp_serde::from_slice(&bytes)
             .expect("a MessagePack entry written before fe25e6e must still deserialise");
 
+        assert_eq!(env.message_id, "legacy-mp");
+        assert_eq!(env.encrypted_payload, sealed);
         assert_eq!(env.sealed_inner.as_deref(), Some(sealed.as_slice()));
         assert!(env.is_sealed_sender);
+        assert!(env.sender_id.is_empty());
         assert_eq!(env.recipient_id, "bob");
     }
 
