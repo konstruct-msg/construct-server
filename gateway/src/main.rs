@@ -26,10 +26,10 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Gateway application state: config + optional bundle verification key + token encryption key (for sealed sender)
-#[derive(Clone)]
+/// State served by the HTTP discovery routes, without startup-only configuration.
 struct GatewayState {
-    config: Arc<Config>,
+    instance_domain: String,
+    veil_relay_addresses: Vec<String>,
     /// Base64-encoded Ed25519 public key for verifying PreKeyBundle server signatures.
     /// Populated from `BUNDLE_SIGNING_PUBLIC_KEY` env var. Optional — absent in dev.
     bundle_verification_key: Option<String>,
@@ -56,7 +56,7 @@ struct GatewayState {
     /// the offline root, so serving them gives this server no say over which keys clients accept
     /// (decisions/server-keys-rooted-offline-and-hybrid.md). Cached: the directory changes once a
     /// quarter, `/.well-known` is read on every connect.
-    server_trust: Arc<ServerTrustCache>,
+    server_trust: ServerTrustCache,
 }
 
 /// `SERVER_TRUST_DIR`, read at most once per `SERVER_TRUST_REFRESH`.
@@ -139,7 +139,6 @@ fn derive_token_encryption_key(config: &Config) -> Option<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_env_for(construct_config::SecretNeeds::GATEWAY)?;
-    let config = Arc::new(config);
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(config.rust_log.clone()))
@@ -207,36 +206,20 @@ async fn main() -> Result<()> {
     }
 
     let state = GatewayState {
-        config: config.clone(),
+        instance_domain: config.instance_domain.clone(),
+        veil_relay_addresses: config.veil_relay_addresses.clone(),
         bundle_verification_key,
         token_encryption_key,
         federation_public_key,
         token_issuer_public,
         token_issuer_key_version,
-        server_trust: Arc::new(ServerTrustCache {
+        server_trust: ServerTrustCache {
             dir: construct_crypto::server_trust::trust_dir(),
             cached: tokio::sync::RwLock::new(None),
-        }),
+        },
     };
 
-    // Create router — health + metrics + .well-known (all API routes are gRPC via Envoy)
-    // NOTE: .well-known MUST return 200 — clients use it to detect DPI interference.
-    // A 404 here causes false-positive DPI detection → unnecessary VEIL auto-start → 5-8s delay.
-    let app = Router::new()
-        .route("/health", axum::routing::get(health_check))
-        .route("/health/ready", axum::routing::get(health_check))
-        .route("/health/live", axum::routing::get(health_check))
-        .route("/metrics", axum::routing::get(metrics_endpoint))
-        .route(
-            "/.well-known/construct-server",
-            axum::routing::get(well_known_construct_server),
-        )
-        .route(
-            "/.well-known/konstruct",
-            axum::routing::get(well_known_construct_server),
-        )
-        .with_state(state)
-        .layer(TraceLayer::new_for_http());
+    let app = gateway_router(state);
 
     // Start plain listener
     info!("API Gateway listening on {}", config.bind_address);
@@ -491,6 +474,25 @@ where
     Ok(())
 }
 
+fn gateway_router(state: GatewayState) -> Router {
+    // .well-known must return 200: clients use it to detect DPI interference.
+    Router::new()
+        .route("/health", axum::routing::get(health_check))
+        .route("/health/ready", axum::routing::get(health_check))
+        .route("/health/live", axum::routing::get(health_check))
+        .route("/metrics", axum::routing::get(metrics_endpoint))
+        .route(
+            "/.well-known/construct-server",
+            axum::routing::get(well_known_construct_server),
+        )
+        .route(
+            "/.well-known/konstruct",
+            axum::routing::get(well_known_construct_server),
+        )
+        .with_state(Arc::new(state))
+        .layer(TraceLayer::new_for_http())
+}
+
 /// The fixed part of the discovery document: what a client needs to find the services.
 ///
 /// No version, commit or build. This document is public, and "which build of the server is
@@ -536,14 +538,13 @@ fn discovery_body(domain: &str, relays: &[String]) -> serde_json::Value {
 /// MUST return 200 — the client DPI detector calls this; a 404 causes a false-positive
 /// DPI detection, triggering VEIL auto-start and adding 5-8 seconds to every connection.
 async fn well_known_construct_server(
-    State(state): State<GatewayState>,
+    State(state): State<Arc<GatewayState>>,
 ) -> (
     StatusCode,
     [(axum::http::header::HeaderName, &'static str); 1],
     Json<serde_json::Value>,
 ) {
-    let config = &state.config;
-    let mut body = discovery_body(&config.instance_domain, &config.veil_relay_addresses);
+    let mut body = discovery_body(&state.instance_domain, &state.veil_relay_addresses);
     // Expose bundle verification key when configured so clients can verify server-signed bundles.
     if let Some(vk) = &state.bundle_verification_key {
         body["bundle_verification_key"] = json!(vk);
@@ -616,6 +617,9 @@ async fn metrics_endpoint() -> Result<Response<String>, StatusCode> {
         }
     }
 }
+
+#[cfg(test)]
+mod http_contracts;
 
 #[cfg(test)]
 mod tests {
