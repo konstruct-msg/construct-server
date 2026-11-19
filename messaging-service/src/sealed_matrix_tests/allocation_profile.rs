@@ -17,7 +17,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 use x25519_dalek::StaticSecret;
 
-#[path = "../../test_support/allocations.rs"]
+#[path = "../../../shared/test_support/allocations.rs"]
 mod allocations;
 #[path = "../../../shared/test_support/postgres.rs"]
 mod postgres;

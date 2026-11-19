@@ -12,7 +12,7 @@ use construct_message::MessageEnvelope;
 use construct_queue::{MailboxCursor, MessageDedupKey, MessageQueue};
 use construct_utils::{hash_client_ip, log_safe_id};
 
-#[path = "../test_support/allocations.rs"]
+#[path = "../../shared/test_support/allocations.rs"]
 mod allocations;
 use allocations::{AllocationDelta, AllocationSample};
 

@@ -2121,6 +2121,7 @@ dependencies = [
  "construct-server-shared",
  "ed25519-dalek",
  "hex",
+ "libc",
  "redis",
  "serde_json",
  "sha2 0.11.0",
