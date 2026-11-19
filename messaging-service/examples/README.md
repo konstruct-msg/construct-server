@@ -97,6 +97,21 @@ measured batches per size). This is a baseline, not an optimization or VPS sizin
 | 1 KiB | 122.02–122.08 | 31,314–31,608 | 143.6–160.6 | 875–1,048 | 13,539 B |
 | 64 KiB | 122.44–122.88 | 676,423–676,607 | 199.4–204.7 | 1,150–1,242 | 400,626 B |
 
+### Moving the owned sealed buffer (P2.1)
+
+Same release fixture above, with baseline `6d0fb66` and the owned-buffer variant
+alternated on the same local services (ABBA twice, 12 batches per size per variant).
+Medians per send except for peak heap, which is the delta for a batch:
+
+| Ciphertext | Allocations | Requested bytes | Process CPU µs | Peak Rust heap Δ |
+|---|---:|---:|---:|---:|
+| 1 KiB | 122.04 → 121.04 | 31,437 → 30,123 | 155.4 → 152.6 | 13,539 → 12,225 B |
+| 64 KiB | 122.79 → 121.75 | 676,435 → 610,607 | 216.1 → 210.1 | 400,626 → 334,799 B |
+
+The peak drops by 1,314 and 65,827 bytes, respectively: the size of the encoded
+`SealedInner`, not just its ciphertext field. CPU ranges overlap for both sizes;
+this run establishes an allocation saving, not a CPU or throughput improvement.
+
 ## P6 local measurements
 
 macOS release build, local Redis 7 via Colima, fixture above; baseline is the P5

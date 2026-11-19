@@ -304,7 +304,7 @@ async fn receive_sealed(
         timestamp: req.timestamp as i64,
     };
 
-    match dispatch_sealed_sender(&context, &sealed_envelope).await {
+    match dispatch_sealed_sender(&context, sealed_envelope).await {
         Ok(response) => {
             info!(
                 message_id = %response.message_id,
