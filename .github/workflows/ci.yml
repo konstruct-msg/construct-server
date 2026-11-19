@@ -285,6 +285,13 @@ jobs:
       - name: Run service-backed tests (#[ignore])
         run: cargo test --workspace --all-targets --no-fail-fast -- --ignored --test-threads=1
 
+      # Run in its own process: the allocator/CPU deltas are process-wide. Check bytes,
+      # routing and the heap guard; don't enforce elapsed-time thresholds in CI.
+      - name: Check sealed dispatch allocation baseline (requires Redis and Postgres)
+        run: cargo test --locked -p messaging-service --bin messaging-service --features allocation-profile profile_local_sealed_dispatch -- --ignored --test-threads=1 --nocapture
+        env:
+          PROFILE_LOCAL_REDIS: "1"
+
       # cargo test compiles example mains but does not execute their allocation assertions.
       # This pure mode needs no Redis/SQL/secrets and must catch wire-buffer reallocations.
       - name: Check mailbox cursor allocation guard

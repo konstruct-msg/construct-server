@@ -34,6 +34,9 @@ use crate::token_redeem::{TokenRedeemResult, redeem_token_checked};
 
 mod cursors;
 
+#[cfg(all(unix, feature = "allocation-profile"))]
+mod allocation_profile;
+
 // ── Env defaults matching ops/docker-compose.dev.yml ─────────────────────────
 
 fn redis_url() -> String {

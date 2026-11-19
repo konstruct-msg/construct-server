@@ -4,6 +4,10 @@ license = "AGPL-3.0-only"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Enables an instrumented test binary only, not instrumentation in the service.
+allocation-profile = []
+
 [dependencies]
 construct-config = { path = "../crates/construct-config" }
 construct-server-shared = { path = "../shared" }
@@ -50,6 +54,7 @@ x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 serial_test = "3"
+libc = "0.2"
 tokio = { workspace = true }
 uuid = { workspace = true }
 curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }

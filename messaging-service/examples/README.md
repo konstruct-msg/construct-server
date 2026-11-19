@@ -61,6 +61,42 @@ are outside this probe. In particular, a single-thread runtime and a heap guard
 are **not** OS CPU/RAM quotas. A constrained Linux/VPS load stand remains necessary
 before sizing groups or tuning concurrency/retention limits.
 
+## Service-backed sealed dispatch baseline (P2)
+
+This separate, opt-in test uses the same allocation counters and calls the production
+`dispatch_sealed_sender` with local PostgreSQL 16 and Redis 7. Run it by itself on Unix,
+with `DATABASE_URL` and `REDIS_URL` pointing to disposable loopback services only:
+
+```sh
+PROFILE_LOCAL_REDIS=1 cargo test --locked --release -p messaging-service \
+  --bin messaging-service --features allocation-profile profile_local_sealed_dispatch \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+One account has two active devices and the envelope names one. The test warms up with
+8 sends per size, then measures three batches of 48 sequential sends at each size.
+Each send uses a fresh synthetic but valid token under `Enforce` and a unique delivery
+tag. Outside the measurement it checks reply IDs/device list, exact stored bytes,
+expected user and device stream lengths, sibling exclusion and that each token was
+spent. SQL uses a fresh migrated schema; Redis cleanup deletes only fixture keys,
+never flushes. Discard the test services after a failed run, which may leave fixture keys.
+
+Dispatch includes decode, token redemption, device lookup and mailbox write. It does
+not include request construction, gRPC ingress/egress or the outer per-IP check, APNs,
+fixture setup, readback or cleanup. CPU is process CPU (not Redis/PostgreSQL CPU); wall
+includes local service waits. The requested Rust bytes are churn, not RSS. Absolute
+heap includes prebuilt inputs/readback fixtures. CI runs the debug form in a separate
+process for the effect checks and a coarse 16 MiB peak-delta guard, not time thresholds.
+
+A/A at production code `67fee6f`, Apple M4 Pro/macOS arm64, Rust 1.100.0 release, local
+Postgres 16 and Redis 7 in containers: ranges across three fresh test processes (nine
+measured batches per size). This is a baseline, not an optimization or VPS sizing result.
+
+| Ciphertext | Allocations/send | Requested bytes/send | Process CPU µs/send | Wall µs/send | Peak Rust heap Δ/batch |
+|---|---:|---:|---:|---:|---:|
+| 1 KiB | 122.02–122.08 | 31,314–31,608 | 143.6–160.6 | 875–1,048 | 13,539 B |
+| 64 KiB | 122.44–122.88 | 676,423–676,607 | 199.4–204.7 | 1,150–1,242 | 400,626 B |
+
 ## P6 local measurements
 
 macOS release build, local Redis 7 via Colima, fixture above; baseline is the P5
