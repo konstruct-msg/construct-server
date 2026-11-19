@@ -1692,6 +1692,9 @@ pub async fn cleanup_expired_kyber_otpks(db: &PgPool) -> Result<u64> {
 mod tests {
     use super::*;
 
+    #[cfg(all(unix, feature = "allocation-profile"))]
+    mod bundle_profile;
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     #[derive(Debug, Clone)]

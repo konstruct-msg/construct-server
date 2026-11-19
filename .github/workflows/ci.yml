@@ -292,6 +292,9 @@ jobs:
         env:
           PROFILE_LOCAL_REDIS: "1"
 
+      - name: Check PQ bundle allocation baseline (requires PostgreSQL)
+        run: cargo test --locked -p key-service --bin key-service --features allocation-profile profile_local_pq_bundles -- --ignored --test-threads=1 --nocapture
+
       # cargo test compiles example mains but does not execute their allocation assertions.
       # This pure mode needs no Redis/SQL/secrets and must catch wire-buffer reallocations.
       - name: Check mailbox cursor allocation guard

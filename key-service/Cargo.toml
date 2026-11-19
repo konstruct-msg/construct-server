@@ -5,6 +5,13 @@ edition.workspace = true
 description = "E2EE Key Management Service for Construct Messenger"
 license = "AGPL-3.0-only"
 
+[features]
+# Instruments only the opt-in test binary.
+allocation-profile = []
+
+[dev-dependencies]
+libc = "0.2"
+
 [dependencies]
 # Core runtime
 tokio = { version = "1", features = ["full"] }
