@@ -2,9 +2,7 @@
 //! See `examples/README.md`. Run in a fresh process per mode for meaningful OS peak RSS.
 
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     hint::black_box,
-    sync::atomic::{AtomicUsize, Ordering::Relaxed},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,84 +12,32 @@ use construct_message::MessageEnvelope;
 use construct_queue::{MailboxCursor, MessageDedupKey, MessageQueue};
 use construct_utils::{hash_client_ip, log_safe_id};
 
-// Instrument only this standalone executable. Counts requested Rust heap bytes, not allocator
-// metadata, native-library buffers or Redis memory. Atomics add overhead to both measured builds.
-struct MeasuredAllocator;
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static BYTES: AtomicUsize = AtomicUsize::new(0);
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn allocated(size: usize) {
-    ALLOCS.fetch_add(1, Relaxed);
-    BYTES.fetch_add(size, Relaxed);
-    let live = LIVE.fetch_add(size, Relaxed) + size;
-    PEAK.fetch_max(live, Relaxed);
-}
-
-// SAFETY: every operation forwards the original pointer/layout to System. Counters do not
-// allocate, dereference pointers or change allocation results; failed allocations are ignored.
-unsafe impl GlobalAlloc for MeasuredAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller supplies the layout required by the allocator contract.
-        let ptr = unsafe { System.alloc(layout) };
-        if !ptr.is_null() {
-            allocated(layout.size());
-        }
-        ptr
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: same allocator contract as alloc, preserving zero-initialization.
-        let ptr = unsafe { System.alloc_zeroed(layout) };
-        if !ptr.is_null() {
-            allocated(layout.size());
-        }
-        ptr
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size(), Relaxed);
-        // SAFETY: ptr/layout are passed unchanged to the allocator that created the block.
-        unsafe { System.dealloc(ptr, layout) };
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        // SAFETY: forwarding the caller's valid allocation and requested new size.
-        let next = unsafe { System.realloc(ptr, layout, size) };
-        if !next.is_null() {
-            LIVE.fetch_sub(layout.size(), Relaxed);
-            allocated(size);
-        }
-        next
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
+#[path = "../test_support/allocations.rs"]
+mod allocations;
+use allocations::{AllocationDelta, AllocationSample};
 
 struct Sample {
     started: Instant,
-    allocations: usize,
-    bytes: usize,
-    live: usize,
+    allocation_sample: AllocationSample,
 }
 
 impl Sample {
     fn start() -> Self {
-        let live = LIVE.load(Relaxed);
-        PEAK.store(live, Relaxed);
         Self {
             started: Instant::now(),
-            allocations: ALLOCS.load(Relaxed),
-            bytes: BYTES.load(Relaxed),
-            live,
+            allocation_sample: AllocationSample::start(),
         }
     }
 
     fn finish(self, label: &str, operations: usize) -> usize {
         let elapsed = self.started.elapsed();
-        let allocations = ALLOCS.load(Relaxed) - self.allocations;
-        let bytes = BYTES.load(Relaxed) - self.bytes;
-        let live = LIVE.load(Relaxed);
-        let peak = PEAK.load(Relaxed);
+        let AllocationDelta {
+            calls: allocations,
+            bytes,
+            live,
+            peak,
+            peak_delta,
+        } = self.allocation_sample.finish();
         // A guard for this synthetic fixture, NOT a production capacity or rate-limit setting.
         assert!(
             peak < 64 * 1024 * 1024,
@@ -104,7 +50,7 @@ impl Sample {
             bytes as f64 / operations as f64,
             live,
             peak,
-            peak.saturating_sub(self.live)
+            peak_delta
         );
         allocations
     }

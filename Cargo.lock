@@ -2310,6 +2310,7 @@ dependencies = [
  "futures-core",
  "hex",
  "hkdf 0.13.0",
+ "libc",
  "prost",
  "rand 0.10.1",
  "redis",
