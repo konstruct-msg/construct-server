@@ -29,13 +29,22 @@ use tokio::sync::Mutex;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
 use crate::context::MessagingServiceContext;
-use crate::envelope::{TokenRejected, dispatch_sealed_sender};
+use crate::envelope::TokenRejected;
 use crate::token_redeem::{TokenRedeemResult, redeem_token_checked};
 
 mod cursors;
 
 #[cfg(all(unix, feature = "allocation-profile"))]
 mod allocation_profile;
+
+// Replay and rejection cases send the same fixture more than once. Keep that
+// copy here, not in the production dispatch or the allocation sample.
+async fn dispatch_sealed_sender(
+    context: &Arc<MessagingServiceContext>,
+    fixture: &core_proto::SealedSenderEnvelope,
+) -> anyhow::Result<construct_server_shared::shared::proto::services::v1::SendMessageResponse> {
+    crate::envelope::dispatch_sealed_sender(context, fixture.clone()).await
+}
 
 // ── Env defaults matching ops/docker-compose.dev.yml ─────────────────────────
 

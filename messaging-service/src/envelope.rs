@@ -195,7 +195,7 @@ pub(crate) fn token_gate_action(
 ///  - Local (same server or empty): parse SealedInner → deliver to recipient_user_id
 pub(crate) async fn dispatch_sealed_sender(
     context: &Arc<MessagingServiceContext>,
-    sealed: &construct_server_shared::shared::proto::core::v1::SealedSenderEnvelope,
+    sealed: construct_server_shared::shared::proto::core::v1::SealedSenderEnvelope,
 ) -> anyhow::Result<proto::SendMessageResponse> {
     use construct_server_shared::federation::FederationClient;
     use construct_server_shared::message::types::MessageEnvelope;
@@ -491,11 +491,12 @@ pub(crate) async fn dispatch_sealed_sender(
         construct_metrics::MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL.inc();
     }
 
+    // Keep the exact received bytes; the decoded view is only for routing and checks.
     let msg_envelope = MessageEnvelope::from_sealed_sender(
         message_id.clone(),
         recipient_id,
         recipient_device,
-        sealed.sealed_inner.to_vec(),
+        sealed.sealed_inner,
     );
 
     if let Err(e) = core::dispatch_envelope(

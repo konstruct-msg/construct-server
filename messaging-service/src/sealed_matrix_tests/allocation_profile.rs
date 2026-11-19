@@ -1,9 +1,12 @@
 //! Opt-in, isolated measurement of the production local sealed dispatch path.
 use super::{
-    account_with_two_devices, core_proto, dispatch_sealed_sender, issue_client_token, make_config,
-    make_ed25519_pems, random_bytes32, seal_token_for_server,
+    account_with_two_devices, core_proto, issue_client_token, make_config, make_ed25519_pems,
+    random_bytes32, seal_token_for_server,
 };
-use crate::{context::MessagingServiceContext, spent_tag::unmark_delivery_tag};
+use crate::{
+    context::MessagingServiceContext, envelope::dispatch_sealed_sender,
+    spent_tag::unmark_delivery_tag,
+};
 use anyhow::{Context, Result, ensure};
 use construct_auth::AuthManager;
 use construct_config::StealthTokenPolicy;
@@ -125,7 +128,7 @@ async fn profile_local_sealed_dispatch() -> Result<()> {
             let wall = Instant::now();
             let sample = AllocationSample::start();
             for sealed in requests {
-                replies.push(dispatch_sealed_sender(&ctx, &sealed).await?);
+                replies.push(dispatch_sealed_sender(&ctx, sealed).await?);
             }
             let delta = sample.finish();
             let wall = wall.elapsed().as_secs_f64();

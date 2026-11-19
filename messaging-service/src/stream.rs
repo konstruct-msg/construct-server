@@ -74,7 +74,7 @@ pub(crate) async fn handle_stream_request(
             }
 
             // ── Sealed Sender path ──────────────────────────────────────────
-            if let Some(sealed) = &envelope.sealed_sender {
+            if let Some(sealed) = envelope.sealed_sender {
                 // Same per-IP window as SendSealedMessage. Unauthenticated stream
                 // sealed used to skip this gate entirely.
                 if check_sealed_ip_limit(context, client_ip).await == SealedIpDecision::Limited {

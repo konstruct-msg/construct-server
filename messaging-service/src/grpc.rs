@@ -382,7 +382,7 @@ impl MessagingService for MessagingGrpcService {
             .ok_or_else(|| Status::invalid_argument("message is required"))?;
 
         // ── Sealed Sender path ──────────────────────────────────────────────
-        if let Some(sealed) = &envelope.sealed_sender {
+        if let Some(sealed) = envelope.sealed_sender {
             require_legacy_sealed_sender_auth(authed_user_id)?;
             if self.context.config.messaging.reject_legacy_sealed_sender {
                 construct_metrics::MSG_SEALED_LEGACY_REJECTED_TOTAL.inc();
@@ -729,7 +729,7 @@ impl MessagingService for MessagingGrpcService {
             .with_label_values(&["sealed_rpc"])
             .inc();
 
-        let mut resp = dispatch_sealed_sender(&self.context, &sealed)
+        let mut resp = dispatch_sealed_sender(&self.context, sealed)
             .await
             .map_err(map_sealed_dispatch_error)?;
         resp.attempt_id = attempt_id;
