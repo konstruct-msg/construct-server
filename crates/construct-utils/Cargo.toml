@@ -13,3 +13,6 @@ sha2 = "0.11"
 socket2 = { version = "0.5", features = ["all"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
