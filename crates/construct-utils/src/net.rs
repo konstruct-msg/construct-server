@@ -30,7 +30,8 @@ pub async fn shutdown_signal() {
 /// switch between Wi-Fi and cellular subflows without dropping the TCP connection.
 /// On macOS/other platforms, or when the kernel does not support MPTCP, falls back to TCP.
 ///
-/// The listening socket has TCP keepalive enabled so accepted connections inherit the setting.
+/// The Linux MPTCP socket enables TCP keepalive so accepted connections inherit it.
+/// The plain TCP fallback uses the OS defaults.
 pub async fn mptcp_or_tcp_listener(addr: &str) -> Result<tokio::net::TcpListener> {
     #[cfg(target_os = "linux")]
     {
@@ -95,8 +96,8 @@ pub async fn mptcp_incoming(addr: &str) -> Result<tokio_stream::wrappers::TcpLis
 /// - HTTP/2 window sizes are set to 4 MB (connection) and 2 MB (per-stream) to
 ///   prevent flow-control stalls when delivering large GetPendingMessages responses
 ///   without extra RTTs for window updates.
-/// - tcp_keepalive probes the underlying TCP connection every 30s; prevents the OS
-///   from silently dropping idle connections behind NAT/firewalls.
+/// - `tcp_keepalive` sets the idle time to 30s on listeners created by tonic.
+///   With `serve_with_incoming*`, the caller's listener controls TCP socket options.
 pub fn grpc_server(
     keepalive_interval_secs: u64,
     keepalive_timeout_secs: u64,

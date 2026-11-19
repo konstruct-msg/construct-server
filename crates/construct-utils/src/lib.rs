@@ -230,9 +230,11 @@ pub fn validate_secret_strength(secret: &str, min_length: usize) -> Result<(), S
 
     // 3. Check for simple repeating patterns (e.g., "ababab" or "123123")
     if secret.len() >= 4 {
-        // Check 2-character patterns
+        // The limit is in bytes, but a repeated UTF-8 prefix must end on a character boundary.
         for pattern_len in 2..=(secret.len() / 2).min(8) {
-            let pattern = &secret[..pattern_len];
+            let Some(pattern) = secret.get(..pattern_len) else {
+                continue;
+            };
             let repetitions = secret.len() / pattern_len;
             let repeated = pattern.repeat(repetitions);
             if secret.starts_with(&repeated) {
