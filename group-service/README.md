@@ -36,3 +36,19 @@ processes; CPU ranges in parentheses:
 
 CI runs the instrumented debug test with the same effect assertions and no CPU or
 wall thresholds. Use this profile before and after removing individual copies.
+
+## Moving the envelope into the hub
+
+Release A/B against `3d5e05d`, ABBA twice on the same local fixture (12 measured
+batches per size and variant). Medians per send, except for peak heap, which is
+measured over a batch:
+
+| Ciphertext | Allocations | Requested bytes | CPU µs | Peak Rust heap Δ |
+|---|---:|---:|---:|---:|
+| 1 KiB | 137.38 → 134.38 | 41,727 → 40,631 | 262.5 → 253.0 | 12,398 → 12,488 B |
+| 64 KiB | 141.03 → 138.05 | 667,654 → 598,758 | 309.1 → 300.2 | 425,577 → 361,300 B |
+
+The removed clone copied the ciphertext plus the two 36-byte IDs in this fixture.
+Totals also include Redis and PostgreSQL client allocations. Both CPU and wall-time
+ranges overlap, as do the 1 KiB peak-heap ranges. This establishes a reduction in
+allocation churn, not a CPU, RSS or throughput improvement.
