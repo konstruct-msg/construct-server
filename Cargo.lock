@@ -1540,6 +1540,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "lazy_static",
+ "libc",
  "prometheus",
  "prost",
  "rand 0.8.6",
