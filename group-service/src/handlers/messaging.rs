@@ -127,9 +127,7 @@ pub(crate) async fn send_group_message(
     svc.hub.publish(
         group_id,
         proto::GroupStreamResponse {
-            response: Some(proto::group_stream_response::Response::Message(
-                envelope.clone(),
-            )),
+            response: Some(proto::group_stream_response::Response::Message(envelope)),
             response_id: None,
         },
     );
