@@ -454,7 +454,7 @@ pub async fn get_prekey_bundle(
     }
 
     // Try to consume a Kyber one-time pre-key (soft-delete, same pattern as classic OTPK)
-    let kyber_otp = if consume_otpk {
+    let mut kyber_otp = if consume_otpk {
         sqlx::query_as::<_, KyberOneTimePreKeyRow>(
             r#"
             UPDATE kyber_one_time_pre_keys
@@ -484,26 +484,28 @@ pub async fn get_prekey_bundle(
         signed_prekey: device.signed_prekey_public,
         signed_prekey_id: device.signed_prekey_id as u32,
         signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
-        one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
         one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
+        one_time_prekey: otp.map(|k| k.public_key),
         crypto_suite: device.crypto_suite,
         registered_at: device.registered_at,
         kyber_pre_key: device.kyber_signed_pre_key,
         kyber_pre_key_id: device.kyber_signed_pre_key_id.map(|id| id as u32),
         kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
-        kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
+        kyber_one_time_pre_key: kyber_otp
+            .as_mut()
+            .map(|k| std::mem::take(&mut k.public_key)),
         kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
         kyber_pre_key_created_at: device
             .kyber_signed_pre_key_created_at
             .map(|t| t.max(0) as u64),
-        kyber_one_time_pre_key_signature: kyber_otp.as_ref().map(|k| k.signature.clone()),
+        kyber_one_time_pre_key_signature: kyber_otp
+            .as_mut()
+            .map(|k| std::mem::take(&mut k.signature)),
         kyber_one_time_pre_key_created_at: kyber_otp
             .as_ref()
             .and_then(|k| k.created_at)
             .map(|t| t.max(0) as u64),
-        kyber_one_time_pre_key_hybrid_signature: kyber_otp
-            .as_ref()
-            .and_then(|k| k.hybrid_signature.clone()),
+        kyber_one_time_pre_key_hybrid_signature: kyber_otp.and_then(|k| k.hybrid_signature),
         spk_uploaded_at: device.spk_uploaded_at,
         spk_rotation_epoch: device.spk_rotation_epoch as u32,
         kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,
@@ -665,7 +667,7 @@ pub async fn get_prekey_bundles(
         }
 
         // Try to consume a Kyber OTPK for this device
-        let kyber_otp = if consume_otpk {
+        let mut kyber_otp = if consume_otpk {
             sqlx::query_as::<_, KyberOneTimePreKeyRow>(
                 r#"
                 UPDATE kyber_one_time_pre_keys
@@ -695,26 +697,28 @@ pub async fn get_prekey_bundles(
             signed_prekey: device.signed_prekey_public,
             signed_prekey_id: device.signed_prekey_id as u32,
             signed_prekey_signature: device.signed_prekey_signature.unwrap_or_default(),
-            one_time_prekey: otp.as_ref().map(|k| k.public_key.clone()),
             one_time_prekey_id: otp.as_ref().map(|k| k.key_id as u32),
+            one_time_prekey: otp.map(|k| k.public_key),
             crypto_suite: device.crypto_suite,
             registered_at: device.registered_at,
             kyber_pre_key: device.kyber_signed_pre_key,
             kyber_pre_key_id: device.kyber_signed_pre_key_id.map(|id| id as u32),
             kyber_pre_key_signature: device.kyber_signed_pre_key_signature,
-            kyber_one_time_pre_key: kyber_otp.as_ref().map(|k| k.public_key.clone()),
+            kyber_one_time_pre_key: kyber_otp
+                .as_mut()
+                .map(|k| std::mem::take(&mut k.public_key)),
             kyber_one_time_pre_key_id: kyber_otp.as_ref().map(|k| k.key_id as u32),
             kyber_pre_key_created_at: device
                 .kyber_signed_pre_key_created_at
                 .map(|t| t.max(0) as u64),
-            kyber_one_time_pre_key_signature: kyber_otp.as_ref().map(|k| k.signature.clone()),
+            kyber_one_time_pre_key_signature: kyber_otp
+                .as_mut()
+                .map(|k| std::mem::take(&mut k.signature)),
             kyber_one_time_pre_key_created_at: kyber_otp
                 .as_ref()
                 .and_then(|k| k.created_at)
                 .map(|t| t.max(0) as u64),
-            kyber_one_time_pre_key_hybrid_signature: kyber_otp
-                .as_ref()
-                .and_then(|k| k.hybrid_signature.clone()),
+            kyber_one_time_pre_key_hybrid_signature: kyber_otp.and_then(|k| k.hybrid_signature),
             spk_uploaded_at: device.spk_uploaded_at,
             spk_rotation_epoch: device.spk_rotation_epoch as u32,
             kyber_spk_uploaded_at: device.kyber_spk_uploaded_at,

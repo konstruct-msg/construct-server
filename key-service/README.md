@@ -34,3 +34,22 @@ bundle signature, and the expected device set. SQL readback checks that the clas
 key disappears and the Kyber key is soft-expired only when requested, while the
 unselected device's keys remain active. CI runs the test in debug on its own database;
 there are no runtime performance thresholds.
+
+## Moving the one-time key buffers
+
+Release A/B against `1f229b0`, same local services and fixture, ABBA twice in fresh
+processes (12 measured batches per variant and case). Medians per fetch:
+
+| Fetch | Consume | Allocations | Requested bytes | CPU µs |
+|---|---|---:|---:|---:|
+| Single | No | 154.38 → 154.38 | 54,241 → 54,243 | 202.2 → 200.9 |
+| Single | Yes | 189.75 → 185.75 | 80,065 → 75,285 | 252.8 → 251.3 |
+| Batch2 | No | 331.12 → 331.25 | 109,644 → 108,875 | 396.2 → 400.2 |
+| Batch2 | Yes | 402.31 → 393.97 | 159,237 → 150,741 | 504.1 → 500.3 |
+
+The consuming path no longer copies four buffers per complete device bundle:
+classic public key (32 B), Kyber public key (1,568 B), Ed25519 signature (64 B) and
+hybrid signature (3,373 B). That's 5,037 copied bytes per complete bundle removed
+from the source path; the table measures the entire fetch, including SQL client
+and KT allocation noise. CPU and wall-time ranges overlap in all cases. There is
+no measured CPU or throughput win and no change to the no-consume code path.
