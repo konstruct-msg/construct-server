@@ -5,6 +5,8 @@ mod channel_lifecycle;
 mod comment_groups;
 mod db_contracts;
 mod group_lifecycle;
+#[cfg(all(unix, feature = "allocation-profile"))]
+mod group_send_profile;
 #[path = "../../../shared/test_support/grpc.rs"]
 mod grpc_support;
 mod invite_links;
