@@ -156,6 +156,38 @@ are directly comparable across cases that prepared different numbers of frames.
 CI checks the observed queue, byte/ID/reconnect effects and teardown, without
 time thresholds.
 
+### Retained ciphertext by owner
+
+The same command emits `mailbox_retention` at idle, first send (before saturation),
+blocked/drained, and close. The test probes count `sealed_inner` **Vec capacities**
+as frames enter/leave the real queue, wait in `send`, or remain in the decoded
+page iterator. They exclude metadata, queue storage, other copies and allocator
+padding. Separate process-wide live heap samples include both clients, the server
+and the harness, but not Redis or the kernel.
+
+Three fresh release processes on the same local setup gave identical component
+counts at the sampled stall, with the first reader already drained:
+
+| Ciphertext/frame | Queue (128 frames) | Pending send | Decoded page tail | Unread gRPC bytes | Total live heap released on close |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 KiB | 131,072 B | 1,024 B | 35,840 B (35) | 32,067 B | 646,305 B |
+| 64 KiB | 8,388,608 B | 65,536 B | 1,245,184 B (19) | 65,702 B | 10,293,834–10,293,983 B |
+
+`Unread gRPC bytes` is the sum of uncompressed Protobuf lengths plus the 5-byte
+gRPC prefixes for frames taken by tonic, minus those decoded by the app. It
+measures logical backlog, **not HTTP/2 heap or even bytes known to have been
+encoded**. At close any such bytes are abandoned; the `closed` line keeps that
+count for diagnosis, not as evidence of live buffers. Do not add it to heap or
+assign the unexplained release to HTTP/2. With both readers draining, each counted
+stock and the backlog reached zero. When the stalled reader closed, its queue,
+waiting send and page stocks all reached zero before reconnect.
+
+For 64 KiB, the three directly counted ciphertext stocks totaled 9.25 MiB at the
+stall, versus about 9.82 MiB of process-wide live heap released on close. This
+locates the first place to investigate for large payloads; it does not justify a
+new queue/window limit or a production retention estimate. The 1 KiB case leaves
+most of the release unattributed by this payload-only accounting.
+
 ## P6 local measurements
 
 macOS release build, local Redis 7 via Colima, fixture above; baseline is the P5
