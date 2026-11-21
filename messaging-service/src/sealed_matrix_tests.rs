@@ -36,6 +36,8 @@ mod cursors;
 
 #[cfg(all(unix, feature = "allocation-profile"))]
 mod allocation_profile;
+#[cfg(all(unix, feature = "allocation-profile"))]
+pub(crate) mod stream_profile;
 
 // Replay and rejection cases send the same fixture more than once. Keep that
 // copy here, not in the production dispatch or the allocation sample.
