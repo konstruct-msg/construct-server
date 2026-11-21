@@ -824,9 +824,12 @@ pub(crate) async fn poll_messages(
             tracing::info!(xread_ms, msg_count, "poll_messages timing (slow)");
         }
 
+        #[cfg(all(test, unix, feature = "allocation-profile"))]
+        let page_probe =
+            crate::sealed_matrix_tests::stream_profile::PageProbe::start(user_id, &page);
         for (cursor, envelope) in page.into_cursor_entries() {
             #[cfg(all(test, unix, feature = "allocation-profile"))]
-            let probe = crate::sealed_matrix_tests::stream_profile::FrameProbe::start(user_id);
+            let probe = page_probe.as_ref().map(|p| p.take(envelope.as_ref()));
             let stream_id = cursor.encode();
             // Convert MessageEnvelope to the appropriate stream response
             let Some(envelope) = envelope else {
@@ -877,11 +880,11 @@ pub(crate) async fn poll_messages(
             };
 
             #[cfg(all(test, unix, feature = "allocation-profile"))]
-            let probe = probe.map(|p| p.before_send(tx.capacity(), tx.max_capacity()));
+            let probe = probe.map(|p| p.before_send(tx.capacity(), tx.max_capacity(), &response));
             let sent = tx.send(Ok(response)).await;
             #[cfg(all(test, unix, feature = "allocation-profile"))]
             if let Some(probe) = probe {
-                probe.after_send();
+                probe.after_send(sent.is_ok());
             }
             sent?;
             tracing::info!(

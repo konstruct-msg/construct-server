@@ -3,12 +3,14 @@ use super::{
     allocation_profile::{allocations::AllocationSample, process_cpu_seconds},
     make_config, make_ed25519_pems,
 };
-use crate::{context::MessagingServiceContext, grpc::MessagingGrpcService};
+use crate::{
+    context::MessagingServiceContext, grpc::MessagingGrpcService, stream::STREAM_MAILBOX_PAGE,
+};
 use anyhow::{Context, Result, ensure};
 use construct_auth::AuthManager;
 use construct_config::StealthTokenPolicy;
 use construct_message::MessageEnvelope;
-use construct_queue::MessageQueue;
+use construct_queue::{MailboxPage, MessageQueue};
 use construct_server_shared::shared::proto::{
     core::v1::envelope::MessageIdType,
     services::v1::{
@@ -16,6 +18,7 @@ use construct_server_shared::shared::proto::{
         messaging_service_server::MessagingServiceServer,
     },
 };
+use prost::Message;
 use std::{
     cell::RefCell,
     sync::Arc,
@@ -32,6 +35,42 @@ use uuid::Uuid;
 const COUNT: usize = 192;
 const DEADLINE: Duration = Duration::from_secs(12);
 
+// Only owned sealed-inner Vec capacity (bytes), not the rest of the response or page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Stock {
+    frames: usize,
+    bytes: usize,
+}
+
+impl Stock {
+    fn add(&mut self, bytes: usize) {
+        self.frames += 1;
+        self.bytes += bytes;
+    }
+
+    fn remove(&mut self, bytes: usize) {
+        self.frames -= 1;
+        self.bytes -= bytes;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Retention {
+    queue: Stock,
+    page: Stock,
+    pending_bytes: usize,
+    // Uncompressed gRPC message bytes, from Tokio receiver yield to client decode.
+    // This is a backlog proxy, not the actual capacity of tonic/h2/TCP buffers.
+    framed_out: usize,
+    framed_received: usize,
+}
+
+impl Retention {
+    fn unread_framed_bytes(self) -> usize {
+        self.framed_out - self.framed_received
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Stats {
     frames: usize,
@@ -40,14 +79,18 @@ struct Stats {
     queue_max: usize,
     prep: Duration,
     wait: Duration,
+    output_closed: bool,
+    retained: Retention,
+    first_send: Option<(Retention, usize)>,
 }
 
 // The profiled test uses a current-thread runtime, including its server tasks.
 thread_local! {
-    static PROBE: RefCell<[(Uuid, Stats); 2]> = const { RefCell::new([(Uuid::nil(), Stats {
-        frames: 0, full: 0, at_full_send: false, queue_max: 0,
-        prep: Duration::ZERO, wait: Duration::ZERO,
-    }); 2]) };
+    static PROBE: RefCell<[(Uuid, Stats); 2]> = RefCell::new([(Uuid::nil(), Stats::default()); 2]);
+}
+
+fn armed(user: Uuid) -> bool {
+    PROBE.with_borrow(|slots| slots.iter().any(|(id, _)| *id == user))
 }
 
 fn update(user: Uuid, f: impl FnOnce(&mut Stats)) {
@@ -58,37 +101,138 @@ fn update(user: Uuid, f: impl FnOnce(&mut Stats)) {
     });
 }
 
+pub(crate) struct PageProbe(Uuid);
+
+impl PageProbe {
+    pub(crate) fn start(user: Uuid, page: &MailboxPage) -> Option<Self> {
+        if !armed(user) {
+            return None;
+        }
+        update(user, |s| {
+            assert_eq!(s.retained.page, Stock::default());
+            for env in page.entries.iter().filter_map(|(_, env)| env.as_ref()) {
+                if let Some(bytes) = &env.sealed_inner {
+                    s.retained.page.add(bytes.capacity());
+                }
+            }
+        });
+        Some(Self(user))
+    }
+
+    pub(crate) fn take(&self, env: Option<&MessageEnvelope>) -> FrameProbe {
+        let started = Instant::now();
+        if let Some(bytes) = env.and_then(|env| env.sealed_inner.as_ref()) {
+            update(self.0, |s| s.retained.page.remove(bytes.capacity()));
+        }
+        FrameProbe {
+            user: self.0,
+            started,
+        }
+    }
+}
+
+impl Drop for PageProbe {
+    fn drop(&mut self) {
+        // Also runs if the send fails or poll_messages is cancelled mid-page.
+        update(self.0, |s| s.retained.page = Stock::default());
+    }
+}
+
+fn sealed_capacity(response: &proto::MessageStreamResponse) -> Option<usize> {
+    match &response.response {
+        Some(proto::message_stream_response::Response::Message(env)) => env
+            .sealed_sender
+            .as_ref()
+            .map(|sealed| sealed.sealed_inner.capacity()),
+        _ => None,
+    }
+}
+
 pub(crate) struct FrameProbe {
     user: Uuid,
     started: Instant,
 }
 
 impl FrameProbe {
-    pub(crate) fn start(user: Uuid) -> Option<Self> {
-        PROBE
-            .with_borrow(|slots| slots.iter().any(|(id, _)| *id == user))
-            .then(|| Self {
-                user,
-                started: Instant::now(),
-            })
-    }
-
-    pub(crate) fn before_send(mut self, capacity: usize, max: usize) -> Self {
+    pub(crate) fn before_send(
+        self,
+        capacity: usize,
+        max: usize,
+        response: &proto::MessageStreamResponse,
+    ) -> SendProbe {
+        let bytes = sealed_capacity(response).expect("profile sends only sealed mailbox frames");
         update(self.user, |s| {
+            let occupied = max - capacity;
+            // At the sampled stall, every occupied slot must hold a sealed frame; a queued
+            // HeartbeatAck isn't included in the payload counters.
             s.frames += 1;
             s.prep += self.started.elapsed();
-            s.queue_max = s.queue_max.max(max - capacity);
+            s.queue_max = s.queue_max.max(occupied);
             s.at_full_send = capacity == 0;
             s.full += usize::from(s.at_full_send);
+            assert_eq!(s.retained.pending_bytes, 0);
+            s.retained.pending_bytes = bytes;
+            if s.frames == 1 {
+                s.first_send = Some((s.retained, AllocationSample::live_bytes()));
+            }
         });
-        self.started = Instant::now();
-        self
+        SendProbe {
+            user: self.user,
+            started: Instant::now(),
+            bytes,
+        }
     }
+}
 
-    pub(crate) fn after_send(self) {
+pub(crate) struct SendProbe {
+    user: Uuid,
+    started: Instant,
+    bytes: usize,
+}
+
+impl SendProbe {
+    pub(crate) fn after_send(self, sent: bool) {
+        if sent {
+            // Current-thread fixture: no receiver code runs between send returning and this update.
+            update(self.user, |s| s.retained.queue.add(self.bytes));
+        }
+    }
+}
+
+impl Drop for SendProbe {
+    fn drop(&mut self) {
         update(self.user, |s| {
             s.wait += self.started.elapsed();
             s.at_full_send = false;
+            s.retained.pending_bytes = 0;
+        });
+    }
+}
+
+pub(crate) struct OutputProbe(Uuid);
+
+impl OutputProbe {
+    pub(crate) fn start(user: Uuid) -> Option<Self> {
+        armed(user).then(|| Self(user))
+    }
+
+    pub(crate) fn pulled(&self, item: &Result<proto::MessageStreamResponse, tonic::Status>) {
+        if let Ok(frame) = item
+            && let Some(bytes) = sealed_capacity(frame)
+        {
+            update(self.0, |s| {
+                s.retained.queue.remove(bytes);
+                s.retained.framed_out += frame.encoded_len() + 5;
+            });
+        }
+    }
+}
+
+impl Drop for OutputProbe {
+    fn drop(&mut self) {
+        update(self.0, |s| {
+            s.retained.queue = Stock::default();
+            s.output_closed = true;
         });
     }
 }
@@ -185,6 +329,7 @@ fn payload(size: usize, n: usize) -> Vec<u8> {
 }
 
 struct Stream {
+    user: Uuid,
     requests: mpsc::Sender<proto::MessageStreamRequest>,
     response: Streaming<proto::MessageStreamResponse>,
     client: MessagingServiceClient<Channel>,
@@ -213,6 +358,7 @@ async fn open(endpoint: &Endpoint, mailbox: &Mailbox, cursor: String) -> Result<
         .await?
         .into_inner();
     Ok(Stream {
+        user: mailbox.user,
         requests,
         response,
         client,
@@ -226,6 +372,7 @@ async fn receive(stream: &mut Stream, expected: &[u8], n: usize) -> Result<Strin
             .message()
             .await?
             .context("stream closed before delivery")?;
+        let framed_size = frame.encoded_len() + 5;
         match frame.response {
             Some(proto::message_stream_response::Response::Message(env)) => {
                 assert_eq!(
@@ -244,6 +391,7 @@ async fn receive(stream: &mut Stream, expected: &[u8], n: usize) -> Result<Strin
                     cursor.starts_with("mc1:"),
                     "expected source-specific cursor"
                 );
+                update(stream.user, |s| s.retained.framed_received += framed_size);
                 return Ok(cursor);
             }
             Some(proto::message_stream_response::Response::HeartbeatAck(_)) => (),
@@ -276,7 +424,10 @@ async fn close(
                 .arg(&mailbox.presence)
                 .query_async(&mut conn)
                 .await?;
-            if !online && construct_metrics::GRPC_STREAMS_ACTIVE.get() == active {
+            if !online
+                && construct_metrics::GRPC_STREAMS_ACTIVE.get() == active
+                && stats(mailbox.user).output_closed
+            {
                 return Ok::<_, anyhow::Error>(());
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -285,6 +436,25 @@ async fn close(
     .await
     .context("stream or presence did not close")??;
     Ok(())
+}
+
+fn report(size: usize, slow: bool, phase: &str, s: Retention, live: usize) {
+    println!(
+        "mailbox_retention: size={size} slow={slow} phase={phase} queue_frames={} queue_bytes={} pending_bytes={} page_frames={} page_bytes={} unread_grpc_message_bytes={} process_live={live}",
+        s.queue.frames,
+        s.queue.bytes,
+        s.pending_bytes,
+        s.page.frames,
+        s.page.bytes,
+        s.unread_framed_bytes(),
+    );
+}
+
+fn check_drained(s: Retention) {
+    assert_eq!(s.queue, Stock::default());
+    assert_eq!(s.page, Stock::default());
+    assert_eq!(s.pending_bytes, 0);
+    assert_eq!(s.unread_framed_bytes(), 0);
 }
 
 async fn sample(
@@ -300,6 +470,7 @@ async fn sample(
     let idle_count = construct_metrics::GRPC_STREAMS_ACTIVE.get();
     let cpu = process_cpu_seconds()?;
     let wall = Instant::now();
+    let idle_live = AllocationSample::live_bytes();
     let sample = AllocationSample::start();
     let (mut first, mut second) = tokio::try_join!(
         open(endpoint, a, "0-0".into()),
@@ -322,14 +493,50 @@ async fn sample(
         observed[0].frames, COUNT,
         "healthy predecessor stalled or replayed"
     );
+    let size = expected[0].len();
+    let [fast, second_reader] = observed.map(|s| s.retained);
+    let (before, before_live) = observed[1]
+        .first_send
+        .context("missing first-send sample")?;
+    assert_eq!(before.queue, Stock::default());
+    assert_eq!(before.pending_bytes, size);
+    assert_eq!(
+        before.page.frames,
+        STREAM_MAILBOX_PAGE - 1,
+        "exclude the first converted frame"
+    );
+    assert_eq!(before.page.bytes, (STREAM_MAILBOX_PAGE - 1) * size);
+    assert_eq!(before.unread_framed_bytes(), 0);
+    check_drained(fast);
     if slow {
         assert!(observed[1].at_full_send && observed[1].full > 0);
+        assert_eq!(
+            second_reader.queue.frames, observed[1].queue_max,
+            "count real channel yields"
+        );
+        assert_eq!(second_reader.queue.bytes, second_reader.queue.frames * size);
+        assert_eq!(second_reader.pending_bytes, size);
+        // In this fixture each page is full except the last (no filtered/duplicate rows).
+        let page_end =
+            (observed[1].frames.div_ceil(STREAM_MAILBOX_PAGE) * STREAM_MAILBOX_PAGE).min(COUNT);
+        let remaining = page_end - observed[1].frames;
+        assert!(remaining > 0, "fixture must block inside a page");
+        assert_eq!(
+            second_reader.page.frames, remaining,
+            "count only the unread page tail"
+        );
+        assert_eq!(second_reader.page.bytes, remaining * size);
+        assert!(
+            second_reader.unread_framed_bytes() > size,
+            "tonic took at least one unread frame"
+        );
         assert!(
             observed[1].frames < COUNT,
             "fixture must exceed the transport and channel buffers"
         );
     } else {
         assert_eq!(observed[1].frames, COUNT);
+        check_drained(second_reader);
     }
     let delta = sample.finish();
     let active = construct_metrics::GRPC_STREAMS_ACTIVE.get();
@@ -338,9 +545,22 @@ async fn sample(
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
 
     close(second, ctx, b, idle_count + 1).await?;
-    let after_close = AllocationSample::start().finish().live;
+    let after_close = AllocationSample::live_bytes();
     let waited = stats(b.user);
-    let size = expected[0].len();
+    assert_eq!(waited.retained.queue, Stock::default());
+    assert_eq!(waited.retained.page, Stock::default());
+    assert_eq!(waited.retained.pending_bytes, 0);
+    report(size, slow, "idle", Retention::default(), idle_live);
+    report(size, slow, "first_send", before, before_live);
+    report(
+        size,
+        slow,
+        if slow { "blocked" } else { "drained" },
+        second_reader,
+        delta.live,
+    );
+    // Any unread framed bytes at cancellation were abandoned, not delivered or measured as freed.
+    report(size, slow, "closed", waited.retained, after_close);
     let released = delta.live.saturating_sub(after_close);
     if slow && size == 65_536 {
         assert!(
@@ -374,9 +594,11 @@ async fn sample(
             }
         }
         drop(client);
+        update(b.user, |s| *s = Stats::default());
         let mut reopened = open(endpoint, b, checkpoint).await?;
         drain(&mut reopened, expected, 1).await?;
-        assert_eq!(stats(b.user).frames, observed[1].frames + COUNT - 1);
+        assert_eq!(stats(b.user).frames, COUNT - 1);
+        check_drained(stats(b.user).retained);
         close(reopened, ctx, b, idle_count).await?;
     }
     println!(

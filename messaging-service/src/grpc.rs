@@ -358,6 +358,18 @@ impl MessagingService for MessagingGrpcService {
         });
 
         let output_stream = ReceiverStream::new(rx);
+        #[cfg(all(test, unix, feature = "allocation-profile"))]
+        if let Some(probe) =
+            auth_user_id.and_then(crate::sealed_matrix_tests::stream_profile::OutputProbe::start)
+        {
+            return Ok(Response::new(Box::pin(tokio_stream::StreamExt::map(
+                output_stream,
+                move |item| {
+                    probe.pulled(&item);
+                    item
+                },
+            )) as Self::MessageStreamStream));
+        }
         Ok(Response::new(
             Box::pin(output_stream) as Self::MessageStreamStream
         ))

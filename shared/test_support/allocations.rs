@@ -71,9 +71,14 @@ pub struct AllocationDelta {
 }
 
 impl AllocationSample {
+    // Does not reset the peak of a sample already in progress.
+    pub fn live_bytes() -> usize {
+        LIVE.load(Relaxed)
+    }
+
     // One isolated sample at a time. Counters are process-wide; peak resets here.
     pub fn start() -> Self {
-        let live = LIVE.load(Relaxed);
+        let live = Self::live_bytes();
         PEAK.store(live, Relaxed);
         Self {
             calls: ALLOCS.load(Relaxed),
@@ -87,7 +92,7 @@ impl AllocationSample {
         AllocationDelta {
             calls: ALLOCS.load(Relaxed) - self.calls,
             bytes: BYTES.load(Relaxed) - self.bytes,
-            live: LIVE.load(Relaxed),
+            live: Self::live_bytes(),
             peak,
             peak_delta: peak.saturating_sub(self.live),
         }
