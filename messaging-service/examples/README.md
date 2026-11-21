@@ -112,6 +112,50 @@ The peak drops by 1,314 and 65,827 bytes, respectively: the size of the encoded
 `SealedInner`, not just its ciphertext field. CPU ranges overlap for both sizes;
 this run establishes an allocation saving, not a CPU or throughput improvement.
 
+## MessageStream backpressure baseline (P2)
+
+On Unix, run only this test in its own process against disposable loopback Redis:
+
+```sh
+PROFILE_LOCAL_REDIS=1 REDIS_URL=redis://127.0.0.1:6379 \
+  cargo test --locked --release -p messaging-service --bin messaging-service \
+  --features allocation-profile profile_local_mailbox_stream \
+  -- --ignored --test-threads=1 --nocapture
+```
+
+Two independent authenticated mailboxes each hold 192 opaque 1/64 KiB payloads,
+with distinct messages at equal user/device Redis IDs. The test serves the actual
+MessageStream over loopback HTTP/2 (test client receive windows 16 KiB stream /
+32 KiB connection, adaptive window off). Both readers drain in the control. The
+slow reader stops after one frame in the second case; the test waits until the
+server's unchanged response channel is full and the other reader has drained.
+Then it drops the slow reader, checks stream and presence teardown, and resumes
+from that one received frame. `GetPendingMessages` limits 0/1 and exact byte, ID,
+order and checkpoint assertions cover the other message at the same Redis ID.
+Reads must not trim either stream. No PostgreSQL or production secrets are used.
+Use disposable Redis; after a failed run, isolated fixture keys may remain.
+
+Per-frame preparation is measured from cursor encoding through response creation
+and ID selection, excluding Redis reads. Send wait is time inside the channel
+send; for a pending slow-reader send it is observed through cancellation. CPU and
+allocation counters cover both client and server in the same test process. They
+exclude preload, reconnect and cleanup; live bytes are sampled separately on
+closing the second reader while the first is still open. Requested bytes are churn,
+not RSS. This fixture is not a network sizing or throughput benchmark.
+
+Release A/A: three fresh processes, Rust 1.100, macOS arm64, Redis 7 in a local
+container. At 1 KiB the slow-reader queue reached 128 and closing the reader
+released 646–648 kB of process-wide live Rust heap. At 64 KiB it also reached 128;
+closing released 10,293,818 B in each process. With both readers draining, closing
+the second released about 393 kB and 481–563 kB, respectively. In the 64 KiB
+slow case the enrolled 131 frames include the blocked send: its measured channel
+wait was about 14–15 ms through cancellation, while preparing those frames took
+0.031–0.035 ms in total. These conditions intentionally make the queue fill; they
+do not predict how often real phones fill it. Neither CPU nor total allocations
+are directly comparable across cases that prepared different numbers of frames.
+CI checks the observed queue, byte/ID/reconnect effects and teardown, without
+time thresholds.
+
 ## P6 local measurements
 
 macOS release build, local Redis 7 via Colima, fixture above; baseline is the P5

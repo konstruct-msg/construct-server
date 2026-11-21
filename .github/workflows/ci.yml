@@ -292,6 +292,11 @@ jobs:
         env:
           PROFILE_LOCAL_REDIS: "1"
 
+      - name: Check mailbox stream backpressure profile (requires Redis)
+        run: cargo test --locked -p messaging-service --bin messaging-service --features allocation-profile profile_local_mailbox_stream -- --ignored --test-threads=1 --nocapture
+        env:
+          PROFILE_LOCAL_REDIS: "1"
+
       - name: Check PQ bundle allocation baseline (requires PostgreSQL)
         run: cargo test --locked -p key-service --bin key-service --features allocation-profile profile_local_pq_bundles -- --ignored --test-threads=1 --nocapture
 
