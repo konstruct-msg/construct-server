@@ -123,7 +123,13 @@ pub(crate) async fn send_group_message(
     })?;
 
     crate::metrics::inc_group_messages_sent(1);
-    let envelope = group_message_row_to_envelope(&row);
+    let reply = proto::SendGroupMessageResponse {
+        message_id: row.message_id.to_string(),
+        sent_at: row.sent_at.timestamp(),
+        sequence_number: row.sequence_number as u64,
+        expires_at: row.expires_at.timestamp(),
+    };
+    let envelope = group_message_row_to_envelope(row);
     svc.hub.publish(
         group_id,
         proto::GroupStreamResponse {
@@ -132,12 +138,7 @@ pub(crate) async fn send_group_message(
         },
     );
 
-    Ok(Response::new(proto::SendGroupMessageResponse {
-        message_id: row.message_id.to_string(),
-        sent_at: row.sent_at.timestamp(),
-        sequence_number: row.sequence_number as u64,
-        expires_at: row.expires_at.timestamp(),
-    }))
+    Ok(Response::new(reply))
 }
 
 pub(crate) async fn fetch_group_messages(
@@ -176,7 +177,7 @@ pub(crate) async fn fetch_group_messages(
 
     let envelopes: Vec<Result<proto::GroupMessageEnvelope, Status>> = rows
         .into_iter()
-        .map(|r| Ok(group_message_row_to_envelope(&r)))
+        .map(|row| Ok(group_message_row_to_envelope(row)))
         .collect();
 
     let stream = futures_util::stream::iter(envelopes);
@@ -369,13 +370,13 @@ fn stream_error(
 }
 
 fn group_message_row_to_envelope(
-    row: &construct_db::mls::GroupMessageRow,
+    row: construct_db::mls::GroupMessageRow,
 ) -> proto::GroupMessageEnvelope {
     proto::GroupMessageEnvelope {
         message_id: row.message_id.to_string(),
         group_id: row.group_id.to_string(),
         epoch: row.epoch as u64,
-        mls_ciphertext: row.mls_ciphertext.clone(),
+        mls_ciphertext: row.mls_ciphertext,
         sent_at: row.sent_at.timestamp(),
         sequence_number: row.sequence_number as u64,
         thread_id: row.thread_id.map(|id| id.to_string()),
