@@ -105,7 +105,7 @@ pub(crate) async fn send_group_message(
     let new_msg = NewGroupMessage {
         group_id,
         epoch: current_epoch,
-        mls_ciphertext: req.mls_ciphertext.clone(),
+        mls_ciphertext: req.mls_ciphertext,
         client_message_id,
         thread_id,
         topic_id,

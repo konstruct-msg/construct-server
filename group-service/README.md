@@ -52,3 +52,18 @@ The removed clone copied the ciphertext plus the two 36-byte IDs in this fixture
 Totals also include Redis and PostgreSQL client allocations. Both CPU and wall-time
 ranges overlap, as do the 1 KiB peak-heap ranges. This establishes a reduction in
 allocation churn, not a CPU, RSS or throughput improvement.
+
+## Moving the request ciphertext into the SQL input
+
+Separate release A/B against `b8349fc`, using the same fixture and ABBA order
+(12 measured batches per size and variant). Only the request ciphertext clone
+was removed; SQL binding and the row-to-envelope conversion were not changed.
+
+| Ciphertext | Allocations/send | Requested bytes/send | Process CPU µs/send |
+|---|---:|---:|---:|
+| 1 KiB | 134.25 → 133.38 | 40,117 → 39,607 | 273.1 → 284.1 |
+| 64 KiB | 138.00 → 136.94 | 609,359 → 546,635 | 318.9 → 311.4 |
+
+The large-payload savings are distinct from SQL and Redis allocation noise;
+for 1 KiB the requested-byte ranges overlap. CPU, wall-time and peak-heap ranges
+also overlap at both sizes, so this run does not establish a change in any of them.
