@@ -213,11 +213,13 @@ async fn test_fetch_group_messages_success() {
         auth: super::test_helpers::TEST_AUTH.clone(),
     };
 
+    let mut sent = Vec::new();
     for i in 0..3 {
+        let ciphertext = vec![0, i, 0xff];
         let req = proto::SendGroupMessageRequest {
             group_id: group_id.to_string(),
             epoch: 0,
-            mls_ciphertext: format!("message_{}", i).into_bytes(),
+            mls_ciphertext: ciphertext.clone(),
             client_message_id: format!("client_{}", i),
             thread_id: None,
             topic_id: None,
@@ -226,7 +228,8 @@ async fn test_fetch_group_messages_success() {
         let metadata = create_metadata(&user_id, &device_id);
         let mut request = Request::new(req);
         *request.metadata_mut() = metadata;
-        svc.send_group_message(request).await.unwrap();
+        let reply = svc.send_group_message(request).await.unwrap().into_inner();
+        sent.push((reply, ciphertext));
     }
 
     let fetch_req = proto::FetchGroupMessagesRequest {
@@ -244,13 +247,24 @@ async fn test_fetch_group_messages_success() {
     let response = svc.fetch_group_messages(request).await.unwrap();
     let mut stream = response.into_inner();
 
-    let mut count = 0;
     use futures_util::StreamExt;
-    while let Some(Ok(_)) = stream.next().await {
-        count += 1;
+    for (reply, ciphertext) in sent {
+        let envelope = stream.next().await.expect("missing envelope").unwrap();
+        assert_eq!(
+            envelope.mls_ciphertext, ciphertext,
+            "stored ciphertext on fetch"
+        );
+        assert_eq!(envelope.group_id, group_id.to_string());
+        assert_eq!(envelope.epoch, 0);
+        assert_eq!(envelope.message_id, reply.message_id);
+        assert_eq!(envelope.sequence_number, reply.sequence_number);
+        assert_eq!(envelope.sent_at, reply.sent_at);
+        assert_eq!(envelope.expires_at, reply.expires_at);
     }
-
-    assert_eq!(count, 3);
+    assert!(
+        stream.next().await.is_none(),
+        "unexpected frame after history"
+    );
 }
 
 #[tokio::test]

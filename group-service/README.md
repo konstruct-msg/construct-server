@@ -67,3 +67,18 @@ was removed; SQL binding and the row-to-envelope conversion were not changed.
 The large-payload savings are distinct from SQL and Redis allocation noise;
 for 1 KiB the requested-byte ranges overlap. CPU, wall-time and peak-heap ranges
 also overlap at both sizes, so this run does not establish a change in any of them.
+
+## Moving the SQL row ciphertext into the envelope
+
+Release send A/B against `33376d9`, same fixture and ABBA order (12 measured
+batches per size and variant). Medians per send:
+
+| Ciphertext | Allocations | Requested bytes | Process CPU µs |
+|---|---:|---:|---:|
+| 1 KiB | 133.38 → 132.38 | 39,607 → 38,583 | 263.4 → 264.6 |
+| 64 KiB | 136.86 → 136.00 | 543,323 → 477,359 | 305.1 → 301.3 |
+
+The row-to-envelope conversion now moves the existing buffer in both send and
+history fetch. The table measures sends only; history fetch has exact byte and
+ID checks but no performance claim. CPU, wall-time and peak-heap ranges overlap
+at both sizes. The 1 KiB requested-byte ranges also overlap.
