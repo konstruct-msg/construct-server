@@ -20,7 +20,7 @@ use construct_server_shared::shared::proto::{
 };
 use prost::Message;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -77,6 +77,7 @@ struct Stats {
     full: usize,
     at_full_send: bool,
     queue_max: usize,
+    channel_capacity: usize,
     prep: Duration,
     wait: Duration,
     output_closed: bool,
@@ -87,6 +88,15 @@ struct Stats {
 // The profiled test uses a current-thread runtime, including its server tasks.
 thread_local! {
     static PROBE: RefCell<[(Uuid, Stats); 2]> = RefCell::new([(Uuid::nil(), Stats::default()); 2]);
+    static TEST_CAPACITY: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+pub(crate) fn test_channel_capacity(user: Option<Uuid>, default: usize) -> usize {
+    if user.is_some_and(armed) {
+        TEST_CAPACITY.get().unwrap_or(default)
+    } else {
+        default
+    }
 }
 
 fn armed(user: Uuid) -> bool {
@@ -168,6 +178,7 @@ impl FrameProbe {
             s.frames += 1;
             s.prep += self.started.elapsed();
             s.queue_max = s.queue_max.max(occupied);
+            s.channel_capacity = max;
             s.at_full_send = capacity == 0;
             s.full += usize::from(s.at_full_send);
             assert_eq!(s.retained.pending_bytes, 0);
@@ -266,7 +277,7 @@ struct Mailbox {
 }
 
 impl Mailbox {
-    async fn seed(ctx: &MessagingServiceContext, size: usize) -> Result<Self> {
+    async fn seed(ctx: &MessagingServiceContext, expected: &[Vec<u8>]) -> Result<Self> {
         let user = Uuid::new_v4();
         let device = Uuid::new_v4().simple().to_string();
         let (token, _, _) = ctx
@@ -279,13 +290,13 @@ impl Mailbox {
             ctx.config.redis_key_prefixes.user
         );
         let mut conn = ctx.redis_conn.clone();
-        for n in 0..COUNT {
+        for (n, bytes) in expected.iter().enumerate() {
             let message_id = format!("message-{n}");
             let envelope = MessageEnvelope::from_sealed_sender(
                 message_id.clone(),
                 user.to_string(),
                 None,
-                payload(size, n),
+                bytes.clone(),
             );
             // Distinct envelopes in the two streams share an ID. Exercise reconnect between peers.
             let redis_id = format!("{}-0", n / 2 + 100);
@@ -308,10 +319,10 @@ impl Mailbox {
         })
     }
 
-    async fn clear(self, conn: &mut redis::aio::ConnectionManager) -> Result<()> {
+    async fn clear(self, conn: &mut redis::aio::ConnectionManager, entries: usize) -> Result<()> {
         for key in &self.keys {
             let len: usize = redis::cmd("XLEN").arg(key).query_async(conn).await?;
-            assert_eq!(len, COUNT / 2, "stream reads cannot trim the mailbox");
+            assert_eq!(len, entries / 2, "stream reads cannot trim the mailbox");
         }
         let removed: usize = redis::cmd("DEL")
             .arg(self.keys.as_slice())
@@ -457,14 +468,62 @@ fn check_drained(s: Retention) {
     assert_eq!(s.unread_framed_bytes(), 0);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    Draining,
+    PauseThenResume,
+    CancelThenReconnect,
+}
+
+impl Reader {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Draining => "fast",
+            Self::PauseThenResume => "resume",
+            Self::CancelThenReconnect => "cancel",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SampleCase {
+    workload: &'static str,
+    windows: &'static str,
+    capacity: usize,
+    reader: Reader,
+}
+
+async fn xread_calls(conn: &mut redis::aio::ConnectionManager) -> Result<usize> {
+    // Server-side wire count, not an inference from the number of pages the reader returned.
+    // This profiling workload runs on exclusive disposable Redis.
+    let info: String = redis::cmd("INFO")
+        .arg("commandstats")
+        .query_async(conn)
+        .await?;
+    match info
+        .lines()
+        .find_map(|line| line.strip_prefix("cmdstat_xread:calls="))
+    {
+        Some(line) => Ok(line
+            .split(',')
+            .next()
+            .context("missing XREAD count")?
+            .parse()?),
+        None => Ok(0),
+    }
+}
+
 async fn sample(
     ctx: &MessagingServiceContext,
     endpoint: &Endpoint,
     boxes: &[Mailbox; 2],
     expected: &[Vec<u8>],
-    slow: bool,
+    case: SampleCase,
 ) -> Result<()> {
     let [a, b] = boxes;
+    let slow = case.reader != Reader::Draining;
+    let mut redis = ctx.redis_conn.clone();
+    let xread_before = xread_calls(&mut redis).await?;
     PROBE
         .with_borrow_mut(|slots| *slots = [(a.user, Stats::default()), (b.user, Stats::default())]);
     let idle_count = construct_metrics::GRPC_STREAMS_ACTIVE.get();
@@ -479,8 +538,15 @@ async fn sample(
     let checkpoint = receive(&mut second, &expected[0], 0).await?;
     tokio::try_join!(drain(&mut first, expected, 0), async {
         if slow {
-            // After just one consumed frame, keep the receiver open but do not poll it.
-            while !stats(b.user).at_full_send {
+            // After one consumed frame, stop polling it. Default HTTP/2 buffering can
+            // absorb the entire workload without leaving the producer blocked.
+            loop {
+                let state = stats(b.user);
+                if state.at_full_send
+                    || (case.windows == "default" && state.frames == expected.len())
+                {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
             Ok(())
@@ -490,9 +556,16 @@ async fn sample(
     })?;
     let observed = [stats(a.user), stats(b.user)];
     assert_eq!(
-        observed[0].frames, COUNT,
-        "healthy predecessor stalled or replayed"
+        observed[0].frames,
+        expected.len(),
+        "healthy reader stalled or replayed"
     );
+    for s in observed {
+        assert_eq!(
+            s.channel_capacity, case.capacity,
+            "requested experiment arm must apply"
+        );
+    }
     let size = expected[0].len();
     let [fast, second_reader] = observed.map(|s| s.retained);
     let (before, before_live) = observed[1]
@@ -505,44 +578,99 @@ async fn sample(
         STREAM_MAILBOX_PAGE - 1,
         "exclude the first converted frame"
     );
-    assert_eq!(before.page.bytes, (STREAM_MAILBOX_PAGE - 1) * size);
+    assert_eq!(
+        before.page.bytes,
+        expected[1..STREAM_MAILBOX_PAGE]
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+    );
     assert_eq!(before.unread_framed_bytes(), 0);
     check_drained(fast);
-    if slow {
-        assert!(observed[1].at_full_send && observed[1].full > 0);
+    let blocked = observed[1].at_full_send;
+    if slow && blocked {
+        assert!(observed[1].full > 0);
         assert_eq!(
-            second_reader.queue.frames, observed[1].queue_max,
+            second_reader.queue.frames, case.capacity,
             "count real channel yields"
         );
-        assert_eq!(second_reader.queue.bytes, second_reader.queue.frames * size);
-        assert_eq!(second_reader.pending_bytes, size);
+        let prepared = observed[1].frames;
+        assert!(
+            prepared < expected.len(),
+            "fixture must exceed transport and channel buffers"
+        );
+        let pending = prepared - 1;
+        let queued = &expected[pending - case.capacity..pending];
+        assert_eq!(
+            second_reader.queue.bytes,
+            queued.iter().map(Vec::len).sum::<usize>()
+        );
+        assert_eq!(second_reader.pending_bytes, expected[pending].len());
         // In this fixture each page is full except the last (no filtered/duplicate rows).
         let page_end =
-            (observed[1].frames.div_ceil(STREAM_MAILBOX_PAGE) * STREAM_MAILBOX_PAGE).min(COUNT);
-        let remaining = page_end - observed[1].frames;
-        assert!(remaining > 0, "fixture must block inside a page");
+            (prepared.div_ceil(STREAM_MAILBOX_PAGE) * STREAM_MAILBOX_PAGE).min(expected.len());
+        let remaining = &expected[prepared..page_end];
         assert_eq!(
-            second_reader.page.frames, remaining,
+            second_reader.page.frames,
+            remaining.len(),
             "count only the unread page tail"
         );
-        assert_eq!(second_reader.page.bytes, remaining * size);
+        assert_eq!(
+            second_reader.page.bytes,
+            remaining.iter().map(Vec::len).sum::<usize>()
+        );
         assert!(
-            second_reader.unread_framed_bytes() > size,
+            second_reader.unread_framed_bytes() > 0,
             "tonic took at least one unread frame"
         );
-        assert!(
-            observed[1].frames < COUNT,
-            "fixture must exceed the transport and channel buffers"
-        );
     } else {
-        assert_eq!(observed[1].frames, COUNT);
-        check_drained(second_reader);
+        assert_eq!(observed[1].frames, expected.len());
+        if slow {
+            assert_eq!(
+                case.windows, "default",
+                "narrow client must block the sender"
+            );
+            assert_eq!(second_reader.page, Stock::default());
+            assert_eq!(second_reader.pending_bytes, 0);
+            assert!(second_reader.unread_framed_bytes() > 0);
+        } else {
+            check_drained(second_reader);
+        }
     }
     let delta = sample.finish();
     let active = construct_metrics::GRPC_STREAMS_ACTIVE.get();
     assert_eq!(active, idle_count + 2);
     let cpu_ms = (process_cpu_seconds()? - cpu) * 1000.0;
     let wall_ms = wall.elapsed().as_secs_f64() * 1000.0;
+
+    let xread_at_sample = xread_calls(&mut redis).await?;
+    let mut recovery_ms = 0.0;
+    let mut recovery_cpu_ms = 0.0;
+    let mut recovery_xreads = 0;
+    let mut recovery_peak_delta = 0;
+    let mut recovery_live = delta.live;
+    if case.reader == Reader::PauseThenResume {
+        let recovery = AllocationSample::start();
+        let cpu = process_cpu_seconds()?;
+        let start = Instant::now();
+        drain(&mut second, expected, 1).await?;
+        recovery_ms = start.elapsed().as_secs_f64() * 1000.0;
+        recovery_cpu_ms = (process_cpu_seconds()? - cpu) * 1000.0;
+        let recovery = recovery.finish();
+        recovery_peak_delta = recovery.peak_delta;
+        recovery_live = recovery.live;
+        assert_eq!(stats(b.user).frames, expected.len());
+        check_drained(stats(b.user).retained);
+        recovery_xreads = xread_calls(&mut redis).await? - xread_at_sample;
+    }
+    let xreads = xread_at_sample - xread_before;
+    if case.reader != Reader::CancelThenReconnect {
+        let min_reads = 2 * expected.len().div_ceil(STREAM_MAILBOX_PAGE);
+        assert!(
+            xreads + recovery_xreads >= min_reads,
+            "Redis XREADs must cover both mailboxes"
+        );
+    }
 
     close(second, ctx, b, idle_count + 1).await?;
     let after_close = AllocationSample::live_bytes();
@@ -555,21 +683,27 @@ async fn sample(
     report(
         size,
         slow,
-        if slow { "blocked" } else { "drained" },
+        if blocked {
+            "blocked"
+        } else if slow {
+            "paused_buffered"
+        } else {
+            "drained"
+        },
         second_reader,
         delta.live,
     );
     // Any unread framed bytes at cancellation were abandoned, not delivered or measured as freed.
     report(size, slow, "closed", waited.retained, after_close);
     let released = delta.live.saturating_sub(after_close);
-    if slow && size == 65_536 {
+    if case.reader == Reader::CancelThenReconnect && blocked && case.workload == "64k" {
         assert!(
             released >= 1024 * 1024,
             "closing the blocked reader did not release its queued data"
         );
     }
     close(first, ctx, a, idle_count).await?;
-    if slow {
+    if case.reader == Reader::CancelThenReconnect {
         let mut client = client(endpoint).await?;
         for limit in [0, 1] {
             let page = client
@@ -597,10 +731,30 @@ async fn sample(
         update(b.user, |s| *s = Stats::default());
         let mut reopened = open(endpoint, b, checkpoint).await?;
         drain(&mut reopened, expected, 1).await?;
-        assert_eq!(stats(b.user).frames, COUNT - 1);
+        assert_eq!(stats(b.user).frames, expected.len() - 1);
         check_drained(stats(b.user).retained);
         close(reopened, ctx, b, idle_count).await?;
     }
+    let owned = second_reader.queue.bytes + second_reader.pending_bytes + second_reader.page.bytes;
+    println!(
+        "mailbox_stream_ab: capacity={} workload={} windows={} case={} blocked={blocked} messages={} payload_bytes={} queue_frames={} queue_bytes={} pending_bytes={} page_bytes={} owned_bytes={owned} live_delta={} peak_delta={} cpu_ms={cpu_ms:.3} wall_ms={wall_ms:.3} xreads={xreads} recovery_ms={recovery_ms:.3} recovery_cpu_ms={recovery_cpu_ms:.3} recovery_xreads={recovery_xreads} recovery_peak_delta={recovery_peak_delta} recovery_live_delta={} live_after_close={} requested_bytes={} allocations={}",
+        case.capacity,
+        case.workload,
+        case.windows,
+        case.reader.label(),
+        expected.len(),
+        expected.iter().map(Vec::len).sum::<usize>(),
+        second_reader.queue.frames,
+        second_reader.queue.bytes,
+        second_reader.pending_bytes,
+        second_reader.page.bytes,
+        delta.live.saturating_sub(idle_live),
+        delta.peak_delta,
+        recovery_live.saturating_sub(idle_live),
+        after_close,
+        delta.bytes,
+        delta.calls,
+    );
     println!(
         "mailbox_stream: size={size} slow={slow} prepared={}/{} queue_max={}/{} full_sends={}/{} prep_ms={:.3}/{:.3} send_ms={:.3}/{:.3} cpu_ms={cpu_ms:.2} wall_ms={wall_ms:.2} allocations={} requested_bytes={} peak_delta={} live_at_sample={} live_after_close={} released={released}",
         observed[0].frames,
@@ -625,6 +779,22 @@ async fn sample(
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires local disposable Redis, run alone"]
 async fn profile_local_mailbox_stream() -> Result<()> {
+    run_profile(None).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires exclusive disposable loopback Redis, run alone"]
+async fn profile_stream_capacity_ab() -> Result<()> {
+    let capacity = match std::env::var("PROFILE_STREAM_CAPACITY").as_deref() {
+        Ok("128") => 128,
+        Ok("64") => 64,
+        _ => anyhow::bail!("PROFILE_STREAM_CAPACITY must be 128 or 64"),
+    };
+    run_profile(Some(capacity)).await
+}
+
+async fn run_profile(capacity: Option<usize>) -> Result<()> {
+    TEST_CAPACITY.set(capacity);
     ensure!(
         std::env::var("PROFILE_LOCAL_REDIS").as_deref() == Ok("1"),
         "use local disposable Redis only"
@@ -665,7 +835,9 @@ async fn profile_local_mailbox_stream() -> Result<()> {
         token_enc_static_secret: None,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = Endpoint::from_shared(format!("http://{}", listener.local_addr()?))?
+    let endpoint = Endpoint::from_shared(format!("http://{}", listener.local_addr()?))?;
+    let narrow = endpoint
+        .clone()
         .initial_stream_window_size(16 * 1024)
         .initial_connection_window_size(32 * 1024)
         .http2_adaptive_window(false);
@@ -678,23 +850,67 @@ async fn profile_local_mailbox_stream() -> Result<()> {
             .add_service(service)
             .serve_with_incoming(TcpListenerStream::new(listener)),
     );
-    for size in [1024, 65_536] {
+    let workloads: &[&str] = if capacity.is_some() {
+        &["1k", "64k", "mixed"]
+    } else {
+        &["1k", "64k"]
+    };
+    let transports: &[(&str, &Endpoint)] = if capacity.is_some() {
+        &[("default", &endpoint), ("narrow", &narrow)]
+    } else {
+        &[("narrow", &narrow)]
+    };
+    let count = if capacity.is_some() { 320 } else { COUNT };
+    for &workload in workloads {
+        let expected: Vec<_> = (0..count)
+            .map(|n| {
+                let size = match workload {
+                    "64k" => 65_536,
+                    "mixed" if n % 8 == 1 => 65_536,
+                    "mixed" if n % 8 == 5 => 8192,
+                    _ => 1024,
+                };
+                payload(size, n)
+            })
+            .collect();
         let boxes = [
-            Mailbox::seed(&ctx, size).await?,
-            Mailbox::seed(&ctx, size).await?,
+            Mailbox::seed(&ctx, &expected).await?,
+            Mailbox::seed(&ctx, &expected).await?,
         ];
-        let expected: Vec<_> = (0..COUNT).map(|n| payload(size, n)).collect();
-        for slow in [false, true] {
-            tokio::time::timeout(
-                DEADLINE * 3,
-                sample(&ctx, &endpoint, &boxes, &expected, slow),
-            )
-            .await
-            .context("mailbox stream sample stalled")??;
+        for &(windows, endpoint) in transports {
+            let readers: &[Reader] = if capacity.is_some() {
+                &[
+                    Reader::Draining,
+                    Reader::PauseThenResume,
+                    Reader::CancelThenReconnect,
+                ]
+            } else {
+                &[Reader::Draining, Reader::CancelThenReconnect]
+            };
+            for &reader in readers {
+                let case = SampleCase {
+                    workload,
+                    windows,
+                    capacity: capacity.unwrap_or(128),
+                    reader,
+                };
+                tokio::time::timeout(
+                    DEADLINE * 3,
+                    sample(&ctx, endpoint, &boxes, &expected, case),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "mailbox stream sample stalled: {workload} {windows} {}",
+                        reader.label()
+                    )
+                })??;
+            }
         }
         for mailbox in boxes {
-            mailbox.clear(&mut conn).await?;
+            mailbox.clear(&mut conn, count).await?;
         }
     }
+    TEST_CAPACITY.set(None);
     Ok(())
 }
