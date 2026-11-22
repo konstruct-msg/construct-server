@@ -18,6 +18,16 @@ use construct_server_shared::shared::proto::services::v1 as proto;
 pub(crate) const SUBSCRIBE_CATCHUP_GRACE: std::time::Duration =
     std::time::Duration::from_millis(1500);
 
+/// How often an open MessageStream reads its mailbox without a wakeup: the bound on how late a
+/// message is when its `inbox:wakeup` publish is lost (pub/sub drops it during a reconnect, or it
+/// lands before the stream subscribed). The wakeup delivers at once; this is the safety net.
+///
+/// A constant, not `MSG_STREAM_POLL_FALLBACK_SECS` (removed 2026-11-22, vault todo 019 phase C):
+/// no deploy file ever set it, 0 made `tokio::time::interval` panic in every stream, and a large
+/// value turned each lost wakeup into that long a delay with nothing to say so. The cost is one
+/// XREAD a second per open stream.
+pub(crate) const STREAM_POLL_FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Per-connection offline catch-up state for MessageStream.
 ///
 /// Catch-up must run only after Subscribe applies `since_cursor` (or after
@@ -627,7 +637,7 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
 
             // Synthetic wakeup immediately after subscribe: polls for any messages
             // that were dispatched during the TCP-connect + SUBSCRIBE window (~50 ms).
-            // Without this, those messages would wait for the next fallback poll (5s).
+            // Without this, those messages would wait for the next fallback poll (`STREAM_POLL_FALLBACK`).
             if tx.send(()).await.is_err() {
                 return; // stream closed
             }

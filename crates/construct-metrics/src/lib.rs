@@ -411,6 +411,21 @@ pub static MSG_MAILBOX_GAP_REPORTED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_MAILBOX_GAP_REPORTED_TOTAL metric")
 });
 
+/// Sends refused as a retry of a delivery already in a mailbox (`msg:dedup:v2:…`,
+/// `MESSAGE_DEDUP_TTL_SECS`). Labels: `path` = `unary` (the `SendMessage` fast path, before
+/// rate counters) | `dispatch` (the recheck in `dispatch_envelope`). How often clients resend
+/// what the server already holds — the share of traffic the 7-day window (vault todo 019) is for.
+pub static MSG_DEDUP_HIT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_dedup_hit_total",
+            "Sends answered as an idempotent retry of a delivery already in the mailbox"
+        ),
+        &["path"]
+    )
+    .expect("Failed to register MSG_DEDUP_HIT_TOTAL metric")
+});
+
 /// Sealed sends accepted for dispatch, by the door they came in through.
 /// Labels: `ingress` = `sealed_rpc` (`SendSealedMessage`, unauthenticated) |
 /// `legacy_send_message` (a sealed payload on the authenticated `SendMessage`).
@@ -864,6 +879,10 @@ pub fn init_registry() {
         MSG_MAILBOX_USER_ONLY_ENTRIES_TOTAL.with_label_values(&[path]);
         MSG_MAILBOX_SIBLING_ENTRIES_SKIPPED_TOTAL.with_label_values(&[path]);
         MSG_MAILBOX_GAP_REPORTED_TOTAL.with_label_values(&[path]);
+    }
+    // Closed label set: the two places a send is recognised as a retry.
+    for path in ["unary", "dispatch"] {
+        MSG_DEDUP_HIT_TOTAL.with_label_values(&[path]);
     }
     // Both children, not just the family. This label set is closed — a sealed send arrives by
     // one of exactly two doors — and the whole point of the counter is the *ratio* between them.
