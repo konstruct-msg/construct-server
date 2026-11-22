@@ -12,8 +12,8 @@ use crate::core;
 use crate::envelope::{TokenRejected, dispatch_sealed_sender};
 use crate::sealed_ip::{SealedIpDecision, check_sealed_ip_limit, extract_client_ip};
 use crate::stream::{
-    SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request, is_valid_mailbox_cursor,
-    poll_messages, spawn_inbox_wakeup,
+    STREAM_POLL_FALLBACK, SUBSCRIBE_CATCHUP_GRACE, StreamCatchupState, handle_stream_request,
+    is_valid_mailbox_cursor, poll_messages, spawn_inbox_wakeup,
 };
 use construct_server_shared::shared::proto::services::v1::{
     self as proto, messaging_service_server::MessagingService,
@@ -148,9 +148,7 @@ impl MessagingService for MessagingGrpcService {
             // Real-time delivery is handled by spawn_inbox_wakeup (Redis pub/sub with
             // auto-reconnect). This fallback caps worst-case delay if a wakeup signal
             // is missed during the pub/sub subscribe race window (~50ms at stream open).
-            let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(
-                context.config.messaging.stream_poll_fallback_secs,
-            ));
+            let mut poll_interval = tokio::time::interval(STREAM_POLL_FALLBACK);
 
             // Server-initiated keepalive: send a HeartbeatAck to the client about every
             // `stream_heartbeat_interval_secs`. This keeps the H2 stream active so that
@@ -486,6 +484,9 @@ impl MessagingService for MessagingGrpcService {
                         message_id = %message_id,
                         "send_message: duplicate retry — returning cached success"
                     );
+                    construct_metrics::MSG_DEDUP_HIT_TOTAL
+                        .with_label_values(&["unary"])
+                        .inc();
                     return Ok(Response::new(proto::SendMessageResponse {
                         message_id,
                         message_number: 0,

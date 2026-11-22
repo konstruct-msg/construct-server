@@ -566,15 +566,14 @@ impl<'a> DeliveryManager<'a> {
 
     // ── Message deduplication ────────────────────────────────────────────────
 
-    /// Mark the scoped delivery as dispatched to prevent duplicate delivery.
-    /// TTL 24h — covers any realistic client retry window.
+    /// Mark the scoped delivery as dispatched to prevent duplicate delivery, for as long as the
+    /// mailbox keeps the copy (`MESSAGE_DEDUP_TTL_SECS`).
     pub(crate) async fn mark_message_dispatched(
         &mut self,
         key: &crate::MessageDedupKey,
     ) -> Result<()> {
-        const TTL_SECS: u64 = 24 * 60 * 60;
         self.client
-            .set_ex(key.as_str(), "1", TTL_SECS)
+            .set_ex(key.as_str(), "1", crate::MESSAGE_DEDUP_TTL_SECS)
             .await
             .context("Failed to mark message as dispatched")?;
         Ok(())

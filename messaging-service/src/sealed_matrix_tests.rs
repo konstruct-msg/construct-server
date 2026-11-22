@@ -2768,6 +2768,12 @@ async fn d5_unary_duplicate_does_not_wait_on_the_mailbox_mutex() {
         .expect("first send");
     assert!(first.success);
 
+    let hits = |path: &str| {
+        construct_metrics::MSG_DEDUP_HIT_TOTAL
+            .with_label_values(&[path])
+            .get()
+    };
+    let (unary_before, dispatch_before) = (hits("unary"), hits("dispatch"));
     let held = h.ctx.queue.lock().await;
     let started = std::time::Instant::now();
     let retry = tokio::time::timeout(
@@ -2777,6 +2783,13 @@ async fn d5_unary_duplicate_does_not_wait_on_the_mailbox_mutex() {
     .await;
     let elapsed = started.elapsed();
     drop(held);
+    // The retry is counted once, where it stopped. Mutation: drop the `unary` increment.
+    assert_eq!(hits("unary") - unary_before, 1, "the retry is counted");
+    assert_eq!(
+        hits("dispatch"),
+        dispatch_before,
+        "it never reached dispatch"
+    );
 
     let mut conn = h.ctx.redis_conn.clone();
     let copies = stream_len(&mut conn, &recipient).await;
@@ -2852,6 +2865,12 @@ async fn d6_dispatch_duplicate_does_not_wait_on_the_mailbox_mutex() {
     .await
     .expect("first dispatch");
 
+    let dispatch_hits = || {
+        construct_metrics::MSG_DEDUP_HIT_TOTAL
+            .with_label_values(&["dispatch"])
+            .get()
+    };
+    let dispatch_before = dispatch_hits();
     let held = h.ctx.queue.lock().await;
     let started = std::time::Instant::now();
     let retry = tokio::time::timeout(
@@ -2881,6 +2900,8 @@ async fn d6_dispatch_duplicate_does_not_wait_on_the_mailbox_mutex() {
         .expect("a committed dispatch retry must not wait for the mailbox mutex")
         .expect("idempotent success");
     assert_eq!(copies, 1, "a dispatch retry must not write another entry");
+    // Mutation: drop the `dispatch` increment.
+    assert_eq!(dispatch_hits() - dispatch_before, 1, "the retry is counted");
     eprintln!("cached dispatch retry with mailbox mutex held: {elapsed:?}");
 }
 

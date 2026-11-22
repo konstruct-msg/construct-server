@@ -625,3 +625,71 @@ async fn cursor_rpc_tail_is_resolved_once_even_when_all_old_entries_were_deleted
         fixture.clear(&h).await;
     }
 }
+
+/// A message whose wakeup is lost still reaches an open stream, by the fallback poll, within one
+/// `STREAM_POLL_FALLBACK` (vault todo 019, phase D: "missed wakeup"). An XADD with no
+/// `inbox:wakeup` publish is exactly what a stream sees when pub/sub drops the publish.
+/// Mutation: drop the `poll_interval.tick()` arm, or make `STREAM_POLL_FALLBACK` an hour.
+#[tokio::test]
+#[serial]
+async fn a_message_whose_wakeup_is_lost_arrives_by_the_fallback_poll() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let user = uuid::Uuid::new_v4();
+    let device = random_device();
+    let user_key = format!("delivery:offline:{user}");
+    let device_key = format!("{user_key}:{device}");
+    let (token, _, _) = h
+        .ctx
+        .auth_manager
+        .create_token_for_device(&user, Some(&device))
+        .unwrap();
+    let mut stand = RpcStand::start(&h).await;
+    let (commands, mut stream) = open_stream(&mut stand, &token, Some("0-0".into())).await;
+    // The empty catch-up and the synthetic wakeup after SUBSCRIBE (`spawn_inbox_wakeup`) come
+    // and go first, so only the fallback poll can find what is written next.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    let id = "lost-wakeup";
+    let envelope = construct_message::MessageEnvelope::new_direct_message(
+        id.into(),
+        "alice".into(),
+        user.to_string(),
+        vec![0; 32],
+        0,
+        [vec![0, 255, 128], id.as_bytes().to_vec()].concat(),
+        String::new(),
+    );
+    let mut conn = h.ctx.redis_conn.clone();
+    let _: String = redis::cmd("XADD")
+        .arg(&device_key)
+        .arg("*")
+        .arg("message_id")
+        .arg(id)
+        .arg("payload")
+        .arg(rmp_serde::encode::to_vec_named(&envelope).unwrap())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let written = std::time::Instant::now();
+    let (received, _) = next_message(&mut stream).await;
+    let waited = written.elapsed();
+    drop(stream);
+    drop(commands);
+    del(
+        &mut conn,
+        &[
+            user_key,
+            device_key,
+            format!("user:{user}:server_instance_id"),
+        ],
+    )
+    .await;
+
+    assert_eq!(received, id);
+    assert!(
+        waited <= crate::stream::STREAM_POLL_FALLBACK + Duration::from_millis(500),
+        "a lost wakeup cost {waited:?}, more than one fallback poll"
+    );
+}

@@ -267,6 +267,9 @@ pub async fn dispatch_envelope(
         match construct_queue::is_message_duplicate(&mut conn, &dedup_key).await {
             Ok(true) => {
                 tracing::debug!(message_id = %message_id, "Duplicate message_id — skipping (idempotent retry)");
+                construct_metrics::MSG_DEDUP_HIT_TOTAL
+                    .with_label_values(&["dispatch"])
+                    .inc();
                 return Ok(());
             }
             Ok(false) => {}

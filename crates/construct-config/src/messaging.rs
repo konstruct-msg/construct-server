@@ -81,13 +81,6 @@ pub struct MessagingConfig {
     /// Default: 30
     pub stream_heartbeat_interval_secs: u64,
 
-    // ── Stream polling ─────────────────────────────────────────────────────
-    /// Fallback poll interval in seconds for the MessageStream inbox loop.
-    /// Normally the stream is woken up via Redis Pub/Sub; this is only a safety
-    /// net for missed wakeups. Smaller values reduce worst-case delivery latency.
-    /// Default: 1
-    pub stream_poll_fallback_secs: u64,
-
     // ── Observability thresholds ───────────────────────────────────────────
     /// Minimum Redis XREAD latency (ms) that triggers a "slow" log entry.
     /// Default: 50
@@ -163,11 +156,6 @@ impl MessagingConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
-
-            stream_poll_fallback_secs: std::env::var("MSG_STREAM_POLL_FALLBACK_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1),
 
             stream_xread_slow_ms: std::env::var("MSG_STREAM_XREAD_SLOW_MS")
                 .ok()

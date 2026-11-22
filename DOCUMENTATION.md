@@ -102,7 +102,7 @@ limits, PoW tiers, retention or cutover policy still require measured evidence.
 | Presence/mailbox | **`REDIS_KEY_PREFIX_USER`**, **`DELIVERY_QUEUE_PREFIX`**, `DEDUP_SAFETY_MARGIN_HOURS`; config loaders and `construct-queue`. Active namespaces are unchanged. Mailbox age retention remains the code constant, not a newly introduced env knob. |
 | gRPC | `GRPC_KEEPALIVE_INTERVAL_SECS`, `GRPC_KEEPALIVE_TIMEOUT_SECS`, plus service-specific bind variables `IDENTITY_GRPC_BIND_ADDRESS`, `MESSAGING_GRPC_BIND_ADDRESS`, `MEDIA_GRPC_BIND_ADDRESS`, `KEY_SERVICE_GRPC_ADDR`, `KEY_SERVICE_HTTP_ADDR`, `VEIL_GRPC_BIND_ADDRESS`; `construct-utils::net` and service entry points. |
 | Message trust/send limits | `MSG_TRUST_NEW_MAX_AGE_HOURS`, `MSG_TRUST_WARMING_MAX_AGE_HOURS`, `MSG_HOURLY_LIMIT_NEW`, `MSG_HOURLY_LIMIT_WARMING`, `MSG_HOURLY_LIMIT_TRUSTED`, `MSG_FANOUT_LIMIT_NEW`, `MSG_FANOUT_LIMIT_WARMING`; `construct-config/src/messaging.rs` and `messaging-service/src/trust.rs`. |
-| Message streams | `MSG_QUEUE_MAXLEN_STANDARD`, `MSG_STREAM_HEARTBEAT_INTERVAL_SECS`, `MSG_STREAM_POLL_FALLBACK_SECS`, `MSG_STREAM_XREAD_SLOW_MS`; `construct-config/src/messaging.rs`, queue and stream code. |
+| Message streams | `MSG_QUEUE_MAXLEN_STANDARD`, `MSG_STREAM_HEARTBEAT_INTERVAL_SECS`, `MSG_STREAM_XREAD_SLOW_MS`; `construct-config/src/messaging.rs`, queue and stream code. |
 | Sealed/Privacy Pass | `MSG_STEALTH_TOKEN_POLICY`, `MSG_SEALED_IP_RATE_LIMIT_PER_MIN`, `MSG_REJECT_LEGACY_SEALED_SENDER`, `MSG_MAILBOX_USER_WRITE`, `TOKEN_ISSUER_KEY`, `TOKEN_ISSUER_KEY_VERSION`, `TOKEN_ENCRYPTION_PUBLIC_KEY`, `TOKEN_ISSUANCE_MAX_PER_HOUR`, `TOKEN_ISSUANCE_YOUNG_MAX_PER_HOUR`, `TOKEN_ISSUANCE_MATURITY_HOURS`; messaging/gateway/identity entry points and messaging config. Fresh-token retries and measured mailbox cutover gates remain. |
 | Identity abuse limits | `MAX_POW_CHALLENGES_PER_HOUR`, `MAX_REGISTRATIONS_PER_HOUR`, `MAX_FAILED_LOGIN_ATTEMPTS`, `POW_DIFFICULTY`; `construct-config/src/security.rs` and `construct-auth-service/src/devices.rs`. Adaptive policy values are unchanged. |
 | Federation/signing | `FEDERATION_ENABLED`, `FEDERATION_BASE_DOMAIN`, `SERVER_SIGNING_KEY`, `FEDERATION_MAX_PER_ORIGIN_PER_HOUR`, `FEDERATION_MTLS_REQUIRED`, `FEDERATION_CLIENT_CERT_PATH`, `FEDERATION_CLIENT_KEY_PATH`, `FEDERATION_VERIFY_SERVER_CERT`, `FEDERATION_PINNED_CERTS`; `construct-config/src/federation.rs`. Outbound mTLS/pinning still needs the island-plan wiring described in audit 241; a loaded setting is not proof it is connected. |
@@ -198,7 +198,7 @@ Client → MessagingService::SendMessage
   └─► messaging-service/src/grpc.rs
       async fn send_message(...)
         ├─ extract message_id from envelope.message_id (echo back to client)
-        ├─ idempotency check: EXISTS msg:dedup:v2:{scope_hash} (set with SET EX 24h only
+        ├─ idempotency check: EXISTS msg:dedup:v2:{scope_hash} (set with SET EX 7d only
         │    after the mailbox XADD — check-then-set, not SETNX)
         │    scope = sender account + recipient account + recipient device (or none) + message_id
         └─► messaging-service/src/core.rs
@@ -745,7 +745,8 @@ docker logs construct-caddy --tail 50
 **Messaging:**
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
-- Idempotency via Redis `msg:dedup:v2:{scope_hash}` (24 h, set after the mailbox write).
+- Idempotency via Redis `msg:dedup:v2:{scope_hash}` (`MESSAGE_DEDUP_TTL_SECS` = the 7-day mailbox
+  retention, set after the mailbox write: a retry of an accepted send is a no-op while the copy waits).
   The length-prefixed hash includes sender account, recipient account, recipient device (or
   none), and message id. Unary fast-path, dispatch, and mailbox merge use the same scope.
   Old global keys are not read: they can suppress another sender. A retry spanning the
