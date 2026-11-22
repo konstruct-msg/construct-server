@@ -97,7 +97,13 @@ impl MessagingService for MessagingGrpcService {
         let mut in_stream = request.into_inner();
         let context = self.context.clone();
 
-        let (tx, rx) = mpsc::channel(128);
+        let channel_capacity = 128;
+        #[cfg(all(test, unix, feature = "allocation-profile"))]
+        let channel_capacity = crate::sealed_matrix_tests::stream_profile::test_channel_capacity(
+            auth_user_id,
+            channel_capacity,
+        );
+        let (tx, rx) = mpsc::channel(channel_capacity);
 
         tokio::spawn(async move {
             // Per-stream queue clone — avoids contention on the global context.queue mutex.

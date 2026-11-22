@@ -188,6 +188,55 @@ locates the first place to investigate for large payloads; it does not justify a
 new queue/window limit or a production retention estimate. The 1 KiB case leaves
 most of the release unattributed by this payload-only accounting.
 
+### Queue-capacity experiment: keep 128 in production
+
+Run each arm in its own release process against exclusive disposable loopback
+Redis (the test reads server-wide `INFO commandstats` for actual XREAD calls):
+
+```sh
+export PROFILE_LOCAL_REDIS=1 REDIS_URL=redis://127.0.0.1:6379
+for cap in 128 128 128 128 64 64 128 128 64 64 128; do
+  PROFILE_STREAM_CAPACITY="$cap" cargo test --locked --release -p messaging-service \
+    --bin messaging-service --features allocation-profile profile_stream_capacity_ab \
+    -- --ignored --test-threads=1 --nocapture || exit
+done
+```
+
+This is 3 initial A/A processes and two ABBA blocks, four samples per arm in
+ABBA. The override applies only to the two instrumented mailboxes in the test
+binary. Production remains at 128 frames. Each mailbox holds 320 entries:
+1 KiB, 64 KiB, or a repeated mix (6 × 1 KiB, 1 × 8 KiB, 1 × 64 KiB). The real
+HTTP/2 endpoints use either tonic defaults or the narrow test windows above.
+The second client drains, pauses after one frame and resumes on the same RPC,
+or pauses and reconnects using the last received frame. Pause ends when the
+first client has drained and the second has either filled its channel or staged
+all frames (possible with default windows). This is a deliberately different
+amount of read-ahead at resume but the exact same 319 frames to receive.
+
+Local Rust 1.100/macOS arm64, Redis 7; ABBA medians (128 → 64):
+
+| Resume case | Extra process live heap at pause (MiB) | Resume to exact last frame (ms) | Total XREADs across both clients |
+| --- | ---: | ---: | ---: |
+| 1 KiB, default | 1.15 → 1.15 | 0.17 → 0.17 | 17–18 → 18 |
+| 1 KiB, narrow | 1.00 → 0.84 | 3.78 → 7.65 | 16 → 16 |
+| 64 KiB, default | 13.80 → 7.50 | 42.85 → 108.74 | 17 → 17 |
+| 64 KiB, narrow | 10.33 → 7.17 | 78.03 → 115.03 | 18 → 18 |
+| Mixed, default | 3.96 → 3.76 | 0.91 → 1.92 | 18 → 16 |
+| Mixed, narrow | 2.47 → 1.94 | 14.69 → 21.94 | 17 → 17 |
+
+For 64 KiB with default windows the observed resume ranges were 37.83–54.86 vs
+98.04–111.74 ms (128 A/A 36.25–41.52 ms); with narrow windows they were
+77.13–79.98 vs 105.56–116.93 ms (one 128 A/A outlier at 177.99 ms). The
+smaller queue leaves more work for after the client resumes. This is not a claim
+of lower steady-state throughput. Both-draining wall times and CPU are noisy;
+there is no consistent improvement and no claim of equivalence. For 1 KiB with
+default windows the producer staged all frames, so reducing the queue did not
+reduce the sampled live heap. XREAD totals include empty fallback polls. CPU is
+client plus server, not Redis; live heap is relative to the pre-open snapshot,
+not RSS. CI checks exact delivery, resume, reconnect, strict unary limits and
+teardown, not timing. Keep 128: the memory gain on large paused frames comes with
+reproducibly longer recovery in this fixture. No conclusions about VPS capacity.
+
 ## P6 local measurements
 
 macOS release build, local Redis 7 via Colima, fixture above; baseline is the P5
