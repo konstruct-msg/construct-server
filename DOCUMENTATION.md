@@ -198,7 +198,7 @@ Client → MessagingService::SendMessage
   └─► messaging-service/src/grpc.rs
       async fn send_message(...)
         ├─ extract message_id from envelope.message_id (echo back to client)
-        ├─ idempotency check: EXISTS msg:dedup:v2:{scope_hash} (set with SET EX 24h only
+        ├─ idempotency check: EXISTS msg:dedup:v2:{scope_hash} (set with SET EX 7d only
         │    after the mailbox XADD — check-then-set, not SETNX)
         │    scope = sender account + recipient account + recipient device (or none) + message_id
         └─► messaging-service/src/core.rs
@@ -745,7 +745,8 @@ docker logs construct-caddy --tail 50
 **Messaging:**
 - SendMessage, MessageStream, GetPendingMessages RPCs
 - message_id echo-back (client ID preserved end-to-end)
-- Idempotency via Redis `msg:dedup:v2:{scope_hash}` (24 h, set after the mailbox write).
+- Idempotency via Redis `msg:dedup:v2:{scope_hash}` (`MESSAGE_DEDUP_TTL_SECS` = the 7-day mailbox
+  retention, set after the mailbox write: a retry of an accepted send is a no-op while the copy waits).
   The length-prefixed hash includes sender account, recipient account, recipient device (or
   none), and message id. Unary fast-path, dispatch, and mailbox merge use the same scope.
   Old global keys are not read: they can suppress another sender. A retry spanning the

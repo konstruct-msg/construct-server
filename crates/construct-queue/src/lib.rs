@@ -42,6 +42,21 @@ pub use tokens::{
 /// value all along, and the clients' key lifetimes were set against it.
 pub const MAILBOX_MAX_AGE_DAYS: u64 = 7;
 
+/// How long a delivery's idempotency marker (`msg:dedup:v2:…`) lives: as long as the mailbox may
+/// still hold the copy it stands for, so a retry of an accepted send finds it for the whole time
+/// the first copy waits there. A retry after that is a copy of a message no one can open.
+///
+/// It was 24 h until 2026-11-22 (vault todo 019, `decisions/store-and-forward-queue-hardening.md`
+/// phase A): a client that crashed after the server accepted and retried the next day wrote a
+/// second stream entry and sent a second push. Derived, not set: a shorter window reopens that,
+/// and a separate knob would let it drift from the sweep.
+///
+/// Not the same thing as `sealed:seen` (messaging-service `spent_tag.rs`): a sealed copy's id is
+/// the server's, and a client's sealed retry is resealed with a new delivery tag, so neither
+/// window sees it; that cache only refuses the same sealed bytes twice.
+pub const MESSAGE_DEDUP_TTL_SECS: u64 =
+    MAILBOX_MAX_AGE_DAYS * construct_config::SECONDS_PER_DAY as u64;
+
 #[cfg(test)]
 mod tests;
 
@@ -658,7 +673,7 @@ impl MessageQueue {
         is_message_duplicate(self.client.connection_mut(), key).await
     }
 
-    /// Mark a scoped delivery as dispatched (idempotency key, TTL 24h).
+    /// Mark a scoped delivery as dispatched (idempotency key, `MESSAGE_DEDUP_TTL_SECS`).
     pub async fn mark_message_dispatched(&mut self, key: &MessageDedupKey) -> Result<()> {
         delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
             .mark_message_dispatched(key)

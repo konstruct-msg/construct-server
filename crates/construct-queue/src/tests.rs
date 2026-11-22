@@ -1484,6 +1484,42 @@ async fn dedup_read_without_the_queue_preserves_exists_semantics() {
     assert!(!is_message_duplicate(&mut conn, &key).await.unwrap());
 }
 
+/// A dispatched delivery's marker outlives the mailbox copy it stands for: the age sweep
+/// (`trim_streams_by_age(MAILBOX_MAX_AGE_DAYS * SECONDS_PER_DAY)` in messaging-service) removes
+/// the copy first, so a retry of an accepted send is a no-op for as long as the copy can be read.
+/// Until todo 019 the marker lived 24 h and a next-day retry wrote a second copy.
+/// Mutation: a 24 h literal in `mark_message_dispatched`, or in `MESSAGE_DEDUP_TTL_SECS`.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn a_dispatch_marker_lives_as_long_as_the_mailbox_keeps_the_copy() {
+    let mut queue = MessageQueue::new(&get_test_config()).await.expect("queue");
+    let mut conn = queue.clone_redis_connection();
+    let key = MessageDedupKey::new(
+        &format!("test_dedup_window_{}", std::process::id()),
+        "recipient",
+        Some("device"),
+        "message",
+    );
+    queue.mark_message_dispatched(&key).await.unwrap();
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(key.as_str())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: () = redis::cmd("DEL")
+        .arg(key.as_str())
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+
+    let sweep_age = (MAILBOX_MAX_AGE_DAYS * construct_config::SECONDS_PER_DAY as u64) as i64;
+    // A few seconds for the round-trip; never more than the window it was set with.
+    assert!(
+        ttl >= sweep_age - 5 && ttl <= sweep_age,
+        "marker TTL {ttl}s, mailbox keeps a copy {sweep_age}s"
+    );
+}
+
 // ============================================================================
 // Access-token blocklist: one read, the same answer the two reads gave
 // ============================================================================
