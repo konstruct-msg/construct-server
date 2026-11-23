@@ -309,6 +309,9 @@ jobs:
       - name: Check MLS send allocation baseline (requires Redis and PostgreSQL)
         run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_mls_send -- --ignored --test-threads=1 --nocapture
 
+      - name: Check group fan-out copy baseline (requires PostgreSQL)
+        run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_group_fanout -- --ignored --test-threads=1 --nocapture
+
       # cargo test compiles example mains but does not execute their allocation assertions.
       # This pure mode needs no Redis/SQL/secrets and must catch wire-buffer reallocations.
       - name: Check mailbox cursor allocation guard
