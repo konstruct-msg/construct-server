@@ -389,7 +389,7 @@ pub async fn deactivate_device_unless_primary(
     // inactive, and a retry that skipped it would leave messaging accepting the device.
     let mut queue = app_context.queue.lock().await;
     queue
-        .mark_device_revoked(device_id, access_token_ttl_secs(app_context))
+        .mark_device_revoked(device_id, revoked_marker_ttl_secs(app_context))
         .await
         .map_err(|e| {
             tracing::error!(error = %e, op, "device deactivate: failed to mark device revoked");
@@ -412,15 +412,28 @@ pub async fn deactivate_device_unless_primary(
     Ok(DeviceDeactivation::Deactivated)
 }
 
-/// How long a device's revoked marker must live: until every access token it could hold has
-/// expired. Refresh refuses an inactive device, so none is minted after.
 fn access_token_ttl_secs(app_context: &AppContext) -> i64 {
     (app_context.config.access_token_ttl_hours * construct_config::SECONDS_PER_HOUR).max(1)
 }
 
+/// How long a device's revoked marker must live: past the expiry of everything signed for it.
+/// Messaging knows a removed device by this marker alone.
+fn revoked_marker_ttl_secs(app_context: &AppContext) -> i64 {
+    marker_outliving(
+        access_token_ttl_secs(app_context),
+        app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY,
+    )
+}
+
+/// The hour is for a refresh that read the device as active before it was removed and signs
+/// after the marker is set: its token expires later than the marker would have.
+fn marker_outliving(access_secs: i64, refresh_secs: i64) -> i64 {
+    access_secs.max(refresh_secs).max(0) + construct_config::SECONDS_PER_HOUR
+}
+
 /// Mark every device of the account revoked, for messaging, which reads the marker and not the
-/// row. For the paths that take devices out of service in bulk: recovery and account deletion.
-/// Until 2026-11-06 neither did, so a recovered account's old devices went on reading the mailbox.
+/// row. For recovery, which takes them out of service in bulk. Until 2026-11-06 it did not, so a
+/// recovered account's old devices went on reading the mailbox.
 pub async fn mark_account_devices_revoked(
     app_context: &AppContext,
     user_id: &Uuid,
@@ -431,9 +444,27 @@ pub async fn mark_account_devices_revoked(
             tracing::error!(error = %e, "Failed to list devices to mark revoked");
             AppError::internal("Cannot complete request (device list failed)")
         })?;
-    let ttl = access_token_ttl_secs(app_context);
+    mark_devices_revoked(app_context, &devices, revoked_marker_ttl_secs(app_context)).await
+}
+
+/// Mark the devices of an account that has just been deleted. The marker names a device, and
+/// the privacy policy promises deletion within a day, so it lives only as long as an access
+/// token. After the deletion, never before: a deletion that failed would leave a live device
+/// out of messaging, or cut short the marker of one removed earlier.
+pub async fn mark_deleted_account_devices_revoked(
+    app_context: &AppContext,
+    devices: &[String],
+) -> Result<(), AppError> {
+    mark_devices_revoked(app_context, devices, access_token_ttl_secs(app_context)).await
+}
+
+async fn mark_devices_revoked(
+    app_context: &AppContext,
+    devices: &[String],
+    ttl: i64,
+) -> Result<(), AppError> {
     let mut queue = app_context.queue.lock().await;
-    for device_id in &devices {
+    for device_id in devices {
         queue
             .mark_device_revoked(device_id, ttl)
             .await
@@ -582,6 +613,18 @@ mod deactivation_guard_tests {
              refuses the primary device because deactivation is unrecoverable — re-read that \
              rationale before deleting this test"
         );
+    }
+}
+
+#[cfg(test)]
+mod marker_ttl_tests {
+    use super::marker_outliving;
+
+    #[test]
+    fn the_marker_outlives_the_longer_lived_token_by_an_hour() {
+        assert_eq!(marker_outliving(86_400, 7_776_000), 7_779_600);
+        assert_eq!(marker_outliving(86_400, 60), 90_000);
+        assert_eq!(marker_outliving(-5, -5), 3_600);
     }
 }
 

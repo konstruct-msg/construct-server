@@ -1331,6 +1331,75 @@ async fn account_with_a_revoked_device(f: &mut Fixture) -> (Uuid, String, String
     (user, primary, primary_token, stolen, stolen_token)
 }
 
+async fn marker_ttl(f: &Fixture, device: &str) -> i64 {
+    redis::cmd("TTL")
+        .arg(format!("revoked_device:{device}"))
+        .query_async(
+            &mut construct_redis::manager_for(
+                redis::Client::open(f.service.context.config.redis_url.as_str()).unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// The longest-lived thing signed for a device: what a marker has to outlive.
+fn longest_token_expiry(f: &Fixture, user: Uuid, device: &str) -> i64 {
+    let auth = &f.service.context.auth_manager;
+    let access = auth.create_token_for_device(&user, Some(device)).unwrap().2;
+    let refresh = auth
+        .create_refresh_token_for_device(&user, Some(device))
+        .unwrap()
+        .2;
+    access.max(refresh)
+}
+
+/// Messaging knows a removed device by the marker alone, so nothing signed for the device,
+/// even by a refresh that was in flight while it was removed, may outlive the marker.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn the_marker_of_a_removed_device_outlives_everything_signed_for_it() {
+    let mut f = Fixture::new().await;
+    let (user, _, _, revoked, _) = account_with_a_revoked_device(&mut f).await;
+    let (signed_out, _, _) = f.device(user).await;
+    f.keys.push(format!("revoked_device:{signed_out}"));
+    let token = f
+        .service
+        .context
+        .auth_manager
+        .create_token_for_device(&user, Some(&signed_out))
+        .unwrap();
+    f.keys.push(format!("invalidated_token:{}", token.1));
+    f.service
+        .logout(Request::new(proto::LogoutRequest {
+            access_token: token.0,
+            all_devices: false,
+        }))
+        .await
+        .unwrap();
+    let other = f.user().await;
+    let (recovered_away, _, _) = f.device(other).await;
+    f.keys.push(format!("revoked_device:{recovered_away}"));
+    recover(&f, other).await.expect("recovery succeeds");
+
+    let mut margins = Vec::new();
+    for (account, device) in [
+        (user, &revoked),
+        (user, &signed_out),
+        (other, &recovered_away),
+    ] {
+        let dies = chrono::Utc::now().timestamp() + marker_ttl(&f, device).await;
+        margins.push(dies - longest_token_expiry(&f, account, device));
+    }
+    f.cleanup().await;
+    assert!(
+        margins.iter().all(|m| (3_000..=3_600).contains(m)),
+        "seconds each marker outlives a token signed now: {margins:?}"
+    );
+}
+
 /// The defect 264 opened on: this deleted the account (reproduced on main 2026-11-06).
 #[tokio::test]
 #[ignore = "requires Redis and migrated PostgreSQL"]
@@ -1584,12 +1653,13 @@ async fn recovery_takes_every_old_device_out_of_messaging_and_the_rest() {
     f.cleanup().await;
 }
 
+/// The marker names a device, so after a deletion it stays no longer than an access token (the
+/// privacy policy promises a day), and replaces the longer one of a device removed before.
 #[tokio::test]
 #[ignore = "requires Redis and migrated PostgreSQL"]
-async fn deleting_an_account_marks_its_devices_revoked() {
+async fn deleting_an_account_marks_its_devices_for_as_long_as_an_access_token() {
     let mut f = Fixture::new().await;
-    let user = f.user().await;
-    let (device, _, _) = f.device(user).await;
+    let (user, device, _, removed, _) = account_with_a_revoked_device(&mut f).await;
     f.keys.push(format!("revoked_device:{device}"));
     f.service
         .delete_account(f.request(
@@ -1602,17 +1672,68 @@ async fn deleting_an_account_marks_its_devices_revoked() {
         ))
         .await
         .unwrap();
-    let marked = f
-        .service
-        .context
-        .queue
-        .lock()
-        .await
-        .is_device_revoked(&device)
+    let ttls = [
+        marker_ttl(&f, &device).await,
+        marker_ttl(&f, &removed).await,
+    ];
+    let access = f.service.context.config.access_token_ttl_hours * 3600;
+    f.cleanup().await;
+    assert!(
+        ttls.iter().all(|t| (access - 60..=access).contains(t)),
+        "{ttls:?}"
+    );
+}
+
+/// Marked before the deletion, a failed deletion left a live device out of messaging for as long
+/// as the marker lived, and shortened the marker of a device removed earlier.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn an_account_that_could_not_be_deleted_keeps_its_devices_as_they_were() {
+    let mut f = Fixture::new().await;
+    let (user, device, _, removed, _) = account_with_a_revoked_device(&mut f).await;
+    f.keys.push(format!("revoked_device:{device}"));
+    let before = marker_ttl(&f, &removed).await;
+    // A row that refuses to let this one user go: the last statement of the transaction fails.
+    let holder = format!("holds_{}", Uuid::new_v4().simple());
+    let pool = f.service.context.db_pool.clone();
+    sqlx::query(&format!(
+        "CREATE TABLE {holder} (u uuid REFERENCES users(id))"
+    ))
+    .execute(pool.as_ref())
+    .await
+    .unwrap();
+    sqlx::query(&format!("INSERT INTO {holder} VALUES ($1)"))
+        .bind(user)
+        .execute(pool.as_ref())
         .await
         .unwrap();
-    assert!(marked);
+    let answer = f
+        .service
+        .delete_account(f.request(
+            user,
+            Some(&device),
+            proto::DeleteAccountRequest {
+                confirmation: "DELETE".into(),
+                reason: None,
+            },
+        ))
+        .await;
+    sqlx::query(&format!("DROP TABLE {holder}"))
+        .execute(pool.as_ref())
+        .await
+        .unwrap();
+    let (live, earlier) = (
+        marker_ttl(&f, &device).await,
+        marker_ttl(&f, &removed).await,
+    );
+    let still_active = construct_db::device_is_active(pool.as_ref(), &device)
+        .await
+        .unwrap();
     f.cleanup().await;
+    assert_eq!(answer.unwrap_err().code(), Code::Internal);
+    assert_eq!(still_active, Some(true));
+    assert_eq!(live, -2, "no marker on a device that stayed");
+    assert!((before - 60..=before).contains(&earlier), "{earlier}");
 }
 
 /// The list is the handlers that read no bearer, exactly. One too many leaves an RPC open to a dead

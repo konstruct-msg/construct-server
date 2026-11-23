@@ -222,13 +222,16 @@ pub async fn find_discoverable_user_by_username_hash(
 /// Not here: the account's Redis mailboxes. They are not in this database; the
 /// caller clears them (`MessageQueue::delete_mailbox`).
 ///
+/// Returns the ids of the devices the account had, read in the same transaction: the
+/// caller marks them revoked for messaging, and afterwards no row is left to list.
+///
 /// Everything runs in one transaction: a partial account deletion is worse than
 /// a failed one, because it looks finished.
 pub async fn delete_user_account(
     pool: &DbPool,
     user_id: &Uuid,
     contact_hmac_secret: &[u8],
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut tx = pool.begin().await.context("Failed to begin deletion")?;
 
     let devices: Vec<String> =
@@ -300,7 +303,7 @@ pub async fn delete_user_account(
         .context("Failed to delete user row")?;
 
     tx.commit().await.context("Failed to commit deletion")?;
-    Ok(())
+    Ok(devices)
 }
 
 /// Make an account's address its recovery key: `identity_public_key`, `identity_key_type` and
