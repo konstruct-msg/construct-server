@@ -27,6 +27,8 @@ const IP_ZSET_TTL_SECS: i64 = 3600;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowChallengeRecord {
     pub difficulty: i16,
+    /// Set by a server older than 2026-11-23 sharing this Redis, which marks a spent challenge
+    /// instead of taking it. Never written `true` here; a challenge lives ten minutes.
     pub used: bool,
     pub requester_ip: Option<String>,
     pub expires_at: DateTime<Utc>,
@@ -91,34 +93,25 @@ impl MessageQueue {
         }
     }
 
-    /// Mark a challenge as used (single-use) and record a successful
-    /// registration against the requester IP's sliding window.
-    pub async fn mark_pow_challenge_used(&mut self, challenge: &str) -> Result<()> {
+    /// Take the challenge out of the store. Whoever receives the record spent it; everyone else,
+    /// on any instance, receives `None`. `GETDEL`, not a read and a write: between those two,
+    /// another registration passes with the same solution.
+    ///
+    /// Also records the registration against the requester IP's sliding window.
+    pub async fn consume_pow_challenge(
+        &mut self,
+        challenge: &str,
+    ) -> Result<Option<PowChallengeRecord>> {
         use redis::AsyncCommands;
 
         let key = format!("{CH_PREFIX}{challenge}");
-        let json: Option<String> = self.client.connection_mut().get(&key).await?;
-        let Some(s) = json else {
-            return Ok(()); // already expired/consumed — nothing to do
+        let json: Option<String> = self.client.connection_mut().get_del(&key).await?;
+        let Some(json) = json else {
+            return Ok(None);
         };
-        let mut record: PowChallengeRecord = serde_json::from_str(&s)?;
-        record.used = true;
-        let ip = record.requester_ip.clone();
+        let record: PowChallengeRecord = serde_json::from_str(&json)?;
 
-        // Preserve remaining TTL so a used challenge still expires on schedule.
-        let ttl: i64 = self.client.connection_mut().ttl(&key).await?;
-        let new_json = serde_json::to_string(&record)?;
-        if ttl > 0 {
-            let _: () = self
-                .client
-                .connection_mut()
-                .set_ex(&key, new_json, ttl as u64)
-                .await?;
-        } else {
-            let _: () = self.client.connection_mut().set(&key, new_json).await?;
-        }
-
-        if let Some(ip) = ip {
+        if let Some(ip) = &record.requester_ip {
             let zkey = format!("{IPREG_PREFIX}{ip}");
             let _: i64 = self
                 .client
@@ -132,7 +125,7 @@ impl MessageQueue {
                 .await?;
         }
 
-        Ok(())
+        Ok(Some(record))
     }
 
     /// Count PoW challenges requested by an IP within the last `minutes`.

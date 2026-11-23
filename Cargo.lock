@@ -545,6 +545,7 @@ dependencies = [
 name = "construct-auth-service"
 version = "0.20.0"
 dependencies = [
+ "anyhow",
  "axum",
  "chrono",
  "construct-config",
@@ -1907,6 +1908,7 @@ name = "identity-service"
 version = "0.20.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "axum",
  "base64",
  "chrono",
@@ -1914,6 +1916,7 @@ dependencies = [
  "construct-crypto",
  "construct-db",
  "construct-error",
+ "construct-pow",
  "construct-redis",
  "construct-server-shared",
  "construct-veil",
@@ -1929,6 +1932,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tokio",
  "tokio-stream",
