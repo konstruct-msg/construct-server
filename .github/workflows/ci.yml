@@ -309,6 +309,8 @@ jobs:
       - name: Check MLS send allocation baseline (requires Redis and PostgreSQL)
         run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_mls_send -- --ignored --test-threads=1 --nocapture
 
+      - name: Check group fan-out copy baseline (requires PostgreSQL)
+        run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_group_fanout -- --ignored --test-threads=1 --nocapture
       - name: Check mailbox merge allocation baseline (requires Redis)
         run: cargo test --locked -p construct-queue --lib --features allocation-profile profile_mailbox -- --ignored --test-threads=1 --nocapture
         env:
