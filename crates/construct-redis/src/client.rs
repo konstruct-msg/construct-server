@@ -123,52 +123,55 @@ impl RedisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Note: These tests require a running Redis instance
-    // Run with: docker run -d -p 6379:6379 redis:7
+    use crate::test_support::{client, key};
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_basic_operations() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let mut client = client().await;
+
+        let k = &key("basic")[..];
 
         // SET/GET
-        client.set("test_key", "test_value").await?;
-        let value: Option<String> = client.get("test_key").await?;
+        client.set(k, "test_value").await?;
+        let value: Option<String> = client.get(k).await?;
         assert_eq!(value, Some("test_value".to_string()));
 
         // DEL
-        client.del("test_key").await?;
-        let value: Option<String> = client.get("test_key").await?;
+        client.del(k).await?;
+        let value: Option<String> = client.get(k).await?;
         assert_eq!(value, None);
 
         Ok(())
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_expiry() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let mut client = client().await;
 
         // SET with expiry
-        client.set_ex("expire_test", "value", 10).await?;
-        let ttl = client.ttl("expire_test").await?;
+        let k = &key("expiry")[..];
+        client.set_ex(k, "value", 10).await?;
+        let ttl = client.ttl(k).await?;
         assert!(ttl > 0 && ttl <= 10);
+        client.del(k).await?;
 
         Ok(())
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_atomic_ops() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let mut client = client().await;
 
         // INCR
-        let count1 = client.incr("counter").await?;
-        let count2 = client.incr("counter").await?;
+        let k = &key("counter")[..];
+        let count1 = client.incr(k).await?;
+        let count2 = client.incr(k).await?;
         assert_eq!(count2, count1 + 1);
 
-        client.del("counter").await?;
+        client.del(k).await?;
 
         Ok(())
     }

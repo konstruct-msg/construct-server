@@ -50,3 +50,23 @@ pub use redis::RedisError;
 
 /// Result type for Redis operations
 pub type Result<T> = std::result::Result<T, RedisError>;
+
+#[cfg(test)]
+mod test_support {
+    use crate::RedisClient;
+
+    /// The Redis the caller chose, so a run against a throwaway instance stays there.
+    pub(crate) async fn client() -> RedisClient {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into());
+        RedisClient::connect(&url).await.expect("Redis required")
+    }
+
+    /// A key no other test, run or developer is using.
+    pub(crate) fn key(name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_nanos();
+        format!("test:construct-redis:{name}:{}:{nanos}", std::process::id())
+    }
+}

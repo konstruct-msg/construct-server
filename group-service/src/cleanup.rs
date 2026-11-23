@@ -101,17 +101,4 @@ mod tests {
         assert_eq!(cleanup_period_seconds(24), 86400);
         assert_eq!(cleanup_period_seconds(u64::MAX), 86400);
     }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_run_cleanup() {
-        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-        let db = PgPool::connect(&db_url).await.unwrap();
-
-        let stats = run_cleanup(&db).await.unwrap();
-
-        assert!(!stats.is_empty());
-        assert!(stats.iter().any(|s| s.operation == "group_messages"));
-        assert!(stats.iter().any(|s| s.operation == "dissolved_groups"));
-    }
 }

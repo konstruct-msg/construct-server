@@ -1225,8 +1225,9 @@ mod tests {
         let state = registry
             .call_ended_by_disconnect(&t.id("callee-user"), &t.id("callee-device-1"))
             .await;
-        assert!(
-            state.is_some(),
+        assert_eq!(
+            state.map(|s| s.call_id),
+            Some(t.id("call-1")),
             "call should end when callee's only device disconnects"
         );
     }
