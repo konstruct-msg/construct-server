@@ -18,7 +18,7 @@ async fn get_test_redis_client() -> RedisClient {
         .expect("Failed to connect to Redis")
 }
 
-fn get_test_config() -> Config {
+pub(crate) fn get_test_config() -> Config {
     // Create minimal test config - unsafe block required for env vars in tests
     unsafe {
         std::env::set_var("DATABASE_URL", "postgres://test:test@localhost/test");
