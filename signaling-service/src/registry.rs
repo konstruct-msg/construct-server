@@ -836,189 +836,191 @@ impl CallRegistry {
             if !self.try_acquire_cleanup_lock().await {
                 continue;
             }
-            let now_s = unix_seconds();
-            let now_ms = unix_millis();
+            self.cleanup_pass(unix_seconds(), unix_millis()).await;
+        }
+    }
 
-            #[derive(Clone)]
-            enum CleanupAction {
-                ErrorToCaller {
-                    call_id: String,
-                    caller_user_id: String,
-                    caller_device_id: String,
-                    code: i32,
-                    message: String,
-                },
-                HangupBoth {
-                    call_id: String,
-                    caller_user_id: String,
-                    caller_device_id: String,
-                    callee_user_id: String,
-                    callee_device_id: Option<String>,
-                    reason: i32,
-                },
-                RemoveCall {
-                    call_id: String,
-                },
+    /// One pass over the active calls at the given time.
+    pub(crate) async fn cleanup_pass(&self, now_s: u64, now_ms: i64) {
+        #[derive(Clone)]
+        enum CleanupAction {
+            ErrorToCaller {
+                call_id: String,
+                caller_user_id: String,
+                caller_device_id: String,
+                code: i32,
+                message: String,
+            },
+            HangupBoth {
+                call_id: String,
+                caller_user_id: String,
+                caller_device_id: String,
+                callee_user_id: String,
+                callee_device_id: Option<String>,
+                reason: i32,
+            },
+            RemoveCall {
+                call_id: String,
+            },
+        }
+
+        let mut actions: Vec<CleanupAction> = Vec::new();
+        let call_ids = self.list_active_call_ids().await;
+        for call_id in call_ids {
+            let Some(state) = self.load_call_state(&call_id).await else {
+                continue;
+            };
+
+            if now_s.saturating_sub(state.created_at) > 300 {
+                actions.push(CleanupAction::RemoveCall {
+                    call_id: state.call_id.clone(),
+                });
+                continue;
             }
 
-            let mut actions: Vec<CleanupAction> = Vec::new();
-            let call_ids = self.list_active_call_ids().await;
-            for call_id in call_ids {
-                let Some(state) = self.load_call_state(&call_id).await else {
-                    continue;
-                };
-
-                if now_s.saturating_sub(state.created_at) > 300 {
-                    actions.push(CleanupAction::RemoveCall {
-                        call_id: state.call_id.clone(),
-                    });
-                    continue;
-                }
-
-                // 45s gives enough headroom for the slow paths in production:
-                //   E2EE-direct accept (offer arrives via encrypted messaging, callee
-                //   processes crypto + WebRTC ensureWebRTC + applies SDP + sends ringing
-                //   via signaling stream) can take 10-20s under poor networks before the
-                //   ringing signal arrives. 15s was reaping these calls mid-flight even
-                //   after iceConnectionState already reached `connected`.
-                if state.ringing_at_ms.is_none()
-                    && state.answered_at_ms.is_none()
-                    && now_ms.saturating_sub(state.offered_at_ms) > 45_000
-                {
-                    actions.push(CleanupAction::ErrorToCaller {
-                        call_id: state.call_id.clone(),
-                        caller_user_id: state.caller_user_id.clone(),
-                        caller_device_id: state.caller_device_id.clone(),
-                        code: SignalErrorCode::CalleeOffline as i32,
-                        message: "No ringing from callee".into(),
-                    });
-                    actions.push(CleanupAction::RemoveCall {
-                        call_id: state.call_id.clone(),
-                    });
-                    continue;
-                }
-
-                // In the E2EE-direct flow the callee's Answer SDP is forwarded
-                // to the caller via encrypted messaging, not over the signaling
-                // stream — so `answered_at_ms` stays `None` until the client
-                // sends a `CallConnected` signal after iceConnectionState reaches
-                // "connected". Once `note_connected` fires, `answered_at_ms` is
-                // set and this reaper no longer applies — the call falls through
-                // to the softer 60s keepalive reaper below.
-                //
-                // The 30s keepalive staleness threshold (3× the 10s client
-                // interval) tolerates a couple of lost pings without reaping a
-                // healthy call that is still waiting for the connected signal.
-                if state.ringing_at_ms.is_some()
-                    && state.answered_at_ms.is_none()
-                    && now_ms.saturating_sub(state.ringing_at_ms.unwrap()) > 30_000
-                    && now_s.saturating_sub(state.caller_last_keepalive_at) > 30
-                    && now_s.saturating_sub(state.callee_last_keepalive_at) > 30
-                {
-                    actions.push(CleanupAction::HangupBoth {
-                        call_id: state.call_id.clone(),
-                        caller_user_id: state.caller_user_id.clone(),
-                        caller_device_id: state.caller_device_id.clone(),
-                        callee_user_id: state.callee_user_id.clone(),
-                        callee_device_id: state.accepted_callee_device_id.clone(),
-                        reason: HangupReason::Timeout as i32,
-                    });
-                    actions.push(CleanupAction::RemoveCall {
-                        call_id: state.call_id.clone(),
-                    });
-                    continue;
-                }
-
-                if now_s.saturating_sub(state.caller_last_keepalive_at) > 60
-                    || now_s.saturating_sub(state.callee_last_keepalive_at) > 60
-                {
-                    actions.push(CleanupAction::HangupBoth {
-                        call_id: state.call_id.clone(),
-                        caller_user_id: state.caller_user_id.clone(),
-                        caller_device_id: state.caller_device_id.clone(),
-                        callee_user_id: state.callee_user_id.clone(),
-                        callee_device_id: state.accepted_callee_device_id.clone(),
-                        reason: HangupReason::ConnectionFailed as i32,
-                    });
-                    actions.push(CleanupAction::RemoveCall {
-                        call_id: state.call_id.clone(),
-                    });
-                }
+            // 45s gives enough headroom for the slow paths in production:
+            //   E2EE-direct accept (offer arrives via encrypted messaging, callee
+            //   processes crypto + WebRTC ensureWebRTC + applies SDP + sends ringing
+            //   via signaling stream) can take 10-20s under poor networks before the
+            //   ringing signal arrives. 15s was reaping these calls mid-flight even
+            //   after iceConnectionState already reached `connected`.
+            if state.ringing_at_ms.is_none()
+                && state.answered_at_ms.is_none()
+                && now_ms.saturating_sub(state.offered_at_ms) > 45_000
+            {
+                actions.push(CleanupAction::ErrorToCaller {
+                    call_id: state.call_id.clone(),
+                    caller_user_id: state.caller_user_id.clone(),
+                    caller_device_id: state.caller_device_id.clone(),
+                    code: SignalErrorCode::CalleeOffline as i32,
+                    message: "No ringing from callee".into(),
+                });
+                actions.push(CleanupAction::RemoveCall {
+                    call_id: state.call_id.clone(),
+                });
+                continue;
             }
 
-            for action in actions {
-                match action {
-                    CleanupAction::ErrorToCaller {
+            // In the E2EE-direct flow the callee's Answer SDP is forwarded
+            // to the caller via encrypted messaging, not over the signaling
+            // stream — so `answered_at_ms` stays `None` until the client
+            // sends a `CallConnected` signal after iceConnectionState reaches
+            // "connected". Once `note_connected` fires, `answered_at_ms` is
+            // set and this reaper no longer applies — the call falls through
+            // to the softer 60s keepalive reaper below.
+            //
+            // The 30s keepalive staleness threshold (3× the 10s client
+            // interval) tolerates a couple of lost pings without reaping a
+            // healthy call that is still waiting for the connected signal.
+            if state.ringing_at_ms.is_some()
+                && state.answered_at_ms.is_none()
+                && now_ms.saturating_sub(state.ringing_at_ms.unwrap()) > 30_000
+                && now_s.saturating_sub(state.caller_last_keepalive_at) > 30
+                && now_s.saturating_sub(state.callee_last_keepalive_at) > 30
+            {
+                actions.push(CleanupAction::HangupBoth {
+                    call_id: state.call_id.clone(),
+                    caller_user_id: state.caller_user_id.clone(),
+                    caller_device_id: state.caller_device_id.clone(),
+                    callee_user_id: state.callee_user_id.clone(),
+                    callee_device_id: state.accepted_callee_device_id.clone(),
+                    reason: HangupReason::Timeout as i32,
+                });
+                actions.push(CleanupAction::RemoveCall {
+                    call_id: state.call_id.clone(),
+                });
+                continue;
+            }
+
+            if now_s.saturating_sub(state.caller_last_keepalive_at) > 60
+                || now_s.saturating_sub(state.callee_last_keepalive_at) > 60
+            {
+                actions.push(CleanupAction::HangupBoth {
+                    call_id: state.call_id.clone(),
+                    caller_user_id: state.caller_user_id.clone(),
+                    caller_device_id: state.caller_device_id.clone(),
+                    callee_user_id: state.callee_user_id.clone(),
+                    callee_device_id: state.accepted_callee_device_id.clone(),
+                    reason: HangupReason::ConnectionFailed as i32,
+                });
+                actions.push(CleanupAction::RemoveCall {
+                    call_id: state.call_id.clone(),
+                });
+            }
+        }
+
+        for action in actions {
+            match action {
+                CleanupAction::ErrorToCaller {
+                    call_id,
+                    caller_user_id,
+                    caller_device_id,
+                    code,
+                    message,
+                } => {
+                    warn!(
                         call_id,
-                        caller_user_id,
-                        caller_device_id,
-                        code,
-                        message,
-                    } => {
-                        warn!(
-                            call_id,
-                            caller_user_id, "call cleanup: sending error to caller"
-                        );
-                        let code_str = code.to_string();
-                        metrics::SIGNALING_ERRORS_TOTAL
-                            .with_label_values(&[code_str.as_str()])
-                            .inc();
-                        let _ = self
-                            .send_to_user(
-                                &caller_user_id,
-                                Some(&caller_device_id),
-                                ForwardedSignal::Error(SignalErrorInfo { code, message }),
-                            )
-                            .await;
-                    }
-                    CleanupAction::HangupBoth {
-                        call_id,
-                        caller_user_id,
-                        caller_device_id,
-                        callee_user_id,
-                        callee_device_id,
-                        reason,
-                    } => {
-                        warn!(call_id, "call cleanup: sending synthetic hangup");
-                        match reason {
-                            r if r == HangupReason::Timeout as i32 => {
-                                metrics::CALLS_MISSED_TOTAL.inc();
-                            }
-                            r if r == HangupReason::ConnectionFailed as i32 => {
-                                metrics::CALLS_FAILED_TOTAL.inc();
-                            }
-                            _ => {}
+                        caller_user_id, "call cleanup: sending error to caller"
+                    );
+                    let code_str = code.to_string();
+                    metrics::SIGNALING_ERRORS_TOTAL
+                        .with_label_values(&[code_str.as_str()])
+                        .inc();
+                    let _ = self
+                        .send_to_user(
+                            &caller_user_id,
+                            Some(&caller_device_id),
+                            ForwardedSignal::Error(SignalErrorInfo { code, message }),
+                        )
+                        .await;
+                }
+                CleanupAction::HangupBoth {
+                    call_id,
+                    caller_user_id,
+                    caller_device_id,
+                    callee_user_id,
+                    callee_device_id,
+                    reason,
+                } => {
+                    warn!(call_id, "call cleanup: sending synthetic hangup");
+                    match reason {
+                        r if r == HangupReason::Timeout as i32 => {
+                            metrics::CALLS_MISSED_TOTAL.inc();
                         }
-                        let hangup = WebRtcSignal {
-                            call_id: call_id.clone(),
-                            signal: Some(web_rtc_signal::Signal::Hangup(CallHangup {
-                                reason,
-                                device_id: "server".into(),
-                                hangup_at: unix_millis(),
-                                message: None,
-                            })),
-                            sender_device_id: "server".into(),
-                            timestamp: unix_millis(),
-                        };
-                        let _ = self
-                            .send_to_user(
-                                &caller_user_id,
-                                Some(&caller_device_id),
-                                ForwardedSignal::Signal(hangup.clone()),
-                            )
-                            .await;
-                        let _ = self
-                            .send_to_user(
-                                &callee_user_id,
-                                callee_device_id.as_deref(),
-                                ForwardedSignal::Signal(hangup),
-                            )
-                            .await;
+                        r if r == HangupReason::ConnectionFailed as i32 => {
+                            metrics::CALLS_FAILED_TOTAL.inc();
+                        }
+                        _ => {}
                     }
-                    CleanupAction::RemoveCall { call_id } => {
-                        warn!(call_id, "removing stale/expired call");
-                        self.remove_call(&call_id).await;
-                    }
+                    let hangup = WebRtcSignal {
+                        call_id: call_id.clone(),
+                        signal: Some(web_rtc_signal::Signal::Hangup(CallHangup {
+                            reason,
+                            device_id: "server".into(),
+                            hangup_at: unix_millis(),
+                            message: None,
+                        })),
+                        sender_device_id: "server".into(),
+                        timestamp: unix_millis(),
+                    };
+                    let _ = self
+                        .send_to_user(
+                            &caller_user_id,
+                            Some(&caller_device_id),
+                            ForwardedSignal::Signal(hangup.clone()),
+                        )
+                        .await;
+                    let _ = self
+                        .send_to_user(
+                            &callee_user_id,
+                            callee_device_id.as_deref(),
+                            ForwardedSignal::Signal(hangup),
+                        )
+                        .await;
+                }
+                CleanupAction::RemoveCall { call_id } => {
+                    warn!(call_id, "removing stale/expired call");
+                    self.remove_call(&call_id).await;
                 }
             }
         }
@@ -1116,6 +1118,10 @@ impl CallRegistry {
         Ok(())
     }
 }
+
+#[cfg(all(test, unix, feature = "allocation-profile"))]
+#[path = "cleanup_profile.rs"]
+mod cleanup_profile;
 
 #[cfg(test)]
 mod tests {

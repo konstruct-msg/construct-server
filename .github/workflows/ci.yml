@@ -309,6 +309,10 @@ jobs:
       - name: Check MLS send allocation baseline (requires Redis and PostgreSQL)
         run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_mls_send -- --ignored --test-threads=1 --nocapture
 
+      - name: Check signaling cleanup baseline (requires a Redis no call uses)
+        run: cargo test --locked -p signaling-service --features allocation-profile profile_signaling_cleanup -- --ignored --test-threads=1 --nocapture
+        env:
+          PROFILE_REDIS_URL: redis://127.0.0.1:6379/9
       - name: Check group fan-out copy baseline (requires PostgreSQL)
         run: cargo test --locked -p group-service --bin group-service --features allocation-profile profile_local_group_fanout -- --ignored --test-threads=1 --nocapture
       - name: Check mailbox merge allocation baseline (requires Redis)
