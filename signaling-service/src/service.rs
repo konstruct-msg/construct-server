@@ -1151,7 +1151,6 @@ mod signal_gate_tests {
             callee_user_id: "b".into(),
             caller_device_id: "a1".into(),
             accepted_callee_device_id: None,
-            created_at: 0,
             offered_at_ms: 0,
             ringing_at_ms: None,
             answered_at_ms: None,

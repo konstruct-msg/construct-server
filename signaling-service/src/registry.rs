@@ -26,6 +26,8 @@ const MAX_SIGNAL_DESTINATIONS: usize = 5;
 /// Redis key for the set of all active call IDs.
 /// Used by cleanup_loop for O(1) lookup instead of SCAN call:*.
 const ACTIVE_CALLS_SET_KEY: &str = "signaling:active_calls";
+/// Redis lifetime of a call's keys past its last refresh: retention, not call length.
+const CALL_TTL_SECS: i64 = 300;
 
 /// Lua script for atomic SCAN+GET to avoid N+1 queries.
 /// KEYS[1] = pattern for SCAN
@@ -56,7 +58,6 @@ pub(crate) struct CallState {
     pub(crate) callee_user_id: String,
     pub(crate) caller_device_id: String,
     pub(crate) accepted_callee_device_id: Option<String>,
-    pub(crate) created_at: u64,
     pub(crate) offered_at_ms: i64,
     pub(crate) ringing_at_ms: Option<i64>,
     pub(crate) answered_at_ms: Option<i64>,
@@ -395,7 +396,6 @@ impl CallRegistry {
             callee_user_id: callee_user_id.to_string(),
             caller_device_id: caller_device_id.to_string(),
             accepted_callee_device_id: None,
-            created_at: now,
             offered_at_ms,
             ringing_at_ms: None,
             answered_at_ms: None,
@@ -449,15 +449,23 @@ impl CallRegistry {
                 .arg(now.to_string())
                 .cmd("EXPIRE")
                 .arg(&call_key)
-                .arg(300)
-                .set_ex(format!("user:{}:active_call", caller_user_id), call_id, 300)
-                .set_ex(format!("user:{}:active_call", callee_user_id), call_id, 300)
+                .arg(CALL_TTL_SECS)
+                .set_ex(
+                    format!("user:{}:active_call", caller_user_id),
+                    call_id,
+                    CALL_TTL_SECS as u64,
+                )
+                .set_ex(
+                    format!("user:{}:active_call", callee_user_id),
+                    call_id,
+                    CALL_TTL_SECS as u64,
+                )
                 .cmd("SADD")
                 .arg(ACTIVE_CALLS_SET_KEY)
                 .arg(call_id)
                 .cmd("EXPIRE")
                 .arg(ACTIVE_CALLS_SET_KEY)
-                .arg(300)
+                .arg(CALL_TTL_SECS)
                 .query_async(&mut conn)
                 .await;
         }
@@ -490,7 +498,7 @@ impl CallRegistry {
                 .arg(avatar_b64)
                 .cmd("EXPIRE")
                 .arg(&key)
-                .arg(300)
+                .arg(CALL_TTL_SECS)
                 .query_async(&mut conn)
                 .await;
         }
@@ -589,7 +597,6 @@ impl CallRegistry {
             callee_user_id,
             caller_device_id,
             accepted_callee_device_id,
-            created_at,
             offered_at_ms,
             ringing_at_ms,
             answered_at_ms,
@@ -700,9 +707,18 @@ impl CallRegistry {
                 .arg(&key)
                 .arg(field)
                 .arg(now.to_string())
-                .cmd("EXPIRE")
-                .arg(&key)
-                .arg(300)
+                .expire(&key, CALL_TTL_SECS)
+                // Every key that leads to the call, not the hash alone. EXPIRE, never SET: a ping
+                // racing the end of the call must not make its users busy again.
+                .expire(
+                    format!("user:{}:active_call", state.caller_user_id),
+                    CALL_TTL_SECS,
+                )
+                .expire(
+                    format!("user:{}:active_call", state.callee_user_id),
+                    CALL_TTL_SECS,
+                )
+                .expire(ACTIVE_CALLS_SET_KEY, CALL_TTL_SECS)
                 .query_async(&mut conn)
                 .await;
         }
@@ -731,7 +747,7 @@ impl CallRegistry {
                 .arg(now_ms.to_string())
                 .cmd("EXPIRE")
                 .arg(&key)
-                .arg(300)
+                .arg(CALL_TTL_SECS)
                 .query_async(&mut conn)
                 .await;
         }
@@ -776,7 +792,7 @@ impl CallRegistry {
             let _: Result<(), _> = pipe
                 .cmd("EXPIRE")
                 .arg(&key)
-                .arg(300)
+                .arg(CALL_TTL_SECS)
                 .query_async(&mut conn)
                 .await;
         }
@@ -871,12 +887,8 @@ impl CallRegistry {
                 continue;
             };
 
-            if now_s.saturating_sub(state.created_at) > 300 {
-                actions.push(CleanupAction::RemoveCall {
-                    call_id: state.call_id.clone(),
-                });
-                continue;
-            }
+            // A call ends by silence or by a side's word, never by its age: both sides ping every
+            // 10 s, and the client's own call machine ends a ring nobody answers.
 
             // 45s gives enough headroom for the slow paths in production:
             //   E2EE-direct accept (offer arrives via encrypted messaging, callee
@@ -1537,5 +1549,189 @@ mod tests {
         let devices = registry.list_online_devices(&t.id("user-2")).await;
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].0, t.id("device-3"));
+    }
+
+    /// A registry in a Redis database of its own: `cleanup_pass` walks every active call there.
+    async fn cleanup_registry() -> (CallRegistry, Names) {
+        let url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let (scheme, rest) = url.split_once("://").expect("a Redis URL");
+        let host = rest.split('/').next().expect("a host");
+        let registry = CallRegistry::new(&format!("{scheme}://{host}/8"), "cleanup-test".into())
+            .await
+            .expect("failed to create registry");
+        (registry, Names(uuid::Uuid::new_v4().simple().to_string()))
+    }
+
+    struct LiveCall {
+        id: String,
+        caller: broadcast::Receiver<ForwardedSignal>,
+        callee: broadcast::Receiver<ForwardedSignal>,
+        created_at: u64,
+    }
+
+    impl LiveCall {
+        async fn start(r: &CallRegistry, t: &Names, answered: bool) -> Self {
+            let caller = r.register_user(&t.id("caller"), &t.id("cd")).await;
+            let callee = r.register_user(&t.id("callee"), &t.id("ed")).await;
+            let id = t.id("call");
+            r.create_call(
+                &id,
+                &t.id("caller"),
+                &t.id("cd"),
+                &t.id("callee"),
+                unix_millis(),
+            )
+            .await;
+            r.note_ringing(&id).await;
+            if answered {
+                r.note_connected(&id, Some(&t.id("ed"))).await;
+            }
+            let created_at = unix_seconds();
+            Self {
+                id,
+                caller: caller.subscribe(),
+                callee: callee.subscribe(),
+                created_at,
+            }
+        }
+
+        /// Both sides last pinged `age` seconds into the call.
+        async fn pinged_at(&self, r: &CallRegistry, age: u64) {
+            let mut calls = r.calls.write().await;
+            let state = calls.get_mut(&self.id).expect("the call");
+            state.caller_last_keepalive_at = self.created_at + age;
+            state.callee_last_keepalive_at = self.created_at + age;
+        }
+
+        async fn pass_at(&self, r: &CallRegistry, age: u64) {
+            let now_s = self.created_at + age;
+            r.cleanup_pass(now_s, now_s as i64 * 1000).await;
+        }
+    }
+
+    async fn ttl(r: &CallRegistry, key: &str) -> i64 {
+        let mut conn = r.redis.clone();
+        redis::cmd("TTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .expect("TTL")
+    }
+
+    /// Age is not a reason to drop a call: both sides ping, so it stays, answered or ringing.
+    /// Until 2026-11 the pass removed it at 301 s and told neither side. Mutation: put the age
+    /// rule back.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn a_call_both_sides_keep_alive_outlives_five_minutes() {
+        for answered in [true, false] {
+            let (r, t) = cleanup_registry().await;
+            let mut call = LiveCall::start(&r, &t, answered).await;
+            for age in [301, 3600] {
+                call.pinged_at(&r, age - 10).await;
+                call.pass_at(&r, age).await;
+                assert!(
+                    r.load_call_state(&call.id).await.is_some(),
+                    "answered={answered} age={age}"
+                );
+                assert!(
+                    call.caller.try_recv().is_err(),
+                    "nothing sent to the caller"
+                );
+                assert!(
+                    call.callee.try_recv().is_err(),
+                    "nothing sent to the callee"
+                );
+            }
+
+            // One side's silence still ends it, whatever its age, and both sides hear it.
+            {
+                let mut calls = r.calls.write().await;
+                let state = calls.get_mut(&call.id).expect("the call");
+                if answered {
+                    state.callee_last_keepalive_at = call.created_at + 3650;
+                } else {
+                    state.caller_last_keepalive_at = call.created_at + 3650;
+                }
+            }
+            call.pass_at(&r, 3600 - 10 + 61).await;
+            for side in [&mut call.caller, &mut call.callee] {
+                assert!(
+                    matches!(
+                        side.try_recv(),
+                        Ok(ForwardedSignal::Signal(WebRtcSignal {
+                            signal: Some(web_rtc_signal::Signal::Hangup(_)),
+                            ..
+                        }))
+                    ),
+                    "answered={answered}"
+                );
+            }
+            assert!(r.load_call_state(&call.id).await.is_none());
+        }
+    }
+
+    /// Every key that leads to the call lives as long as the call is kept alive. Only the hash was
+    /// refreshed: after 300 s the user lookup was gone, and the call left the active set the
+    /// cleanup reads unless an unrelated new call refreshed it. Mutations: drop each EXPIRE.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn a_keepalive_keeps_every_key_of_the_call() {
+        for side in ["caller", "callee"] {
+            let (r, t) = cleanup_registry().await;
+            let call = LiveCall::start(&r, &t, true).await;
+            let keys = [
+                CallRegistry::call_key(&call.id),
+                format!("user:{}:active_call", t.id("caller")),
+                format!("user:{}:active_call", t.id("callee")),
+                ACTIVE_CALLS_SET_KEY.to_string(),
+            ];
+            let mut conn = r.redis.clone();
+            for key in &keys {
+                let _: () = redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(20)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("EXPIRE");
+            }
+            r.note_keepalive(&t.id(side)).await;
+            for key in &keys {
+                assert!(ttl(&r, key).await > 200, "{side}: {key}");
+            }
+            r.remove_call(&call.id).await;
+        }
+    }
+
+    /// A ping that races the end of the call must not make the user busy again: it refreshes a
+    /// key, it never creates one. Mutation: SETEX instead of EXPIRE.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn a_keepalive_does_not_bring_back_an_ended_calls_lookup() {
+        let (r, t) = cleanup_registry().await;
+        let call = LiveCall::start(&r, &t, true).await;
+        let mut conn = r.redis.clone();
+        let users = [
+            format!("user:{}:active_call", t.id("caller")),
+            format!("user:{}:active_call", t.id("callee")),
+        ];
+        let _: () = redis::cmd("DEL")
+            .arg(&users)
+            .query_async(&mut conn)
+            .await
+            .expect("DEL");
+        let _: () = redis::cmd("SREM")
+            .arg(ACTIVE_CALLS_SET_KEY)
+            .arg(&call.id)
+            .query_async(&mut conn)
+            .await
+            .expect("SREM");
+        r.note_keepalive(&t.id("caller")).await;
+        for key in &users {
+            assert_eq!(ttl(&r, key).await, -2, "{key} does not exist");
+        }
+        assert!(!r.list_active_call_ids().await.contains(&call.id));
+        r.remove_call(&call.id).await;
     }
 }
