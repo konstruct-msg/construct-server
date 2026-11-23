@@ -47,3 +47,6 @@ construct-veil = { git = "https://github.com/konstruct-msg/construct-veil.git", 
 
 [dev-dependencies]
 http-body-util = "0.1"
+argon2 = "0.5"
+construct-pow = { path = "../crates/construct-pow" }
+sha2 = { workspace = true }

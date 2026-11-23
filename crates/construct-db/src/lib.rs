@@ -548,6 +548,12 @@ pub struct Device {
     pub sealed_metadata: Option<Vec<u8>>,
 }
 
+/// `CreateDeviceData::crypto_suites` for one suite. The name comes from the client, so it is
+/// encoded and never spliced: a quote in it used to close the string and add suites of its own.
+pub fn crypto_suites_json(suite: &str) -> String {
+    serde_json::json!([suite]).to_string()
+}
+
 /// Data for creating a new device
 #[derive(Debug, Clone)]
 pub struct CreateDeviceData {
@@ -642,7 +648,7 @@ where
             crypto_suites = %data.crypto_suites,
             "Failed to create device in database"
         );
-        anyhow::anyhow!("Failed to create device: {}", e)
+        anyhow::Error::new(e).context("Failed to create device")
     })?;
 
     Ok(device)
@@ -777,7 +783,7 @@ pub async fn create_user_with_first_device(
             error = %e,
             "Failed to create user in database"
         );
-        anyhow::anyhow!("Failed to create user: {}", e)
+        anyhow::Error::new(e).context("Failed to create user")
     })?;
 
     // 2. Create device linked to user using shared implementation

@@ -191,9 +191,31 @@ pub struct RegisterDeviceResponse {
     pub expires_in: u64,
 }
 
+/// Longest accepted suite name. The one clients send is 18 bytes.
+const MAX_CRYPTO_SUITE_LEN: usize = 64;
+
 // ============================================================================
 // Registration Endpoint
 // ============================================================================
+
+/// What the caller is told when a unique index refused the new account, if one did.
+fn registration_conflict(e: &anyhow::Error) -> Option<&'static str> {
+    // `insert_device_impl` names this one itself.
+    if e.to_string().contains("IDENTITY_KEY_CONFLICT") {
+        return Some("Identity key already registered by another device");
+    }
+    let sqlx::Error::Database(db_err) = e.downcast_ref::<sqlx::Error>()? else {
+        return None;
+    };
+    if !db_err.is_unique_violation() {
+        return None;
+    }
+    match db_err.constraint() {
+        Some("idx_users_username_hash") => Some("Username is already taken"),
+        Some("devices_pkey") => Some("Device already exists"),
+        _ => None,
+    }
+}
 
 /// Core registration logic with binary key inputs.
 ///
@@ -218,9 +240,9 @@ pub async fn register_device_core(
 
     tracing::info!(
         device_id = %device_id,
-        username = ?username,
+        has_username = username.is_some(),
         ip_hash = %client_ip,
-        "Device registration attempt (username will be normalized to lowercase)"
+        "Device registration attempt"
     );
 
     // 0. Check rate limiting + adaptive PoW difficulty
@@ -308,6 +330,25 @@ pub async fn register_device_core(
     let signed_prekey_public = keys.signed_prekey_public;
     let signed_prekey_signature = keys.signed_prekey_signature;
 
+    // Both are X25519 keys peers will be handed; without this a caller stores any size.
+    if identity_public.len() != 32 {
+        return Err(AppError::Validation(
+            "identity_public must be exactly 32 bytes (X25519)".to_string(),
+        ));
+    }
+
+    if signed_prekey_public.len() != 32 {
+        return Err(AppError::Validation(
+            "signed_prekey_public must be exactly 32 bytes (X25519)".to_string(),
+        ));
+    }
+
+    if keys.crypto_suite.len() > MAX_CRYPTO_SUITE_LEN {
+        return Err(AppError::Validation(format!(
+            "crypto_suite must be at most {MAX_CRYPTO_SUITE_LEN} bytes"
+        )));
+    }
+
     if signed_prekey_signature.len() != 64 {
         return Err(AppError::Validation(
             "signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)".to_string(),
@@ -381,12 +422,6 @@ pub async fn register_device_core(
         return Err(AppError::Validation("PoW challenge expired".to_string()));
     }
 
-    if pow_challenge.used {
-        return Err(AppError::Validation(
-            "PoW challenge already used".to_string(),
-        ));
-    }
-
     if !construct_pow::verify_pow_solution(
         &pow_solution.challenge,
         pow_solution.nonce,
@@ -402,18 +437,21 @@ pub async fn register_device_core(
         return Err(AppError::Validation("Invalid PoW solution".to_string()));
     }
 
+    // The solution was read above and is spent here, by whoever Redis hands the record to.
     app_context
         .queue
         .lock()
         .await
-        .mark_pow_challenge_used(&pow_solution.challenge)
+        .consume_pow_challenge(&pow_solution.challenge)
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to mark challenge as used: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to consume PoW challenge: {}", e)))?
+        .filter(|record| !record.used)
+        .ok_or_else(|| AppError::Validation("PoW challenge already used".to_string()))?;
 
     // 7. Create user + device atomically
     let server_hostname = app_context.config.instance_domain.clone();
 
-    let crypto_suites = format!(r#"["{}"]"#, keys.crypto_suite);
+    let crypto_suites = db::crypto_suites_json(&keys.crypto_suite);
 
     let device_data = CreateDeviceData {
         device_id: device_id.clone(),
@@ -452,17 +490,11 @@ pub async fn register_device_core(
     )
     .await
     .map_err(|e| {
-        if let Some(sqlx::Error::Database(db_err)) = e.downcast_ref::<sqlx::Error>()
-            && db_err.code().as_deref() == Some("23505")
-            && db_err
-                .constraint()
-                .is_some_and(|c| c.contains("identity_public"))
-        {
-            tracing::warn!(
-                device_id = %device_id,
-                "Registration failed: identity key already registered"
-            );
-            return AppError::Conflict("Identity key already registered by another device".into());
+        // The checks above read; the unique indexes decide. Two registrations of one name or
+        // one device that pass the reads together meet here.
+        if let Some(conflict) = registration_conflict(&e) {
+            tracing::warn!(device_id = %device_id, conflict, "Registration lost a race");
+            return AppError::Conflict(conflict.to_string());
         }
         tracing::error!(error = %e, "Failed to create user with device");
         AppError::Unknown(e)
@@ -589,8 +621,7 @@ pub async fn authenticate_device_core(
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
     // 1. Validate timestamp (±5 minutes window)
     let now = chrono::Utc::now().timestamp();
-    let time_diff = (now - timestamp).abs();
-    if time_diff > 300 {
+    if now.abs_diff(timestamp) > 300 {
         return Err(AppError::validation(
             "Timestamp expired (must be within ±5 minutes)",
         ));

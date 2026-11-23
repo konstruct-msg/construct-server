@@ -12,6 +12,7 @@ use tonic::Code;
 use tower::Layer;
 use uuid::Uuid;
 
+mod device_auth;
 #[path = "../../shared/test_support/grpc.rs"]
 mod grpc_support;
 

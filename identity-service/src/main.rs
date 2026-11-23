@@ -845,7 +845,7 @@ impl AuthService for IdentityGrpcService {
                 identity_public: public_keys.identity_public,
                 signed_prekey_public,
                 signed_prekey_signature,
-                crypto_suites: format!(r#"["{}"]"#, public_keys.crypto_suite),
+                crypto_suites: construct_db::crypto_suites_json(&public_keys.crypto_suite),
                 supports_pq_ratchet: false,
             },
             Some(user_id),
@@ -1156,7 +1156,7 @@ impl AuthService for IdentityGrpcService {
             identity_public,
             signed_prekey_public,
             signed_prekey_signature,
-            crypto_suites: format!("[\"{crypto_suite}\"]"),
+            crypto_suites: construct_db::crypto_suites_json(&crypto_suite),
             supports_pq_ratchet: false,
         };
 
@@ -1947,7 +1947,7 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
             identity_public: public_keys.identity_public,
             signed_prekey_public,
             signed_prekey_signature,
-            crypto_suites: format!("[\"{}\"]", public_keys.crypto_suite),
+            crypto_suites: construct_db::crypto_suites_json(&public_keys.crypto_suite),
             supports_pq_ratchet: false,
         };
 
