@@ -804,7 +804,7 @@ mod stickers_db {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Postgres
+    #[ignore = "requires Postgres"]
     async fn manifest_and_blobs_round_trip_byte_for_byte() {
         let (pool, _serial) = pool().await;
         let (m, bytes, blobs) = pack("Round trip", &[1, 2, 3]);
@@ -833,7 +833,7 @@ mod stickers_db {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Postgres
+    #[ignore = "requires Postgres"]
     async fn republish_is_idempotent_and_replaces_only_manifest_bytes() {
         let (pool, _serial) = pool().await;
         let (m, bytes, blobs) = pack("Idempotent", &[4, 5]);
@@ -865,7 +865,7 @@ mod stickers_db {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Postgres
+    #[ignore = "requires Postgres"]
     async fn catalog_lists_only_listed_and_pages_by_cursor() {
         let (pool, _serial) = pool().await;
         let mut ids = Vec::new();
@@ -920,7 +920,7 @@ mod stickers_db {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Postgres
+    #[ignore = "requires Postgres"]
     async fn schema_refuses_what_the_rules_refuse() {
         let (pool, _serial) = pool().await;
         // A 31-byte hash and an oversized blob both die at the CHECK, whatever the code did.

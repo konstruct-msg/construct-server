@@ -1583,7 +1583,7 @@ mod deletion_tests {
     /// with someone else stays. Mutation: drop the `contact_links` DELETE, or its
     /// `OR peer_hmac` half — the first or second assertion reddens.
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn deletion_removes_contact_links_both_ways_and_only_those() {
         let pool = pool().await;
         let (gone, friend, other) = (user(&pool).await, user(&pool).await, user(&pool).await);
@@ -1659,7 +1659,7 @@ mod deletion_tests {
     /// two other accounts stays. Mutation: drop the `contact_requests` DELETE, or either
     /// half of its `OR` — the first or second assertion reddens.
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn deletion_removes_contact_requests_both_ways_and_only_those() {
         let pool = pool().await;
         let (gone, a, b) = (user(&pool).await, user(&pool).await, user(&pool).await);
@@ -1693,7 +1693,7 @@ mod deletion_tests {
     /// the sender polls. Mutation: drop the scrub columns from the UPDATE (second block),
     /// the link inserts (first block), or make the UPDATE not match (the error assertion).
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn accept_scrubs_the_row_and_links_both_ways() {
         let pool = pool().await;
         let (sender, recipient) = (user(&pool).await, user(&pool).await);
@@ -1753,7 +1753,7 @@ mod deletion_tests {
     /// Decline deletes the row; only the recipient can. Mutation: turn the DELETE back
     /// into a status UPDATE — the row survives and `request_exists` stays true.
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn decline_deletes_the_row() {
         let pool = pool().await;
         let (sender, recipient) = (user(&pool).await, user(&pool).await);
@@ -1789,7 +1789,7 @@ mod deletion_tests {
     /// one, not someone else's accepted one. Mutation: drop `status = 'accepted'` (the pending
     /// row goes) or `from_hmac = $1` (the other sender's row goes).
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn acknowledgement_deletes_only_own_accepted_requests() {
         let pool = pool().await;
         let (a, b, c, other, d) = (
@@ -1845,7 +1845,7 @@ mod deletion_tests {
     /// it, and nothing younger. Mutation: remove the DELETE, or compare `created_at` only
     /// (the old accepted row, created long ago but resolved recently, would then go).
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn sweep_deletes_only_stale_requests() {
         let pool = pool().await;
         let (a, b, c, d, e) = (
@@ -1974,7 +1974,7 @@ mod device_certificate_tests {
     /// `user_id` subquery, the `<> $1`, or the `is_active` on either side — one assertion
     /// reddens each.
     #[tokio::test]
-    #[ignore] // Requires Postgres with migrations
+    #[ignore = "requires Postgres"]
     async fn a_certificate_is_stored_only_within_one_account() {
         let pool = pool().await;
         let (owner, stranger) = (user(&pool).await, user(&pool).await);

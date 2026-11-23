@@ -2,6 +2,7 @@ mod admin;
 mod audit_239;
 mod channel_admin;
 mod channel_lifecycle;
+mod cleanup;
 mod comment_groups;
 mod db_contracts;
 #[cfg(all(unix, feature = "allocation-profile"))]

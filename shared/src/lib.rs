@@ -87,11 +87,25 @@ mod build_info_tests {
         assert!(full.contains('+'), "expected version+commit, got {full}");
     }
 
-    /// Printed, not asserted: in a git checkout this must show a real SHA. If it
-    /// says "unknown" here, build.rs stopped finding git and every deploy would
-    /// silently lose its identity.
+    /// Where git can name the checkout, the binary must too: "unknown" here means build.rs
+    /// stopped finding git, and every deploy would silently lose its identity. The commit is
+    /// not compared with HEAD, which moves without a rebuild.
     #[test]
-    fn print_build_identity() {
-        println!("build identity: {}", build_info::full());
+    fn a_git_checkout_is_named_by_its_commit() {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output();
+        // No git, or a source tarball: "unknown" is the honest answer there.
+        if !head.is_ok_and(|o| o.status.success()) {
+            return;
+        }
+        let sha = build_info::GIT_SHA;
+        assert!(
+            sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "expected a commit, got {sha:?}"
+        );
+        assert!(build_info::full().contains(build_info::GIT_SHA_SHORT));
+        assert_eq!(build_info::GIT_SHA_SHORT, &sha[..12]);
     }
 }

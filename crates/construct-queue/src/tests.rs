@@ -46,7 +46,7 @@ pub(crate) fn get_test_config() -> Config {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn test_delivery_track_user_online() {
     let mut client = get_test_redis_client().await;
     let config = get_test_config();
@@ -146,7 +146,7 @@ async fn test_session_revoke_all() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn test_rate_limit_check() {
     let mut client = get_test_redis_client().await;
 
@@ -180,7 +180,7 @@ async fn test_rate_limit_check() {
 }
 
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn test_rate_limit_failed_login() {
     let mut client = get_test_redis_client().await;
 
@@ -219,7 +219,7 @@ async fn test_rate_limit_failed_login() {
 }
 
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn test_user_blocking() {
     let mut client = get_test_redis_client().await;
 
@@ -451,7 +451,7 @@ async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
 /// and deleting them is precisely what the server used to do. So the stream is
 /// measured afterwards. Reads are side-effect free or this test is red.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_offline_backlog_survives_a_read_from_a_lower_cursor() {
     let user = "test_mailbox_incident_recipient";
     let device = "test_mailbox_incident_device";
@@ -970,7 +970,7 @@ async fn mailbox_read_keeps_the_healthy_source_when_its_peer_is_missing_or_wrong
 /// Every device gets its own copy, and neither read empties the other's box — the
 /// shared-mailbox loss that the per-device streams exist to remove.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_two_devices_each_receive_every_message() {
     let user = "test_mailbox_two_devices_user";
     let (d1, d2) = ("test_mbx_dev_a", "test_mbx_dev_b");
@@ -1016,7 +1016,7 @@ async fn mailbox_two_devices_each_receive_every_message() {
 /// reaches only the user stream; `user_only` is what makes that visible, and it is the
 /// number that must be zero before `MSG_MAILBOX_USER_WRITE=0`.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
     let user = "test_mailbox_gate_user";
     let device = "test_mbx_gate_dev";
@@ -1050,7 +1050,7 @@ async fn mailbox_gate_counts_a_message_the_device_stream_never_got() {
 /// to go must fail loudly. Returning `Ok` here is the silent loss the whole decision
 /// exists to remove, arriving from the write side instead of the read side.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_cutover_refuses_a_message_with_nowhere_to_land() {
     let user = "test_mailbox_cutover_user";
     let mut queue = mailbox_queue(false).await;
@@ -1074,7 +1074,7 @@ async fn mailbox_cutover_refuses_a_message_with_nowhere_to_land() {
 
 /// With the flag off the device streams are the whole mailbox, and they must still work.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_cutover_delivers_through_device_streams_only() {
     let user = "test_mailbox_cutover_ok_user";
     let device = "test_mbx_cutover_dev";
@@ -1108,7 +1108,7 @@ async fn mailbox_cutover_delivers_through_device_streams_only() {
 /// Sender-supplied `max_queue_len` (historically TrustLevel::New = 100) must not
 /// trim the recipient's mailbox. Redis MAXLEN is whole-stream retention.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_xadd_ignores_sender_envelope_maxlen() {
     let user = "test_mailbox_maxlen_user";
     let device = "test_mailbox_maxlen_dev";
@@ -1155,7 +1155,7 @@ async fn mailbox_xadd_ignores_sender_envelope_maxlen() {
 /// user stream, and to count as `user_only` on the sibling's read. Now the sibling's
 /// read neither delivers it nor counts it; the named device's read is unchanged.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
     let user = "test_mailbox_sibling_user";
     let (d1, d2) = ("test_mbx_sib_a", "test_mbx_sib_b");
@@ -1205,7 +1205,7 @@ async fn mailbox_sibling_read_skips_an_envelope_named_to_the_other_device() {
 /// dispatch that found no devices) behind such a backlog was never delivered. Paged as
 /// `GetPendingMessages` pages — one cursor for both streams.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_a_user_only_entry_behind_a_sibling_backlog_reaches_a_paged_read() {
     let user = "test_mailbox_horizon_user";
     let (a, b, c) = ("test_mbx_hz_a", "test_mbx_hz_b", "test_mbx_hz_c");
@@ -1277,7 +1277,7 @@ async fn mailbox_a_user_only_entry_behind_a_sibling_backlog_reaches_a_paged_read
 /// device stream — and no one else's. Mutation: drop the SCAN for device streams and
 /// the device mailbox survives; widen the pattern and the neighbour's goes too.
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn mailbox_delete_removes_every_stream_of_the_account_and_no_other() {
     let (gone, neighbour) = ("test_mailbox_delete_user", "test_mailbox_delete_user2");
     let (d1, d2) = ("test_mbx_del_a", "test_mbx_del_b");
@@ -1322,7 +1322,7 @@ async fn mailbox_delete_removes_every_stream_of_the_account_and_no_other() {
 /// are not; a stream that never lost an entry is not, however old the cursor. The sweep records
 /// what it trims (XTRIM itself does not move `max-deleted-entry-id`).
 #[tokio::test]
-#[ignore] // Requires Redis 7 (XINFO STREAM, XSETID MAXDELETEDID)
+#[ignore = "requires Redis 7 (XINFO STREAM, XSETID MAXDELETEDID)"]
 async fn mailbox_gap_names_what_the_age_sweep_trimmed_after_the_cursor() {
     use std::time::{SystemTime, UNIX_EPOCH};
     let user = "test_mailbox_gap_user";
@@ -1399,7 +1399,7 @@ async fn mailbox_gap_names_what_the_age_sweep_trimmed_after_the_cursor() {
 }
 
 #[tokio::test]
-#[ignore] // Requires Redis
+#[ignore = "requires Redis"]
 async fn push_outstanding_marks_once_until_cleared() {
     let config = get_test_config();
     let mut queue = MessageQueue::new(&config).await.expect("queue");

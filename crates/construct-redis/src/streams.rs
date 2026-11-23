@@ -261,6 +261,7 @@ impl RedisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{client, key};
 
     #[test]
     fn grouped_binary_reply_retains_sources_and_moves_payload_buffers() {
@@ -309,10 +310,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn grouped_binary_read_keeps_independent_offsets_and_per_source_count() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
-        let keys: Vec<_> = (0..3)
-            .map(|i| format!("test_binary_grouped_{}:{i}", std::process::id()))
-            .collect();
+        let mut client = client().await;
+        let keys: Vec<_> = (0..3).map(|i| key(&format!("grouped{i}"))).collect();
         client.del(&keys).await?;
         for key in &keys[..2] {
             for id in ["100-0", "200-0", "300-0"] {
@@ -363,11 +362,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_stream_operations() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let mut client = client().await;
 
-        let stream_key = "test_stream";
+        let stream_key = &key("test_stream")[..];
 
         // XADD
         let id1 = client
@@ -400,13 +399,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_binary_stream_operations() -> Result<()> {
         use redis::AsyncCommands;
 
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
+        let mut client = client().await;
 
-        let stream_key = "test_binary_stream";
+        let stream_key = &key("test_binary_stream")[..];
 
         // Add binary data using low-level xadd (need to use connection_mut for binary)
         let binary_data = vec![0x01, 0x02, 0x03, 0xDE, 0xAD, 0xBE, 0xEF];
@@ -431,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_binary_messagepack() -> Result<()> {
         use redis::AsyncCommands;
         use rmp_serde;
@@ -444,8 +443,8 @@ mod tests {
             timestamp: u64,
         }
 
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
-        let stream_key = "test_msgpack_stream";
+        let mut client = client().await;
+        let stream_key = &key("test_msgpack_stream")[..];
 
         // Serialize with MessagePack
         let msg = TestMessage {
@@ -483,10 +482,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Redis
+    #[ignore = "requires Redis"]
     async fn test_stream_blocking_read() -> Result<()> {
-        let mut client = RedisClient::connect("redis://localhost:6379").await?;
-        let stream_key = "test_blocking_stream";
+        let mut client = client().await;
+        let stream_key = &key("test_blocking_stream")[..];
 
         // Add entry
         client.xadd(stream_key, "*", &[("field", "value")]).await?;

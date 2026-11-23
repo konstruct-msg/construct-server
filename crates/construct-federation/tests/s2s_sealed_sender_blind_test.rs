@@ -14,15 +14,15 @@
 // in plain `cargo test` with no Postgres/Redis/network:
 //
 //   * the S2S *wire* envelope for a sealed message is sender-blind
-//     (no `from` / `to` — contrast a regular federated message which carries them);
+//     (no `from` / `to`);
 //   * origin signs, destination verifies with the origin's published key
 //     (exactly what `messaging-service::federation::handle_inbound_sealed` does
 //      via PublicKeyCache -> ServerSigner::verify_signature);
 //   * payload-hash integrity: any tamper of the opaque blob is detectable;
-//   * a spoofed origin (wrong key) is rejected;
-//   * the sealed_inner blob is forwarded byte-for-byte (server never transforms it).
+//   * a spoofed origin (wrong key) is rejected.
 //
-// Mirrors the real receiver: messaging-service/src/federation.rs.
+// The receiver itself — bytes in the mailbox, claims, refusals — is driven over HTTP by
+// messaging-service/src/federation/invariant_tests.rs.
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use construct_federation::{FederatedEnvelope, ServerSigner};
@@ -80,24 +80,6 @@ fn sealed_s2s_envelope_is_sender_blind_on_the_wire() {
 }
 
 #[test]
-fn regular_federated_message_does_carry_addresses() {
-    // Contrast case: a NON-sealed federated message legitimately carries from/to.
-    // This guards against a regression where the sealed path accidentally starts
-    // populating them.
-    let payload = BASE64.encode(b"double-ratchet-ciphertext");
-    let env = FederatedEnvelope {
-        message_id: "msg-regular-001".to_string(),
-        from: format!("alice@{NODE_A}"),
-        to: format!("bob@{NODE_B}"),
-        origin_server: NODE_A.to_string(),
-        destination_server: NODE_B.to_string(),
-        timestamp: 1_720_000_000,
-        payload_hash: FederatedEnvelope::hash_payload(&payload),
-    };
-    assert!(!env.from.is_empty() && !env.to.is_empty());
-}
-
-#[test]
 fn origin_signs_destination_verifies_with_published_key() {
     let signer_a =
         ServerSigner::from_seed_base64(SEED_A, NODE_A.to_string()).expect("node A signer");
@@ -110,10 +92,9 @@ fn origin_signs_destination_verifies_with_published_key() {
     // Node A signs (outbound: FederationClient::send_sealed_message).
     let signature = signer_a.sign_message(&env);
 
-    // Node B verifies (inbound: handle_inbound_sealed via PublicKeyCache). B must
-    // reconstruct the SAME envelope from the request fields — this is exactly what
-    // the receiver does; if the reconstruction drifts, verification breaks.
-    let verified_on_b = ServerSigner::verify_signature(&a_published_pubkey, &env, &signature);
+    // Node B rebuilds the envelope from what arrived and verifies it.
+    let on_b = sealed_envelope("msg-a5-002", &sealed_inner_b64, 1_720_000_100);
+    let verified_on_b = ServerSigner::verify_signature(&a_published_pubkey, &on_b, &signature);
     assert!(
         verified_on_b.is_ok(),
         "destination failed to verify a valid origin signature"
@@ -153,20 +134,5 @@ fn spoofed_origin_key_is_rejected() {
     assert!(
         wrong.is_err(),
         "signature verified under the wrong origin key"
-    );
-}
-
-#[test]
-fn sealed_inner_is_forwarded_byte_for_byte() {
-    // The transit/destination server treats sealed_inner as opaque and must not
-    // transform it. Model the wire round-trip: base64 on send, base64-decode on
-    // receive -> identical bytes reach bob's device stream.
-    let sealed_inner: &[u8] = b"\x00\x01\x02 binary sealed inner \xff\xfe";
-    let on_the_wire = BASE64.encode(sealed_inner);
-    let at_destination = BASE64.decode(&on_the_wire).expect("valid base64");
-    assert_eq!(
-        sealed_inner,
-        at_destination.as_slice(),
-        "sealed_inner must survive S2S transit unmodified"
     );
 }
