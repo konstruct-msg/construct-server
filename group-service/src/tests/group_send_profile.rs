@@ -14,9 +14,9 @@ use tonic::{Request, metadata::MetadataMap};
 use uuid::Uuid;
 
 #[path = "../../../shared/test_support/allocations.rs"]
-mod allocations;
+pub(super) mod allocations;
 
-fn process_cpu_seconds() -> Result<f64> {
+pub(super) fn process_cpu_seconds() -> Result<f64> {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
