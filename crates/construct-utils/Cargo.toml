@@ -10,9 +10,12 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 sha2 = "0.11"
-socket2 = { version = "0.5", features = ["all"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14.5"
+
+# Only the MPTCP listener in `net.rs` uses it, and that code is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

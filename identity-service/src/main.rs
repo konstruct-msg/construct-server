@@ -3210,9 +3210,7 @@ async fn well_known_construct_server(
 ) -> impl IntoResponse {
     use axum::http::header;
 
-    let app_context = Arc::new(context.to_app_context());
-
-    let public_key = app_context
+    let public_key = context
         .server_signer
         .as_ref()
         .map(|signer| signer.public_key_base64());
@@ -3229,18 +3227,14 @@ async fn well_known_construct_server(
         .as_ref()
         .map(|bytes| b64::STANDARD.encode(bytes));
 
-    let paseto_public_key = app_context
-        .config
-        .paseto_public_key
-        .as_ref()
-        .and_then(|pem| {
-            let pem = pem.replace("\\n", "\n");
-            ed25519_compact::PublicKey::from_pem(pem.as_str())
-                .ok()
-                .map(|pk| b64::URL_SAFE_NO_PAD.encode(pk.as_ref()))
-        });
+    let paseto_public_key = context.config.paseto_public_key.as_ref().and_then(|pem| {
+        let pem = pem.replace("\\n", "\n");
+        ed25519_compact::PublicKey::from_pem(pem.as_str())
+            .ok()
+            .map(|pk| b64::URL_SAFE_NO_PAD.encode(pk.as_ref()))
+    });
 
-    let domain = &app_context.config.instance_domain;
+    let domain = &context.config.instance_domain;
     let tls_enabled = public_key.is_some();
 
     let discovery_info = json!({
@@ -3261,7 +3255,7 @@ async fn well_known_construct_server(
             "notification.NotificationService", "invite.InviteService", "media.MediaService"
         ],
         "federation": {
-            "enabled": app_context.config.federation_enabled,
+            "enabled": context.config.federation_enabled,
             "protocol_version": "1.0",
             "public_key": public_key,
             "s2s_endpoint": format!("{}:443", domain),
@@ -3277,7 +3271,7 @@ async fn well_known_construct_server(
         "limits": {
             "max_message_size_bytes": 100_000,
             "max_media_size_bytes": 100_000_000,
-            "rate_limit_messages_per_hour": app_context.config.security.max_messages_per_hour,
+            "rate_limit_messages_per_hour": context.config.security.max_messages_per_hour,
             "rate_limit_pow_per_hour": 10
         }
     });

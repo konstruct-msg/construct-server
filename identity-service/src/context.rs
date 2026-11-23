@@ -1,11 +1,7 @@
 use construct_config::Config;
 use construct_server_shared::clients::notification::NotificationClient;
 use construct_server_shared::{
-    apns::{ApnsClient, DeviceTokenEncryption},
-    auth::AuthManager,
-    context::AppContext,
-    db::DbPool,
-    federation::signing::ServerSigner,
+    auth::AuthManager, context::AppContext, db::DbPool, federation::signing::ServerSigner,
     queue::MessageQueue,
 };
 use std::sync::Arc;
@@ -32,48 +28,14 @@ pub struct IdentityServiceContext {
 impl IdentityServiceContext {
     /// Convert to shared AppContext for legacy handlers.
     ///
-    /// APNs + token encryption are optional on AppContext. Identity paths that need
-    /// them (device-token registration) construct them at the call site; the adapter
-    /// must not panic when APNs keys are absent (P2-3).
+    /// Runs on every auth RPC, so it only clones handles: no client, cipher or cache
+    /// is built here.
     pub fn to_app_context(&self) -> AppContext {
-        let apns_client = ApnsClient::new(self.config.apns.clone())
-            .map(Arc::new)
-            .map_err(|e| {
-                tracing::debug!(error = %e, "APNs client not configured for identity AppContext adapter");
-                e
-            })
-            .ok();
-
-        let token_encryption =
-            DeviceTokenEncryption::from_hex(&self.config.apns.device_token_encryption_key)
-                .map(Arc::new)
-                .map_err(|e| {
-                    tracing::debug!(
-                        error = %e,
-                        "Token encryption not configured for identity AppContext adapter"
-                    );
-                    e
-                })
-                .ok();
-
-        let mut builder = AppContext::builder()
+        AppContext::builder()
             .with_db_pool(self.db_pool.clone())
             .with_queue(self.queue.clone())
             .with_auth_manager(self.auth_manager.clone())
             .with_config(self.config.clone())
-            .with_server_instance_id(uuid::Uuid::new_v4().to_string());
-
-        if let Some(signer) = &self.server_signer {
-            builder = builder.with_server_signer(signer.clone());
-        }
-        if let Some(client) = apns_client {
-            builder = builder.with_apns_client(client);
-        }
-        if let Some(enc) = token_encryption {
-            builder = builder.with_token_encryption(enc);
-        }
-
-        builder
             .build()
             .expect("Failed to build AppContext in identity service")
     }

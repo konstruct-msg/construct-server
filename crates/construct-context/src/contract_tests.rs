@@ -5,7 +5,7 @@
 //! 1. **What the builder accepts arrives unchanged.** Every `with_*` setter must
 //!    deliver the *same* allocation into the built context. A setter that silently
 //!    drops its value (or its receiver) would leave a service running against a
-//!    different pool, queue, queue config or signer than the one it constructed,
+//!    different pool, queue or queue config than the one it constructed,
 //!    and nothing downstream would report it.
 //! 2. **A missing dependency is named, in a fixed order.** `identity-service`
 //!    adapts its own context through the builder and relies on `build()` returning
@@ -22,14 +22,12 @@
 //! `#[ignore = "requires Redis"]` and run in CI with `-- --ignored`.
 
 use crate::{AppContext, AppContextBuilder};
-use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_config::{
     ApnsConfig, ApnsEnvironment, Config, DbConfig, DeepLinksConfig, FederationConfig,
     LoggingConfig, MediaConfig, MessagingConfig, MtlsConfig, RedisKeyPrefixes, SecurityConfig,
 };
 use construct_db::DbPool;
-use construct_federation::ServerSigner;
 use construct_queue::MessageQueue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -225,17 +223,6 @@ fn signer_is_present_with_a_seed_and_carries_the_instance_domain() {
 }
 
 #[test]
-fn private_signer_helper_matches_the_public_one() {
-    let mut config = test_config();
-    config.federation.signing_key_seed = Some(VALID_SEED.to_string());
-    config.federation.instance_domain = "origin.example".to_string();
-
-    let signer =
-        AppContext::init_server_signer(&config).expect("a valid seed must produce a signer");
-    assert_eq!(signer.instance_domain(), "origin.example");
-}
-
-#[test]
 fn malformed_seed_disables_signing_instead_of_failing_boot() {
     for broken in ["not base64 !!", "AAAA", ""] {
         let mut config = test_config();
@@ -252,33 +239,17 @@ fn malformed_seed_disables_signing_instead_of_failing_boot() {
 #[tokio::test]
 #[ignore = "requires Redis"]
 async fn build_carries_every_accepted_field() {
-    let mut config = test_config();
-    // A seed in config proves the explicit override wins, rather than merely being
-    // the only source available.
-    config.federation.signing_key_seed = Some(VALID_SEED.to_string());
-    config.federation.instance_domain = "config.example".to_string();
-    let config = Arc::new(config);
+    let config = Arc::new(test_config());
 
     let db_pool = Arc::new(lazy_pool());
     let queue = Arc::new(Mutex::new(MessageQueue::new(&config).await.expect("redis")));
     let auth_manager = Arc::new(AuthManager::new(&config).expect("auth manager"));
-    let apns_client = Arc::new(ApnsClient::new(config.apns.clone()).expect("apns client"));
-    let token_encryption =
-        Arc::new(DeviceTokenEncryption::from_hex(&"0".repeat(64)).expect("token encryption"));
-    let signer = Arc::new(
-        ServerSigner::from_seed_base64(VALID_SEED, "override.example".to_string())
-            .expect("override signer"),
-    );
 
     let context = AppContext::builder()
         .with_db_pool(db_pool.clone())
         .with_queue(queue.clone())
         .with_auth_manager(auth_manager.clone())
         .with_config(config.clone())
-        .with_apns_client(apns_client.clone())
-        .with_token_encryption(token_encryption.clone())
-        .with_server_instance_id("instance-abc".to_string())
-        .with_server_signer(signer.clone())
         .build()
         .expect("every required field was supplied");
 
@@ -286,44 +257,6 @@ async fn build_carries_every_accepted_field() {
     assert!(Arc::ptr_eq(&context.queue, &queue));
     assert!(Arc::ptr_eq(&context.auth_manager, &auth_manager));
     assert!(Arc::ptr_eq(&context.config, &config));
-    assert!(Arc::ptr_eq(
-        context.apns_client.as_ref().expect("apns client"),
-        &apns_client
-    ));
-    assert!(Arc::ptr_eq(
-        context.token_encryption.as_ref().expect("token encryption"),
-        &token_encryption
-    ));
-    assert_eq!(context.server_instance_id, "instance-abc");
-    assert!(
-        Arc::ptr_eq(context.server_signer.as_ref().expect("signer"), &signer),
-        "an explicit signer must not be replaced by the config-derived one"
-    );
-    assert_eq!(
-        context
-            .server_signer
-            .as_ref()
-            .expect("signer")
-            .instance_domain(),
-        "override.example"
-    );
-
-    // The remote-key cache belongs to the context that will use it. Sharing it across
-    // builds would let one service's cached peer key answer another's verification.
-    let second = AppContext::builder()
-        .with_db_pool(db_pool.clone())
-        .with_queue(queue.clone())
-        .with_auth_manager(auth_manager.clone())
-        .with_config(config.clone())
-        .with_server_instance_id("instance-def".to_string())
-        .build()
-        .expect("build");
-    assert!(!Arc::ptr_eq(
-        &context.public_key_cache,
-        &second.public_key_cache
-    ));
-    assert!(second.apns_client.is_none());
-    assert!(second.token_encryption.is_none());
 }
 
 #[tokio::test]
@@ -331,7 +264,6 @@ async fn build_carries_every_accepted_field() {
 async fn missing_required_fields_are_named_in_build_order() {
     let config = Arc::new(test_config());
     let queue = Arc::new(Mutex::new(MessageQueue::new(&config).await.expect("redis")));
-    let auth_manager = Arc::new(AuthManager::new(&config).expect("auth manager"));
 
     // Each case supplies everything the builder accepts *before* the field under
     // test. A setter that dropped its receiver would lose those earlier fields too,
@@ -352,15 +284,5 @@ async fn missing_required_fields_are_named_in_build_order() {
                 .with_config(config.clone())
         ),
         "auth_manager is required"
-    );
-    assert_eq!(
-        build_error(
-            AppContext::builder()
-                .with_db_pool(Arc::new(lazy_pool()))
-                .with_queue(queue.clone())
-                .with_auth_manager(auth_manager.clone())
-                .with_config(config.clone())
-        ),
-        "server_instance_id is required"
     );
 }

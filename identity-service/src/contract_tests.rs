@@ -1675,3 +1675,51 @@ fn the_rpcs_open_to_a_dead_token_are_the_ones_that_never_read_it() {
         .collect();
     assert_eq!(open, listed);
 }
+
+/// A peer verifies our S2S signatures with the key published here, so the document must
+/// carry the key of the signer this service actually holds, or none at all.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn well_known_publishes_the_key_of_the_signer_the_service_holds() {
+    use http_body_util::BodyExt;
+
+    let f = Fixture::new().await;
+    let signer = Arc::new(
+        construct_server_shared::federation::ServerSigner::from_seed_base64(
+            &b64::STANDARD.encode([41u8; 32]),
+            "signer.example".to_string(),
+        )
+        .unwrap(),
+    );
+
+    for held in [Some(signer.clone()), None] {
+        let context = Arc::new(IdentityServiceContext {
+            server_signer: held.clone(),
+            ..(*f.service.context).clone()
+        });
+        let response = well_known_construct_server(State(context.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let expected = json!(held.as_ref().map(|s| s.public_key_base64()));
+        assert_eq!(doc["server"]["public_key"], expected);
+        assert_eq!(doc["federation"]["public_key"], expected);
+        assert_eq!(doc["federation"]["tls"], json!(held.is_some()));
+        assert_eq!(
+            doc["server"]["domain"],
+            json!(context.config.instance_domain)
+        );
+        assert_eq!(
+            doc["federation"]["enabled"],
+            json!(context.config.federation_enabled)
+        );
+        assert_eq!(
+            doc["limits"]["rate_limit_messages_per_hour"],
+            json!(context.config.security.max_messages_per_hour)
+        );
+    }
+    f.cleanup().await;
+}
