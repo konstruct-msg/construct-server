@@ -5,7 +5,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-construct-apns          = { path = "../construct-apns" }
 construct-auth          = { path = "../construct-auth" }
 construct-db            = { path = "../construct-db" }
 construct-federation    = { path = "../construct-federation" }

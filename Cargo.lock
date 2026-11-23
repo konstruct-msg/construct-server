@@ -580,7 +580,6 @@ dependencies = [
 name = "construct-context"
 version = "0.20.0"
 dependencies = [
- "construct-apns",
  "construct-auth",
  "construct-config",
  "construct-db",

@@ -117,7 +117,7 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
   signature verification and sealed base64 decoding; dispatch failure releases it,
   Redis error fails closed. See `crates/construct-federation/README.md`.
 
-- Known debt: `AppContext` APNs/token_encryption are set only by identity's `to_app_context()` (messaging pushes through `notification_core`); signaling's in-memory `user_channels` is empty after restart (clients reconnect).
+- `AppContext` holds only the pool, queue, auth manager and config; `to_app_context()` runs per auth RPC and only clones handles. Known debt: signaling's in-memory `user_channels` is empty after restart (clients reconnect).
 - `INSTANCE_DOMAIN` is required on every Rust service (mismatch breaks federation).
 - Never re-declare an `app.env` secret as bare `${VAR}` under compose `environment:` (unset shell var blanks it). Rotate with `up -d --force-recreate`, not `restart`.
 - `secret_hygiene` fails boot on malformed secrets; run `scripts/preflight-secrets.sh` before deploy. Binaries load `Config::from_env_for(SecretNeeds::*)`. No Vault-on-box, no `app.env` encrypted with a key beside it.

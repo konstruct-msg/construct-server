@@ -1,10 +1,9 @@
 //! Shared service dependencies and their builder.
 
-use construct_apns::{ApnsClient, DeviceTokenEncryption};
 use construct_auth::AuthManager;
 use construct_config::Config;
 use construct_db::DbPool;
-use construct_federation::{PublicKeyCache, ServerSigner};
+use construct_federation::ServerSigner;
 
 use construct_queue::MessageQueue;
 use std::sync::Arc;
@@ -17,32 +16,12 @@ pub struct AppContext {
     pub queue: Arc<Mutex<MessageQueue>>,
     pub auth_manager: Arc<AuthManager>,
     pub config: Arc<Config>,
-    /// APNs client for push notifications (production tokens)
-    /// Optional: only required for services that send push notifications directly.
-    /// messaging-service delegates push to notification-service via gRPC and leaves this None.
-    pub apns_client: Option<Arc<ApnsClient>>,
-    /// Device token encryption for privacy
-    /// Optional: only required for services that register/decrypt device tokens.
-    pub token_encryption: Option<Arc<DeviceTokenEncryption>>,
-    /// Unique identifier for this server instance (`user:{id}:server_instance_id`)
-    pub server_instance_id: String,
-    /// Server signer for S2S federation authentication
-    /// When None: federation signing is disabled (messages sent unsigned)
-    /// When Some: sign outgoing S2S messages with Ed25519
-    pub server_signer: Option<Arc<ServerSigner>>,
-    /// Cache for remote server public keys (for signature verification)
-    pub public_key_cache: Arc<PublicKeyCache>,
 }
 
 impl AppContext {
     /// Create a new AppContext using builder pattern (Phase 2.7)
     pub fn builder() -> AppContextBuilder {
         AppContextBuilder::new()
-    }
-
-    /// Initialize the builder's server signer from config.
-    fn init_server_signer(config: &Config) -> Option<Arc<ServerSigner>> {
-        Self::init_server_signer_pub(config)
     }
 
     /// Public helper: initialize server signer from config.
@@ -70,10 +49,6 @@ pub struct AppContextBuilder {
     queue: Option<Arc<Mutex<MessageQueue>>>,
     auth_manager: Option<Arc<AuthManager>>,
     config: Option<Arc<Config>>,
-    apns_client: Option<Arc<ApnsClient>>,
-    token_encryption: Option<Arc<DeviceTokenEncryption>>,
-    server_instance_id: Option<String>,
-    server_signer_override: Option<Arc<ServerSigner>>,
 }
 
 impl AppContextBuilder {
@@ -83,10 +58,6 @@ impl AppContextBuilder {
             queue: None,
             auth_manager: None,
             config: None,
-            apns_client: None,
-            token_encryption: None,
-            server_instance_id: None,
-            server_signer_override: None,
         }
     }
 
@@ -110,38 +81,11 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn with_apns_client(mut self, apns_client: Arc<ApnsClient>) -> Self {
-        self.apns_client = Some(apns_client);
-        self
-    }
-
-    pub fn with_token_encryption(mut self, token_encryption: Arc<DeviceTokenEncryption>) -> Self {
-        self.token_encryption = Some(token_encryption);
-        self
-    }
-
-    pub fn with_server_instance_id(mut self, server_instance_id: String) -> Self {
-        self.server_instance_id = Some(server_instance_id);
-        self
-    }
-
-    pub fn with_server_signer(mut self, signer: Arc<ServerSigner>) -> Self {
-        self.server_signer_override = Some(signer);
-        self
-    }
-
     /// Build AppContext from builder
-    ///
-    /// Initializes server_signer and public_key_cache from config if available.
     pub fn build(self) -> Result<AppContext, String> {
         let config = self
             .config
             .ok_or_else(|| "Config is required".to_string())?;
-
-        // Use override signer if provided, otherwise init from config
-        let server_signer = self
-            .server_signer_override
-            .or_else(|| AppContext::init_server_signer(&config));
 
         Ok(AppContext {
             db_pool: self
@@ -152,13 +96,6 @@ impl AppContextBuilder {
                 .auth_manager
                 .ok_or_else(|| "auth_manager is required".to_string())?,
             config,
-            apns_client: self.apns_client,
-            token_encryption: self.token_encryption,
-            server_instance_id: self
-                .server_instance_id
-                .ok_or_else(|| "server_instance_id is required".to_string())?,
-            server_signer,
-            public_key_cache: Arc::new(PublicKeyCache::new()),
         })
     }
 }
