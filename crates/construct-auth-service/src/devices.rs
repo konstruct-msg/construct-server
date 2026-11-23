@@ -556,58 +556,6 @@ pub async fn register_device_core(
 // Device Authentication Endpoint
 // ============================================================================
 
-/// Increment failed-login counter and apply temporary block when threshold hit.
-///
-/// Runs on the request path (awaited) so the next attempt can observe the block.
-/// Redis failures are fail-open for login availability: log + metric only.
-async fn record_failed_login_attempt(app_context: &AppContext, device_id: &str) {
-    let max_failed = app_context.config.security.max_failed_login_attempts;
-    let block_duration = app_context
-        .config
-        .security
-        .rate_limit_block_duration_seconds;
-
-    let mut queue = app_context.queue.lock().await;
-    let count = match queue.increment_failed_login_count(device_id).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                device_id = %device_id,
-                "Failed to increment failed-login counter; lockout not advanced"
-            );
-            construct_metrics::record_auth_security_fail_open("login_fail_count");
-            return;
-        }
-    };
-
-    if count < max_failed {
-        tracing::debug!(
-            device_id = %device_id,
-            failed_count = count,
-            max_failed,
-            "Failed auth attempt recorded"
-        );
-        return;
-    }
-
-    let reason = format!("Too many failed auth attempts ({}/{})", count, max_failed);
-    if let Err(e) = queue
-        .block_user_temporarily(device_id, block_duration, &reason)
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            device_id = %device_id,
-            failed_count = count,
-            max_failed,
-            block_duration_seconds = block_duration,
-            "Failed to apply temporary login block after max failed attempts"
-        );
-        construct_metrics::record_auth_security_fail_open("login_block_apply");
-    }
-}
-
 /// Core authentication logic with binary signature.
 ///
 /// Called from:
@@ -625,30 +573,6 @@ pub async fn authenticate_device_core(
         return Err(AppError::validation(
             "Timestamp expired (must be within ±5 minutes)",
         ));
-    }
-
-    // 1b. Check if this device_id is temporarily blocked (brute force protection).
-    // Redis errors fail-open (allow attempt) so a Redis outage does not deny all
-    // logins; the skip is logged + metered (`login_block_check`).
-    {
-        let mut queue = app_context.queue.lock().await;
-        match queue.is_user_blocked(&device_id).await {
-            Ok(Some(reason)) => {
-                return Err(AppError::auth(format!(
-                    "Authentication temporarily blocked: {}",
-                    reason
-                )));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    device_id = %device_id,
-                    "Redis error checking temporary login block; failing open"
-                );
-                construct_metrics::record_auth_security_fail_open("login_block_check");
-            }
-        }
     }
 
     // 2. Find device in database
@@ -692,24 +616,12 @@ pub async fn authenticate_device_core(
     );
 
     if verifying_key.verify(message_bytes, &signature).is_err() {
-        // Await lockout accounting on the request path (no fire-and-forget spawn)
-        // so concurrent failures cannot race past an unapplied block, and so Redis
-        // errors are observed instead of discarded with `let _ =`.
-        record_failed_login_attempt(&app_context, &device_id).await;
+        // Counted, never per device: the signature did not verify, so nothing says the caller
+        // has anything to do with the device they named.
+        construct_metrics::AUTH_FAILURES_TOTAL
+            .with_label_values(&["device_signature"])
+            .inc();
         return Err(AppError::auth("Invalid signature"));
-    }
-
-    // Reset failed attempt counter on successful authentication
-    {
-        let mut queue = app_context.queue.lock().await;
-        if let Err(e) = queue.reset_failed_login_count(&device_id).await {
-            tracing::error!(
-                error = %e,
-                device_id = %device_id,
-                "Failed to reset failed-login counter after successful auth"
-            );
-            construct_metrics::record_auth_security_fail_open("login_fail_reset");
-        }
     }
 
     // 5. Get user_id from device

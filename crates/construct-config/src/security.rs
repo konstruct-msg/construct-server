@@ -16,11 +16,9 @@ pub struct SecurityConfig {
     pub max_messages_per_ip_per_hour: u32,
     pub max_key_rotations_per_day: u32,
     pub max_password_changes_per_day: u32,
-    pub max_failed_login_attempts: u32,
 
     pub max_connections_per_user: u32,
     pub key_bundle_cache_hours: i64,
-    pub rate_limit_block_duration_seconds: i64,
     /// Whether IP-based rate limiting is enabled for anonymous operations
     pub ip_rate_limiting_enabled: bool,
     /// Maximum requests per IP per hour (for anonymous operations: login, registration, etc.)
@@ -111,10 +109,6 @@ impl SecurityConfig {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(5),
-            max_failed_login_attempts: std::env::var("MAX_FAILED_LOGIN_ATTEMPTS")
-                .ok()
-                .and_then(|f| f.parse().ok())
-                .unwrap_or(5),
             max_connections_per_user: std::env::var("MAX_CONNECTIONS_PER_USER")
                 .ok()
                 .and_then(|c| c.parse().ok())
@@ -123,10 +117,6 @@ impl SecurityConfig {
                 .ok()
                 .and_then(|h| h.parse().ok())
                 .unwrap_or(1),
-            rate_limit_block_duration_seconds: std::env::var("RATE_LIMIT_BLOCK_SECONDS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3600),
             // IP-based rate limiting for anonymous operations
             ip_rate_limiting_enabled: std::env::var("IP_RATE_LIMITING_ENABLED")
                 .ok()

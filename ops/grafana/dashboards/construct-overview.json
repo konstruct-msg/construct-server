@@ -2492,17 +2492,6 @@
           "refId": "A",
           "instant": false,
           "format": "time_series"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "construct-prometheus"
-          },
-          "expr": "sum by (control) (rate(construct_auth_security_fail_open_total[5m]))",
-          "legendFormat": "auth {{control}}",
-          "refId": "B",
-          "instant": false,
-          "format": "time_series"
         }
       ]
     },

@@ -7,7 +7,6 @@
 use anyhow::Result;
 use construct_config::SECONDS_PER_HOUR;
 use construct_redis::RedisClient;
-use redis::AsyncCommands;
 
 pub(crate) struct RateLimiter<'a> {
     client: &'a mut RedisClient,
@@ -47,61 +46,6 @@ impl<'a> RateLimiter<'a> {
             .await?;
 
         Ok(count)
-    }
-
-    /// Increments failed login attempt counter for rate limiting
-    /// Returns the total count of failed login attempts in the last 15 minutes
-    pub(crate) async fn increment_failed_login_count(&mut self, username: &str) -> Result<u32> {
-        let key = format!("rate:login:{}", username);
-
-        let count: u32 = self.client.incr(&key).await? as u32;
-
-        // 15 minutes = 900 seconds
-        const FAILED_LOGIN_WINDOW_SECS: i64 = 900;
-        if count == 1 {
-            let _: bool = self
-                .client
-                .connection_mut()
-                .expire(&key, FAILED_LOGIN_WINDOW_SECS)
-                .await?;
-        }
-
-        Ok(count)
-    }
-
-    /// Resets failed login counter after successful login
-    pub(crate) async fn reset_failed_login_count(&mut self, username: &str) -> Result<()> {
-        let key = format!("rate:login:{}", username);
-        let _: i64 = self.client.del(&key).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn block_user_temporarily(
-        &mut self,
-        user_id: &str,
-        duration_seconds: i64,
-        reason: &str,
-    ) -> Result<()> {
-        let key = format!("blocked:{}", user_id);
-        let _: () = self
-            .client
-            .set_ex(&key, reason, duration_seconds as u64)
-            .await?;
-
-        tracing::warn!(
-            user_id = %user_id,
-            duration_seconds = duration_seconds,
-            reason = %reason,
-            "User temporarily blocked"
-        );
-
-        Ok(())
-    }
-
-    pub(crate) async fn is_user_blocked(&mut self, user_id: &str) -> Result<Option<String>> {
-        let key = format!("blocked:{}", user_id);
-        let reason: Option<String> = self.client.get(&key).await?;
-        Ok(reason)
     }
 
     fn privacy_pass_hour_key(user_id: &str) -> String {

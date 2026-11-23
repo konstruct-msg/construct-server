@@ -717,42 +717,6 @@ pub fn record_abuse_fail_open(control: &'static str) {
 }
 
 // ============================================================================
-// Auth security fail-open (login anti-bruteforce availability bias)
-// ============================================================================
-//
-// Temporary login lockout uses Redis. When Redis is unavailable we prefer
-// allowing login attempts over denying all auth (availability). Each skip is
-// metered so operators can alert during Redis outages / lockout degradation.
-//
-// Label `control` (stable):
-//   login_block_check  — is_user_blocked GET failed (cannot enforce existing ban)
-//   login_fail_count   — increment_failed_login_count failed
-//   login_block_apply  — block_user_temporarily failed after max attempts
-//   login_fail_reset   — reset_failed_login_count failed after success
-//
-// Policy (launch): fail-open on Redis for these controls. Alert on sustained rate.
-
-/// Auth anti-bruteforce controls skipped due to infrastructure error (fail-open).
-pub static AUTH_SECURITY_FAIL_OPEN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        opts!(
-            "construct_auth_security_fail_open_total",
-            "Auth security controls skipped (fail-open) by control name"
-        ),
-        &["control"]
-    )
-    .expect("Failed to register AUTH_SECURITY_FAIL_OPEN_TOTAL metric")
-});
-
-/// Record that an auth security control was skipped (fail-open).
-#[inline]
-pub fn record_auth_security_fail_open(control: &'static str) {
-    AUTH_SECURITY_FAIL_OPEN_TOTAL
-        .with_label_values(&[control])
-        .inc();
-}
-
-// ============================================================================
 // VEIL bootstrap vouchers (veil-service only)
 // ============================================================================
 //
@@ -939,7 +903,6 @@ pub fn init_registry() {
     Lazy::force(&GRPC_STREAMS_CLOSED_TOTAL);
     Lazy::force(&MSG_ABUSE_FAIL_OPEN_TOTAL);
     Lazy::force(&MSG_SEALED_DELIVERY_TAG_MISSING_TOTAL);
-    Lazy::force(&AUTH_SECURITY_FAIL_OPEN_TOTAL);
 }
 
 #[cfg(test)]
@@ -1158,16 +1121,5 @@ mod tests {
                 "call site produces path=`{path}`, which init_registry does not pre-create"
             );
         }
-    }
-
-    #[test]
-    fn test_auth_security_fail_open_metric() {
-        record_auth_security_fail_open("login_block_apply");
-        record_auth_security_fail_open("login_fail_count");
-        let text = gather_metrics().unwrap();
-        assert!(text.contains("construct_auth_security_fail_open_total"));
-        assert!(
-            text.contains("control=\"login_block_apply\"") || text.contains("login_block_apply")
-        );
     }
 }
