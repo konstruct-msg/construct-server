@@ -5,6 +5,10 @@ edition.workspace = true
 description = "SignalingService — WebRTC call signaling relay for Construct Messenger"
 license = "AGPL-3.0-only"
 
+[features]
+# Instruments only the opt-in test binary.
+allocation-profile = []
+
 [dependencies]
 # Core runtime
 tokio = { version = "1", features = ["full"] }
@@ -43,6 +47,9 @@ construct-config = { path = "../crates/construct-config" }
 # Shared
 construct-server-shared = { path = "../shared" }
 construct-db = { path = "../crates/construct-db" }
+
+[dev-dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "signaling-service"
