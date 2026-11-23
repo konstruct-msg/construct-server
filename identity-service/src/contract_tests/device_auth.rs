@@ -102,8 +102,6 @@ impl Fixture {
         let (key, request) = registration(solve(&challenge, 0));
         let device = request.device_id.clone();
         let tokens = self.registers(request).await.unwrap();
-        self.keys
-            .extend([format!("rate:login:{device}"), format!("blocked:{device}")]);
         (tokens, device, key)
     }
 
@@ -700,35 +698,42 @@ async fn signing_in_takes_the_devices_own_key_inside_five_minutes() {
     assert_ne!(unknown, removed);
 }
 
+/// A signature that does not verify proves nothing about its caller, so it costs the owner of
+/// the device nothing and leaves nothing behind under the device's name.
 #[tokio::test]
 #[ignore = "requires Redis and migrated PostgreSQL"]
-async fn failures_are_counted_per_device_and_a_success_clears_them() {
+async fn a_stranger_s_failures_do_not_touch_the_owner_s_sign_in() {
     let mut f = Fixture::new().await;
     let (_, device, key) = f.registered().await;
-    let (_, bystander, bystander_key) = f.registered().await;
-    let wrong = SigningKey::from_bytes(&[77; 32]);
-    for _ in 0..4 {
-        f.sign_in(&device, &wrong, now()).await.unwrap_err();
+    let stranger = SigningKey::from_bytes(&[77; 32]);
+    let counted = || {
+        construct_server_shared::metrics::AUTH_FAILURES_TOTAL
+            .with_label_values(&["device_signature"])
+            .get()
+    };
+    let before = counted();
+    let mut refused = Vec::new();
+    for _ in 0..12 {
+        refused.push(
+            f.sign_in(&device, &stranger, now())
+                .await
+                .unwrap_err()
+                .code(),
+        );
     }
-    let after_four = f.sign_in(&device, &key, now()).await.is_ok();
+    let after = counted();
     let mut redis = redis_of(&f).await;
-    let cleared = get(&mut redis, &format!("rate:login:{device}")).await;
-    for _ in 0..5 {
-        f.sign_in(&device, &wrong, now()).await.unwrap_err();
-    }
-    let blocked = f.sign_in(&device, &key, now()).await;
-    let ttl: i64 = redis::cmd("TTL")
-        .arg(format!("blocked:{device}"))
+    let left: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("*{device}*"))
         .query_async(&mut redis)
         .await
         .unwrap();
-    let other = f.sign_in(&bystander, &bystander_key, now()).await.is_ok();
+    let owner = f.sign_in(&device, &key, now()).await.map(|_| ());
     f.cleanup().await;
-    assert!(after_four);
-    assert_eq!(cleared, None);
-    assert_eq!(blocked.unwrap_err().code(), Code::Unauthenticated);
-    assert!((3590..=3600).contains(&ttl), "{ttl}");
-    assert!(other, "another device is not counted");
+    assert_eq!(refused, [Code::Unauthenticated; 12]);
+    assert_eq!(after - before, 12);
+    assert_eq!(left, Vec::<String>::new());
+    assert!(owner.is_ok(), "{owner:?}");
 }
 
 #[tokio::test]

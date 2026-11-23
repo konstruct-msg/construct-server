@@ -150,35 +150,6 @@ impl MessageQueue {
             .await
     }
 
-    pub async fn increment_failed_login_count(&mut self, username: &str) -> Result<u32> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .increment_failed_login_count(username)
-            .await
-    }
-
-    pub async fn reset_failed_login_count(&mut self, username: &str) -> Result<()> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .reset_failed_login_count(username)
-            .await
-    }
-
-    pub async fn block_user_temporarily(
-        &mut self,
-        user_id: &str,
-        duration_seconds: i64,
-        reason: &str,
-    ) -> Result<()> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .block_user_temporarily(user_id, duration_seconds, reason)
-            .await
-    }
-
-    pub async fn is_user_blocked(&mut self, user_id: &str) -> Result<Option<String>> {
-        rate_limiting::RateLimiter::new(&mut self.client)
-            .is_user_blocked(user_id)
-            .await
-    }
-
     // ============================================================================
     // Token Management (delegated to tokens module)
     // ============================================================================

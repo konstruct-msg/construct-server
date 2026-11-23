@@ -233,8 +233,7 @@ panel(R6, "Звонки: пропущено / отклонено / неуспе�
            "звонка серий нет. Пишет signaling-service. Соединение и время установки не измеряются: SDP answer идёт E2EE через messaging, а не signaling.")
 
 panel(R6, "Деградация лимитера (fail-open)",
-      [("sum by (control) (rate(construct_msg_abuse_fail_open_total[5m]))", "msg {{control}}"),
-       ("sum by (control) (rate(construct_auth_security_fail_open_total[5m]))", "auth {{control}}")],
+      [("sum by (control) (rate(construct_msg_abuse_fail_open_total[5m]))", "msg {{control}}")],
       idle=True, w=12,
       desc="Пусто = лимитер ни разу не деградировал, то есть желаемый исход. "
            "Появление линии означает, что Redis не отвечает на путь квот и лимиты "
