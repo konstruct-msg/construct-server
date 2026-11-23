@@ -214,10 +214,10 @@ impl<'a> TokenManager<'a> {
         Ok(exists)
     }
 
-    /// Mark a device as revoked so any access token carrying that `device_id`
-    /// claim is rejected until TTL expires (should match max access-token lifetime).
+    /// Mark a device as revoked so any token carrying that `device_id` claim is rejected
+    /// until the marker expires. How long that is, its callers in construct-auth-service decide.
     ///
-    /// Complements JTI blocklist: we do not have a per-device access-token index,
+    /// Complements JTI blocklist: we do not have a per-device token index,
     /// so a single Redis key covers all outstanding tokens for the device.
     pub(crate) async fn mark_device_revoked(
         &mut self,

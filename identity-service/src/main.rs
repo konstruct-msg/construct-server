@@ -2433,16 +2433,6 @@ impl UserService for IdentityGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("user not found"))?;
 
-        // While the rows still exist to be listed. Logged, not returned, like its neighbour: the
-        // deletion matters more than the marker, and a token of a deleted account finds nothing.
-        if let Err(e) = construct_server_shared::auth_service::core::mark_account_devices_revoked(
-            &self.context.to_app_context(),
-            &user_id,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "Failed to mark devices revoked during account deletion");
-        }
         {
             let mut queue = self.context.queue.lock().await;
             if let Err(e) = queue.revoke_all_user_tokens(&user_id.to_string()).await {
@@ -2450,13 +2440,24 @@ impl UserService for IdentityGrpcService {
             }
         }
 
-        construct_server_shared::db::delete_user_account(
+        let devices = construct_server_shared::db::delete_user_account(
             &self.context.db_pool,
             &user_id,
             &self.context.config.security.contact_hmac_secret,
         )
         .await
         .map_err(|e| Status::internal(format!("Failed to delete account: {}", e)))?;
+
+        // Logged, not returned: the account is gone, and a token of it finds nothing.
+        if let Err(e) =
+            construct_server_shared::auth_service::core::mark_deleted_account_devices_revoked(
+                &self.context.to_app_context(),
+                &devices,
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to mark devices revoked after account deletion");
+        }
 
         // The mailboxes are in Redis, not in the transaction above. A failure here is
         // logged, not returned: the account is already gone, a retry would answer
