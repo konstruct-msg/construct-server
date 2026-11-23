@@ -18,6 +18,10 @@ const PER_SOURCE: usize = 2 * COUNT; // read_mailbox_messages oversamples each s
 const READER: &str = "0123456789abcdef0123456789abcdef";
 const SIBLING: &str = "fedcba9876543210fedcba9876543210";
 
+/// The budgets were measured on arm64. hashbrown pads its control bytes by one SIMD group, whose
+/// width is the platform's: 8 bytes there, 16 on x86_64.
+const TABLE_GROUP: usize = 16;
+
 type Rows = Vec<(String, Option<MessageEnvelope>)>;
 
 struct Case {
@@ -167,7 +171,7 @@ fn profile_mailbox_merge() {
             assert_eq!(page.sibling_skipped, skipped, "{}", case.name);
             assert_eq!(page.has_more, more, "{}", case.name);
             assert!(
-                heap.calls <= case.heap.0 && heap.bytes <= case.heap.1,
+                heap.calls <= case.heap.0 && heap.bytes <= case.heap.1 + TABLE_GROUP,
                 "{}: {} allocations / {} B, budget {:?}",
                 case.name,
                 heap.calls,
