@@ -4,6 +4,8 @@ mod channel_admin;
 mod channel_lifecycle;
 mod comment_groups;
 mod db_contracts;
+#[cfg(all(unix, feature = "allocation-profile"))]
+mod group_fanout_profile;
 mod group_lifecycle;
 #[cfg(all(unix, feature = "allocation-profile"))]
 mod group_send_profile;

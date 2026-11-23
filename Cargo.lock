@@ -725,6 +725,7 @@ dependencies = [
  "construct-message",
  "construct-redis",
  "hex",
+ "libc",
  "redis",
  "rmp-serde",
  "serde",

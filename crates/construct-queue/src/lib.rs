@@ -1004,6 +1004,9 @@ fn merge_mailbox_pages(
     })
 }
 
+#[cfg(all(test, feature = "allocation-profile"))]
+mod merge_profile;
+
 #[cfg(test)]
 mod mailbox_merge_tests {
     use super::*;
@@ -1634,48 +1637,6 @@ mod mailbox_merge_tests {
         assert!(!page.has_more);
         assert_eq!(page.resume_cursor().device, StreamPosition(400, 0));
         assert_eq!(page.resume_cursor().user, StreamPosition(300, 0));
-    }
-
-    /// CPU-only benchmark of the production merge, with cloning outside the timed region.
-    /// Run with --release --ignored --nocapture; latency is reported, never asserted.
-    #[test]
-    #[ignore = "manual merge CPU benchmark"]
-    fn mailbox_merge_cpu_benchmark() {
-        let device: Vec<_> = (0..50)
-            .map(|i| {
-                let mut e = env(&format!("message-{i}"));
-                e.encrypted_payload = vec![255; 1024];
-                (format!("{}-0", 1000 + 2 * i), Some(e))
-            })
-            .collect();
-        let user: Vec<_> = (0..50)
-            .map(|i| {
-                let mut e = if i < 40 {
-                    device[i].1.as_ref().unwrap().clone()
-                } else if i < 45 {
-                    env_for(&format!("sibling-{i}"), "other")
-                } else {
-                    env(&format!("user-only-{i}"))
-                };
-                e.encrypted_payload = vec![255; 1024];
-                (format!("{}-0", 1001 + 2 * i), Some(e))
-            })
-            .collect();
-        let mut elapsed = std::time::Duration::ZERO;
-        for _ in 0..1000 {
-            let (d, u) = (device.clone(), user.clone());
-            let started = std::time::Instant::now();
-            let page = std::hint::black_box(merge_mailbox_pages(d, u, 50, 100, "dev"));
-            elapsed += started.elapsed();
-            assert_eq!(page.entries.len(), 50);
-            assert_eq!(page.user_only(), 2);
-            assert_eq!(page.sibling_skipped, 5);
-            assert!(page.has_more);
-        }
-        eprintln!(
-            "mailbox merge: {:.2} us/page (1000 pages, 50+50 inputs, 1 KiB payload)",
-            elapsed.as_secs_f64() * 1e6 / 1000.0
-        );
     }
 
     /// A page that delivered nothing and examined nothing leaves the cursor where it was.
