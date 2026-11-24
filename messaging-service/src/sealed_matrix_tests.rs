@@ -164,8 +164,6 @@ pub(crate) fn make_config(
             metrics_auth_enabled: false,
             metrics_ip_whitelist: vec![],
             metrics_bearer_token: None,
-            max_pow_challenges_per_hour: 5,
-            max_registrations_per_hour: 3,
             pow_difficulty: 1,
             username_hmac_secret: vec![0u8; 32],
             contact_hmac_secret: vec![0u8; 32],

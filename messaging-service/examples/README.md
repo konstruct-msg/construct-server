@@ -1,7 +1,7 @@
 # Hot-path allocation probe
 
-`hotpath_profile.rs` calls the production `MessageQueue`, `MailboxCursor::encode`,
-`log_safe_id` and `hash_client_ip` helpers. It adds no instrumentation to service binaries.
+`hotpath_profile.rs` calls the production `MessageQueue`, `MailboxCursor::encode`
+and `log_safe_id` helpers. It adds no instrumentation to service binaries.
 
 Use **only local/disposable Redis**. Keys have a unique `profile:p6:<run>` mailbox
 prefix and scoped dedup inputs. The probe never flushes Redis. It verifies written

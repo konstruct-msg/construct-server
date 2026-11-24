@@ -186,14 +186,12 @@ pub async fn refresh_tokens(
 
 pub async fn get_pow_challenge(
     app_context: Arc<AppContext>,
-    headers: axum::http::HeaderMap,
-) -> Result<(axum::http::HeaderMap, Json<devices::ChallengeResponse>), AppError> {
-    devices::get_pow_challenge(axum::extract::State(app_context), headers).await
+) -> Result<Json<devices::ChallengeResponse>, AppError> {
+    devices::get_pow_challenge(axum::extract::State(app_context)).await
 }
 
 pub async fn register_device(
     app_context: Arc<AppContext>,
-    headers: axum::http::HeaderMap,
     input: RegisterDeviceInput,
 ) -> Result<
     (
@@ -202,9 +200,8 @@ pub async fn register_device(
     ),
     AppError,
 > {
-    devices::register_device_core(
+    let result = devices::register_device_core(
         app_context,
-        headers,
         input.username,
         input.device_id,
         devices::DevicePublicKeysBinary {
@@ -221,7 +218,15 @@ pub async fn register_device(
             hash: input.pow_solution.hash,
         },
     )
-    .await
+    .await;
+    construct_metrics::ACCOUNT_REGISTRATIONS_TOTAL
+        .with_label_values(&[match &result {
+            Ok(_) => "registered",
+            Err(e) if e.status_code().is_server_error() => "failed",
+            Err(_) => "refused",
+        }])
+        .inc();
+    result
 }
 
 pub async fn authenticate_device(

@@ -103,6 +103,13 @@ panel(R2, "Ошибки аутентификации", [("sum by (reason) (rate(
       desc="По причинам. Всплеск одной причины — это либо сломанный клиент, либо "
            "перебор; ровный фон по всем — обычно истёкшие токены.")
 
+panel(R2, "Регистрации за час",
+      [("sum by (result) (increase(construct_account_registrations_total[1h]))", "{{result}}"),
+       ("sum(increase(construct_pow_challenges_issued_total[1h]))", "выдано задач PoW")],
+      idle=True,
+      desc="Правил по адресу у регистрации нет, всплеск видно только здесь. Много "
+           "задач без регистраций — кто-то пишет в Redis, а не регистрируется.")
+
 panel(R2, "Звонки", [("construct_active_calls", "активных сейчас"),
                      ("sum(rate(construct_calls_initiated_total[5m]))", "инициировано/с")],
       idle=True,

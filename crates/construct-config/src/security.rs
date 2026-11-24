@@ -42,14 +42,6 @@ pub struct SecurityConfig {
     /// Bearer token for /metrics endpoint (optional, for Prometheus scraping)
     /// If empty, only IP whitelist is used (if enabled)
     pub metrics_bearer_token: Option<String>,
-    /// Maximum PoW challenges per IP per hour (anti-spam for registration)
-    /// Default: 10 (allows multiple device registration attempts)
-    /// Set to 0 to disable rate limiting (for testing)
-    pub max_pow_challenges_per_hour: u32,
-    /// Maximum device registrations per IP per hour (anti-spam)
-    /// Default: 5 (allows registering multiple devices per hour)
-    /// Set to 0 to disable rate limiting (for testing)
-    pub max_registrations_per_hour: u32,
     /// PoW difficulty (number of leading zero bits required)
     /// Default: 8 (production), set to 1-2 for fast tests
     pub pow_difficulty: u32,
@@ -162,16 +154,6 @@ impl SecurityConfig {
             metrics_bearer_token: std::env::var("METRICS_BEARER_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            // PoW challenge rate limiting (anti-spam for registration)
-            max_pow_challenges_per_hour: std::env::var("MAX_POW_CHALLENGES_PER_HOUR")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10), // 10 challenges/hour by default (allows multiple device attempts)
-            // Device registration rate limiting (anti-spam)
-            max_registrations_per_hour: std::env::var("MAX_REGISTRATIONS_PER_HOUR")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(5), // 5 registrations/hour by default (multiple devices per user)
             // PoW difficulty (default: 8 for production, set to 1-2 for tests)
             pow_difficulty: std::env::var("POW_DIFFICULTY")
                 .ok()
