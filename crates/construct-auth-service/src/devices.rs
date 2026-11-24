@@ -200,21 +200,14 @@ const MAX_CRYPTO_SUITE_LEN: usize = 64;
 
 /// What the caller is told when a unique index refused the new account, if one did.
 fn registration_conflict(e: &anyhow::Error) -> Option<&'static str> {
-    // `insert_device_impl` names this one itself.
-    if e.to_string().contains("IDENTITY_KEY_CONFLICT") {
-        return Some("Identity key already registered by another device");
+    if let Some(refusal) = db::device_conflict(e) {
+        return Some(refusal);
     }
     let sqlx::Error::Database(db_err) = e.downcast_ref::<sqlx::Error>()? else {
         return None;
     };
-    if !db_err.is_unique_violation() {
-        return None;
-    }
-    match db_err.constraint() {
-        Some("idx_users_username_hash") => Some("Username is already taken"),
-        Some("devices_pkey") => Some("Device already exists"),
-        _ => None,
-    }
+    (db_err.is_unique_violation() && db_err.constraint() == Some("idx_users_username_hash"))
+        .then_some("Username is already taken")
 }
 
 /// Core registration logic with binary key inputs.

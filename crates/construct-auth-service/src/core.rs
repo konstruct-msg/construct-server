@@ -431,20 +431,14 @@ fn marker_outliving(access_secs: i64, refresh_secs: i64) -> i64 {
     access_secs.max(refresh_secs).max(0) + construct_config::SECONDS_PER_HOUR
 }
 
-/// Mark every device of the account revoked, for messaging, which reads the marker and not the
-/// row. For recovery, which takes them out of service in bulk. Until 2026-11-06 it did not, so a
-/// recovered account's old devices went on reading the mailbox.
+/// Mark an account's devices revoked, for messaging, which reads the marker and not the row. For
+/// recovery, which takes them out of service in bulk. Until 2026-11-06 it did not, so a recovered
+/// account's old devices went on reading the mailbox.
 pub async fn mark_account_devices_revoked(
     app_context: &AppContext,
-    user_id: &Uuid,
+    devices: &[String],
 ) -> Result<(), AppError> {
-    let devices = construct_db::all_device_ids_of_user(&app_context.db_pool, user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to list devices to mark revoked");
-            AppError::internal("Cannot complete request (device list failed)")
-        })?;
-    mark_devices_revoked(app_context, &devices, revoked_marker_ttl_secs(app_context)).await
+    mark_devices_revoked(app_context, devices, revoked_marker_ttl_secs(app_context)).await
 }
 
 /// Mark the devices of an account that has just been deleted. The marker names a device, and

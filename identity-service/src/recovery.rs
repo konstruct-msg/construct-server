@@ -11,7 +11,7 @@
 // - Server stores recovery_public_key (the Ed25519 key, 32 bytes — also the account's address)
 //   and recovery_mldsa_public_key (the ML-DSA-65 half, 1952 bytes, once the account is hybrid)
 // - Recovery: client signs a claim with the recovery key, server verifies
-// - On success: all devices revoked, new device registered
+// - On success: all devices revoked, new device registered, in one transaction
 //
 // Security:
 // - Recovery key is immutable once set (DB triggers prevent changes); an Ed25519 key is completed
@@ -364,24 +364,56 @@ pub async fn verify_recovery_signature_at(
     Ok(row.id)
 }
 
-/// Revoke all devices for a user (during recovery)
-pub async fn revoke_all_devices(db: &PgPool, user_id: Uuid) -> Result<u32> {
-    let result =
-        sqlx::query("UPDATE devices SET is_active = false WHERE user_id = $1 AND is_active = true")
-            .bind(user_id)
-            .execute(db)
-            .await?;
-
-    Ok(result.rows_affected() as u32)
+/// What taking an account over did, inside the caller's transaction.
+pub struct AccountTaken {
+    /// How many devices were active until now.
+    pub devices_revoked: u32,
+    /// Every device the account had, for the markers messaging reads.
+    pub old_devices: Vec<String>,
 }
 
-/// Update last_recovery_at timestamp after successful recovery
-pub async fn mark_recovery_used(db: &PgPool, user_id: Uuid) -> Result<()> {
-    sqlx::query("UPDATE users SET last_recovery_at = NOW() WHERE id = $1")
-        .bind(user_id)
-        .execute(db)
-        .await?;
-    Ok(())
+/// Hand the account to `device` and take every other device out of service, in the caller's
+/// transaction: a refusal or a failure on the way leaves the account with the devices it had.
+/// Until 2026-11-24 these were separate statements, the devices went first, and a recovery that
+/// was then refused left the account with none.
+pub async fn take_account(
+    conn: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    device: construct_db::CreateDeviceData,
+) -> Result<AccountTaken> {
+    // First, so that it holds the account's row: of several recoveries at once the others wait
+    // here and then find the cooldown begun. The check in `verify_recovery_signature` cannot see
+    // a recovery that has not finished.
+    let begun = sqlx::query(
+        "UPDATE users SET last_recovery_at = NOW() WHERE id = $1 \
+         AND (last_recovery_at IS NULL OR last_recovery_at <= NOW() - INTERVAL '7 days')",
+    )
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await?;
+    if begun.rows_affected() == 0 {
+        anyhow::bail!("Recovery cooldown active");
+    }
+
+    let old_devices = construct_db::all_device_ids_of_user(&mut *conn, &user_id).await?;
+    let revoked =
+        sqlx::query("UPDATE devices SET is_active = false WHERE user_id = $1 AND is_active = true")
+            .bind(user_id)
+            .execute(&mut *conn)
+            .await?;
+
+    let device_id = device.device_id.clone();
+    construct_db::create_device_in(&mut *conn, device, Some(user_id)).await?;
+    // The account now belongs to this device. Without this the pointer went on naming a device
+    // deactivated above, so every "is this the primary device" question answered **no** for the
+    // account's only live device — and signing out of a recovered account therefore unregistered
+    // it, leaving the account with no active device and no way back except another recovery.
+    construct_db::set_primary_device(&mut *conn, &user_id, &device_id).await?;
+
+    Ok(AccountTaken {
+        devices_revoked: revoked.rows_affected() as u32,
+        old_devices,
+    })
 }
 
 // ============================================================================

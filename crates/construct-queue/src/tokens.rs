@@ -169,16 +169,15 @@ impl<'a> TokenManager<'a> {
         let jtis: Vec<String> = redis::cmd("SMEMBERS")
             .arg(&index_key)
             .query_async(self.client.connection_mut())
-            .await
-            .unwrap_or_default();
+            .await?;
 
         let mut deleted_count = 0usize;
         for jti in &jtis {
             let token_key = format!("refresh_token:{}", jti);
-            let n: i64 = self.client.del(&token_key).await.unwrap_or(0);
+            let n: i64 = self.client.del(&token_key).await?;
             deleted_count += n as usize;
         }
-        self.client.del(&index_key).await.unwrap_or(0i64);
+        self.client.del(&index_key).await?;
 
         tracing::info!(
             user_id = %user_id,
