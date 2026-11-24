@@ -93,7 +93,7 @@ limits, PoW tiers, retention or cutover policy still require measured evidence.
 
 | Area | Settings and consumer/default authority |
 |---|---|
-| Service/connection | `INSTANCE_DOMAIN`, `SERVER_HOSTNAME`, `DATABASE_URL`, `REDIS_URL`, `PORT`, `HEALTH_PORT`, `METRICS_PORT`, `SERVICE_NAME`, `RUST_LOG`; service entry points and `crates/construct-config/src/lib.rs`. Domain is required by Config; DB/Redis requirements are per role. |
+| Service/connection | `INSTANCE_DOMAIN`, `DATABASE_URL`, `REDIS_URL`, `PORT`, `HEALTH_PORT`, `METRICS_PORT`, `SERVICE_NAME`, `RUST_LOG`; service entry points and `crates/construct-config/src/lib.rs`. Domain is required by Config; DB/Redis requirements are per role. |
 | Production/secret policy | `ENVIRONMENT`, `PRODUCTION`, `ALLOW_INSECURE_SECRETS`, `FLY_APP_NAME`, `FLY_REGION`, `RAILWAY_ENVIRONMENT`; `crates/construct-config/src/secret_hygiene.rs`. Present malformed active secrets still fail boot. |
 | Auth | `PASETO_PRIVATE_KEY`, `PASETO_PUBLIC_KEY`, `PASETO_PUBLIC_KEY_PREVIOUS`, `AUTH_TOKEN_ISSUER` (fallback **`JWT_ISSUER`**), `ACCESS_TOKEN_TTL_HOURS`, `REFRESH_TOKEN_TTL_DAYS`; `construct-config/src/lib.rs` and `construct-auth`. `SESSION_TTL_DAYS` also remains: presence uses it. |
 | Privacy identifiers | `USERNAME_HMAC_SECRET`, `CONTACT_HMAC_SECRET`, `REQUEST_ENVELOPE_KEY`, `LOG_HASH_SALT`; `construct-config/src/security.rs`, `logging.rs`, `secret_needs.rs`. Requirements stay unchanged for all six remaining role bits. |

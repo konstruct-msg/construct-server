@@ -590,6 +590,29 @@ pub async fn create_device(
     insert_device_impl(pool, data, user_id).await
 }
 
+/// `create_device` as one step of the caller's transaction.
+pub async fn create_device_in(
+    conn: &mut sqlx::PgConnection,
+    data: CreateDeviceData,
+    user_id: Option<Uuid>,
+) -> Result<Device> {
+    insert_device_impl(conn, data, user_id).await
+}
+
+/// What the caller is told when a new device was refused because its id or its identity key
+/// already belongs to one.
+pub fn device_conflict(e: &anyhow::Error) -> Option<&'static str> {
+    // `insert_device_impl` names this one itself.
+    if e.to_string().contains("IDENTITY_KEY_CONFLICT") {
+        return Some("Identity key already registered by another device");
+    }
+    let sqlx::Error::Database(db_err) = e.downcast_ref::<sqlx::Error>()? else {
+        return None;
+    };
+    (db_err.is_unique_violation() && db_err.constraint() == Some("devices_pkey"))
+        .then_some("Device already exists")
+}
+
 /// Internal implementation for inserting a device (supports transactions)
 async fn insert_device_impl<'a, E>(
     executor: E,
@@ -943,11 +966,15 @@ pub async fn set_device_certificate(
 /// **no** for the account's only live device — including the guard that refuses to deactivate it,
 /// so signing out of a recovered account unregistered its last device and left the account with
 /// none. See `deactivate_device_unless_primary`.
-pub async fn set_primary_device(pool: &DbPool, user_id: &Uuid, device_id: &str) -> Result<()> {
+pub async fn set_primary_device<'a>(
+    executor: impl sqlx::Executor<'a, Database = sqlx::Postgres>,
+    user_id: &Uuid,
+    device_id: &str,
+) -> Result<()> {
     sqlx::query("UPDATE users SET primary_device_id = $1 WHERE id = $2")
         .bind(device_id)
         .bind(user_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to set primary_device_id")?;
     Ok(())
@@ -963,12 +990,15 @@ pub async fn device_is_active(pool: &DbPool, device_id: &str) -> Result<Option<b
         .context("Failed to read device state")
 }
 
-/// Every device of the account, active or not. For marking them revoked: a retry after a failure
-/// must reach the devices the first attempt already deactivated.
-pub async fn all_device_ids_of_user(pool: &DbPool, user_id: &Uuid) -> Result<Vec<String>> {
+/// Every device of the account, active or not. For marking them revoked: one deactivated earlier
+/// may have lost its marker.
+pub async fn all_device_ids_of_user<'a>(
+    executor: impl sqlx::Executor<'a, Database = sqlx::Postgres>,
+    user_id: &Uuid,
+) -> Result<Vec<String>> {
     sqlx::query_scalar("SELECT device_id FROM devices WHERE user_id = $1")
         .bind(user_id)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .context("Failed to list account devices")
 }

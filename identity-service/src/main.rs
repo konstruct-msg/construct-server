@@ -210,6 +210,24 @@ fn app_error_to_status(e: construct_error::AppError) -> Status {
     }
 }
 
+fn recovery_status(e: anyhow::Error) -> Status {
+    if let Some(refusal) = construct_db::device_conflict(&e) {
+        return Status::already_exists(refusal);
+    }
+    let msg = e.to_string();
+    if msg.contains("not found") {
+        Status::not_found(msg)
+    } else if msg.contains("not set up") {
+        Status::failed_precondition(msg)
+    } else if msg.contains("cooldown") {
+        Status::resource_exhausted(msg)
+    } else if msg.contains("Invalid") {
+        Status::permission_denied(msg)
+    } else {
+        Status::internal(msg)
+    }
+}
+
 /// Build the wire view of a device row.
 ///
 /// Shared by ListDevices and GetDeviceInfo so the two cannot disagree about what a device
@@ -764,6 +782,13 @@ impl AuthService for IdentityGrpcService {
             .public_keys
             .ok_or_else(|| Status::invalid_argument("new_device.public_keys is required"))?;
 
+        // Everything the request can be refused for by itself comes before the account is touched.
+        verify_spk_signature(
+            &public_keys.verifying_key,
+            &public_keys.signed_prekey_public,
+            &public_keys.signed_prekey_signature,
+        )?;
+
         let db = self.context.db_pool.as_ref();
 
         // The legacy challenge field stays on the wire for schema compatibility, but
@@ -783,33 +808,34 @@ impl AuthService for IdentityGrpcService {
             &self.context.config.security.username_hmac_secret,
         )
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("not found") {
-                Status::not_found(msg)
-            } else if msg.contains("not set up") {
-                Status::failed_precondition(msg)
-            } else if msg.contains("cooldown") {
-                Status::resource_exhausted(msg)
-            } else if msg.contains("Invalid") {
-                Status::permission_denied(msg)
-            } else {
-                Status::internal(msg)
-            }
-        })?;
+        .map_err(recovery_status)?;
 
-        let devices_revoked = recovery::revoke_all_devices(db, user_id)
+        let device_id = new_device.device_id;
+        let mut tx = db
+            .begin()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-
-        let app_context = Arc::new(self.context.to_app_context());
-        // Recovery exists for the stolen phone: its token must stop reading the mailbox now.
-        construct_server_shared::auth_service::core::mark_account_devices_revoked(
-            &app_context,
-            &user_id,
+        let taken = recovery::take_account(
+            &mut tx,
+            user_id,
+            construct_db::CreateDeviceData {
+                device_id: device_id.clone(),
+                server_hostname: self.context.config.instance_domain.clone(),
+                verifying_key: public_keys.verifying_key,
+                identity_public: public_keys.identity_public,
+                signed_prekey_public: public_keys.signed_prekey_public,
+                signed_prekey_signature: public_keys.signed_prekey_signature,
+                crypto_suites: construct_db::crypto_suites_json(&public_keys.crypto_suite),
+                supports_pq_ratchet: false,
+            },
         )
         .await
-        .map_err(app_error_to_status)?;
+        .map_err(recovery_status)?;
+
+        // The other store, before the commit: if it fails, the rows stay as they were and the
+        // phrase works again at once. After the commit the caller would be told "failed" about an
+        // account it has, and wait out the cooldown to try again.
+        let app_context = Arc::new(self.context.to_app_context());
         construct_server_shared::auth_service::core::logout_user(
             app_context.clone(),
             user_id,
@@ -819,78 +845,38 @@ impl AuthService for IdentityGrpcService {
             None,
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        let hostname = env::var("SERVER_HOSTNAME").unwrap_or_else(|_| "construct.cc".to_string());
-        let verifying_key = public_keys.verifying_key.clone();
-        let signed_prekey_public = public_keys.signed_prekey_public.clone();
-        let signed_prekey_signature = public_keys.signed_prekey_signature.clone();
-
-        verify_spk_signature(
-            &verifying_key,
-            &signed_prekey_public,
-            &signed_prekey_signature,
-        )?;
-
-        construct_server_shared::db::create_device(
-            self.context.db_pool.as_ref(),
-            construct_server_shared::db::CreateDeviceData {
-                device_id: new_device.device_id.clone(),
-                server_hostname: hostname,
-                verifying_key,
-                identity_public: public_keys.identity_public,
-                signed_prekey_public,
-                signed_prekey_signature,
-                crypto_suites: construct_db::crypto_suites_json(&public_keys.crypto_suite),
-                supports_pq_ratchet: false,
-            },
-            Some(user_id),
-        )
-        .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("IDENTITY_KEY_CONFLICT") {
-                Status::already_exists("Identity key already registered by another device")
-            } else {
-                Status::internal(msg)
-            }
-        })?;
-
-        // The account now belongs to this device. Without this the pointer went on naming the
-        // device `revoke_all_devices` had just deactivated three statements ago, so every "is this
-        // the primary device" question answered **no** for the account's only live device — and
-        // signing out of a recovered account therefore unregistered it, leaving the account with
-        // no active device and no way back except another recovery.
-        construct_server_shared::db::set_primary_device(
-            self.context.db_pool.as_ref(),
-            &user_id,
-            &new_device.device_id,
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(app_error_to_status)?;
 
         let (access_token, _, exp_timestamp) = app_context
             .auth_manager
-            .create_token_for_device(&user_id, Some(&new_device.device_id))
+            .create_token_for_device(&user_id, Some(&device_id))
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let (refresh_token, refresh_jti, _) = app_context
             .auth_manager
-            .create_refresh_token_for_device(&user_id, Some(&new_device.device_id))
+            .create_refresh_token_for_device(&user_id, Some(&device_id))
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        {
-            let mut queue = app_context.queue.lock().await;
-            let ttl = app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
-            if let Err(e) = queue
-                .store_refresh_token(&refresh_jti, &user_id.to_string(), ttl)
-                .await
-            {
-                tracing::warn!(error = %e, "Failed to store refresh token during recovery");
-            }
-        }
+        let ttl = app_context.config.refresh_token_ttl_days * construct_config::SECONDS_PER_DAY;
+        app_context
+            .queue
+            .lock()
+            .await
+            .store_refresh_token(&refresh_jti, &user_id.to_string(), ttl)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-        recovery::mark_recovery_used(db, user_id)
+        // Recovery exists for the stolen phone: its token must stop reading the mailbox now. Last,
+        // because a marker outlives a rollback and a device that kept its row would be out of
+        // messaging until the recovery is repeated.
+        construct_server_shared::auth_service::core::mark_account_devices_revoked(
+            &app_context,
+            &taken.old_devices,
+        )
+        .await
+        .map_err(app_error_to_status)?;
+
+        tx.commit()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -905,7 +891,7 @@ impl AuthService for IdentityGrpcService {
                 expires_at: exp_timestamp,
                 veil_bridge_cert: self.veil_bridge_cert.clone(),
             }),
-            devices_revoked,
+            devices_revoked: taken.devices_revoked,
             recovered_at: now,
             warnings: vec!["All existing sessions have been terminated".to_string()],
             error: None,

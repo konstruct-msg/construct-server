@@ -13,8 +13,11 @@ use tower::Layer;
 use uuid::Uuid;
 
 mod device_auth;
+#[path = "../../shared/test_support/faulty_redis.rs"]
+mod faulty_redis;
 #[path = "../../shared/test_support/grpc.rs"]
 mod grpc_support;
+mod recovery_contracts;
 
 struct Fixture {
     service: IdentityGrpcService,
@@ -24,7 +27,11 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let config = Arc::new(test_config::config());
+        Self::on(test_config::config()).await
+    }
+
+    async fn on(config: Config) -> Self {
+        let config = Arc::new(config);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(3)
             .connect(&config.database_url)
@@ -1236,47 +1243,75 @@ async fn link_result_is_visible_only_to_the_issuing_account() {
 
 // ── 264: what a token is worth after its device is gone ──────────────────────
 
-/// A real recovery: the phrase's hybrid key set on the account, a claim for a new device.
-async fn recover(f: &Fixture, user: Uuid) -> Result<proto::RecoverAccountResponse, Status> {
-    use construct_crypto::pqc::hybrid::{hybrid_sign, hybrid_signature_keypair_from_seeds};
-    use construct_crypto::server_trust::recovery as claim_bytes;
-    let (private, public) = hybrid_signature_keypair_from_seeds(&rand::random(), &rand::random());
-    let now = chrono::Utc::now().timestamp();
-    let setup = claim_bytes::setup_signable(&user.to_string(), now, &public).unwrap();
-    recovery::set_recovery_key(
-        f.service.context.db_pool.as_ref(),
-        user,
-        &public,
-        &hybrid_sign(&private, &setup).unwrap(),
-        now,
-        None,
-    )
-    .await
-    .unwrap();
+/// A recovery phrase: the hybrid key it derives.
+struct Phrase {
+    private: Vec<u8>,
+    public: Vec<u8>,
+}
 
-    let device_id = Uuid::new_v4().simple().to_string();
-    let (_, keys) = device_keys();
-    let claim = claim_bytes::claim_signable(
-        &public,
-        now,
-        &device_id,
-        &keys.verifying_key,
-        &keys.identity_public,
-    )
-    .unwrap();
-    f.service
-        .recover_account(Request::new(proto::RecoverAccountRequest {
+impl Phrase {
+    /// A phrase whose key is the account's.
+    async fn of(f: &Fixture, user: Uuid) -> Self {
+        use construct_crypto::pqc::hybrid::{hybrid_sign, hybrid_signature_keypair_from_seeds};
+        use construct_crypto::server_trust::recovery as claim_bytes;
+        let (private, public) =
+            hybrid_signature_keypair_from_seeds(&rand::random(), &rand::random());
+        let now = chrono::Utc::now().timestamp();
+        let setup = claim_bytes::setup_signable(&user.to_string(), now, &public).unwrap();
+        recovery::set_recovery_key(
+            f.service.context.db_pool.as_ref(),
+            user,
+            &public,
+            &hybrid_sign(&private, &setup).unwrap(),
+            now,
+            None,
+        )
+        .await
+        .unwrap();
+        Self { private, public }
+    }
+
+    /// The claim that hands the account to this device.
+    fn claim(
+        &self,
+        user: Uuid,
+        device_id: &str,
+        keys: proto::DevicePublicKeys,
+    ) -> proto::RecoverAccountRequest {
+        use construct_crypto::pqc::hybrid::hybrid_sign;
+        use construct_crypto::server_trust::recovery as claim_bytes;
+        let now = chrono::Utc::now().timestamp();
+        let claim = claim_bytes::claim_signable(
+            &self.public,
+            now,
+            device_id,
+            &keys.verifying_key,
+            &keys.identity_public,
+        )
+        .unwrap();
+        proto::RecoverAccountRequest {
             identifier: user.to_string(),
-            recovery_public_key: public,
-            recovery_signature: hybrid_sign(&private, &claim).unwrap(),
+            recovery_public_key: self.public.clone(),
+            recovery_signature: hybrid_sign(&self.private, &claim).unwrap(),
             timestamp: now,
             new_device: Some(proto::NewDeviceForRecovery {
-                device_id,
+                device_id: device_id.to_string(),
                 public_keys: Some(keys),
                 ..Default::default()
             }),
             ..Default::default()
-        }))
+        }
+    }
+}
+
+/// A real recovery: the phrase's hybrid key set on the account, a claim for a new device.
+async fn recover(f: &Fixture, user: Uuid) -> Result<proto::RecoverAccountResponse, Status> {
+    let device_id = Uuid::new_v4().simple().to_string();
+    let claim = Phrase::of(f, user)
+        .await
+        .claim(user, &device_id, device_keys().1);
+    f.service
+        .recover_account(Request::new(claim))
         .await
         .map(Response::into_inner)
 }

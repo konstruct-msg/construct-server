@@ -85,6 +85,8 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
   `recovery_public_key` stays 32 bytes and names the account address. A legacy row
   with no ML-DSA half remains recoverable by a valid hybrid claim of the same phrase,
   which adds that half without changing the address or fingerprint.
+  The claim takes the account in one transaction (`recovery::take_account`): cooldown first,
+  Redis before the commit, markers last. Nothing is refused after the old devices are gone.
 - messaging gRPC uses `extract_authed_user_id()`: Bearer required, verify + blocklist, fail-closed on Redis error. `x-user-id` / `x-device-id` must match claims; headers alone are never trusted. Caddy injects no `x-user-id`; gateway `:9443` has no token auth. Each service validates with `construct-auth::AuthManager`.
 - `ops/Caddyfile`: `flush_interval -1` only for streaming RPCs (`MessageStream`, `SignalingService`); on unary RPCs it emits DATA+END_STREAM and grpc-swift reports "EOS alongside a data frame" instead of `privacy_pass:…`. Caddyfile is a single-file bind mount: `up -d --force-recreate caddy` after edits.
 

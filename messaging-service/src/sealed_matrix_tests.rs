@@ -28,6 +28,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSecret};
 
+#[path = "../../shared/test_support/faulty_redis.rs"]
+mod faulty_redis;
+pub(crate) use faulty_redis::FaultyRedis;
+
 use crate::context::MessagingServiceContext;
 use crate::envelope::TokenRejected;
 use crate::token_redeem::{TokenRedeemResult, redeem_token_checked};
@@ -1316,81 +1320,6 @@ impl CuttableRedis {
 
     pub(crate) fn cut(&self) {
         let _ = self.cut.send(true);
-    }
-}
-
-/// A TCP forwarder to the test Redis that answers `-ERR` to any command naming the armed key
-/// fragment and forwards everything else. Isolates one read from others on the same connection,
-/// which `CuttableRedis` cannot. Commands on a connection here are one at a time.
-pub(crate) struct FaultyRedis {
-    pub(crate) url: String,
-    armed: tokio::sync::watch::Sender<Option<Vec<u8>>>,
-}
-
-impl FaultyRedis {
-    pub(crate) async fn start() -> Self {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let target = redis_url()
-            .trim_start_matches("redis://")
-            .trim_end_matches('/')
-            .to_string();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind a local port");
-        let url = format!("redis://{}", listener.local_addr().expect("local addr"));
-        let (armed, armed_rx) = tokio::sync::watch::channel(None::<Vec<u8>>);
-        tokio::spawn(async move {
-            while let Ok((inbound, _)) = listener.accept().await {
-                let target = target.clone();
-                let armed_rx = armed_rx.clone();
-                tokio::spawn(async move {
-                    let Ok(outbound) = tokio::net::TcpStream::connect(&target).await else {
-                        return;
-                    };
-                    let (mut client_read, client_write) = inbound.into_split();
-                    let (mut server_read, mut server_write) = outbound.into_split();
-                    let client_write = Arc::new(Mutex::new(client_write));
-                    let to_client = client_write.clone();
-                    tokio::spawn(async move {
-                        let mut buf = vec![0u8; 64 * 1024];
-                        while let Ok(n) = server_read.read(&mut buf).await {
-                            if n == 0 || to_client.lock().await.write_all(&buf[..n]).await.is_err()
-                            {
-                                return;
-                            }
-                        }
-                    });
-                    let mut buf = vec![0u8; 64 * 1024];
-                    while let Ok(n) = client_read.read(&mut buf).await {
-                        if n == 0 {
-                            return;
-                        }
-                        let hit = armed_rx.borrow().as_ref().is_some_and(|needle| {
-                            buf[..n]
-                                .windows(needle.len())
-                                .any(|w| w == needle.as_slice())
-                        });
-                        let sent = if hit {
-                            client_write
-                                .lock()
-                                .await
-                                .write_all(b"-ERR injected by FaultyRedis\r\n")
-                                .await
-                        } else {
-                            server_write.write_all(&buf[..n]).await
-                        };
-                        if sent.is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        Self { url, armed }
-    }
-
-    pub(crate) fn fail_commands_naming(&self, fragment: &str) {
-        let _ = self.armed.send(Some(fragment.as_bytes().to_vec()));
     }
 }
 
@@ -3508,7 +3437,7 @@ async fn u1_send_message_refuses_past_the_hourly_limit() {
 #[tokio::test]
 #[serial]
 async fn f1_send_message_delivers_and_counts_when_the_limit_store_is_down() {
-    let proxy = FaultyRedis::start().await;
+    let proxy = FaultyRedis::start(&redis_url()).await;
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
@@ -3540,7 +3469,7 @@ async fn f1_send_message_delivers_and_counts_when_the_limit_store_is_down() {
 #[tokio::test]
 #[serial]
 async fn f2_send_message_delivers_when_sentinel_cannot_read_its_store() {
-    let proxy = FaultyRedis::start().await;
+    let proxy = FaultyRedis::start(&redis_url()).await;
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
@@ -3651,7 +3580,7 @@ async fn d4_a_device_list_the_caller_read_is_not_asked_for_again() {
 #[serial]
 async fn a2_auth_fails_closed_when_only_the_device_revocation_cannot_be_read() {
     use crate::grpc::extract_authed_identity;
-    let proxy = FaultyRedis::start().await;
+    let proxy = FaultyRedis::start(&redis_url()).await;
     // Same wiring as `a1`: `FaultyRedis` refuses any command naming the armed fragment, so the
     // device marker's read fails while the mailbox and the token's own key stay readable.
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
@@ -3729,7 +3658,7 @@ async fn a3_auth_does_not_wait_on_the_mailbox_mutex() {
 #[tokio::test]
 #[serial]
 async fn f3_an_unreadable_dedup_key_does_not_stop_delivery() {
-    let proxy = FaultyRedis::start().await;
+    let proxy = FaultyRedis::start(&redis_url()).await;
     let Some(h) = build_harness_on(StealthTokenPolicy::Off, &redis_url(), &proxy.url).await else {
         return;
     };
