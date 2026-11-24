@@ -80,6 +80,8 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
   token/header consistency check. Certificates bind an active device of the token's account;
   invite signers must be active devices of the signed account. Link/join tokens use Redis
   `GETDEL`, never separate GET and DEL (a mutex covers one process only).
+  A waiting join request is not replaced: the same bytes again, or `ALREADY_EXISTS`.
+  `ApproveJoinRequest` returns no tokens; the joined device has its own key to sign in with.
 - Recovery setup and claims require the 1984-byte hybrid key and both signatures;
   no Ed25519-only setup, challenge verifier or calendar gate. Stored
   `recovery_public_key` stays 32 bytes and names the account address. A legacy row

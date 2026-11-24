@@ -308,14 +308,29 @@ impl<'a> TokenManager<'a> {
     ///
     /// The payload is opaque bytes: it carries X25519/Ed25519 key material, so the
     /// caller serializes it in a binary format rather than base64-in-JSON.
+    ///
+    /// The first request holds the id. False: another one holds it, and nothing changed. The same
+    /// bytes again are the same request sent twice, and true.
     pub(crate) async fn store_join_request(
         &mut self,
         pending_device_id: &str,
         payload: &[u8],
-    ) -> Result<()> {
-        let key = format!("join_req:{}", pending_device_id);
-        let _: () = self.client.set_ex(&key, payload, 10 * 60).await?;
-        Ok(())
+    ) -> Result<bool> {
+        const SCRIPT: &str = r#"
+            local held = redis.call('GET', KEYS[1])
+            if not held then
+                redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+                return 1
+            end
+            return held == ARGV[1] and 1 or 0
+        "#;
+        let held: i64 = redis::Script::new(SCRIPT)
+            .key(format!("join_req:{}", pending_device_id))
+            .arg(payload)
+            .arg(10 * 60)
+            .invoke_async(self.client.connection_mut())
+            .await?;
+        Ok(held == 1)
     }
 
     /// Get a join request payload by pending_device_id (non-destructive read).
