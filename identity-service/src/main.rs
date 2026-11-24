@@ -1203,14 +1203,9 @@ impl AuthService for IdentityGrpcService {
             "Join request approved — device linked"
         );
 
+        // The tokens are the new device's; the approver has its own.
         Ok(Response::new(proto::ApproveJoinRequestResponse {
-            tokens: Some(proto::AuthTokensResponse {
-                user_id: user_id.to_string(),
-                access_token,
-                refresh_token,
-                expires_at: exp_timestamp,
-                veil_bridge_cert: self.veil_bridge_cert.clone(),
-            }),
+            tokens: None,
         }))
     }
 
@@ -2085,12 +2080,18 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
         let payload = rmp_serde::to_vec_named(&data)
             .map_err(|e| Status::internal(format!("serialize: {e}")))?;
 
-        {
+        let held = {
             let mut queue = self.context.queue.lock().await;
             queue
                 .store_join_request(&pending_device_id, &payload)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to store join request: {e}")))?;
+                .map_err(|e| Status::internal(format!("Failed to store join request: {e}")))?
+        };
+        // The id and the identity key are in the QR; the signing key the approver lets in is not.
+        if !held {
+            return Err(Status::already_exists(
+                "a join request for this device_id is already waiting",
+            ));
         }
 
         tracing::info!(pending_device_id = %pending_device_id, "Join request stored (10 min TTL)");

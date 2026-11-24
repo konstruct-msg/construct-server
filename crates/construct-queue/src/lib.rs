@@ -261,7 +261,7 @@ impl MessageQueue {
         &mut self,
         pending_device_id: &str,
         payload: &[u8],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         tokens::TokenManager::new(&mut self.client)
             .store_join_request(pending_device_id, payload)
             .await

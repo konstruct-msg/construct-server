@@ -100,7 +100,7 @@ impl Fixture {
         (tokens, device, key)
     }
 
-    async fn sign_in(
+    pub(super) async fn sign_in(
         &self,
         device: &str,
         key: &SigningKey,
@@ -311,7 +311,7 @@ async fn registration_stores_the_device_and_hands_out_tokens_bound_to_it() {
     assert_eq!(accounts, 1);
 }
 
-async fn redis_of(f: &Fixture) -> redis::aio::MultiplexedConnection {
+pub(super) async fn redis_of(f: &Fixture) -> redis::aio::MultiplexedConnection {
     redis::Client::open(f.service.context.config.redis_url.as_str())
         .unwrap()
         .get_multiplexed_async_connection()

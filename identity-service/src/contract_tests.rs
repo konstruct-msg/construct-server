@@ -19,6 +19,7 @@ mod device_keys_contracts;
 mod faulty_redis;
 #[path = "../../shared/test_support/grpc.rs"]
 mod grpc_support;
+mod join_contracts;
 mod recovery_contracts;
 
 struct Fixture {
@@ -767,22 +768,10 @@ async fn approval_refuses_header_spoof_without_consuming_join_and_accepts_once()
             .unwrap()
             .is_some()
     );
-    let tokens = f
-        .service
+    f.service
         .approve_join_request(f.request(user, Some(&device), body.clone()))
         .await
-        .unwrap()
-        .into_inner()
-        .tokens
         .unwrap();
-    assert_eq!(tokens.user_id, user.to_string());
-    let claims = f
-        .service
-        .context
-        .auth_manager
-        .verify_token(&tokens.access_token)
-        .unwrap();
-    assert_eq!(claims.device_id.as_deref(), Some(pending.as_str()));
     assert_eq!(
         f.service
             .approve_join_request(f.request(user, Some(&device), body))
