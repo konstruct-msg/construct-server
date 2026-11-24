@@ -10,7 +10,7 @@ use anyhow::{Result, ensure};
 use construct_config::{Config, SecretNeeds};
 use construct_message::MessageEnvelope;
 use construct_queue::{MailboxCursor, MessageDedupKey, MessageQueue};
-use construct_utils::{hash_client_ip, log_safe_id};
+use construct_utils::log_safe_id;
 
 #[path = "../../shared/test_support/allocations.rs"]
 mod allocations;
@@ -75,25 +75,19 @@ fn profile_clones(queue: &MessageQueue, check: bool) {
 }
 
 fn profile_hashes(check: bool) {
-    for ip in [false, true] {
-        let sample = Sample::start();
-        for _ in 0..100_000 {
-            if ip {
-                black_box(hash_client_ip(black_box("192.0.2.3"), "profile-only-salt"));
-            } else {
-                black_box(log_safe_id(
-                    black_box("profile-account-id"),
-                    "profile-only-salt",
-                ));
-            }
-        }
-        let allocations = sample.finish(if ip { "IP tag" } else { "log ID" }, 100_000);
-        if check {
-            assert_eq!(
-                allocations, 100_000,
-                "hash encoding must allocate only the output String"
-            );
-        }
+    let sample = Sample::start();
+    for _ in 0..100_000 {
+        black_box(log_safe_id(
+            black_box("profile-account-id"),
+            "profile-only-salt",
+        ));
+    }
+    let allocations = sample.finish("log ID", 100_000);
+    if check {
+        assert_eq!(
+            allocations, 100_000,
+            "hash encoding must allocate only the output String"
+        );
     }
 }
 

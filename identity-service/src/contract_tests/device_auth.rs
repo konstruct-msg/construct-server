@@ -54,7 +54,7 @@ impl Fixture {
             .queue
             .lock()
             .await
-            .create_pow_challenge(&challenge, difficulty, None, 600)
+            .create_pow_challenge(&challenge, difficulty, 600)
             .await
             .unwrap();
         self.keys.push(format!("pow:ch:{challenge}"));
@@ -326,6 +326,106 @@ async fn redis_of(f: &Fixture) -> redis::aio::MultiplexedConnection {
 
 async fn get(redis: &mut redis::aio::MultiplexedConnection, key: &str) -> Option<String> {
     redis::cmd("GET").arg(key).query_async(redis).await.unwrap()
+}
+
+fn registrations(result: &str) -> u64 {
+    construct_server_shared::metrics::ACCOUNT_REGISTRATIONS_TOTAL
+        .with_label_values(&[result])
+        .get()
+}
+
+/// What a server that counted by address kept beside its challenges.
+async fn address_keys(
+    redis: &mut redis::aio::MultiplexedConnection,
+) -> std::collections::BTreeSet<String> {
+    redis::cmd("KEYS")
+        .arg("pow:ip*")
+        .query_async(redis)
+        .await
+        .unwrap()
+}
+
+/// Registration reads no address: a relay front, the QUIC gateway and a carrier NAT each put many
+/// people behind one, so every challenge asks the same work whoever asked before, every account
+/// solved for is opened, and nothing is kept about where a request came from. Volume is counted
+/// instead.
+#[tokio::test]
+#[ignore = "requires Redis and migrated PostgreSQL"]
+async fn people_behind_one_address_register_alike_and_leave_no_trace_of_it() {
+    let mut f = Fixture::new().await;
+    let ip = format!("2001:db8::{:x}", uuid::Uuid::new_v4().as_fields().0);
+    let from = |request: proto::RegisterDeviceRequest| {
+        let mut request = Request::new(request);
+        request
+            .metadata_mut()
+            .insert("x-forwarded-for", ip.parse().unwrap());
+        request
+    };
+    let difficulty = f.service.context.config.security.pow_difficulty;
+    let issued = construct_server_shared::metrics::POW_CHALLENGES_ISSUED_TOTAL.get();
+    let before = ["registered", "refused", "failed"].map(registrations);
+    let mut redis = redis_of(&f).await;
+    let kept_before = address_keys(&mut redis).await;
+
+    for person in 0..12 {
+        let mut request = Request::new(proto::GetPowChallengeRequest::default());
+        request
+            .metadata_mut()
+            .insert("x-forwarded-for", ip.parse().unwrap());
+        let challenge = f
+            .service
+            .get_pow_challenge(request)
+            .await
+            .unwrap_or_else(|e| panic!("person {person}: {e}"))
+            .into_inner();
+        let key = format!("pow:ch:{}", challenge.challenge);
+        f.keys.push(key.clone());
+        assert_eq!(challenge.difficulty, difficulty, "person {person}");
+        let record: String = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+        let mut fields: Vec<_> = record.as_object().unwrap().keys().cloned().collect();
+        fields.sort();
+        assert_eq!(fields, ["difficulty", "expires_at", "used"]);
+        assert_eq!(record["difficulty"], difficulty);
+
+        let (_, request) = registration(solve(&challenge.challenge, difficulty));
+        let tokens = f
+            .service
+            .register_device(from(request))
+            .await
+            .unwrap_or_else(|e| panic!("person {person}: {e}"))
+            .into_inner()
+            .tokens
+            .unwrap();
+        f.users.push(tokens.user_id.parse().unwrap());
+    }
+    let (_, unsolved) = registration(proto::PowSolution::default());
+    let refusal = f.service.register_device(from(unsolved)).await.unwrap_err();
+    let broken = Fixture::new().await;
+    let challenge = f.challenge(0).await;
+    broken.service.context.db_pool.close().await;
+    let (_, request) = registration(solve(&challenge, 0));
+    let failure = broken
+        .service
+        .register_device(from(request))
+        .await
+        .unwrap_err();
+    let kept = address_keys(&mut redis).await;
+    let after = ["registered", "refused", "failed"].map(registrations);
+    f.cleanup().await;
+
+    assert_eq!(refusal.code(), Code::InvalidArgument);
+    assert_eq!(failure.code(), Code::Internal);
+    assert_eq!(kept.difference(&kept_before).count(), 0, "{kept:?}");
+    assert_eq!(after, [before[0] + 12, before[1] + 1, before[2] + 1]);
+    assert_eq!(
+        construct_server_shared::metrics::POW_CHALLENGES_ISSUED_TOTAL.get() - issued,
+        12
+    );
 }
 
 #[tokio::test]

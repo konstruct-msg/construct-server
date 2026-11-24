@@ -563,6 +563,30 @@ pub static AUTH_FAILURES_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register AUTH_FAILURES_TOTAL metric")
 });
 
+/// Account registrations (`RegisterDevice`). Label `result`: "registered" | "refused" (the
+/// request was) | "failed" (the server was). Linked and recovered devices are not registrations.
+/// Registration has no rule by address, so this series is what notices a campaign.
+pub static ACCOUNT_REGISTRATIONS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_account_registrations_total",
+            "Account registrations, by result"
+        ),
+        &["result"]
+    )
+    .expect("Failed to register ACCOUNT_REGISTRATIONS_TOTAL metric")
+});
+
+/// Proof-of-work challenges handed out. Read against registrations: many challenges and few
+/// registrations is someone writing to Redis, not someone registering.
+pub static POW_CHALLENGES_ISSUED_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(opts!(
+        "construct_pow_challenges_issued_total",
+        "Registration proof-of-work challenges issued"
+    ))
+    .expect("Failed to register POW_CHALLENGES_ISSUED_TOTAL metric")
+});
+
 // ============================================================================
 // Stealth Sealed Sender — Privacy Pass Redemption (Phase 1)
 // ============================================================================
@@ -916,6 +940,10 @@ pub fn init_registry() {
         MSG_INTAKE_PUBLISH_TOTAL.with_label_values(&[outcome]);
     }
     Lazy::force(&AUTH_FAILURES_TOTAL);
+    for result in ["registered", "refused", "failed"] {
+        ACCOUNT_REGISTRATIONS_TOTAL.with_label_values(&[result]);
+    }
+    Lazy::force(&POW_CHALLENGES_ISSUED_TOTAL);
     Lazy::force(&STEALTH_TOKEN_PRESENT_TOTAL);
     Lazy::force(&STEALTH_TOKEN_CHECK_TOTAL);
     Lazy::force(&GRPC_STREAMS_CLOSED_TOTAL);

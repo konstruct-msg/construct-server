@@ -1255,6 +1255,73 @@
           "sort": "desc"
         }
       },
+      "title": "Регистрации за час",
+      "description": "Правил по адресу у регистрации нет, всплеск видно только здесь. Много задач без регистраций — кто-то пишет в Redis, а не регистрируется.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum by (result) (increase(construct_account_registrations_total[1h]))",
+          "legendFormat": "{{result}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum(increase(construct_pow_challenges_issued_total[1h]))",
+          "legendFormat": "выдано задач PoW",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 125
+      },
+      "id": 112,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "title": "Звонки",
       "description": "Активные звонки — gauge, инициации — счётчик. Расхождение (много инициаций, ноль активных) означает, что звонки не устанавливаются.",
       "type": "timeseries",
@@ -1307,10 +1374,10 @@
       "gridPos": {
         "h": 7,
         "w": 8,
-        "x": 8,
+        "x": 16,
         "y": 125
       },
-      "id": 112,
+      "id": 113,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1347,7 +1414,7 @@
         "x": 0,
         "y": 132
       },
-      "id": 113,
+      "id": 114,
       "title": "КЛЮЧИ И ПОДКЛЮЧЕНИЯ",
       "type": "row"
     },
@@ -1378,7 +1445,7 @@
         "x": 0,
         "y": 133
       },
-      "id": 114,
+      "id": 115,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1456,7 +1523,7 @@
         "x": 12,
         "y": 133
       },
-      "id": 115,
+      "id": 116,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1523,7 +1590,7 @@
         "x": 0,
         "y": 140
       },
-      "id": 116,
+      "id": 117,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1590,7 +1657,7 @@
         "x": 12,
         "y": 140
       },
-      "id": 117,
+      "id": 118,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1627,7 +1694,7 @@
         "x": 0,
         "y": 147
       },
-      "id": 118,
+      "id": 119,
       "title": "ЗАПРОСЫ (CADDY)",
       "type": "row"
     },
@@ -1658,7 +1725,7 @@
         "x": 0,
         "y": 148
       },
-      "id": 119,
+      "id": 120,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1714,7 +1781,7 @@
         "x": 12,
         "y": 148
       },
-      "id": 120,
+      "id": 121,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1773,7 +1840,7 @@
         "x": 0,
         "y": 155
       },
-      "id": 121,
+      "id": 122,
       "title": "POSTGRES",
       "type": "row"
     },
@@ -1804,7 +1871,7 @@
         "x": 0,
         "y": 156
       },
-      "id": 122,
+      "id": 123,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1860,7 +1927,7 @@
         "x": 8,
         "y": 156
       },
-      "id": 123,
+      "id": 124,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1916,7 +1983,7 @@
         "x": 16,
         "y": 156
       },
-      "id": 124,
+      "id": 125,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1983,7 +2050,7 @@
         "x": 0,
         "y": 163
       },
-      "id": 125,
+      "id": 126,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2031,7 +2098,7 @@
         "x": 0,
         "y": 170
       },
-      "id": 126,
+      "id": 127,
       "title": "REDIS — он же хранилище недоставленного",
       "type": "row"
     },
@@ -2062,7 +2129,7 @@
         "x": 0,
         "y": 171
       },
-      "id": 127,
+      "id": 128,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2118,7 +2185,7 @@
         "x": 8,
         "y": 171
       },
-      "id": 128,
+      "id": 129,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2174,7 +2241,7 @@
         "x": 16,
         "y": 171
       },
-      "id": 129,
+      "id": 130,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2241,7 +2308,7 @@
         "x": 0,
         "y": 178
       },
-      "id": 130,
+      "id": 131,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2289,7 +2356,7 @@
         "x": 0,
         "y": 185
       },
-      "id": 131,
+      "id": 132,
       "title": "РЕСУРСЫ ПРОЦЕССОВ",
       "type": "row"
     },
@@ -2320,7 +2387,7 @@
         "x": 0,
         "y": 186
       },
-      "id": 132,
+      "id": 133,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2376,7 +2443,7 @@
         "x": 12,
         "y": 186
       },
-      "id": 133,
+      "id": 134,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2413,7 +2480,7 @@
         "x": 0,
         "y": 193
       },
-      "id": 134,
+      "id": 135,
       "title": "ЖДЁТ СОБЫТИЙ — производитель есть, событие не наступало",
       "type": "row"
     },
@@ -2444,7 +2511,7 @@
         "x": 0,
         "y": 194
       },
-      "id": 135,
+      "id": 136,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2522,7 +2589,7 @@
         "x": 12,
         "y": 194
       },
-      "id": 136,
+      "id": 137,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2578,7 +2645,7 @@
         "x": 0,
         "y": 201
       },
-      "id": 137,
+      "id": 138,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -2634,7 +2701,7 @@
         "x": 12,
         "y": 201
       },
-      "id": 138,
+      "id": 139,
       "options": {
         "legend": {
           "displayMode": "list",
