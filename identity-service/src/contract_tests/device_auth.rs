@@ -3,11 +3,6 @@
 //! These decide who is handed a token.
 use super::*;
 use proto::auth_service_server::AuthService;
-use sha2::{Digest, Sha256};
-
-fn device_id(identity_public: &[u8]) -> String {
-    hex::encode(&Sha256::digest(identity_public)[..16])
-}
 
 /// The client's side of the puzzle, written against the parameters and not by calling the
 /// verifier it is checked with.

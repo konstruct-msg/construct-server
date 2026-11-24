@@ -7,12 +7,14 @@ use construct_server_shared::shared::proto::services::v1::{
     user_service_server::UserServiceServer,
 };
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
+use ed25519_dalek::Verifier;
 use prost::Message;
 use tonic::Code;
 use tower::Layer;
 use uuid::Uuid;
 
 mod device_auth;
+mod device_keys_contracts;
 #[path = "../../shared/test_support/faulty_redis.rs"]
 mod faulty_redis;
 #[path = "../../shared/test_support/grpc.rs"]
@@ -101,8 +103,8 @@ impl Fixture {
     }
 
     async fn device(&self, user: Uuid) -> (String, SigningKey, proto::DevicePublicKeys) {
-        let id = Uuid::new_v4().simple().to_string();
         let (key, public) = device_keys();
+        let id = device_id(&public.identity_public);
         construct_db::create_device(
             self.service.context.db_pool.as_ref(),
             construct_db::CreateDeviceData {
@@ -140,8 +142,8 @@ impl Fixture {
     }
 
     async fn join(&mut self) -> String {
-        let id = Uuid::new_v4().simple().to_string();
         let (_, keys) = device_keys();
+        let id = device_id(&keys.identity_public);
         let data = JoinRequestData {
             pending_device_id: id.clone(),
             identity_public: keys.identity_public,
@@ -228,6 +230,12 @@ impl Drop for Fixture {
             eprintln!("identity fixture cleanup failed: {result:?}");
         }
     }
+}
+
+/// Written against the rule and not by calling the check that holds it.
+fn device_id(identity_public: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(identity_public)[..16])
 }
 
 fn device_keys() -> (SigningKey, proto::DevicePublicKeys) {
@@ -513,7 +521,7 @@ async fn sender_certificate_binds_active_device_account_key_domain_and_lifetime(
         cert.issued_at,
         cert.expires_at,
     );
-    let sig = Ed25519Signature::from_slice(&cert.server_signature).unwrap();
+    let sig = ed25519_dalek::Signature::from_slice(&cert.server_signature).unwrap();
     let verifier = f.service.cert_signing_key.as_ref().unwrap().verifying_key();
     verifier.verify(&body, &sig).unwrap();
     let substituted = build_sender_cert_sign_payload(
@@ -609,11 +617,12 @@ async fn sender_certificate_refuses_missing_key_header_foreign_account_and_sibli
     f.cleanup().await;
 }
 
-fn confirm(token: &str, device: &str) -> proto::ConfirmDeviceLinkRequest {
+fn confirm(token: &str) -> proto::ConfirmDeviceLinkRequest {
+    let (_, keys) = device_keys();
     proto::ConfirmDeviceLinkRequest {
         link_token: token.into(),
-        device_id: device.into(),
-        public_keys: Some(device_keys().1),
+        device_id: device_id(&keys.identity_public),
+        public_keys: Some(keys),
         link_key_proof: vec![52; 32],
     }
 }
@@ -624,8 +633,8 @@ async fn confirm_link_is_single_use_returns_bound_tokens_and_preserves_key_proof
     let mut f = Fixture::new().await;
     let user = f.user().await;
     let token = f.link_token(user).await;
-    let device = Uuid::new_v4().simple().to_string();
-    let req = confirm(&token, &device);
+    let req = confirm(&token);
+    let device = req.device_id.clone();
     let tokens = f
         .service
         .confirm_device_link(Request::new(req.clone()))
@@ -675,8 +684,9 @@ async fn confirm_link_rejects_expired_tokens_and_invalid_key_proofs() {
     let mut f = Fixture::new().await;
     let user = f.user().await;
     let token = f.link_token(user).await;
-    let device = Uuid::new_v4().simple().to_string();
-    let mut req = confirm(&token, &device);
+    let valid = confirm(&token);
+    let device = valid.device_id.clone();
+    let mut req = valid.clone();
     req.link_key_proof = vec![1; 31];
     assert_eq!(
         f.service
@@ -708,7 +718,7 @@ async fn confirm_link_rejects_expired_tokens_and_invalid_key_proofs() {
         .unwrap();
     assert_eq!(
         f.service
-            .confirm_device_link(Request::new(confirm(&token, &device)))
+            .confirm_device_link(Request::new(valid))
             .await
             .unwrap_err()
             .code(),
@@ -1215,9 +1225,10 @@ async fn link_result_is_visible_only_to_the_issuing_account() {
         assert!(result.device_id.is_empty());
         assert!(result.link_key_proof.is_empty());
     }
-    let device = Uuid::new_v4().simple().to_string();
+    let confirmed = confirm(&token);
+    let device = confirmed.device_id.clone();
     f.service
-        .confirm_device_link(Request::new(confirm(&token, &device)))
+        .confirm_device_link(Request::new(confirmed))
         .await
         .unwrap();
     let owned = f
@@ -1306,10 +1317,9 @@ impl Phrase {
 
 /// A real recovery: the phrase's hybrid key set on the account, a claim for a new device.
 async fn recover(f: &Fixture, user: Uuid) -> Result<proto::RecoverAccountResponse, Status> {
-    let device_id = Uuid::new_v4().simple().to_string();
-    let claim = Phrase::of(f, user)
-        .await
-        .claim(user, &device_id, device_keys().1);
+    let (_, keys) = device_keys();
+    let id = device_id(&keys.identity_public);
+    let claim = Phrase::of(f, user).await.claim(user, &id, keys);
     f.service
         .recover_account(Request::new(claim))
         .await

@@ -82,6 +82,58 @@ pub struct RegisterDeviceResponse {
 /// Longest accepted suite name. The one clients send is 18 bytes.
 const MAX_CRYPTO_SUITE_LEN: usize = 64;
 
+/// What a new device says it is, on any of the ways in.
+pub struct NewDeviceKeys<'a> {
+    pub device_id: &'a str,
+    pub verifying_key: &'a [u8],
+    pub identity_public: &'a [u8],
+    pub signed_prekey_public: &'a [u8],
+    pub signed_prekey_signature: &'a [u8],
+    pub crypto_suite: &'a str,
+}
+
+/// The one check of a new device: registration, linking, joining and recovery all ask it, before
+/// they spend or change anything. Peers are handed these keys, so their sizes are exact; the id is
+/// the identity key's, so nobody takes the id of a device whose key they do not present; and the
+/// prekey is signed by the device.
+pub fn check_new_device(device: &NewDeviceKeys<'_>) -> Result<(), AppError> {
+    let invalid = |what: &str| AppError::Validation(what.to_string());
+
+    let verifying_key: &[u8; 32] = device
+        .verifying_key
+        .try_into()
+        .map_err(|_| invalid("verifying_key must be exactly 32 bytes (Ed25519)"))?;
+    if device.identity_public.len() != 32 {
+        return Err(invalid("identity_public must be exactly 32 bytes (X25519)"));
+    }
+    if device.signed_prekey_public.len() != 32 {
+        return Err(invalid(
+            "signed_prekey_public must be exactly 32 bytes (X25519)",
+        ));
+    }
+    let signature: &[u8; 64] = device.signed_prekey_signature.try_into().map_err(|_| {
+        invalid("signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)")
+    })?;
+    if device.crypto_suite.len() > MAX_CRYPTO_SUITE_LEN {
+        return Err(AppError::Validation(format!(
+            "crypto_suite must be at most {MAX_CRYPTO_SUITE_LEN} bytes"
+        )));
+    }
+
+    if hex::encode(&Sha256::digest(device.identity_public)[..16]) != device.device_id {
+        return Err(invalid("device_id must be SHA256(identity_public)[0..16]"));
+    }
+
+    let mut signed = Vec::with_capacity(18 + device.signed_prekey_public.len());
+    signed.extend_from_slice(b"KonstruktX3DH-v1");
+    signed.extend_from_slice(&[0x00, 0x01]);
+    signed.extend_from_slice(device.signed_prekey_public);
+    VerifyingKey::from_bytes(verifying_key)
+        .map_err(|_| invalid("verifying_key is not a valid Ed25519 key"))?
+        .verify(&signed, &Ed25519Signature::from_bytes(signature))
+        .map_err(|_| invalid("signed_prekey_signature verification failed"))
+}
+
 // ============================================================================
 // Registration Endpoint
 // ============================================================================
@@ -115,26 +167,16 @@ pub async fn register_device_core(
         "Device registration attempt"
     );
 
-    // 1. Validate device_id format (32 lowercase hex characters = 16 bytes)
-    if device_id.len() != 32 {
-        return Err(AppError::Validation(
-            "device_id must be exactly 32 characters (16 bytes hex)".to_string(),
-        ));
-    }
+    check_new_device(&NewDeviceKeys {
+        device_id: &device_id,
+        verifying_key: &keys.verifying_key,
+        identity_public: &keys.identity_public,
+        signed_prekey_public: &keys.signed_prekey_public,
+        signed_prekey_signature: &keys.signed_prekey_signature,
+        crypto_suite: &keys.crypto_suite,
+    })?;
 
-    if !device_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(AppError::Validation(
-            "device_id must be hex characters (0-9a-f)".to_string(),
-        ));
-    }
-
-    if device_id.to_lowercase() != device_id {
-        return Err(AppError::Validation(
-            "device_id must be lowercase".to_string(),
-        ));
-    }
-
-    // 2. Validate and normalize username (optional)
+    // Validate and normalize username (optional)
     let normalized_username = username.as_ref().map(|u| u.to_lowercase());
 
     if let Some(ref uname) = normalized_username {
@@ -151,86 +193,7 @@ pub async fn register_device_core(
         }
     }
 
-    // 3. Validate public keys (already decoded from base64)
-    let verifying_key = keys.verifying_key;
-
-    if verifying_key.len() != 32 {
-        return Err(AppError::Validation(
-            "verifying_key must be exactly 32 bytes (Ed25519)".to_string(),
-        ));
-    }
-
-    let identity_public = keys.identity_public;
-    let signed_prekey_public = keys.signed_prekey_public;
-    let signed_prekey_signature = keys.signed_prekey_signature;
-
-    // Both are X25519 keys peers will be handed; without this a caller stores any size.
-    if identity_public.len() != 32 {
-        return Err(AppError::Validation(
-            "identity_public must be exactly 32 bytes (X25519)".to_string(),
-        ));
-    }
-
-    if signed_prekey_public.len() != 32 {
-        return Err(AppError::Validation(
-            "signed_prekey_public must be exactly 32 bytes (X25519)".to_string(),
-        ));
-    }
-
-    if keys.crypto_suite.len() > MAX_CRYPTO_SUITE_LEN {
-        return Err(AppError::Validation(format!(
-            "crypto_suite must be at most {MAX_CRYPTO_SUITE_LEN} bytes"
-        )));
-    }
-
-    if signed_prekey_signature.len() != 64 {
-        return Err(AppError::Validation(
-            "signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)".to_string(),
-        ));
-    }
-
-    // Cryptographically verify signed_prekey_signature.
-    {
-        let vk_bytes: [u8; 32] = verifying_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| AppError::Validation("verifying_key must be 32 bytes".to_string()))?;
-        let vk = VerifyingKey::from_bytes(&vk_bytes).map_err(|_| {
-            AppError::Validation("verifying_key is not a valid Ed25519 key".to_string())
-        })?;
-        let sig_bytes: [u8; 64] = signed_prekey_signature.as_slice().try_into().map_err(|_| {
-            AppError::Validation(
-                "signed_prekey_signature must be exactly 64 bytes (Ed25519 signature)".to_string(),
-            )
-        })?;
-        let sig = Ed25519Signature::from_bytes(&sig_bytes);
-        let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
-        msg.extend_from_slice(b"KonstruktX3DH-v1");
-        msg.extend_from_slice(&[0x00, 0x01]);
-        msg.extend_from_slice(&signed_prekey_public);
-        vk.verify(&msg, &sig).map_err(|_| {
-            AppError::Validation("signed_prekey_signature verification failed".to_string())
-        })?;
-    }
-
-    // 4. Verify device_id matches identity_public (SHA256 first 16 bytes = 32 hex chars)
-    let computed_device_id = {
-        let hash = Sha256::digest(&identity_public);
-        hex::encode(&hash[0..16])
-    };
-
-    if computed_device_id != device_id {
-        tracing::warn!(
-            provided = %device_id,
-            computed = %computed_device_id,
-            "device_id mismatch with identity_public"
-        );
-        return Err(AppError::Validation(
-            "device_id must be SHA256(identity_public)[0..16]".to_string(),
-        ));
-    }
-
-    // 5. Check if device_id already exists
+    // Check if device_id already exists
     if db::device_exists(&app_context.db_pool, &device_id)
         .await
         .unwrap_or(false)
@@ -242,7 +205,7 @@ pub async fn register_device_core(
         return Err(AppError::Conflict("Device already exists".to_string()));
     }
 
-    // 6. Verify PoW solution
+    // Verify PoW solution
     let pow_challenge = app_context
         .queue
         .lock()
@@ -290,10 +253,10 @@ pub async fn register_device_core(
     let device_data = CreateDeviceData {
         device_id: device_id.clone(),
         server_hostname: server_hostname.clone(),
-        verifying_key,
-        identity_public,
-        signed_prekey_public,
-        signed_prekey_signature,
+        verifying_key: keys.verifying_key,
+        identity_public: keys.identity_public,
+        signed_prekey_public: keys.signed_prekey_public,
+        signed_prekey_signature: keys.signed_prekey_signature,
         crypto_suites,
         supports_pq_ratchet: keys.supports_pq_ratchet,
     };

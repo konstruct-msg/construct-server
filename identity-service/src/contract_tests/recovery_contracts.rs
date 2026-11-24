@@ -2,8 +2,9 @@
 use super::faulty_redis::FaultyRedis;
 use super::*;
 
-fn new_device_id() -> String {
-    Uuid::new_v4().simple().to_string()
+fn new_device() -> (String, proto::DevicePublicKeys) {
+    let (_, keys) = device_keys();
+    (device_id(&keys.identity_public), keys)
 }
 
 /// What a refused recovery must not touch.
@@ -56,9 +57,9 @@ async fn account(f: &Fixture, user: Uuid, device: &str, refresh_jti: &str) -> Ac
 }
 
 /// An account with one signed-in primary device. Returns the device and its refresh token's id.
-async fn signed_in_account(f: &mut Fixture) -> (Uuid, String, String) {
+async fn signed_in_account(f: &mut Fixture) -> (Uuid, String, String, proto::DevicePublicKeys) {
     let user = f.user().await;
-    let (device, _, _) = f.device(user).await;
+    let (device, _, keys) = f.device(user).await;
     f.keys.push(format!("revoked_device:{device}"));
     construct_db::set_primary_device(f.service.context.db_pool.as_ref(), &user, &device)
         .await
@@ -72,7 +73,7 @@ async fn signed_in_account(f: &mut Fixture) -> (Uuid, String, String) {
         .store_refresh_token(&jti, &user.to_string(), 600)
         .await
         .unwrap();
-    (user, device, jti)
+    (user, device, jti, keys)
 }
 
 /// Everything a recovery is refused for is found before it takes the account's devices away.
@@ -80,7 +81,7 @@ async fn signed_in_account(f: &mut Fixture) -> (Uuid, String, String) {
 #[ignore = "requires Redis and migrated PostgreSQL"]
 async fn a_refused_recovery_leaves_the_account_as_it_was() {
     let mut f = Fixture::new().await;
-    let (user, device, jti) = signed_in_account(&mut f).await;
+    let (user, device, jti, device_public) = signed_in_account(&mut f).await;
     // Removed before it had a marker, or after its marker ran out.
     let (removed_earlier, _, _) = f.device(user).await;
     f.keys.push(format!("revoked_device:{removed_earlier}"));
@@ -94,26 +95,22 @@ async fn a_refused_recovery_leaves_the_account_as_it_was() {
     let phrase = Phrase::of(&f, user).await;
     let before = account(&f, user, &device, &jti).await;
 
-    let mut unsigned_prekey = device_keys().1;
+    let (unsigned_id, mut unsigned_prekey) = new_device();
     unsigned_prekey.signed_prekey_signature = vec![0; 64];
     let mut outcomes = Vec::new();
     for (case, id, keys) in [
         (
             "prekey not signed by the device",
-            new_device_id(),
+            unsigned_id,
             unsigned_prekey,
         ),
-        ("device id of another account", taken_id, device_keys().1),
         (
-            "device id the account already has",
-            device.clone(),
-            device_keys().1,
+            "another device's id under its own key",
+            taken_id.clone(),
+            new_device().1,
         ),
-        (
-            "identity key of another device",
-            new_device_id(),
-            taken_keys,
-        ),
+        ("a device of another account", taken_id, taken_keys),
+        ("the device it already has", device.clone(), device_public),
     ] {
         let code = f
             .service
@@ -123,7 +120,7 @@ async fn a_refused_recovery_leaves_the_account_as_it_was() {
         outcomes.push((case, code, account(&f, user, &device, &jti).await == before));
     }
 
-    let (id, keys) = (new_device_id(), device_keys().1);
+    let (id, keys) = new_device();
     let recovered = f
         .service
         .recover_account(Request::new(phrase.claim(user, &id, keys)))
@@ -156,13 +153,13 @@ async fn a_refused_recovery_leaves_the_account_as_it_was() {
                 Code::InvalidArgument,
                 true
             ),
-            ("device id of another account", Code::AlreadyExists, true),
             (
-                "device id the account already has",
-                Code::AlreadyExists,
+                "another device's id under its own key",
+                Code::InvalidArgument,
                 true
             ),
-            ("identity key of another device", Code::AlreadyExists, true),
+            ("a device of another account", Code::AlreadyExists, true),
+            ("the device it already has", Code::AlreadyExists, true),
         ]
     );
     assert_eq!(
@@ -202,7 +199,7 @@ async fn a_recovery_the_store_interrupts_can_be_tried_again() {
         let proxy = FaultyRedis::start(&config.redis_url).await;
         config.redis_url = proxy.url.clone();
         let mut f = Fixture::on(config).await;
-        let (user, device, jti) = signed_in_account(&mut f).await;
+        let (user, device, jti, _) = signed_in_account(&mut f).await;
         if !has_session {
             f.service
                 .context
@@ -219,20 +216,19 @@ async fn a_recovery_the_store_interrupts_can_be_tried_again() {
         proxy.fail_commands_naming(failing);
         let refused = f
             .service
-            .recover_account(Request::new(phrase.claim(
-                user,
-                &new_device_id(),
-                device_keys().1,
-            )))
+            .recover_account(Request::new({
+                let (id, keys) = new_device();
+                phrase.claim(user, &id, keys)
+            }))
             .await
             .map_or_else(|e| e.code(), |_| Code::Ok);
         proxy.recover();
         let between = account(&f, user, &device, &jti).await;
 
-        let id = new_device_id();
+        let (id, keys) = new_device();
         let again = f
             .service
-            .recover_account(Request::new(phrase.claim(user, &id, device_keys().1)))
+            .recover_account(Request::new(phrase.claim(user, &id, keys)))
             .await
             .map_or_else(|e| e.code(), |_| Code::Ok);
         let after = account(&f, user, &device, &jti).await;
@@ -254,14 +250,14 @@ async fn a_recovery_the_store_interrupts_can_be_tried_again() {
 #[ignore = "requires Redis and migrated PostgreSQL"]
 async fn one_of_several_recoveries_at_once_gets_the_account() {
     let mut f = Fixture::new().await;
-    let (user, _, _) = signed_in_account(&mut f).await;
+    let (user, _, _, _) = signed_in_account(&mut f).await;
     let phrase = Phrase::of(&f, user).await;
     let start = Arc::new(tokio::sync::Barrier::new(6));
     let mut calls = Vec::new();
     for _ in 0..6 {
-        let id = new_device_id();
+        let (id, keys) = new_device();
         f.keys.push(format!("revoked_device:{id}"));
-        let claim = phrase.claim(user, &id, device_keys().1);
+        let claim = phrase.claim(user, &id, keys);
         let (other, start) = (Fixture::new().await, start.clone());
         calls.push(tokio::spawn(async move {
             start.wait().await;
