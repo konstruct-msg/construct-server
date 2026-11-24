@@ -994,10 +994,10 @@
       "gridPos": {
         "h": 7,
         "w": 8,
-        "x": 0,
-        "y": 118
+        "x": 16,
+        "y": 111
       },
-      "id": 108,
+      "id": 107,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1050,10 +1050,10 @@
       "gridPos": {
         "h": 7,
         "w": 8,
-        "x": 8,
+        "x": 0,
         "y": 118
       },
-      "id": 109,
+      "id": 108,
       "options": {
         "legend": {
           "displayMode": "list",
@@ -1099,6 +1099,62 @@
           "expr": "sum(rate(construct_stealth_sealed_local_total[5m]))",
           "legendFormat": "sealed локально/с",
           "refId": "C",
+          "instant": false,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "construct-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 118
+      },
+      "id": 109,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "Запечатанные отправки: отказы окна по адресу",
+      "description": "Отказов за 5 минут. Окно общее для всех, кого Caddy видит с одного адреса: фронт, QUIC-шлюз, NAT оператора. Не ноль при обычном трафике = люди мешают друг другу отправлять, а не злоупотребление.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "construct-prometheus"
+          },
+          "expr": "sum by (ingress) (increase(construct_msg_sealed_ip_limited_total[5m]))",
+          "legendFormat": "{{ingress}}",
+          "refId": "A",
           "instant": false,
           "format": "time_series"
         }

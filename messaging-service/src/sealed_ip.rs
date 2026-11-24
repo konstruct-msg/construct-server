@@ -51,8 +51,23 @@ pub(crate) fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> Stri
     "unknown".to_string()
 }
 
-/// Check-and-record the per-IP sealed send window.
-///
+/// Check-and-record the per-IP sealed send window, counting a refusal under `ingress`
+/// (a label of `construct_msg_sealed_ip_limited_total`). Counted here so that no door refuses
+/// uncounted.
+pub(crate) async fn check_sealed_ip_limit(
+    context: &MessagingServiceContext,
+    client_ip: &str,
+    ingress: &str,
+) -> SealedIpDecision {
+    let decision = window_decision(context, client_ip).await;
+    if decision == SealedIpDecision::Limited {
+        construct_metrics::MSG_SEALED_IP_LIMITED_TOTAL
+            .with_label_values(&[ingress])
+            .inc();
+    }
+    decision
+}
+
 /// On a Redis outage this does not give up. It trips a circuit breaker — so the cost of
 /// the outage is not one timeout per send, which is what turns a blip into a latency
 /// collapse — and keeps counting in a bounded in-process table for the duration. The
@@ -63,10 +78,7 @@ pub(crate) fn extract_client_ip(metadata: &tonic::metadata::MetadataMap) -> Stri
 /// Until 2026-09-13 the Redis arm returned `Allow` unconditionally, which removed the
 /// gate rather than degrading it — and the only sign was a counter on a panel with no
 /// alert behind it.
-pub(crate) async fn check_sealed_ip_limit(
-    context: &MessagingServiceContext,
-    client_ip: &str,
-) -> SealedIpDecision {
+async fn window_decision(context: &MessagingServiceContext, client_ip: &str) -> SealedIpDecision {
     // Counted per /64 on IPv6, not per address. A /64 comes free with any rented machine,
     // so a window keyed on the exact address is a window the sender opens as many of as it
     // likes. `client_rate_bucket` is shared with key-service's bundle limit rather than

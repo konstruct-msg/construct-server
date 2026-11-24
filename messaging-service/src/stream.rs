@@ -87,7 +87,9 @@ pub(crate) async fn handle_stream_request(
             if let Some(sealed) = envelope.sealed_sender {
                 // Same per-IP window as SendSealedMessage. Unauthenticated stream
                 // sealed used to skip this gate entirely.
-                if check_sealed_ip_limit(context, client_ip).await == SealedIpDecision::Limited {
+                if check_sealed_ip_limit(context, client_ip, "stream").await
+                    == SealedIpDecision::Limited
+                {
                     let error = proto::MessageError {
                         message_id: String::new(),
                         error_code: proto::ErrorCode::RateLimit.into(),

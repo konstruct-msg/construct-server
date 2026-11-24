@@ -453,6 +453,20 @@ pub static MSG_SEALED_INGRESS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     .expect("Failed to register MSG_SEALED_INGRESS_TOTAL metric")
 });
 
+/// Sealed sends refused by the per-address window (`messaging-service/src/sealed_ip.rs`), by
+/// ingress. Everyone behind one relay front, one QUIC gateway or one carrier NAT shares a window,
+/// so this is the only series that says whether the window refuses people. No address, no bucket.
+pub static MSG_SEALED_IP_LIMITED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "construct_msg_sealed_ip_limited_total",
+            "Sealed sends refused by the per-address window, by ingress RPC"
+        ),
+        &["ingress"]
+    )
+    .expect("Failed to register MSG_SEALED_IP_LIMITED_TOTAL metric")
+});
+
 /// Identified sends refused by a per-sender limit (`hourly` count, daily `fanout` of unique
 /// recipients), answered `RATE_LIMIT` with `retry_after_ms`. The hourly limit refused nothing
 /// from 2026-04-06 until todo 249; this is the series that says whom it now refuses.
@@ -853,8 +867,12 @@ pub fn init_registry() {
     // Left to appear on first use, the gate reads `absent / present` before the flip and
     // `present / absent` long after it, and neither is a number: the same "missing is not zero"
     // trap this function exists for, one level down at the child.
-    for ingress in ["sealed_rpc", "legacy_send_message"] {
+    for ingress in ["sealed_rpc", "stream", "legacy_send_message"] {
         MSG_SEALED_INGRESS_TOTAL.with_label_values(&[ingress]);
+    }
+    // The legacy door is authenticated and has no window.
+    for ingress in ["sealed_rpc", "stream"] {
+        MSG_SEALED_IP_LIMITED_TOTAL.with_label_values(&[ingress]);
     }
     for limit in ["hourly", "fanout"] {
         MSG_SEND_RATE_LIMITED_TOTAL.with_label_values(&[limit]);

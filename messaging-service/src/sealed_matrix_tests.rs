@@ -3163,6 +3163,19 @@ async fn stream_send(
     anyhow::Result<()>,
     Option<construct_server_shared::shared::proto::services::v1::message_stream_response::Response>,
 ) {
+    stream_send_from(h, sender, token_device, envelope, "127.0.0.1").await
+}
+
+async fn stream_send_from(
+    h: &TestHarness,
+    sender: uuid::Uuid,
+    token_device: Option<&str>,
+    envelope: core_proto::Envelope,
+    client_ip: &str,
+) -> (
+    anyhow::Result<()>,
+    Option<construct_server_shared::shared::proto::services::v1::message_stream_response::Response>,
+) {
     use construct_server_shared::shared::proto::services::v1 as proto;
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let mut user_id = Some(sender);
@@ -3180,7 +3193,7 @@ async fn stream_send(
         token_device,
         &mut queue,
         &mut catchup,
-        "127.0.0.1",
+        client_ip,
     )
     .await;
     drop(tx);
@@ -3233,6 +3246,81 @@ async fn cleanup_sender(conn: &mut redis::aio::ConnectionManager, sender: &uuid:
         ],
     )
     .await;
+}
+
+fn sealed_ip_limited(ingress: &str) -> u64 {
+    construct_metrics::MSG_SEALED_IP_LIMITED_TOTAL
+        .with_label_values(&[ingress])
+        .get()
+}
+
+/// An address no other run used, and the Redis key of its window.
+fn fresh_address() -> (String, String) {
+    let b = random_bytes32();
+    let ip = format!(
+        "2001:db8:{:02x}{:02x}:{:02x}{:02x}::1",
+        b[0], b[1], b[2], b[3]
+    );
+    let key = format!(
+        "sealed_ip:{}",
+        construct_rate_limit::client_rate_bucket(&ip)
+    );
+    (ip, key)
+}
+
+/// Both unauthenticated doors count what the per-address window refuses, each under its own
+/// label, and nothing it lets through. Until todo 335 a refusal was counted nowhere, so whether
+/// people sharing an address were refused could not be asked. Mutations: drop the count; count
+/// an allowed send; swap the labels.
+#[tokio::test]
+#[serial]
+async fn g1_each_sealed_door_counts_its_refusals() {
+    use construct_server_shared::shared::proto::services::v1 as proto;
+    use proto::messaging_service_server::MessagingService;
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let limit = h.ctx.config.messaging.sealed_ip_rate_limit_per_min;
+    let mut conn = h.ctx.redis_conn.clone();
+    let service = crate::grpc::MessagingGrpcService {
+        context: h.ctx.clone(),
+    };
+    let before = (sealed_ip_limited("sealed_rpc"), sealed_ip_limited("stream"));
+
+    // An empty request passes the window and is refused right after it, so nothing is delivered.
+    let (ip, unary_key) = fresh_address();
+    let mut unary = Vec::new();
+    for _ in 0..limit + 2 {
+        let mut req = tonic::Request::new(proto::SendSealedMessageRequest::default());
+        req.metadata_mut()
+            .insert("x-forwarded-for", ip.parse().unwrap());
+        unary.push(service.send_sealed_message(req).await.unwrap_err().code());
+    }
+    let after_unary = (sealed_ip_limited("sealed_rpc"), sealed_ip_limited("stream"));
+
+    let (ip, stream_key) = fresh_address();
+    let mut stream_limited = 0;
+    for _ in 0..limit + 3 {
+        let envelope = core_proto::Envelope {
+            sealed_sender: Some(Default::default()),
+            ..Default::default()
+        };
+        let (_, frame) = stream_send_from(&h, uuid::Uuid::new_v4(), None, envelope, &ip).await;
+        if let Some(proto::message_stream_response::Response::Error(e)) = frame
+            && e.error_code == proto::ErrorCode::RateLimit as i32
+        {
+            stream_limited += 1;
+        }
+    }
+    let after_stream = (sealed_ip_limited("sealed_rpc"), sealed_ip_limited("stream"));
+    del(&mut conn, &[unary_key, stream_key]).await;
+
+    let mut expected = vec![tonic::Code::InvalidArgument; limit as usize];
+    expected.extend([tonic::Code::ResourceExhausted; 2]);
+    assert_eq!(unary, expected);
+    assert_eq!(after_unary, (before.0 + 2, before.1));
+    assert_eq!(stream_limited, 3);
+    assert_eq!(after_stream, (before.0 + 2, before.1 + 3));
 }
 
 /// The stream path has the unary path's 64 KiB cap. Until 2026-10-29 it checked only for empty, so
