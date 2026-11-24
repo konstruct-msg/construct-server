@@ -9,18 +9,12 @@
 //
 // Security:
 // - Argon2id PoW validation (anti-spam)
-// - Rate limiting per IP (5 challenges/hour)
 // - Unique device_id enforcement
 // - Ed25519 signature verification
 //
 // ============================================================================
 
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-};
-use construct_utils::hash_client_ip;
+use axum::{Json, extract::State, http::StatusCode};
 use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -31,112 +25,6 @@ use construct_context::AppContext;
 use construct_crypto::hash_username;
 use construct_db::{self as db, CreateDeviceData};
 use construct_error::{AppError, DeviceRefusal};
-
-// ============================================================================
-// IP Extraction & Adaptive PoW
-// ============================================================================
-
-/// Extract client IP from X-Forwarded-For / X-Real-IP headers (set by Caddy).
-/// Falls back to "unknown" if not present.
-///
-/// SECURITY: use the **rightmost** XFF hop. Caddy appends the connecting peer
-/// after any client-supplied values — leftmost is attacker-controlled.
-pub fn extract_client_ip(headers: &HeaderMap) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for")
-        && let Ok(val) = forwarded.to_str()
-    {
-        let ip = val.split(',').next_back().unwrap_or("").trim();
-        if !ip.is_empty() {
-            return ip.to_string();
-        }
-    }
-    if let Some(real_ip) = headers.get("x-real-ip")
-        && let Ok(val) = real_ip.to_str()
-    {
-        return val.trim().to_string();
-    }
-    "unknown".to_string()
-}
-
-/// Adaptive PoW parameters based on per-IP request count.
-///
-/// As an IP makes more registration attempts, difficulty increases and
-/// a Retry-After delay is added — doubling the cost of each successive attempt.
-///
-/// Difficulty formula: base + floor(log2(count / threshold + 1)) * step
-/// Retry-After formula: base_delay_secs * 2^floor(count / threshold)  (capped at 3600s)
-pub struct AdaptivePowParams {
-    pub difficulty: u32,
-    /// Seconds client should wait before retrying (0 = no delay)
-    pub retry_after_secs: u64,
-}
-
-pub fn adaptive_pow_params(base_difficulty: u32, count: i64) -> AdaptivePowParams {
-    // Each tier = 10 requests from same IP within the window
-    const TIER_SIZE: i64 = 10;
-    const DIFFICULTY_STEP: u32 = 2;
-    const MAX_DIFFICULTY: u32 = 20;
-    const BASE_RETRY_SECS: u64 = 30;
-    const MAX_RETRY_SECS: u64 = 3600;
-
-    let tier = (count / TIER_SIZE) as u32;
-
-    let difficulty = (base_difficulty + tier * DIFFICULTY_STEP).min(MAX_DIFFICULTY);
-
-    // Exponential backoff starts at tier 2 (20+ requests/hour from same IP)
-    let retry_after_secs = if tier >= 2 {
-        (BASE_RETRY_SECS * (1u64 << (tier - 2).min(6))).min(MAX_RETRY_SECS)
-    } else {
-        0
-    };
-
-    AdaptivePowParams {
-        difficulty,
-        retry_after_secs,
-    }
-}
-
-/// Adaptive PoW params specifically for account registration per IP.
-///
-/// Much more aggressive than the generic `adaptive_pow_params`:
-/// - Tier size = 1 account (every new registration from same IP = escalation)
-/// - Exponential delay starts from the 3rd account (tier ≥ 2)
-/// - Delay doubles with each additional account
-///
-/// | Registrations (1h) | PoW level | Delay before next attempt |
-/// |--------------------|-----------|---------------------------|
-/// | 1-2                | base (8)  | none                      |
-/// | 3                  | 8         | 60 s                      |
-/// | 4                  | 10        | 120 s                     |
-/// | 5                  | 12        | 240 s                     |
-/// | 6                  | 14        | 480 s (~8 min)            |
-/// | 7                  | 16        | 960 s (~16 min)           |
-/// | 8+                 | 18+       | up to 3600 s (1 h)        |
-pub fn adaptive_pow_params_registration(base_difficulty: u32, reg_count: i64) -> AdaptivePowParams {
-    const DIFFICULTY_STEP: u32 = 2;
-    const MAX_DIFFICULTY: u32 = 20;
-    // Delay starts at 3rd account (reg_count=2), doubles with each additional
-    const BASE_RETRY_SECS: u64 = 60;
-    const MAX_RETRY_SECS: u64 = 3600;
-
-    let count = reg_count as u32;
-
-    // Difficulty escalates starting from the 4th account (count >= 3)
-    let extra = count.saturating_sub(2);
-    let difficulty = (base_difficulty + extra * DIFFICULTY_STEP).min(MAX_DIFFICULTY);
-
-    // Exponential delay starts at 3rd account (count >= 2): 60s, 120s, 240s, 480s…
-    let retry_after_secs = if count >= 2 {
-        (BASE_RETRY_SECS * (1u64 << (count - 2).min(6))).min(MAX_RETRY_SECS)
-    } else {
-        0
-    };
-
-    AdaptivePowParams {
-        difficulty,
-        retry_after_secs,
-    }
-}
 
 // ============================================================================
 // Request/Response Types
@@ -223,63 +111,16 @@ fn registration_conflict(e: &anyhow::Error) -> Option<&'static str> {
 #[allow(clippy::too_many_arguments)]
 pub async fn register_device_core(
     app_context: Arc<AppContext>,
-    headers: HeaderMap,
     username: Option<String>,
     device_id: String,
     keys: DevicePublicKeysBinary,
     pow_solution: PowSolution,
 ) -> Result<(StatusCode, Json<RegisterDeviceResponse>), AppError> {
-    // Salted hash of the client IP (hash_client_ip) — used only for anti-abuse keying
-    // and logging. The raw address is never stored: the PoW challenge record's
-    // requester_ip, the per-IP zset keys, and all logs carry this opaque tag. Same IP →
-    // same tag, so adaptive per-IP PoW is unchanged; "unknown" passes through.
-    let client_ip = hash_client_ip(
-        &extract_client_ip(&headers),
-        &app_context.config.logging.hash_salt,
-    );
-
     tracing::info!(
         device_id = %device_id,
         has_username = username.is_some(),
-        ip_hash = %client_ip,
         "Device registration attempt"
     );
-
-    // 0. Check rate limiting + adaptive PoW difficulty
-    let max_registrations = app_context.config.security.max_registrations_per_hour;
-
-    if max_registrations > 0 && client_ip != "unknown" {
-        let count = app_context
-            .queue
-            .lock()
-            .await
-            .count_pow_registrations_by_ip(&client_ip, 60)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?;
-
-        if count >= max_registrations as i64 {
-            let params = adaptive_pow_params(app_context.config.security.pow_difficulty, count);
-            let mut err = AppError::Validation(format!(
-                "Rate limit exceeded: max {} registrations per hour from this IP",
-                max_registrations
-            ));
-            if params.retry_after_secs > 0 {
-                err = AppError::TooManyRequests(format!(
-                    "Too many registrations from this IP. Retry after {}s",
-                    params.retry_after_secs
-                ));
-            }
-            tracing::warn!(
-                target: "audit",
-                event_type = "REGISTRATION_RATE_LIMIT",
-                ip_hash = %client_ip,
-                count = count,
-                retry_after_secs = params.retry_after_secs,
-                "Registration rate limit exceeded"
-            );
-            return Err(err);
-        }
-    }
 
     // 1. Validate device_id format (32 lowercase hex characters = 16 bytes)
     if device_id.len() != 32 {
@@ -704,246 +545,30 @@ pub struct ChallengeResponse {
     pub expires_at: i64, // Unix timestamp
 }
 
-/// GET /api/v1/register/challenge
+/// Issue a proof-of-work challenge for registration.
 ///
-/// Generate a PoW challenge for registration.
-/// Difficulty scales up with request volume from the same IP (adaptive PoW).
-/// A Retry-After header is added when the IP is in a higher abuse tier.
-///
-/// Rate limiting: Configurable via MAX_POW_CHALLENGES_PER_HOUR (default: 5)
+/// The difficulty is the same for everyone and no address is read: a relay front, the QUIC
+/// gateway and a carrier NAT each put many people behind one address, so a rule by address
+/// refuses the people it should serve. Volume is watched, not limited
+/// (`construct_pow_challenges_issued_total`, `construct_account_registrations_total`).
 pub async fn get_pow_challenge(
     State(app_context): State<Arc<AppContext>>,
-    headers: HeaderMap,
-) -> Result<(axum::http::HeaderMap, Json<ChallengeResponse>), AppError> {
-    // Salted hash of the client IP (hash_client_ip) — used only for anti-abuse keying
-    // and logging. The raw address is never stored: the PoW challenge record's
-    // requester_ip, the per-IP zset keys, and all logs carry this opaque tag. Same IP →
-    // same tag, so adaptive per-IP PoW is unchanged; "unknown" passes through.
-    let client_ip = hash_client_ip(
-        &extract_client_ip(&headers),
-        &app_context.config.logging.hash_salt,
-    );
-
-    // 1. Count how many challenges this IP has requested in the last hour
-    // Skip rate-limit check when IP is unknown (no proxy headers) to avoid inet cast errors
-    let max_challenges = app_context.config.security.max_pow_challenges_per_hour;
-    let count = if max_challenges > 0 && client_ip != "unknown" {
-        app_context
-            .queue
-            .lock()
-            .await
-            .count_pow_challenges_by_ip(&client_ip, 60)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to check rate limit: {}", e)))?
-    } else {
-        0
-    };
-
-    if max_challenges > 0 && count >= max_challenges as i64 {
-        tracing::warn!(
-            target: "audit",
-            event_type = "POW_CHALLENGE_RATE_LIMIT",
-            ip_hash = %client_ip,
-            count = count,
-            "PoW challenge rate limit exceeded"
-        );
-        return Err(AppError::TooManyRequests(format!(
-            "Rate limit exceeded: max {} challenges per hour",
-            max_challenges
-        )));
-    }
-
-    // 2. Compute adaptive difficulty — take the stricter of:
-    //    (a) challenge-request volume from this IP (generic throttling)
-    //    (b) successful registrations from this IP (registration-specific escalation)
-    let base_difficulty = app_context.config.security.pow_difficulty;
-    let reg_count = if client_ip != "unknown" {
-        app_context
-            .queue
-            .lock()
-            .await
-            .count_pow_registrations_by_ip(&client_ip, 60)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let params_challenge = adaptive_pow_params(base_difficulty, count);
-    let params_reg = adaptive_pow_params_registration(base_difficulty, reg_count);
-    // Use whichever gives the higher difficulty + longer delay
-    let params = if params_reg.difficulty >= params_challenge.difficulty {
-        AdaptivePowParams {
-            difficulty: params_reg.difficulty,
-            retry_after_secs: params_reg
-                .retry_after_secs
-                .max(params_challenge.retry_after_secs),
-        }
-    } else {
-        params_challenge
-    };
-    if reg_count >= 2 {
-        tracing::info!(
-            target: "audit",
-            event_type = "POW_REG_ESCALATION",
-            ip_hash = %client_ip,
-            reg_count = reg_count,
-            difficulty = params.difficulty,
-            retry_after_secs = params.retry_after_secs,
-            "PoW difficulty escalated due to registration count"
-        );
-    }
-
-    // 3. Generate and store challenge with adaptive difficulty
-    // Only pass IP when it's a valid address — PostgreSQL inet cast rejects "unknown"
+) -> Result<Json<ChallengeResponse>, AppError> {
+    let difficulty = app_context.config.security.pow_difficulty;
     let challenge = construct_pow::generate_challenge();
     let ttl_seconds = 600; // 10 minutes
-    let requester_ip = if client_ip == "unknown" {
-        None
-    } else {
-        Some(client_ip.as_str())
-    };
     let pow_challenge = app_context
         .queue
         .lock()
         .await
-        .create_pow_challenge(
-            &challenge,
-            params.difficulty as i16,
-            requester_ip,
-            ttl_seconds,
-        )
+        .create_pow_challenge(&challenge, difficulty as i16, ttl_seconds)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to create challenge: {}", e)))?;
+    construct_metrics::POW_CHALLENGES_ISSUED_TOTAL.inc();
 
-    tracing::info!(
-        challenge = %challenge,
-        difficulty = %params.difficulty,
-        retry_after_secs = %params.retry_after_secs,
-        ip_hash = %client_ip,
-        "PoW challenge generated (adaptive)"
-    );
-
-    // 4. Build response headers — include Retry-After if IP is in abuse tier
-    let mut resp_headers = axum::http::HeaderMap::new();
-    if params.retry_after_secs > 0 {
-        resp_headers.insert(
-            axum::http::header::RETRY_AFTER,
-            params.retry_after_secs.to_string().parse().unwrap(),
-        );
-    }
-
-    Ok((
-        resp_headers,
-        Json(ChallengeResponse {
-            challenge,
-            difficulty: params.difficulty,
-            expires_at: pow_challenge.expires_at.timestamp(),
-        }),
-    ))
-}
-
-#[cfg(test)]
-mod adaptive_pow_tests {
-    use super::{adaptive_pow_params, adaptive_pow_params_registration};
-
-    #[test]
-    fn test_base_tier_no_throttle() {
-        let p = adaptive_pow_params(8, 0);
-        assert_eq!(p.difficulty, 8);
-        assert_eq!(p.retry_after_secs, 0);
-
-        let p = adaptive_pow_params(8, 9);
-        assert_eq!(p.difficulty, 8);
-        assert_eq!(p.retry_after_secs, 0);
-    }
-
-    #[test]
-    fn test_tier1_difficulty_increases() {
-        let p = adaptive_pow_params(8, 10);
-        assert_eq!(p.difficulty, 10);
-        assert_eq!(p.retry_after_secs, 0);
-    }
-
-    #[test]
-    fn test_tier2_backoff_starts() {
-        let p = adaptive_pow_params(8, 20);
-        assert_eq!(p.difficulty, 12);
-        assert_eq!(p.retry_after_secs, 30);
-    }
-
-    #[test]
-    fn test_tier3_backoff_doubles() {
-        let p = adaptive_pow_params(8, 30);
-        assert_eq!(p.difficulty, 14);
-        assert_eq!(p.retry_after_secs, 60);
-    }
-
-    #[test]
-    fn test_difficulty_capped_at_20() {
-        let p = adaptive_pow_params(8, 100);
-        assert_eq!(p.difficulty, 20);
-    }
-
-    #[test]
-    fn test_retry_after_capped_at_3600() {
-        // tier >= 8 (count=80): 30 * 2^6 = 1920, cap is applied before 3600
-        // Actually max is BASE_RETRY * 2^6 = 30*64 = 1920 due to .min(6) shift cap
-        // Use a very high count to confirm cap holds
-        let p = adaptive_pow_params(8, 1000);
-        assert!(p.retry_after_secs <= 3600);
-        assert!(p.retry_after_secs > 0);
-    }
-
-    // ── Registration-specific escalation tests ───────────────────────────────
-
-    #[test]
-    fn test_reg_first_two_accounts_no_delay() {
-        // 1st account (count=0): no escalation
-        let p = adaptive_pow_params_registration(8, 0);
-        assert_eq!(p.difficulty, 8);
-        assert_eq!(p.retry_after_secs, 0);
-
-        // 2nd account (count=1): still no delay
-        let p = adaptive_pow_params_registration(8, 1);
-        assert_eq!(p.difficulty, 8);
-        assert_eq!(p.retry_after_secs, 0);
-    }
-
-    #[test]
-    fn test_reg_third_account_delay_starts() {
-        // 3rd account (count=2): 60s delay, level still 8
-        let p = adaptive_pow_params_registration(8, 2);
-        assert_eq!(p.difficulty, 8);
-        assert_eq!(p.retry_after_secs, 60);
-    }
-
-    #[test]
-    fn test_reg_escalation_table() {
-        // 4th account: level 10, 120s
-        let p = adaptive_pow_params_registration(8, 3);
-        assert_eq!(p.difficulty, 10);
-        assert_eq!(p.retry_after_secs, 120);
-
-        // 5th account: level 12, 240s
-        let p = adaptive_pow_params_registration(8, 4);
-        assert_eq!(p.difficulty, 12);
-        assert_eq!(p.retry_after_secs, 240);
-
-        // 6th account: level 14, 480s
-        let p = adaptive_pow_params_registration(8, 5);
-        assert_eq!(p.difficulty, 14);
-        assert_eq!(p.retry_after_secs, 480);
-    }
-
-    #[test]
-    fn test_reg_difficulty_capped_at_20() {
-        let p = adaptive_pow_params_registration(8, 100);
-        assert_eq!(p.difficulty, 20);
-    }
-
-    #[test]
-    fn test_reg_retry_capped_at_3600() {
-        let p = adaptive_pow_params_registration(8, 1000);
-        assert_eq!(p.retry_after_secs, 3600);
-    }
+    Ok(Json(ChallengeResponse {
+        challenge,
+        difficulty,
+        expires_at: pow_challenge.expires_at.timestamp(),
+    }))
 }

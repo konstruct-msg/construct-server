@@ -120,6 +120,24 @@ groups:
             Reaching 50k tracked keys needs 50k verified devices. Treat as a possible
             abuse campaign coinciding with a Redis outage.
 
+  # ── Registration ────────────────────────────────────────────────────────────
+  # Registration has no rule by address; the proof of work prices an account and the
+  # age-tiered token cap prices what it can send. This is where a campaign shows.
+  # The busiest hour of the 90 days before 2026-11-24 had 10 devices.
+  - name: registration
+    rules:
+      - alert: AccountRegistrationsUnusual
+        expr: sum(increase(construct_account_registrations_total{result="registered"}[1h])) > 30
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} accounts registered in an hour"
+          description: >
+            Three times the busiest hour on record. A release, or someone farming
+            accounts: compare with construct_pow_challenges_issued_total and with the
+            sends of accounts younger than a day. POW_DIFFICULTY is the lever.
+
   # ── Is the wiring itself alive ──────────────────────────────────────────────
   #
   # A wrong scrape target is silent: the job simply sits DOWN and every alert
