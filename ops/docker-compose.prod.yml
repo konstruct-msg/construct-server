@@ -520,6 +520,20 @@ services:
       QUIC_UPSTREAM: "127.0.0.1:8080"
       QUIC_CERT_PATH: /certs/server-cert.der
       QUIC_KEY_PATH: /certs/server-key.der
+    # Memory fence, same reason as redis above: without one, whatever grows here is the
+    # host's problem and the kernel picks the victim among Postgres, Redis and the services.
+    # This is a public UDP endpoint and the one container whose loss costs no delivery:
+    # `restart` brings it back and clients have the H2 path.
+    #
+    # Expected use is tens of MB — two connections at most at once (measured 2026-11-23/24)
+    # at ~60 KB each, a few MB per slow reader. 512m is far above that and an eighth of the
+    # smallest documented host. Verify it applied (want 536870912):
+    #   docker inspect -f '{{.HostConfig.Memory}}' \
+    #     $(docker compose -f ops/docker-compose.prod.yml --env-file .env ps -q quic)
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     volumes:
       - /opt/construct/quic-certs:/certs
 
