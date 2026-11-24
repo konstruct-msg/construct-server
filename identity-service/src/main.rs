@@ -22,9 +22,10 @@ use axum::{Json, Router, extract::State, http::StatusCode, response::IntoRespons
 use base64::{Engine as _, engine::general_purpose as b64};
 use construct_config::Config;
 use construct_server_shared::auth_service::core as auth_core;
+use construct_server_shared::auth_service::devices::{NewDeviceKeys, check_new_device};
 use construct_server_shared::{db::DbPool, queue::MessageQueue};
 use context::IdentityServiceContext;
-use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::Arc};
@@ -783,11 +784,15 @@ impl AuthService for IdentityGrpcService {
             .ok_or_else(|| Status::invalid_argument("new_device.public_keys is required"))?;
 
         // Everything the request can be refused for by itself comes before the account is touched.
-        verify_spk_signature(
-            &public_keys.verifying_key,
-            &public_keys.signed_prekey_public,
-            &public_keys.signed_prekey_signature,
-        )?;
+        check_new_device(&NewDeviceKeys {
+            device_id: &new_device.device_id,
+            verifying_key: &public_keys.verifying_key,
+            identity_public: &public_keys.identity_public,
+            signed_prekey_public: &public_keys.signed_prekey_public,
+            signed_prekey_signature: &public_keys.signed_prekey_signature,
+            crypto_suite: &public_keys.crypto_suite,
+        })
+        .map_err(app_error_to_status)?;
 
         let db = self.context.db_pool.as_ref();
 
@@ -1125,11 +1130,16 @@ impl AuthService for IdentityGrpcService {
             req.crypto_suite
         };
 
-        verify_spk_signature(
-            &verifying_key,
-            &signed_prekey_public,
-            &signed_prekey_signature,
-        )?;
+        // Asked when the request was stored; asked again of one stored by an older server.
+        check_new_device(&NewDeviceKeys {
+            device_id: &req.pending_device_id,
+            verifying_key: &verifying_key,
+            identity_public: &identity_public,
+            signed_prekey_public: &signed_prekey_public,
+            signed_prekey_signature: &signed_prekey_signature,
+            crypto_suite: &crypto_suite,
+        })
+        .map_err(app_error_to_status)?;
 
         let device_data = construct_db::CreateDeviceData {
             device_id: req.pending_device_id.clone(),
@@ -1893,6 +1903,16 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
             return Err(Status::invalid_argument("link_key_proof must be 32 bytes"));
         }
 
+        check_new_device(&NewDeviceKeys {
+            device_id: &req.device_id,
+            verifying_key: &public_keys.verifying_key,
+            identity_public: &public_keys.identity_public,
+            signed_prekey_public: &public_keys.signed_prekey_public,
+            signed_prekey_signature: &public_keys.signed_prekey_signature,
+            crypto_suite: &public_keys.crypto_suite,
+        })
+        .map_err(app_error_to_status)?;
+
         let user_id_str = {
             let mut queue = self.context.queue.lock().await;
             queue
@@ -1912,23 +1932,13 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
             return Err(Status::already_exists("device_id already registered"));
         }
 
-        let verifying_key = public_keys.verifying_key;
-        let signed_prekey_public = public_keys.signed_prekey_public;
-        let signed_prekey_signature = public_keys.signed_prekey_signature;
-
-        verify_spk_signature(
-            &verifying_key,
-            &signed_prekey_public,
-            &signed_prekey_signature,
-        )?;
-
         let device_data = construct_db::CreateDeviceData {
             device_id: req.device_id.clone(),
             server_hostname: self.context.config.instance_domain.clone(),
-            verifying_key,
+            verifying_key: public_keys.verifying_key,
             identity_public: public_keys.identity_public,
-            signed_prekey_public,
-            signed_prekey_signature,
+            signed_prekey_public: public_keys.signed_prekey_public,
+            signed_prekey_signature: public_keys.signed_prekey_signature,
             crypto_suites: construct_db::crypto_suites_json(&public_keys.crypto_suite),
             supports_pq_ratchet: false,
         };
@@ -2043,6 +2053,16 @@ impl proto::device_link_service_server::DeviceLinkService for IdentityGrpcServic
             &req.signed_prekey_signature_b64,
             "signed_prekey_signature",
         )?;
+
+        check_new_device(&NewDeviceKeys {
+            device_id: &req.pending_device_id,
+            verifying_key: &verifying_key,
+            identity_public: &identity_public,
+            signed_prekey_public: &signed_prekey_public,
+            signed_prekey_signature: &signed_prekey_signature,
+            crypto_suite: "", // named by the approving device
+        })
+        .map_err(app_error_to_status)?;
 
         if construct_db::device_exists(self.context.db_pool.as_ref(), &req.pending_device_id)
             .await
@@ -3254,8 +3274,7 @@ async fn well_known_construct_server(
         "limits": {
             "max_message_size_bytes": 100_000,
             "max_media_size_bytes": 100_000_000,
-            "rate_limit_messages_per_hour": context.config.security.max_messages_per_hour,
-            "rate_limit_pow_per_hour": 10
+            "rate_limit_messages_per_hour": context.config.security.max_messages_per_hour
         }
     });
 
@@ -3276,28 +3295,6 @@ fn certificate_names_signer(certificate: &[u8], signer: &str) -> bool {
 // ============================================================================
 // SPK signature verification (shared by multiple gRPC methods)
 // ============================================================================
-
-fn verify_spk_signature(
-    verifying_key: &[u8],
-    signed_prekey_public: &[u8],
-    signed_prekey_signature: &[u8],
-) -> Result<(), Status> {
-    let vk_bytes: [u8; 32] = verifying_key
-        .try_into()
-        .map_err(|_| Status::invalid_argument("verifying_key must be 32 bytes"))?;
-    let vk = VerifyingKey::from_bytes(&vk_bytes)
-        .map_err(|_| Status::invalid_argument("verifying_key is not a valid Ed25519 key"))?;
-    let sig_bytes: [u8; 64] = signed_prekey_signature
-        .try_into()
-        .map_err(|_| Status::invalid_argument("signed_prekey_signature must be 64 bytes"))?;
-    let sig = Ed25519Signature::from_bytes(&sig_bytes);
-    let mut msg = Vec::with_capacity(18 + signed_prekey_public.len());
-    msg.extend_from_slice(b"KonstruktX3DH-v1");
-    msg.extend_from_slice(&[0x00, 0x01]);
-    msg.extend_from_slice(signed_prekey_public);
-    vk.verify(&msg, &sig)
-        .map_err(|_| Status::invalid_argument("signed_prekey_signature verification failed"))
-}
 
 // ============================================================================
 // main
