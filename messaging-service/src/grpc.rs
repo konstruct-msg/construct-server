@@ -729,7 +729,9 @@ impl MessagingService for MessagingGrpcService {
         request: Request<proto::SendSealedMessageRequest>,
     ) -> Result<Response<proto::SendMessageResponse>, Status> {
         let client_ip = extract_client_ip(request.metadata());
-        if check_sealed_ip_limit(&self.context, &client_ip).await == SealedIpDecision::Limited {
+        if check_sealed_ip_limit(&self.context, &client_ip, "sealed_rpc").await
+            == SealedIpDecision::Limited
+        {
             return Err(Status::resource_exhausted(
                 "sealed-sender rate limit exceeded for this IP",
             ));
