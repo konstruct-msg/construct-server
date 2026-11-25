@@ -415,6 +415,23 @@ groups:
             Vertical upgrade before splitting Postgres or Redis onto their own host —
             a network hop on every query is a worse trade below a few thousand users.
 
+      # The kernel's own count of OOM kills on the host, container limits included. A
+      # container killed at its limit is back up by `restart` within seconds, so nothing
+      # else here notices: no target stays down long enough, and `quic` is not a target.
+      # It says that something was killed, not what — which is why it is critical.
+      - alert: OomKill
+        expr: increase(node_vmstat_oom_kill[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The kernel killed a process for lack of memory"
+          description: >
+            Which one: `journalctl -k | grep -E 'oom-kill:|Killed process'` on the host.
+            CONSTRAINT_MEMCG means a container hit its own limit, and task_memcg ends in its
+            id; CONSTRAINT_NONE means the host ran out and the kernel chose the victim. `quic`
+            costs no delivery, clients have the H2 path. Redis or Postgres is an outage.
+
       # Load per core, not raw load: the same number means nothing without the
       # core count.
       - alert: HostLoadSustained
