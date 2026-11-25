@@ -173,16 +173,15 @@ impl MessagingService for MessagingGrpcService {
             tokio::pin!(subscribe_grace);
 
             // If user_id is already known from auth metadata, arm inbox wakeup and
-            // mark online — but do NOT poll yet (wait for Subscribe or grace).
+            // go live — but do NOT poll yet (wait for Subscribe or grace).
             if let Some(uid) = user_id {
-                spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
+                spawn_inbox_wakeup(
+                    context.config.redis_url.clone(),
+                    uid,
+                    device_id.clone(),
+                    wakeup_tx.clone(),
+                );
                 wakeup_subscribed = true;
-                if let Err(e) = stream_queue
-                    .track_user_online(&uid.to_string(), &context.server_instance_id)
-                    .await
-                {
-                    tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
-                }
             }
 
             // Open/close are counted around the loop, not at the RPC entry, so the
@@ -196,14 +195,13 @@ impl MessagingService for MessagingGrpcService {
                 // Lazy inbox wakeup: arm as soon as user_id becomes known.
                 // Catch-up poll still waits for Subscribe or grace (not here).
                 if !wakeup_subscribed && let Some(uid) = user_id {
-                    spawn_inbox_wakeup(context.config.redis_url.clone(), uid, wakeup_tx.clone());
+                    spawn_inbox_wakeup(
+                        context.config.redis_url.clone(),
+                        uid,
+                        device_id.clone(),
+                        wakeup_tx.clone(),
+                    );
                     wakeup_subscribed = true;
-                    if let Err(e) = stream_queue
-                        .track_user_online(&uid.to_string(), &context.server_instance_id)
-                        .await
-                    {
-                        tracing::warn!(user_id = %uid, "track_user_online failed: {}", e);
-                    }
                 }
 
                 tokio::select! {
@@ -353,12 +351,6 @@ impl MessagingService for MessagingGrpcService {
                 lifetime_secs,
                 "MessageStream closed"
             );
-
-            if let Some(uid) = user_id
-                && let Err(e) = stream_queue.untrack_user_online(&uid.to_string()).await
-            {
-                tracing::warn!(user_id = %uid, "untrack_user_online failed: {}", e);
-            }
         });
 
         let output_stream = ReceiverStream::new(rx);

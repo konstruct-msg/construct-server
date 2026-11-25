@@ -5,7 +5,7 @@
 // Phase 4.6: Migrated to construct-redis for clean architecture
 
 use anyhow::{Context, Result};
-use construct_config::{Config, SECONDS_PER_DAY};
+use construct_config::Config;
 use construct_redis::{RedisClient, StreamReadOptions};
 use std::{borrow::Cow, collections::HashMap};
 
@@ -21,14 +21,58 @@ pub struct MailboxWrites {
     pub user_stream: Option<bool>,
     /// Device-stream writes that landed.
     pub device_streams: usize,
-    /// Whether a `MessageStream` held this user when the fan-out ran. Read in the same pipeline, so
-    /// it is observed after the writes rather than racing them.
-    pub recipient_online: bool,
+    /// Who held a `MessageStream` when the fan-out ran. Read in the same pipeline, so it is
+    /// observed after the writes rather than racing them.
+    pub live: LiveStreams,
+}
+
+/// The recipient's live `MessageStream`s, as Redis counts their subscriptions.
+///
+/// A stream is live while its pub/sub subscription is: Redis forgets the subscriber when the
+/// stream's task ends or its process dies, so there is no record to expire and no way for one
+/// stream to clear another's. Until 2026-11-25 this was one key per account with a TTL of days,
+/// deleted by whichever stream closed first (vault todo 343).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LiveStreams {
+    /// The devices written to that hold a stream, in caller order.
+    pub devices: Vec<String>,
+    /// Any stream of the account, with or without a device in its token.
+    pub account: bool,
+}
+
+/// The channel every stream of an account is woken through.
+pub fn wakeup_channel(user_id: &str) -> String {
+    format!("inbox:wakeup:{user_id}")
+}
+
+/// The channel one device's streams are counted on. Nothing is published to it.
+pub fn live_channel(user_id: &str, device_id: &str) -> String {
+    format!("inbox:live:{user_id}:{device_id}")
+}
+
+/// Reads a `PUBSUB NUMSUB` reply: the count for each channel, in the order asked. Anything that
+/// is not such a reply answers `None`, and the caller takes the recipient for offline — a wake
+/// push too many, never one too few.
+fn subscriber_counts(reply: Option<&redis::Value>, channels: usize) -> Option<Vec<i64>> {
+    let redis::Value::Array(items) = reply? else {
+        return None;
+    };
+    let counts: Vec<i64> = items
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| match pair[1] {
+            redis::Value::Int(n) => Some(n),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (counts.len() == channels).then_some(counts)
 }
 
 struct MailboxWriteKeys<'a> {
     user: &'a str,
-    presence: &'a str,
+    /// One per device, in caller order.
+    live: &'a [String],
     wakeup: &'a str,
 }
 
@@ -74,7 +118,10 @@ fn mailbox_write_pipeline(
             xadd(&mut pipe, &device_key);
         }
     }
-    pipe.cmd("GET").arg(keys.presence);
+    pipe.cmd("PUBSUB")
+        .arg("NUMSUB")
+        .arg(keys.wakeup)
+        .arg(keys.live);
     pipe.cmd("PUBLISH").arg(keys.wakeup).arg("1");
     pipe
 }
@@ -335,63 +382,6 @@ impl<'a> DeliveryManager<'a> {
         Ok(Some(envelope))
     }
 
-    /// Record which messaging instance owns this user's live MessageStream.
-    /// Read back via `GET user:{user}:server_instance_id` (wake-push skip, not
-    /// a delivery-worker hop — that worker is gone).
-    pub(crate) async fn track_user_online(
-        &mut self,
-        user_id: &str,
-        server_instance_id: &str,
-    ) -> Result<()> {
-        let key = format!(
-            "{}{}:server_instance_id",
-            self.config.redis_key_prefixes.user, user_id
-        );
-        // Set with TTL matching session TTL from config
-        let ttl_seconds = self.config.session_ttl_days * SECONDS_PER_DAY;
-
-        self.client
-            .set_ex(&key, server_instance_id, ttl_seconds as u64)
-            .await?;
-
-        tracing::debug!(
-            user_id = %user_id,
-            server_instance_id = %server_instance_id,
-            "Tracked user online status"
-        );
-
-        Ok(())
-    }
-
-    /// Phase 5: Remove user online tracking when they disconnect
-    pub(crate) async fn untrack_user_online(&mut self, user_id: &str) -> Result<()> {
-        let key = format!(
-            "{}{}:server_instance_id",
-            self.config.redis_key_prefixes.user, user_id
-        );
-        self.client.del(&key).await?;
-
-        tracing::debug!(
-            user_id = %user_id,
-            "Removed user online tracking"
-        );
-
-        Ok(())
-    }
-
-    /// Phase 5: Get server instance ID for an online user
-    pub(crate) async fn get_user_server_instance(
-        &mut self,
-        user_id: &str,
-    ) -> Result<Option<String>> {
-        let key = format!(
-            "{}{}:server_instance_id",
-            self.config.redis_key_prefixes.user, user_id
-        );
-        let result: Option<String> = self.client.get(&key).await?;
-        Ok(result)
-    }
-
     /// Write one envelope to every mailbox the recipient has, in one round trip.
     ///
     /// ── Why one round trip ──────────────────────────────────────────────────────────
@@ -412,8 +402,8 @@ impl<'a> DeliveryManager<'a> {
     ///   error into a value instead of failing the batch, so a stream key of the wrong type costs
     ///   its own copy and nothing else — the other mailboxes still get theirs, and the caller gets
     ///   the count of writes that landed to make its "nowhere to land" decision on.
-    /// - **Presence is read after the writes, as before**, from the same pipeline: the flag a live
-    ///   stream sets is what the push decision turns on, and it is no longer a separate trip.
+    /// - **Presence is read after the writes, as before**, from the same pipeline: the subscription
+    ///   a live stream holds is what the push decision turns on, and it is not a separate trip.
     ///
     /// The count of landed writes, not of attempted ones: see [`MailboxWrites`].
     pub(crate) async fn write_message_to_mailboxes(
@@ -434,16 +424,16 @@ impl<'a> DeliveryManager<'a> {
         // hourly_limit_*, not a smaller MAXLEN on someone else's mailbox.
         let max_len = self.mailbox_maxlen();
         let user_stream_key = format!("{}:offline:{}", self.delivery_queue_prefix, user_id);
-        let presence_key = format!(
-            "{}{}:server_instance_id",
-            self.config.redis_key_prefixes.user, user_id
-        );
-        let wakeup_channel = format!("inbox:wakeup:{}", user_id);
+        let wakeup_channel = wakeup_channel(user_id);
+        let live_channels: Vec<String> = device_ids
+            .iter()
+            .map(|device| live_channel(user_id, device))
+            .collect();
 
         let pipe = mailbox_write_pipeline(
             MailboxWriteKeys {
                 user: &user_stream_key,
-                presence: &presence_key,
+                live: &live_channels,
                 wakeup: &wakeup_channel,
             },
             device_ids,
@@ -495,19 +485,23 @@ impl<'a> DeliveryManager<'a> {
             .filter(|slot| landed(*slot))
             .count();
 
-        // Presence: any answer that is not nil and not an error means a stream holds this user.
-        // A failed read is offline, as it was before — fail-open, the wake push is still sent.
-        let recipient_online = match replies.get(presence_slot) {
-            Some(redis::Value::Nil) | None => false,
-            Some(redis::Value::ServerError(e)) => {
+        let live = match subscriber_counts(replies.get(presence_slot), 1 + device_ids.len()) {
+            Some(counts) => LiveStreams {
+                account: counts[0] > 0,
+                devices: device_ids
+                    .iter()
+                    .zip(&counts[1..])
+                    .filter(|(_, streams)| **streams > 0)
+                    .map(|(device, _)| device.clone())
+                    .collect(),
+            },
+            None => {
                 tracing::debug!(
-                    error = %e,
                     user_id = %user_id,
-                    "Failed to check recipient online status — will send wake push"
+                    "Failed to count the recipient's streams — will send wake push"
                 );
-                false
+                LiveStreams::default()
             }
-            Some(_) => true,
         };
 
         // The stream id of the user-stream write is the only thing that ties a dispatched message
@@ -533,7 +527,7 @@ impl<'a> DeliveryManager<'a> {
         Ok(MailboxWrites {
             user_stream,
             device_streams,
-            recipient_online,
+            live,
         })
     }
 
@@ -841,6 +835,22 @@ mod tests {
     use super::*;
     use construct_message::MessageEnvelope;
 
+    /// Mutation: take a short, foreign or failed reply for counts — a live answer invented from it
+    /// withholds a push.
+    #[test]
+    fn only_a_whole_numsub_reply_is_an_answer() {
+        use redis::Value::{Array, BulkString, Int, Nil};
+        let pair = |name: &str, n| [BulkString(name.as_bytes().to_vec()), Int(n)];
+        let reply = Array([pair("a", 2), pair("b", 0)].concat());
+        assert_eq!(subscriber_counts(Some(&reply), 2), Some(vec![2, 0]));
+        assert_eq!(subscriber_counts(Some(&reply), 3), None);
+        assert_eq!(subscriber_counts(Some(&reply), 1), None);
+        assert_eq!(subscriber_counts(None, 0), None);
+        assert_eq!(subscriber_counts(Some(&Nil), 1), None);
+        let odd = Array(vec![BulkString(b"a".to_vec()), BulkString(b"2".to_vec())]);
+        assert_eq!(subscriber_counts(Some(&odd), 1), None);
+    }
+
     #[test]
     fn reserved_mailbox_pipeline_keeps_the_legacy_resp_bytes() {
         for devices in [
@@ -856,9 +866,13 @@ mod tests {
             for write_user in [true, false] {
                 for maxlen in [1, 10_000, i64::MAX] {
                     for payload in [Vec::new(), vec![0, 255, 128], vec![255; 65_536]] {
+                        let live: Vec<String> = devices
+                            .iter()
+                            .map(|device| live_channel("account", device))
+                            .collect();
                         let keys = MailboxWriteKeys {
                             user: "custom:queue:offline:account",
-                            presence: "custom:presence:account",
+                            live: &live,
                             wakeup: "inbox:wakeup:account",
                         };
                         let id = "méssage:\0id";
@@ -886,7 +900,12 @@ mod tests {
                                 .arg("payload")
                                 .arg(&payload);
                         }
-                        legacy.cmd("GET").arg(keys.presence);
+                        let mut numsub = redis::cmd("PUBSUB");
+                        numsub.arg("NUMSUB").arg(keys.wakeup);
+                        for channel in keys.live {
+                            numsub.arg(channel);
+                        }
+                        legacy.add_command(numsub);
                         legacy.cmd("PUBLISH").arg(keys.wakeup).arg("1");
                         let payload_len = payload.len();
                         let planned = mailbox_write_pipeline(

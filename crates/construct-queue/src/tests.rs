@@ -45,46 +45,6 @@ pub(crate) fn get_test_config() -> Config {
 // DeliveryManager Tests
 // ============================================================================
 
-#[tokio::test]
-#[ignore = "requires Redis"]
-async fn test_delivery_track_user_online() {
-    let mut client = get_test_redis_client().await;
-    let config = get_test_config();
-
-    let user_id = "test_delivery_user_001";
-    let server_id = "test_server_001";
-
-    let mut manager = delivery::DeliveryManager::new(&mut client, &config, "test:delivery:");
-
-    // Track user online
-    manager
-        .track_user_online(user_id, server_id)
-        .await
-        .expect("Failed to track user online");
-
-    // Verify tracking
-    let instance = manager
-        .get_user_server_instance(user_id)
-        .await
-        .expect("Failed to get server instance");
-
-    assert_eq!(instance, Some(server_id.to_string()));
-
-    // Untrack
-    manager
-        .untrack_user_online(user_id)
-        .await
-        .expect("Failed to untrack user");
-
-    // Verify untracked
-    let instance_after = manager
-        .get_user_server_instance(user_id)
-        .await
-        .expect("Failed to get instance after untrack");
-
-    assert_eq!(instance_after, None);
-}
-
 // ============================================================================
 // SessionManager Tests
 // ============================================================================
@@ -263,20 +223,14 @@ async fn stream_len(queue: &mut MessageQueue, key: &str) -> i64 {
 
 /// Cloning a queue must keep its boot-time config and shared Redis namespace, even after the
 /// caller changes/drops its source Config or drops the original queue. Exercise the consumer,
-/// not just the pointer representation: custom prefix, cutover flag, presence TTL and payload.
+/// not just the pointer representation: custom prefix, cutover flag and payload.
 #[tokio::test]
 #[ignore = "requires Redis"]
 async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
     let mut config = get_test_config();
     let prefix = format!("test:p6:clone:{}", std::process::id());
     config.delivery_queue_prefix = prefix.clone();
-    config.redis_key_prefixes.user = format!("{prefix}:presence:");
     config.messaging.mailbox_user_write = false;
-    config.session_ttl_days = 2;
-    let presence_key = format!(
-        "{}account:server_instance_id",
-        config.redis_key_prefixes.user
-    );
     let mut original = MessageQueue::new(&config).await.unwrap();
     let mut cloned = original.clone();
     assert!(
@@ -291,30 +245,10 @@ async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
         "queue clones must share the immutable prefix"
     );
     config.delivery_queue_prefix = "unused".into();
-    config.redis_key_prefixes.user = "unused".into();
     config.messaging.mailbox_user_write = true;
     drop(config);
 
     original.delete_mailbox("account").await.unwrap();
-    original
-        .track_user_online("account", "instance")
-        .await
-        .unwrap();
-    assert_eq!(
-        cloned
-            .get_user_server_instance("account")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("instance")
-    );
-    let mut conn = cloned.clone_redis_connection();
-    let ttl: i64 = redis::cmd("TTL")
-        .arg(&presence_key)
-        .query_async(&mut conn)
-        .await
-        .unwrap();
-    assert!((172_790..=172_800).contains(&ttl));
     let message = construct_message::MessageEnvelope::new_direct_message(
         "message".into(),
         "alice".into(),
@@ -333,7 +267,6 @@ async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
         "the source config mutation must not enable legacy writes"
     );
     assert_eq!(writes.device_streams, 1);
-    assert!(writes.recipient_online);
     let page = original
         .read_mailbox_messages("account", Some("device"), None, None, 10)
         .await
@@ -355,17 +288,12 @@ async fn mailbox_clone_preserves_config_snapshot_and_namespace() {
         1,
         "a reader outlives the original handle"
     );
-    cloned.untrack_user_online("account").await.unwrap();
-    assert_eq!(
-        cloned.get_user_server_instance("account").await.unwrap(),
-        None
-    );
     assert_eq!(cloned.delete_mailbox("account").await.unwrap(), 1);
     let keys = [
-        presence_key,
         format!("{prefix}:offline:account"),
         format!("{prefix}:offline:account:device"),
     ];
+    let mut conn = cloned.clone_redis_connection();
     let left: usize = redis::cmd("EXISTS")
         .arg(&keys)
         .query_async(&mut conn)
@@ -1589,7 +1517,11 @@ async fn mailbox_a_refused_device_stream_costs_only_that_copy() {
         Some(true),
         "the legacy copy still landed"
     );
-    assert!(!writes.recipient_online, "nobody is streaming this user");
+    assert_eq!(
+        writes.live,
+        LiveStreams::default(),
+        "nobody is streaming this user"
+    );
 
     let good_key = format!("{}:offline:{}:{}", queue.delivery_queue_prefix, user, good);
     assert_eq!(stream_len(&mut queue, &good_key).await, 1);
@@ -1600,6 +1532,77 @@ async fn mailbox_a_refused_device_stream_costs_only_that_copy() {
         .await
         .unwrap();
     clear_mailbox(&mut queue, user, &[good, bad]).await;
+}
+
+/// Presence is per stream: closing one of a device's two streams leaves the device live, a live
+/// device says nothing about its sibling, and the last subscriber gone is offline with no clean-up
+/// of its own.
+///
+/// Mutations: answer with the account's count for every device; count only the first channel.
+#[tokio::test]
+#[ignore = "requires Redis"]
+async fn mailbox_a_fan_out_counts_each_devices_streams() {
+    let user = "test_mailbox_live_user";
+    let (phone, mac) = ("test_mbx_live_phone", "test_mbx_live_mac");
+    let all = [phone.to_string(), mac.to_string()];
+    let mut queue = mailbox_queue(false).await;
+    clear_mailbox(&mut queue, user, &[phone, mac]).await;
+    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let client = redis::Client::open(url.as_str()).expect("redis client");
+    let open = |device: Option<&'static str>| {
+        let client = client.clone();
+        async move {
+            let mut pubsub = client.get_async_pubsub().await.expect("pubsub");
+            pubsub.subscribe(wakeup_channel(user)).await.unwrap();
+            if let Some(device) = device {
+                pubsub.subscribe(live_channel(user, device)).await.unwrap();
+            }
+            pubsub
+        }
+    };
+    let env = construct_message::types::MessageEnvelope::new_key_sync("alice".into(), user.into());
+    // Redis counts a closed connection out when it reads the close, a moment after the drop.
+    async fn until(
+        queue: &mut MessageQueue,
+        user: &str,
+        all: &[String],
+        env: &construct_message::types::MessageEnvelope,
+        want: &[&str],
+        account: bool,
+    ) {
+        let mut last = LiveStreams::default();
+        for _ in 0..50 {
+            last = queue
+                .write_message_to_device_streams(user, all, env)
+                .await
+                .unwrap()
+                .live;
+            if last.devices == want && last.account == account {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("wanted {want:?} account={account}, Redis says {last:?}");
+    }
+
+    until(&mut queue, user, &all, &env, &[], false).await;
+    let first = open(Some(phone)).await;
+    let second = open(Some(phone)).await;
+    until(&mut queue, user, &all, &env, &[phone], true).await;
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    until(&mut queue, user, &all, &env, &[phone], true).await;
+    let desktop = open(Some(mac)).await;
+    until(&mut queue, user, &all, &env, &[phone, mac], true).await;
+    drop(second);
+    until(&mut queue, user, &all, &env, &[mac], true).await;
+    drop(desktop);
+    until(&mut queue, user, &all, &env, &[], false).await;
+    let legacy = open(None).await;
+    until(&mut queue, user, &all, &env, &[], true).await;
+    drop(legacy);
+
+    clear_mailbox(&mut queue, user, &[phone, mac]).await;
 }
 
 /// A fan-out still wakes the account's `inbox:wakeup` channel, and the entry is there when the

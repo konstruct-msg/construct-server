@@ -31,8 +31,6 @@ pub struct MessagingServiceContext {
     pub config: Arc<Config>,
     /// Server signer for S2S federation authentication (sealed sender forwarding)
     pub server_signer: Option<Arc<ServerSigner>>,
-    /// Stable ID for this process instance — stored in Redis at stream open.
-    pub server_instance_id: String,
     /// Standalone Redis ConnectionManager for rate-limiting and caching.
     /// Cloned lock-free without acquiring the queue Mutex.
     pub redis_conn: redis::aio::ConnectionManager,

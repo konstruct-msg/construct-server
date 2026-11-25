@@ -259,7 +259,6 @@ async fn main() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
     config.delivery_queue_prefix = namespace.clone();
-    config.redis_key_prefixes.user = format!("{namespace}:presence:");
     config.messaging.mailbox_user_write = true;
     config.messaging.queue_maxlen_standard = 10_000;
     let queue = MessageQueue::new(&config).await?;

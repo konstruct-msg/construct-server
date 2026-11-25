@@ -16,7 +16,7 @@ mod tokens;
 use cursor::StreamPosition;
 pub use cursor::{InvalidMailboxCursor, MailboxCursor};
 pub use dedup::{MessageDedupKey, is_message_duplicate};
-pub use delivery::MailboxWrites;
+pub use delivery::{LiveStreams, MailboxWrites, live_channel, wakeup_channel};
 pub use gap::MailboxGap;
 pub use intake_generation::intake_generation_key;
 pub use pow::PowChallengeRecord;
@@ -361,28 +361,6 @@ impl MessageQueue {
     // `trim_offline_stream` was removed with minimal-server-delivery step 2 — see the
     // note at its old site in delivery.rs. Nothing may delete a user's mail from a
     // cursor the user's client supplied.
-
-    pub async fn track_user_online(
-        &mut self,
-        user_id: &str,
-        server_instance_id: &str,
-    ) -> Result<()> {
-        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
-            .track_user_online(user_id, server_instance_id)
-            .await
-    }
-
-    pub async fn untrack_user_online(&mut self, user_id: &str) -> Result<()> {
-        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
-            .untrack_user_online(user_id)
-            .await
-    }
-
-    pub async fn get_user_server_instance(&mut self, user_id: &str) -> Result<Option<String>> {
-        delivery::DeliveryManager::new(&mut self.client, &self.config, &self.delivery_queue_prefix)
-            .get_user_server_instance(user_id)
-            .await
-    }
 
     /// Fan-out a message to per-device Redis streams (multi-device support).
     ///

@@ -65,7 +65,6 @@ impl Harness {
             sentinel: None,
             config: Arc::new(config),
             server_signer: None,
-            server_instance_id: uuid::Uuid::new_v4().to_string(),
             redis_conn: construct_redis::connect_manager(&redis_url).await.unwrap(),
             token_issuer_key: None,
             token_enc_static_secret: None,

@@ -67,6 +67,7 @@ impl NotificationService for NotificationGrpcService {
             activity_type: req.activity_type,
             conversation_id: req.conversation_id,
             announce: true,
+            audience: notification_core::PushAudience::Account,
         };
 
         let ctx = self.notif_ctx()?;

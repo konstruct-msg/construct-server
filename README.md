@@ -69,8 +69,8 @@ Delivery invariants:
 - `since_cursor` is a read offset only. It must never trim or delete mailbox
   entries.
 - Retention is handled by `XADD MAXLEN ~` plus the age sweep.
-- Online users are woken by Redis pub/sub; APNs silent `new_message` is skipped
-  while `user:{user_id}:server_instance_id` is set.
+- A device with a live `MessageStream` is woken by Redis pub/sub; the `new_message`
+  push goes only to the devices written to that hold none.
 - `MSG_MAILBOX_USER_WRITE` controls legacy user-stream writes during cutover.
   When it is disabled, failure to write a target stream is a hard error.
 - Mailbox payloads are written with `rmp_serde::encode::to_vec_named` and read

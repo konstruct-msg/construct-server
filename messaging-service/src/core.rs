@@ -12,19 +12,54 @@ use construct_metrics::{
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_utils::log_safe_id;
 
-/// Whether dispatch should fire a silent APNs wake for this recipient.
+/// Whose phones one dispatched envelope wakes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakePush {
+    /// The account's active devices: a token row naming one of them is decided by `offline`.
+    known: Vec<String>,
+    /// Devices written to that hold no live stream.
+    offline: Vec<String>,
+    /// Token rows that name none of `known` — no device id, or one the account no longer has.
+    /// They cannot be matched to a stream, so they follow the account: pushed while no stream of
+    /// it is live.
+    unaddressed: bool,
+}
+
+impl WakePush {
+    /// Whether the token row registered by `device` gets this push.
+    pub(crate) fn reaches(&self, device: Option<&str>) -> bool {
+        match device {
+            Some(d) if self.known.iter().any(|k| k == d) => self.offline.iter().any(|o| o == d),
+            _ => self.unaddressed,
+        }
+    }
+}
+
+/// The wake push for one dispatched envelope, or `None` when nobody needs one.
 ///
-/// When the recipient already has a live MessageStream, Redis `inbox:wakeup`
-/// delivers in real time. An APNs silent push is redundant and historically
-/// caused the iOS client to force-reconnect the stream on every message,
-/// re-XREADing the entire untrimmed offline backlog (reconnect storm).
+/// A device with a live MessageStream is delivered to through Redis `inbox:wakeup`; a push there
+/// is redundant and has made iOS force-reconnect on every message, re-reading the whole backlog.
+/// A device the envelope was not written to has nothing to fetch: the copies a person's devices
+/// send each other used to push every phone of the account, the sending one included.
 ///
-/// Presence is user-level (`user:{id}:server_instance_id`), not per-device:
-/// if any device holds a stream we skip push. Offline secondary devices still
-/// pick up from Redis on next open; multi-device online tracking is a separate
-/// improvement.
-pub(crate) fn should_send_wake_push(recipient_online: bool) -> bool {
-    !recipient_online
+/// `active` empty is a failed lookup or an account with no devices — indistinguishable, so every
+/// token row is unaddressed and the account's presence decides, as it did for all of them.
+pub(crate) fn wake_push(
+    active: &[String],
+    written: &[String],
+    live: &construct_queue::LiveStreams,
+) -> Option<WakePush> {
+    let offline: Vec<String> = written
+        .iter()
+        .filter(|d| !live.devices.contains(d))
+        .cloned()
+        .collect();
+    let unaddressed = !live.account;
+    (unaddressed || !offline.is_empty()).then(|| WakePush {
+        known: active.to_vec(),
+        offline,
+        unaddressed,
+    })
 }
 
 /// Look up active device IDs for a recipient.
@@ -346,10 +381,10 @@ pub async fn dispatch_envelope(
             .inc_by(device_ids.len() as u64);
     }
 
-    // Presence is read inside the fan-out pipeline, after the writes, so it still observes the
-    // online flag an active MessageStream set on this (or another) instance. A failed read is
+    // Presence is read inside the fan-out pipeline, after the writes, so it observes the
+    // subscription an active MessageStream holds on this (or another) instance. A failed read is
     // offline: fail-open, the wake push is still sent.
-    let recipient_online = writes.recipient_online;
+    let wake = wake_push(&active_devices, &device_ids, &writes.live);
     drop(queue);
     tracing::debug!(
         redis_ms = t_lock.elapsed().as_millis(),
@@ -369,10 +404,10 @@ pub async fn dispatch_envelope(
     MESSAGE_DELIVERY_TIME.observe(elapsed.as_secs_f64());
 
     // ── Non-critical background tasks ─────────────────────────────────────────
-    // Silent APNs only when the recipient has no live MessageStream. Online
-    // recipients are woken via inbox:wakeup; pushing them causes reconnect storms.
+    // APNs only for the devices this envelope was written to and that hold no live MessageStream.
+    // Online devices are woken via inbox:wakeup; pushing them causes reconnect storms.
     if let Some(notif_ctx) = notification_context {
-        if should_send_wake_push(recipient_online) {
+        if let Some(wake) = wake {
             let ctx = notif_ctx;
             let recipient = recipient_id.clone();
             let announce = push_announces(sender_id, recipient_id);
@@ -386,6 +421,7 @@ pub async fn dispatch_envelope(
                     activity_type: Some("new_message".to_string()),
                     conversation_id: None,
                     announce,
+                    audience: crate::notification_core::PushAudience::Wake(wake),
                 };
                 match crate::notification_core::send_blind_notification(&ctx, input).await {
                     Ok(_) => tracing::debug!("Blind notification sent via embedded APNs"),
@@ -402,7 +438,7 @@ pub async fn dispatch_envelope(
             tracing::debug!(
                 recipient_hash = %log_safe_id(recipient_id, salt),
                 message_id = %message_id,
-                "Skipping silent push — recipient has active MessageStream"
+                "Skipping push — every device written to has a live MessageStream"
             );
         }
     }
@@ -441,7 +477,7 @@ mod tests {
     }
     use super::{
         normalize_device_id, push_announces, reported_active_devices, select_target_devices,
-        should_send_wake_push,
+        wake_push,
     };
 
     #[test]
@@ -545,13 +581,64 @@ mod tests {
         assert_eq!(routing, "named");
     }
 
-    #[test]
-    fn wake_push_skipped_when_recipient_online() {
-        assert!(!should_send_wake_push(true));
+    fn live(devices_online: &[&str], account: bool) -> construct_queue::LiveStreams {
+        construct_queue::LiveStreams {
+            devices: devices(devices_online),
+            account,
+        }
     }
 
     #[test]
-    fn wake_push_sent_when_recipient_offline() {
-        assert!(should_send_wake_push(false));
+    fn a_live_device_does_not_silence_its_sibling() {
+        let all = devices(&["phone", "mac"]);
+        let wake = wake_push(&all, &all, &live(&["mac"], true)).expect("the phone is offline");
+        assert!(wake.reaches(Some("phone")));
+        assert!(!wake.reaches(Some("mac")), "its stream already carries it");
+        assert!(!wake.reaches(None), "somebody of the account is live");
+    }
+
+    #[test]
+    fn a_copy_for_one_device_wakes_that_device_only() {
+        let all = devices(&["phone", "mac"]);
+        let wake =
+            wake_push(&all, &devices(&["mac"]), &live(&[], true)).expect("the mac is offline");
+        assert!(wake.reaches(Some("mac")));
+        assert!(
+            !wake.reaches(Some("phone")),
+            "the phone sent it and has nothing to fetch"
+        );
+    }
+
+    #[test]
+    fn nobody_is_pushed_when_every_device_written_to_is_live() {
+        let all = devices(&["phone", "mac"]);
+        assert_eq!(wake_push(&all, &all, &live(&["phone", "mac"], true)), None);
+        assert_eq!(
+            wake_push(&all, &devices(&["mac"]), &live(&["mac"], true)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_row_that_names_no_device_of_the_account_follows_the_account() {
+        let all = devices(&["phone"]);
+        let quiet = wake_push(&all, &all, &live(&[], false)).expect("offline");
+        assert!(quiet.reaches(Some("phone")));
+        assert!(quiet.reaches(None));
+        assert!(quiet.reaches(Some("a-removed-device")));
+
+        // A device-less stream is live: the phone, which has none, still rings.
+        let busy = wake_push(&all, &all, &live(&[], true)).expect("the phone is offline");
+        assert!(busy.reaches(Some("phone")));
+        assert!(!busy.reaches(None));
+        assert!(!busy.reaches(Some("a-removed-device")));
+    }
+
+    #[test]
+    fn a_failed_device_lookup_pushes_by_account() {
+        let wake = wake_push(&[], &[], &live(&[], false)).expect("nobody is live");
+        assert!(wake.reaches(Some("phone")));
+        assert!(wake.reaches(None));
+        assert_eq!(wake_push(&[], &[], &live(&[], true)), None);
     }
 }

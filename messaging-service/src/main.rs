@@ -221,7 +221,6 @@ async fn main() -> Result<()> {
         sentinel: Some(sentinel_core),
         config: config.clone(),
         server_signer,
-        server_instance_id: uuid::Uuid::new_v4().to_string(),
         redis_conn,
         token_issuer_key,
         token_enc_static_secret,

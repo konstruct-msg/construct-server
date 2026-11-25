@@ -21,6 +21,32 @@ pub struct SendBlindNotificationInput {
     /// devices (SENDER_SYNC, read markers): it wakes the device to fetch, and says nothing —
     /// writing on the Desktop rang the phone with "New message" for every line (2026-10-19).
     pub announce: bool,
+    /// Which of the account's devices it is for.
+    pub audience: PushAudience,
+}
+
+/// Which token rows of an account a push goes to.
+#[derive(Debug, Clone)]
+pub enum PushAudience {
+    /// Every device: key maintenance, contact requests, group events.
+    Account,
+    /// The devices one dispatched envelope has to wake.
+    Wake(crate::core::WakePush),
+}
+
+impl PushAudience {
+    /// `device_ids`: the account's token rows by device, `None` when they could not be read — then
+    /// nothing is held back (fail open).
+    fn takes(
+        &self,
+        device_ids: Option<&std::collections::HashMap<Vec<u8>, String>>,
+        token: &[u8],
+    ) -> bool {
+        match (self, device_ids) {
+            (Self::Account, _) | (_, None) => true,
+            (Self::Wake(wake), Some(ids)) => wake.reaches(ids.get(token).map(String::as_str)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -343,7 +369,7 @@ pub async fn send_blind_notification(
 
     // `device_id` is read with a runtime query rather than added to the `query!` above: that
     // would change the compile-time-checked statement and its offline data for one column.
-    let device_ids: std::collections::HashMap<Vec<u8>, String> = sqlx::query(
+    let device_ids: Option<std::collections::HashMap<Vec<u8>, String>> = sqlx::query(
         "SELECT device_token_encrypted, device_id FROM device_tokens \
          WHERE user_id = $1 AND enabled = TRUE AND device_id IS NOT NULL",
     )
@@ -360,11 +386,18 @@ pub async fn send_blind_notification(
             })
             .collect()
     })
+    .map_err(|e| tracing::warn!(error = %e, "token rows' device ids unavailable — pushing all"))
     // Fail open: without the ids nothing is held back and every device gets its push.
-    .unwrap_or_default();
+    .ok();
 
     let mut sent_count = 0;
     for token_row in &device_tokens {
+        if !input
+            .audience
+            .takes(device_ids.as_ref(), &token_row.device_token_encrypted)
+        {
+            continue;
+        }
         let device_token = context
             .token_encryption
             .decrypt(&token_row.device_token_encrypted)
@@ -425,7 +458,8 @@ pub async fn send_blind_notification(
         let outstanding_for: Option<&str> =
             if is_message_alert(input.activity_type.as_deref(), alert.is_some()) {
                 device_ids
-                    .get(&token_row.device_token_encrypted)
+                    .as_ref()
+                    .and_then(|ids| ids.get(&token_row.device_token_encrypted))
                     .map(String::as_str)
             } else {
                 None
@@ -1448,6 +1482,26 @@ mod blind_alert_tests {
 
     /// Mutation: return `None` for new_message — messages go back to background pushes and
     /// TestFlight banners disappear again.
+    /// Mutations: push every row; hold a push back when the rows' devices could not be read.
+    #[test]
+    fn a_message_push_takes_the_rows_it_wakes_and_all_of_them_when_they_are_unknown() {
+        let known = ["phone".to_string(), "mac".to_string()];
+        let live = construct_queue::LiveStreams {
+            devices: vec!["mac".into()],
+            account: true,
+        };
+        let wake = PushAudience::Wake(crate::core::wake_push(&known, &known, &live).unwrap());
+        let ids = std::collections::HashMap::from([
+            (b"token-phone".to_vec(), "phone".to_string()),
+            (b"token-mac".to_vec(), "mac".to_string()),
+        ]);
+        assert!(wake.takes(Some(&ids), b"token-phone"));
+        assert!(!wake.takes(Some(&ids), b"token-mac"));
+        assert!(!wake.takes(Some(&ids), b"token-of-no-device"));
+        assert!(wake.takes(None, b"token-mac"), "unknown rows fail open");
+        assert!(PushAudience::Account.takes(Some(&ids), b"token-mac"));
+    }
+
     #[test]
     fn a_message_is_a_banner() {
         assert_eq!(

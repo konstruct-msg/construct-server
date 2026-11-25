@@ -112,15 +112,7 @@ impl Fixture {
 
     async fn clear(&self, h: &TestHarness) {
         let mut conn = h.ctx.redis_conn.clone();
-        del(
-            &mut conn,
-            &[
-                self.user_key.clone(),
-                self.device_key.clone(),
-                format!("user:{}:server_instance_id", self.user),
-            ],
-        )
-        .await;
+        del(&mut conn, &[self.user_key.clone(), self.device_key.clone()]).await;
     }
 
     async fn unchanged(&self, h: &TestHarness) {
@@ -677,19 +669,84 @@ async fn a_message_whose_wakeup_is_lost_arrives_by_the_fallback_poll() {
     let waited = written.elapsed();
     drop(stream);
     drop(commands);
-    del(
-        &mut conn,
-        &[
-            user_key,
-            device_key,
-            format!("user:{user}:server_instance_id"),
-        ],
-    )
-    .await;
+    del(&mut conn, &[user_key, device_key]).await;
 
     assert_eq!(received, id);
     assert!(
         waited <= crate::stream::STREAM_POLL_FALLBACK + Duration::from_millis(500),
         "a lost wakeup cost {waited:?}, more than one fallback poll"
     );
+}
+
+/// The report of 2026-11-25 (vault todo 343): a phone with a live stream was pushed for every
+/// message once another stream of the account had closed. Through the RPC, so it holds the stream
+/// to subscribing as the device its token names.
+/// Mutations: subscribe to the account channel only; clear presence when a stream closes.
+#[tokio::test]
+#[serial]
+async fn closing_one_stream_leaves_the_others_live() {
+    let Some(h) = build_harness(StealthTokenPolicy::Off).await else {
+        return;
+    };
+    let user = uuid::Uuid::new_v4();
+    let (phone, mac) = (random_device(), random_device());
+    let all = [phone.clone(), mac.clone()];
+    let token = |device: &str| {
+        h.ctx
+            .auth_manager
+            .create_token_for_device(&user, Some(device))
+            .unwrap()
+            .0
+    };
+    let (phone_token, mac_token) = (token(&phone), token(&mac));
+    let mut stand = RpcStand::start(&h).await;
+    let old = open_stream(&mut stand, &phone_token, Some("0-0".into())).await;
+    let current = open_stream(&mut stand, &phone_token, Some("0-0".into())).await;
+    let desktop = open_stream(&mut stand, &mac_token, Some("0-0".into())).await;
+
+    let envelope =
+        construct_message::MessageEnvelope::new_key_sync("alice".into(), user.to_string());
+    let mut queue = h.ctx.queue.lock().await.clone();
+    let mut live = async |want: &[&String]| {
+        let mut seen = construct_queue::LiveStreams::default();
+        for _ in 0..100 {
+            seen = queue
+                .write_message_to_device_streams(&user.to_string(), &all, &envelope)
+                .await
+                .unwrap()
+                .live;
+            if seen.devices.iter().collect::<Vec<_>>() == want {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("wanted {want:?}, Redis says {seen:?}");
+    };
+    live(&[&phone, &mac]).await;
+
+    drop(old);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    live(&[&phone, &mac]).await;
+
+    drop(current);
+    let seen = live(&[&mac]).await;
+    assert!(seen.account);
+    let wake = crate::core::wake_push(&all, &all, &seen).expect("the phone has no stream left");
+    assert!(wake.reaches(Some(&phone)));
+    assert!(!wake.reaches(Some(&mac)));
+
+    drop(desktop);
+    assert!(!live(&[]).await.account);
+
+    let mut conn = h.ctx.redis_conn.clone();
+    let user_key = format!("delivery:offline:{user}");
+    del(
+        &mut conn,
+        &[
+            format!("{user_key}:{phone}"),
+            format!("{user_key}:{mac}"),
+            user_key,
+        ],
+    )
+    .await;
 }

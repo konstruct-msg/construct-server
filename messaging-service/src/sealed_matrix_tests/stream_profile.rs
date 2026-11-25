@@ -285,10 +285,7 @@ impl Mailbox {
             .create_token_for_device(&user, Some(&device))?;
         let user_key = format!("{}:offline:{user}", ctx.config.delivery_queue_prefix);
         let keys = [user_key.clone(), format!("{user_key}:{device}")];
-        let presence = format!(
-            "{}{user}:server_instance_id",
-            ctx.config.redis_key_prefixes.user
-        );
+        let presence = construct_queue::live_channel(&user.to_string(), &device);
         let mut conn = ctx.redis_conn.clone();
         for (n, bytes) in expected.iter().enumerate() {
             let message_id = format!("message-{n}");
@@ -431,11 +428,12 @@ async fn close(
     let mut conn = ctx.redis_conn.clone();
     tokio::time::timeout(DEADLINE, async {
         loop {
-            let online: bool = redis::cmd("EXISTS")
+            let (_, streams): (String, i64) = redis::cmd("PUBSUB")
+                .arg("NUMSUB")
                 .arg(&mailbox.presence)
                 .query_async(&mut conn)
                 .await?;
-            if !online
+            if streams == 0
                 && construct_metrics::GRPC_STREAMS_ACTIVE.get() == active
                 && stats(mailbox.user).output_closed
             {
@@ -814,7 +812,6 @@ async fn run_profile(capacity: Option<usize>) -> Result<()> {
         StealthTokenPolicy::Enforce,
     );
     config.delivery_queue_prefix = format!("profile:stream:{}", Uuid::new_v4());
-    config.redis_key_prefixes.user = format!("{}:presence:", config.delivery_queue_prefix);
     // Authenticated reads must not require PostgreSQL. No DB connection is made by this fixture.
     let db = sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(Duration::from_millis(200))
@@ -828,7 +825,6 @@ async fn run_profile(capacity: Option<usize>) -> Result<()> {
         notification_context: None,
         sentinel: None,
         server_signer: None,
-        server_instance_id: config.delivery_queue_prefix.clone(),
         config: Arc::new(config),
         redis_conn: conn.clone(),
         token_issuer_key: None,

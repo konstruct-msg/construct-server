@@ -339,9 +339,9 @@ stream alongside per-device. Flip to `0` only after
 `construct_msg_mailbox_user_only_entries_total` is flat zero for 7 days (see AGENTS.md /
 minimal-server-delivery). Rollback = set the flag back to `1`.
 
-**Wake push:** `dispatch_envelope` sends APNs silent `new_message` only when the recipient
-has **no** active MessageStream (`user:{id}:server_instance_id` absent). Online recipients
-are woken via Redis `inbox:wakeup` only — silent push while online caused client reconnect
+**Wake push:** `dispatch_envelope` sends APNs `new_message` only to the devices the envelope was
+written to that hold **no** live MessageStream (no subscriber on `inbox:live:{user}:{device}`).
+Live devices are woken via Redis `inbox:wakeup` only — pushing them caused client reconnect
 storms and full offline-stream redelivery.
 
 > **History:** before 2026-06, `read_stream_messages` trimmed by the server's *read position*

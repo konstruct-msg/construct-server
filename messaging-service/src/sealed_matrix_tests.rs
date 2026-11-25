@@ -295,7 +295,6 @@ async fn build_harness_on(
         sentinel: None,
         config,
         server_signer: None,
-        server_instance_id: format!("sealed-matrix-{}", uuid::Uuid::new_v4()),
         redis_conn: abuse_conn,
         token_issuer_key: Some(token_issuer_key),
         token_enc_static_secret: Some(token_enc_secret.clone()),

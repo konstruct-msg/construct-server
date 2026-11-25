@@ -596,9 +596,19 @@ fn compare_stream_ids(a: &str, b: &str) -> std::cmp::Ordering {
 /// Callers must gate wakeup-driven polls until initial catch-up has applied
 /// `since_cursor` (or subscribe grace has elapsed); otherwise a synthetic wakeup
 /// would XREAD from `"0"` and re-deliver the offline window.
-pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mpsc::Sender<()>) {
+pub(crate) fn spawn_inbox_wakeup(
+    redis_url: String,
+    user_id: uuid::Uuid,
+    device_id: Option<String>,
+    tx: mpsc::Sender<()>,
+) {
     tokio::spawn(async move {
-        let channel = format!("inbox:wakeup:{}", user_id);
+        let channel = construct_queue::wakeup_channel(&user_id.to_string());
+        // Subscribing is what makes this device live for the push decision; nothing is published
+        // there, so a message still wakes the stream once.
+        let live_channel = device_id
+            .filter(|d| !d.is_empty())
+            .map(|d| construct_queue::live_channel(&user_id.to_string(), &d));
         let client = match redis::Client::open(redis_url.as_str()) {
             Ok(c) => c,
             Err(e) => {
@@ -624,8 +634,16 @@ pub(crate) fn spawn_inbox_wakeup(redis_url: String, user_id: uuid::Uuid, tx: mps
                     continue;
                 }
             };
+            // Wakeups first: a device counts as live only once it hears them.
+            let subscribe = async {
+                pubsub.subscribe(&channel).await?;
+                match &live_channel {
+                    Some(live) => pubsub.subscribe(live).await,
+                    None => Ok(()),
+                }
+            };
             let subscribed = tokio::select! {
-                r = pubsub.subscribe(&channel) => r,
+                r = subscribe => r,
                 _ = tx.closed() => return,
             };
             if let Err(e) = subscribed {
