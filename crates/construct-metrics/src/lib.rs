@@ -330,8 +330,8 @@ pub static MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL: Lazy<IntCounter> = Laz
     .expect("Failed to register MSG_POLL_MISSING_CURSOR_AFTER_SUBSCRIBE_TOTAL metric")
 });
 
-/// Silent APNs `new_message` push skipped because the recipient already has an
-/// active MessageStream (`user:{id}:server_instance_id` present). Realtime delivery
+/// APNs `new_message` push skipped because every device the envelope was written to
+/// holds an active MessageStream (`inbox:live:{user}:{device}`). Realtime delivery
 /// uses Redis `inbox:wakeup` — pushing while online causes client reconnect storms
 /// and full offline-stream redelivery.
 pub static MSG_PUSH_SKIPPED_ONLINE_TOTAL: Lazy<IntCounter> = Lazy::new(|| {

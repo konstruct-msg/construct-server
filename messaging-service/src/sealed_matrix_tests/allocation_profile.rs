@@ -80,7 +80,6 @@ async fn profile_local_sealed_dispatch() -> Result<()> {
         notification_context: None,
         sentinel: None,
         server_signer: None,
-        server_instance_id: cfg.delivery_queue_prefix.clone(),
         config: Arc::new(cfg),
         redis_conn: conn.clone(),
         token_issuer_key: Some(issuer),
