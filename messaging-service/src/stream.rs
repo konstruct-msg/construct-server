@@ -163,9 +163,9 @@ pub(crate) async fn handle_stream_request(
                 // Same 64 KiB cap as SendMessage. Until 2026-10-29 this path checked only for
                 // empty, so a stream send wrote anything up to the gRPC decode limit into the
                 // recipient's mailbox (construct-docs todo 228).
-                crate::grpc::validate_payload(&envelope.encrypted_payload)
+                crate::send_checks::validate_payload(&envelope.encrypted_payload)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let sender_device_id = crate::grpc::sentinel_sender_device(
+                let sender_device_id = crate::send_checks::sentinel_sender_device(
                     device_id,
                     envelope
                         .sender_device

@@ -9,6 +9,7 @@ mod notification_core;
 mod notification_grpc;
 mod receipts;
 mod sealed_ip;
+mod send_checks;
 mod sentinel;
 mod spent_tag;
 mod stream;

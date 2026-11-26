@@ -3,6 +3,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::context::MessagingServiceContext;
+use crate::notification_core::WakePush;
 use construct_error::AppError;
 use construct_message::MessageEnvelope;
 use construct_metrics::{
@@ -11,29 +12,6 @@ use construct_metrics::{
 };
 use construct_server_shared::notification_service::NotificationServiceContext;
 use construct_utils::log_safe_id;
-
-/// Whose phones one dispatched envelope wakes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WakePush {
-    /// The account's active devices: a token row naming one of them is decided by `offline`.
-    known: Vec<String>,
-    /// Devices written to that hold no live stream.
-    offline: Vec<String>,
-    /// Token rows that name none of `known` — no device id, or one the account no longer has.
-    /// They cannot be matched to a stream, so they follow the account: pushed while no stream of
-    /// it is live.
-    unaddressed: bool,
-}
-
-impl WakePush {
-    /// Whether the token row registered by `device` gets this push.
-    pub(crate) fn reaches(&self, device: Option<&str>) -> bool {
-        match device {
-            Some(d) if self.known.iter().any(|k| k == d) => self.offline.iter().any(|o| o == d),
-            _ => self.unaddressed,
-        }
-    }
-}
 
 /// The wake push for one dispatched envelope, or `None` when nobody needs one.
 ///
@@ -55,11 +33,8 @@ pub(crate) fn wake_push(
         .cloned()
         .collect();
     let unaddressed = !live.account;
-    (unaddressed || !offline.is_empty()).then(|| WakePush {
-        known: active.to_vec(),
-        offline,
-        unaddressed,
-    })
+    (unaddressed || !offline.is_empty())
+        .then(|| WakePush::new(active.to_vec(), offline, unaddressed))
 }
 
 /// Look up active device IDs for a recipient.

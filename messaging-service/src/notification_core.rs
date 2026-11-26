@@ -25,13 +25,45 @@ pub struct SendBlindNotificationInput {
     pub audience: PushAudience,
 }
 
+/// Whose phones one dispatched envelope wakes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakePush {
+    /// The account's active devices: a token row naming one of them is decided by `offline`.
+    known: Vec<String>,
+    /// Devices written to that hold no live stream.
+    offline: Vec<String>,
+    /// Token rows that name none of `known` — no device id, or one the account no longer has.
+    /// They cannot be matched to a stream, so they follow the account: pushed while no stream of
+    /// it is live.
+    unaddressed: bool,
+}
+
+impl WakePush {
+    /// Built by `core::wake_push`, the one place that decides who is woken.
+    pub(crate) fn new(known: Vec<String>, offline: Vec<String>, unaddressed: bool) -> Self {
+        Self {
+            known,
+            offline,
+            unaddressed,
+        }
+    }
+
+    /// Whether the token row registered by `device` gets this push.
+    pub(crate) fn reaches(&self, device: Option<&str>) -> bool {
+        match device {
+            Some(d) if self.known.iter().any(|k| k == d) => self.offline.iter().any(|o| o == d),
+            _ => self.unaddressed,
+        }
+    }
+}
+
 /// Which token rows of an account a push goes to.
 #[derive(Debug, Clone)]
 pub enum PushAudience {
     /// Every device: key maintenance, contact requests, group events.
     Account,
     /// The devices one dispatched envelope has to wake.
-    Wake(crate::core::WakePush),
+    Wake(WakePush),
 }
 
 impl PushAudience {
