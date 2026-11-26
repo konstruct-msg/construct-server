@@ -132,6 +132,19 @@ Send: `XADD delivery:offline:{user}` (legacy, gated by `MSG_MAILBOX_USER_WRITE`)
   an empty `.env`; do not add process-global env mutations to that matrix.
 - tonic 0.14.x has no `http2_keepalive_while_idle`; the app HeartbeatAck is the keepalive.
 
+## Code shape
+
+Found by an architecture lint on 2026-11-26 (vault `todo/epic-server-architecture-lint-2026-11-26.md`, tasks 353–360). These rules are reviewed by hand until task 360 makes the lint a gate that only new findings fail.
+
+- **No module cycles inside a crate.** A check that two paths both need (unary and stream send, two services) goes into a leaf module both import, never into one of the two (`grpc` ↔ `stream`, 353).
+- **One config value, one field.** No alias copies of a sub-config field (`instance_domain` beside `federation.instance_domain`, 354). A field with no reader is removed, not kept "for later".
+- **A library crate takes its slice, not `&Config`.** Only a binary's `main` and `AppContext` hold the whole `Config`; a crate under `crates/` gets a small struct of exactly what it reads, so it never sees secrets it does not use. Existing exceptions: `construct-queue` (355), `AuthManager::new`.
+- **A secret is used through a handle, not read off the config at each call site** (log salt → one redactor in the context, 359).
+- **`main.rs` is wiring.** Each gRPC service impl lives in its own module (identity, 356); a new query goes into its domain module in `construct-db`, not `lib.rs` (357). Tests sit beside the code they test.
+- **A test that reads source text names every file it reads and asserts it found something.** Moving code must turn it red, never leave it vacuously green (`include_str!("main.rs")` in identity's bearer-list test, 356).
+- **A crate needs a second consumer or a deploy boundary.** Code with one consumer lives in that consumer (`construct-notification-service`, 358).
+- **Size is a signal, not a rule.** Past ~2000 lines, split along the sections the file already has; never split to satisfy a counter.
+
 ## Build, lint, test
 
 ```bash
